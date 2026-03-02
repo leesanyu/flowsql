@@ -126,8 +126,8 @@ void test_pipeline(const std::string& plugin_dir) {
     }
 
     // 查询插件
-    IChannel* source_ch = registry->GetChannel("example", "memory");
-    IOperator* op = registry->GetOperator("example", "passthrough");
+    IChannel* source_ch = registry->Get<IChannel>(IID_CHANNEL, "example.memory");
+    IOperator* op = registry->Get<IOperator>(IID_OPERATOR, "example.passthrough");
     assert(source_ch != nullptr);
     assert(op != nullptr);
 
@@ -242,7 +242,7 @@ void test_dynamic_register() {
     }
 
     // 验证静态插件存在
-    IOperator* static_op = registry->GetOperator("example", "passthrough");
+    IOperator* static_op = registry->Get<IOperator>(IID_OPERATOR, "example.passthrough");
     assert(static_op != nullptr);
 
     // 动态注册一个新算子
@@ -256,7 +256,7 @@ void test_dynamic_register() {
     assert(found->Name() == "mock");
 
     // 静态算子仍然可查
-    assert(registry->GetOperator("example", "passthrough") != nullptr);
+    assert(registry->Get<IOperator>(IID_OPERATOR, "example.passthrough") != nullptr);
 
     // 遍历合并：应该同时看到静态和动态算子
     int count = 0;

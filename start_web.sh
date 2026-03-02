@@ -1,7 +1,7 @@
 #!/bin/bash
 # FlowSQL Web 服务器启动脚本
 
-cd "$(dirname "$0")/src/build/output"
+cd "$(dirname "$0")/build/output"
 
 echo "=========================================="
 echo "  启动 FlowSQL Web 管理系统"

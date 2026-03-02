@@ -2,6 +2,57 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow Orchestration
+
+### 1. Plan Node Default
+- Enter plan mode for ANY non-trivial task (3+ steps or architectural decisions)
+- If something goes sideways, STOP and re-plan immediately - don't keep pushing
+- Use plan mode for verification steps, not just building
+- Write detailed specs upfront to reduce ambiguity
+
+### 2. Subagent Strategy
+- Use subagents liberally to keep main context window clean
+- Offload research, exploration, and parallel analysis to subagents
+- For complex problems, throw more compute at it via subagents
+- One tack per subagent for focused execution
+
+### 3. Self-Improvement Loop
+- After ANY correction from the user: update `tasks/lessons.md` with the pattern
+- Write rules for yourself that prevent the same mistake
+- Ruthlessly iterate on these lessons until mistake rate drops
+- Review lessons at session start for relevant project
+
+### 4. Verification Before Done
+- Never mark a task complete without proving it works
+- Diff behavior between main and your changes when relevant
+- Ask yourself: "Would a staff engineer approve this?"
+- Run tests, check logs, demonstrate correctness
+
+### 5. Demand Elegance (Balanced)
+- For non-trivial changes: pause and ask "is there a more elegant way?"
+- If a fix feels hacky: "Knowing everything I know now, implement the elegant solution"
+- Skip this for simple, obvious fixes - don't over-engineer
+- Challenge your own work before presenting it
+
+### 6. Autonomous Bug Fixing
+- When given a bug report: just fix it. Don't ask for hand-holding
+- Point at logs, errors, failing tests - then resolve them
+- Zero context switching required from the user
+- Go fix failing CI tests without being told how
+
+## Task Management
+1. **Plan First**: Write plan to `tasks/todo.md` with checkable items
+2. **Verify Plan**: Check in before starting implementation
+3. **Track Progress**: Mark items complete as you go
+4. **Explain Changes**: High-level summary at each step
+5. **Document Results**: Add review section to `tasks/todo.md`
+6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
+
+## Core Principles
+- **Simplicity First**: Make every change as simple as possible. Impact minimal code.
+- **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
+- **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
+
 ## 交流规则
 
 1. 全程使用中文交流
@@ -9,66 +60,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. 移动或删除目录前需要用户确认
 4. 不要自动提交代码（git commit/push），等用户明确发起提交指令后再执行
 5. 将用户发起的每一条命令记录到 `docs/commands.md` 文件中（追加写入，格式：日期 + 命令内容）
-
-## 构建
-
-```bash
-cd src/build
-cmake ..
-make -j$(nproc)
-```
-
-构建产物（可执行文件和 .so）输出到 `src/build/output/`。首次构建会通过 ExternalProject 下载第三方依赖，需要网络。
-
-清理重建：`cd src/build && rm -rf * && cmake .. && make -j$(nproc)`
-
-## 运行测试
-
-```bash
-./src/build/output/test_npi
-./src/build/output/test_framework
-```
-
-## 架构
-
-FlowSQL 是基于 SQL 语法的网络流量分析平台，采用插件化架构。
-
-### 插件系统
-
-**PluginLoader**（`common/loader.hpp`）— 所有插件统一使用此机制：
-- 插件编译为 .so，导出 `pluginregist` / `pluginunregist` 符号
-- 通过 GUID 注册接口，`IQuerier`（`common/iquerier.hpp`）按 GUID 查询/遍历接口实例
-- 注册宏：`BEGIN_PLUGIN_REGIST(ClassName)` → `____INTERFACE(IID, InterfaceName)` → `END_PLUGIN_REGIST()`
-- `IModule` 接口（Start/Stop）已在 `loader.hpp` 中预留，尚未启用
-
-### 框架层（Stage 1）
-
-位于 `src/framework/`，提供数据处理框架：
-- `interfaces/` — 核心接口定义：`IDataFrame`（Arrow 列式数据）、`IDataEntity`（数据实体）、`IChannel`（数据通道）、`IOperator`（数据算子）
-- `core/` — 实现：`DataFrame`（Apache Arrow 后端）、`Pipeline`（管道）、`PluginRegistry`（插件注册表）、`Service`（服务管理）
-- `macros.h` — 框架注册宏（`BEGIN_CHANNEL_REGIST`、`BEGIN_OPERATOR_REGIST`）
-
-### NPI 插件（协议识别）
-
-位于 `src/plugins/protocol/npi/`，实现 `IProtocol` 接口（IID_PROTOCOL）：
-- `Engine` — 协议识别引擎，组合三种匹配器
-- `NetworkLayer` — 网络层解析（Ethernet → IP → TCP/UDP 等）
-- `Config` — 从 YAML（`conf/protocols.yml`）加载协议定义
-- 三种匹配策略：`BitmapMatch`（位图）、`EnumerateMatch`（枚举）、`RegexMatch`（Hyperscan 正则）
-
-### 第三方依赖
-
-通过 `src/thirdparts/` 下的 `*-config.cmake` 文件以 ExternalProject_Add 管理。`subjects.cmake` 中的 `add_thirddepen(TARGET lib1 lib2 ...)` 宏自动处理 include/link 目录和库链接。
-
-依赖列表：gflags、glog、hyperscan（正则引擎）、rapidjson、yaml-cpp、Apache Arrow（列式数据）、Boost、Ragel（状态机生成器）。
-
-### 关键目录
-
-- `src/common/` — 公共库：算法（Bitmap、对象池、链表）、网络包结构（`network/`）、线程安全原语（`threadsafe/`）、插件加载器、GUID、工具函数
-- `src/framework/` — 数据处理框架：接口定义、DataFrame、Pipeline、插件注册表
-- `src/plugins/` — 插件实现：`protocol/npi/`（协议识别）、`example/`（示例 Channel + Operator）
-- `src/tests/` — 测试程序：`test_npi/`、`test_framework/`
-- `src/data/packets/` — 测试用 pcap 抓包文件
 
 ## 编程规则
 

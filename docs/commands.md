@@ -60,3 +60,24 @@
 - 2026-03-01: 修复Python算子执行500错误：HandleCreateTask核心执行逻辑（Configure+Pipeline::Run+结果读取）添加try-catch，捕获std::exception和未知异常，返回带具体错误信息的JSON 500响应并更新数据库任务状态为failed
 - 2026-03-01: 修复basic_string::_M_create崩溃根因：ArrowIpcSerializer::Deserialize使用Buffer::Wrap创建非拥有buffer，反序列化的RecordBatch零拷贝引用httplib响应体内存，响应体销毁后RecordBatch持有悬空指针；修复为AllocateBuffer+memcpy创建拥有所有权的buffer
 - 2026-03-01: 排查新算子operator not found问题：根因是用户复制explore_chisquare.py创建新算子时未修改@register_operator装饰器的name参数，三个文件都注册为explore.chisquare导致互相覆盖；修复explore_chi.py和explore_chi2.py的name参数
+- 2026-03-01: 提交上传代码（模块 C：控制协议 + Web 前端 + Python 桥接优化）
+- 2026-03-01: 更新 docs/framework.md 架构文档：5 服务→4 服务（合并 Scheduler+OperatorService）、修正原则1/5、新增 Pipeline 定义、数据面区分 C++/Python 路径、修正序列化→memcpy 措辞、删除过时实施范围
+- 2026-03-02: 讨论流式架构设计：netcard（DPDK 采集）+ npm（网络性能分析）场景，Channel 描述符本质、IStreamChannel/IStreamOperator 接口、DPDK 大页内存零拷贝、Scheduler 三种角色（执行者/宿主/编排者）、StreamWorker 通用容器
+- 2026-03-02: 更新 docs/framework.md 新增"流式架构（设计阶段）"章节，记录讨论共识和待深入设计事项
+- 2026-03-02: 实现共享内存数据面：新增SharedMemoryGuard RAII守卫；ArrowIpcSerializer新增SerializeToFile/DeserializeFromFile（memory_map零拷贝）；PythonOperatorBridge::Work改为共享内存路径传递（HTTP只传JSON路径）；BridgePlugin::Start启动清理残留文件；Python端arrow_codec新增文件读写函数+worker.py改为JSON路径模式；operator_base.py从pandas改为polars；requirements.txt新增polars依赖
+## 2026-03-02 命令记录
+- 实施 Gateway/Manager 服务架构重构（4步计划）
+- 新增 src/gateway/ 模块：config.h/.cpp（YAML配置解析）、route_table.h/.cpp（路由表）、service_manager.h/.cpp（子进程管理）、gateway_plugin.h/.cpp（Gateway核心插件）、service_client.h/.cpp（服务注册客户端）、plugin_register.cpp、CMakeLists.txt
+- 重写 src/web/main.cpp 为通用入口（Gateway模式 + Service模式）
+- 修改 PluginRegistry::LoadPlugin 新增 option 参数重载
+- 修改 bridge_plugin 移除 PythonProcessManager/ControlServer 依赖，改为 HTTP 发现 Worker
+- 修改 worker.py 移除 ControlClient，改为向 Gateway 注册路由 + 心跳
+- 新增 config/gateway.yaml 配置文件
+- 编译验证通过
+- Gateway 模式启动测试：验证路由注册、HTTP 转发、服务发现、优雅停止
+- 更新 docs/framework.md：路由注册示例改为实际实现、部署配置同步 gateway.yaml、启动/停止编排改为实际流程、新增"当前实现状态"章节
+- 实施 Scheduler 插件：新增 src/scheduler/（scheduler_plugin.h/.cpp、plugin_register.cpp、CMakeLists.txt）；Web 层 HandleCreateTask/HandleGetChannels/HandleGetOperators 改为 HTTP 转发到 Scheduler；测试数据通道移至 Scheduler 进程；更新 gateway.yaml 插件分配（Web 只加载 web.so，Scheduler 加载 scheduler+bridge+example）；编译验证通过
+- IModule 合并到 IPlugin + 移除 PluginRegistry 便捷方法：IPlugin 新增默认空 Start()/Stop()；删除 IModule/IID_MODULE；StartModules→StartAll/StopModules→StopAll；4个插件头文件移除 IModule 继承；4个注册文件移除 IID_MODULE 注册；plugin_registry.h 删除 GetChannel/GetOperator/TraverseChannels/TraverseOperators 便捷方法；3个调用者改用 Get<T>/Traverse<T> 泛型方法；编译+测试通过
+- 2026-03-02: src 目录整理重构：thirdparts/build/.thirdparts_*提到项目根；bridge/scheduler/gateway/web归入services/；plugins/protocol/npi上提为plugins/npi；web-ui重命名frontend；data移入tests/；删除废弃ragel/boost；project(npi_test)→project(flowsql)；CMake路径全部适配；编译+测试通过
+- 2026-03-02: 修复目录重构后PYTHONPATH路径问题：service_manager.cpp和python_process_manager.cpp中../../python改为../../src/python
+- 2026-03-02: 同步 docs/framework.md：更新部署配置（gateway.yaml同步实际）、新增项目目录结构章节、新增构建与运行命令、更新实现状态（IModule合并、目录重构）

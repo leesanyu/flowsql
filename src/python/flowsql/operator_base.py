@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Dict
 
-import pandas as pd
+import polars as pl
 
 
 @dataclass
@@ -31,8 +31,10 @@ class OperatorBase(ABC):
         raise NotImplementedError("Must use @register_operator decorator or override attribute() method")
 
     @abstractmethod
-    def work(self, df_in: pd.DataFrame) -> pd.DataFrame:
-        """核心处理方法：接收输入 DataFrame，返回输出 DataFrame"""
+    def work(self, df_in: pl.DataFrame) -> pl.DataFrame:
+        """核心处理方法：接收输入 Polars DataFrame，返回输出 Polars DataFrame
+
+        如需使用 pandas，可在算子内部调用 df_in.to_pandas() 转换"""
         ...
 
     def configure(self, key: str, value: str):

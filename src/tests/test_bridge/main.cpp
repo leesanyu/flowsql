@@ -6,7 +6,7 @@
 
 #include <arrow/api.h>
 
-#include "bridge/arrow_ipc_serializer.h"
+#include "services/bridge/arrow_ipc_serializer.h"
 #include "framework/core/dataframe.h"
 #include "framework/interfaces/idata_entity.h"
 

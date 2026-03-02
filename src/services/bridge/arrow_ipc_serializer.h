@@ -19,6 +19,12 @@ class ArrowIpcSerializer {
     // 反序列化 Arrow IPC stream 为 RecordBatch
     // 成功返回 0，失败返回 -1
     static int Deserialize(const std::string& data, std::shared_ptr<arrow::RecordBatch>* out);
+
+    // 序列化 RecordBatch 为 Arrow IPC stream 写入文件
+    static int SerializeToFile(const std::shared_ptr<arrow::RecordBatch>& batch, const std::string& path);
+
+    // 从文件 memory_map 零拷贝读取 Arrow IPC stream 为 RecordBatch
+    static int DeserializeFromFile(const std::string& path, std::shared_ptr<arrow::RecordBatch>* out);
 };
 
 }  // namespace bridge

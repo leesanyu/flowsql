@@ -1,0 +1,23 @@
+gateway:
+  host: 127.0.0.1
+  port: 18800
+  heartbeat_interval_s: 5
+  heartbeat_timeout_count: 3
+
+services:
+  - name: web
+    plugins:
+      - libflowsql_web.so
+    port: 8081
+
+  - name: scheduler
+    plugins:
+      - libflowsql_scheduler.so
+      - libflowsql_bridge.so
+      - libflowsql_example.so
+    port: 18803
+
+  - name: pyworker
+    type: python
+    command: "python3 -m flowsql.worker"
+    port: 18900

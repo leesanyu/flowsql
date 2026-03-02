@@ -9,8 +9,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "framework/interfaces/ichannel.h"
-#include "framework/interfaces/ioperator.h"
+#include <common/loader.hpp>
 
 namespace flowsql {
 
@@ -22,15 +21,16 @@ class PluginRegistry {
 
     // 静态插件加载（委托 PluginLoader）
     int LoadPlugin(const std::string& path);
+    int LoadPlugin(const std::string& path, const char* option);
     void UnloadAll();
 
     // 动态注册/注销 — 通用接口，按 IID + key 管理
     void Register(const Guid& iid, const std::string& key, std::shared_ptr<void> instance);
     void Unregister(const Guid& iid, const std::string& key);
 
-    // 模块启停 — 委托 PluginLoader，不持有 mutex_（避免 Start 回调 Register 死锁）
-    int StartModules();
-    void StopModules();
+    // 插件启停 — 委托 PluginLoader，不持有 mutex_（避免 Start 回调 Register 死锁）
+    int StartAll();
+    void StopAll();
 
     // 统一查询 — 合并静态 + 动态，动态优先
     void* Get(const Guid& iid, const std::string& key);
@@ -50,20 +50,6 @@ class PluginRegistry {
             callback(static_cast<T*>(p));
             return 0;
         });
-    }
-    // 向后兼容（内联薄包装）
-    IChannel* GetChannel(const std::string& catelog, const std::string& name) {
-        return Get<IChannel>(IID_CHANNEL, catelog + "." + name);
-    }
-    IOperator* GetOperator(const std::string& catelog, const std::string& name) {
-        return Get<IOperator>(IID_OPERATOR, catelog + "." + name);
-    }
-
-    void TraverseChannels(std::function<void(IChannel*)> callback) {
-        Traverse<IChannel>(IID_CHANNEL, callback);
-    }
-    void TraverseOperators(std::function<void(IOperator*)> callback) {
-        Traverse<IOperator>(IID_OPERATOR, callback);
     }
 
  private:

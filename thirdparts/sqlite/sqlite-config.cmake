@@ -12,7 +12,7 @@ else()
         PREFIX ${THIRDPARTS_PREFIX_DIR}/sqlite
         URL "https://www.sqlite.org/2024/sqlite-amalgamation-3450100.zip"
         CONFIGURE_COMMAND ""
-        BUILD_COMMAND ${CMAKE_C_COMPILER} -c -O2 -DSQLITE_THREADSAFE=1
+        BUILD_COMMAND ${CMAKE_C_COMPILER} -c -O2 -fPIC -DSQLITE_THREADSAFE=1
             <SOURCE_DIR>/sqlite3.c -o <BINARY_DIR>/sqlite3.o
             COMMAND ${CMAKE_AR} rcs <BINARY_DIR>/libsqlite3.a <BINARY_DIR>/sqlite3.o
         INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${_sqlite_install}/include

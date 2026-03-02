@@ -4,12 +4,9 @@ cmake_minimum_required(VERSION 3.12)
 
 file(GLOB_RECURSE DIR_SRCS *.cc *.cpp)
 
-# 设置 thirdparts 路径 (相对于 src 目录)
-set(THIRDPARTS_DIR ${CMAKE_SOURCE_DIR}/../../thirdparts)
-
-# 头文件目录
+# 头文件目录（THIRDPARTS_DIR 由主 CMakeLists.txt 设置）
 include_directories(${CMAKE_SOURCE_DIR})
-include_directories(${CMAKE_SOURCE_DIR}/../../common)
+include_directories(${CMAKE_SOURCE_DIR}/common)
 
 # 生成动态库
 add_library(${PROJECT_NAME} SHARED ${DIR_SRCS})

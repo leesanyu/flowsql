@@ -72,8 +72,8 @@ int PythonProcessManager::Start(const std::string& host, int port, const std::st
         size_t last_slash = exe_dir.find_last_of('/');
         if (last_slash != std::string::npos) {
             exe_dir = exe_dir.substr(0, last_slash);  // 去掉可执行文件名
-            // 假设目录结构: build/output/xxx -> ../../python
-            python_module_path = exe_dir + "/../../python";
+            // 假设目录结构: build/output/xxx -> ../../src/python
+            python_module_path = exe_dir + "/../../src/python";
         }
     }
 

@@ -35,14 +35,10 @@ interface IPlugin {
     virtual int Option(const char * /* arg */) { return 0; }
     virtual int Load() = 0;    // do not call any interface in this func.
     virtual int Unload() = 0;  // do not call any interface in this func.
-};
 
-// {5F6E092B-7FDE-46E4-A628-30115EEE11FF}
-const Guid IID_MODULE = {0x5f6e092b, 0x7fde, 0x46e4, {0xa6, 0x28, 0x30, 0x11, 0x5e, 0xee, 0x11, 0xff}};
-interface IModule {
-    virtual ~IModule(){};
-    virtual int Start() = 0;
-    virtual int Stop() = 0;
+    // 模块启停（原 IModule 接口，合并后默认空实现，轻量插件无需覆写）
+    virtual int Start() { return 0; }
+    virtual int Stop() { return 0; }
 };
 
 class PluginLoader : public IRegister, public IQuerier {
@@ -73,16 +69,16 @@ class PluginLoader : public IRegister, public IQuerier {
     }
 
  public:
-    // 模块启停 — 由 PluginRegistry 在锁外调用，避免 Start() 回调 Register() 死锁
-    int StartModules();
-    void StopModules();
+    // 插件启停 — 由 PluginRegistry 在锁外调用，避免 Start() 回调 Register() 死锁
+    int StartAll();
+    void StopAll();
 
  private:
     PluginLoader() {}
 
     std::map<Guid, std::vector<void *>> ifs_ref_;
     std::vector<thandle> plugins_ref_;
-    size_t started_module_count_ = 0;  // 已启动的模块数量，避免重复启动
+    size_t started_count_ = 0;  // 已启动的插件数量，避免重复启动
 };
 
 typedef flowsql::IPlugin *(*fnregister)(flowsql::IRegister *, const char *);
@@ -123,7 +119,7 @@ inline int PluginLoader::Load(const char *fullpath[], int count) {
         plugins_ref_.push_back(h);
     }
 
-    // 注意：不在此处调用 StartModules()
+    // 注意：不在此处调用 StartAll()
     // 模块启动由 PluginRegistry::LoadPlugin() 在释放锁后单独调用，
     // 避免 Start() 回调 Register() 时与 LoadPlugin 持有的锁产生死锁
     return 0;
@@ -177,13 +173,13 @@ inline int PluginLoader::Load(const char *path, const char *relapath[], const ch
         plugins_ref_.push_back(h);
     }
 
-    // 注意：不在此处调用 StartModules()（同上）
+    // 注意：不在此处调用 StartAll()（同上）
     return 0;
 }
 
 typedef void (*fnunregister)();
 inline int PluginLoader::Unload() {
-    // 注意：不在此处调用 StopModules()
+    // 注意：不在此处调用 StopAll()
     // 模块停止由 PluginRegistry::UnloadAll() 在释放锁后单独调用，
     // 避免 Stop() 回调 Unregister() 时与 UnloadAll 持有的锁产生死锁
 
@@ -204,7 +200,7 @@ inline int PluginLoader::Unload() {
     // 清理引用，避免悬空指针（问题 4）
     plugins_ref_.clear();
     ifs_ref_.clear();
-    started_module_count_ = 0;  // 重置计数器，避免重新 Load 后跳过模块启动（问题 13）
+    started_count_ = 0;  // 重置计数器，避免重新 Load 后跳过启动（问题 13）
 
     return 0;
 }
@@ -234,39 +230,39 @@ inline void *PluginLoader::First(const Guid &iid) {
     return nullptr;
 }
 
-inline int PluginLoader::StartModules() {
-    auto it = ifs_ref_.find(flowsql::IID_MODULE);
+inline int PluginLoader::StartAll() {
+    auto it = ifs_ref_.find(flowsql::IID_PLUGIN);
     if (it == ifs_ref_.end()) return 0;
 
-    auto &modules = it->second;
-    // 只启动新增的模块（跳过已启动的）
-    for (size_t i = started_module_count_; i < modules.size(); ++i) {
-        auto *mod = reinterpret_cast<flowsql::IModule *>(modules[i]);
-        if (-1 == mod->Start()) {
-            printf("IModule::Start() failed at index %zu, rolling back\n", i);
-            // 逆序 Stop 本次已成功启动的模块
-            for (size_t j = i; j > started_module_count_; --j) {
-                auto *started = reinterpret_cast<flowsql::IModule *>(modules[j - 1]);
+    auto &plugins = it->second;
+    // 只启动新增的插件（跳过已启动的）
+    for (size_t i = started_count_; i < plugins.size(); ++i) {
+        auto *plugin = reinterpret_cast<flowsql::IPlugin *>(plugins[i]);
+        if (-1 == plugin->Start()) {
+            printf("IPlugin::Start() failed at index %zu, rolling back\n", i);
+            // 逆序 Stop 本次已成功启动的插件
+            for (size_t j = i; j > started_count_; --j) {
+                auto *started = reinterpret_cast<flowsql::IPlugin *>(plugins[j - 1]);
                 started->Stop();
             }
             return -1;
         }
     }
-    started_module_count_ = modules.size();
+    started_count_ = plugins.size();
     return 0;
 }
 
-inline void PluginLoader::StopModules() {
-    auto it = ifs_ref_.find(flowsql::IID_MODULE);
+inline void PluginLoader::StopAll() {
+    auto it = ifs_ref_.find(flowsql::IID_PLUGIN);
     if (it == ifs_ref_.end()) return;
 
-    auto &modules = it->second;
-    // 逆序停止已启动的模块
-    for (size_t i = started_module_count_; i > 0; --i) {
-        auto *mod = reinterpret_cast<flowsql::IModule *>(modules[i - 1]);
-        mod->Stop();
+    auto &plugins = it->second;
+    // 逆序停止已启动的插件
+    for (size_t i = started_count_; i > 0; --i) {
+        auto *plugin = reinterpret_cast<flowsql::IPlugin *>(plugins[i - 1]);
+        plugin->Stop();
     }
-    started_module_count_ = 0;
+    started_count_ = 0;
 }
 
 }  // namespace flowsql

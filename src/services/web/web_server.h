@@ -26,6 +26,9 @@ class WebServer {
     // 设置 Python Worker 地址（用于算子激活/停用时通知 Worker 重载）
     void SetWorkerAddress(const std::string& host, int port);
 
+    // 设置 Scheduler 转发地址（通过 Gateway 转发 SQL 执行请求）
+    void SetSchedulerAddress(const std::string& host, int port);
+
     // 启动监听（阻塞）
     int Start(const std::string& host, int port);
 
@@ -61,6 +64,8 @@ class WebServer {
     PluginRegistry* registry_ = nullptr;
     std::string worker_host_ = "127.0.0.1";
     int worker_port_ = 18900;
+    std::string scheduler_host_ = "127.0.0.1";
+    int scheduler_port_ = 18800;  // 默认指向 Gateway
 };
 
 }  // namespace web

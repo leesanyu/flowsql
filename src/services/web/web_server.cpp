@@ -11,12 +11,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include "framework/core/dataframe.h"
-#include "framework/core/dataframe_channel.h"
-#include "framework/core/pipeline.h"
 #include "framework/core/plugin_registry.h"
-#include "framework/core/sql_parser.h"
-#include "framework/interfaces/idataframe_channel.h"
+#include "framework/interfaces/ichannel.h"
+#include "framework/interfaces/ioperator.h"
 
 namespace flowsql {
 namespace web {
@@ -63,17 +60,20 @@ void WebServer::SetWorkerAddress(const std::string& host, int port) {
     worker_port_ = port;
 }
 
+void WebServer::SetSchedulerAddress(const std::string& host, int port) {
+    scheduler_host_ = host;
+    scheduler_port_ = port;
+}
+
 void WebServer::NotifyWorkerReload() {
-    // 调用 Python Worker 的 /reload 端点，触发算子重新扫描
+    // 通过 Gateway 转发 reload 请求到 Python Worker
     httplib::Client client(worker_host_, worker_port_);
     client.set_connection_timeout(2);
     client.set_read_timeout(5);
-    auto result = client.Post("/reload", "", "application/json");
+    auto result = client.Post("/pyworker/reload", "", "application/json");
     if (result && result->status == 200) {
         printf("WebServer: Worker reload OK\n");
-        // 等待一小段时间让 ControlServer 处理 OPERATOR_ADDED 消息
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        // 同步新注册的算子到数据库
         SyncRegistryToDb();
     } else {
         printf("WebServer: Worker reload failed (Worker may not be running)\n");
@@ -216,13 +216,13 @@ void WebServer::SyncRegistryToDb() {
     if (!registry_) return;
 
     // 同步通道
-    registry_->TraverseChannels([this](IChannel* ch) {
+    registry_->Traverse<IChannel>(IID_CHANNEL, [this](IChannel* ch) {
         db_.ExecuteParams("INSERT OR IGNORE INTO channels (catelog, name, type, schema_json) VALUES (?1, ?2, ?3, ?4)",
                           {ch->Catelog(), ch->Name(), ch->Type(), ch->Schema()});
     });
 
     // 同步算子
-    registry_->TraverseOperators([this](IOperator* op) {
+    registry_->Traverse<IOperator>(IID_OPERATOR, [this](IOperator* op) {
         std::string pos = (op->Position() == OperatorPosition::STORAGE) ? "STORAGE" : "DATA";
         db_.ExecuteParams("INSERT OR IGNORE INTO operators (catelog, name, description, position) VALUES (?1, ?2, ?3, ?4)",
                           {op->Catelog(), op->Name(), op->Description(), pos});
@@ -238,15 +238,35 @@ void WebServer::HandleHealth(const httplib::Request&, httplib::Response& res) {
 // --- Channels ---
 void WebServer::HandleGetChannels(const httplib::Request&, httplib::Response& res) {
     SetCorsHeaders(res);
-    auto rows = db_.Query("SELECT id, catelog, name, type, schema_json, status, created_at FROM channels");
-    res.set_content(RowsToJson(rows), "application/json");
+    // 从 Scheduler 获取实时通道列表
+    httplib::Client client(scheduler_host_, scheduler_port_);
+    client.set_connection_timeout(2);
+    client.set_read_timeout(5);
+    auto result = client.Get("/scheduler/channels");
+    if (result && result->status == 200) {
+        res.set_content(result->body, "application/json");
+    } else {
+        // 回退到本地数据库
+        auto rows = db_.Query("SELECT id, catelog, name, type, schema_json, status, created_at FROM channels");
+        res.set_content(RowsToJson(rows), "application/json");
+    }
 }
 
 // --- Operators ---
 void WebServer::HandleGetOperators(const httplib::Request&, httplib::Response& res) {
     SetCorsHeaders(res);
-    auto rows = db_.Query("SELECT id, catelog, name, description, position, source, active, created_at FROM operators");
-    res.set_content(RowsToJson(rows), "application/json");
+    // 从 Scheduler 获取实时算子列表
+    httplib::Client client(scheduler_host_, scheduler_port_);
+    client.set_connection_timeout(2);
+    client.set_read_timeout(5);
+    auto result = client.Get("/scheduler/operators");
+    if (result && result->status == 200) {
+        res.set_content(result->body, "application/json");
+    } else {
+        // 回退到本地数据库
+        auto rows = db_.Query("SELECT id, catelog, name, description, position, source, active, created_at FROM operators");
+        res.set_content(RowsToJson(rows), "application/json");
+    }
 }
 
 void WebServer::HandleUploadOperator(const httplib::Request& req, httplib::Response& res) {
@@ -394,152 +414,83 @@ void WebServer::HandleCreateTask(const httplib::Request& req, httplib::Response&
         return;
     }
 
-    // 解析 SQL
-    SqlParser parser;
-    auto stmt = parser.Parse(sql_text);
-    if (!stmt.error.empty()) {
-        db_.ExecuteParams("UPDATE tasks SET status='failed', error_msg=?1, finished_at=CURRENT_TIMESTAMP WHERE id=?2",
-                          {stmt.error, std::to_string(task_id)});
-        res.status = 400;
-        res.set_content(MakeErrorJson(stmt.error, task_id), "application/json");
-        return;
-    }
+    // 转发到 Scheduler 执行
+    httplib::Client client(scheduler_host_, scheduler_port_);
+    client.set_connection_timeout(5);
+    client.set_read_timeout(30);
 
-    // 查找 source channel
-    IChannel* source = registry_->GetChannel(stmt.source.substr(0, stmt.source.find('.')),
-                                              stmt.source.find('.') != std::string::npos ?
-                                              stmt.source.substr(stmt.source.find('.') + 1) : stmt.source);
-    // 如果按 catelog.name 找不到，尝试直接用 name 遍历查找
-    if (!source) {
-        registry_->TraverseChannels([&](IChannel* ch) {
-            if (std::string(ch->Name()) == stmt.source ||
-                (std::string(ch->Catelog()) + "." + ch->Name()) == stmt.source) {
-                source = ch;
-            }
-        });
-    }
-    if (!source) {
-        std::string err = "source channel not found: " + stmt.source;
-        db_.ExecuteParams("UPDATE tasks SET status='failed', error_msg=?1, finished_at=CURRENT_TIMESTAMP WHERE id=?2",
-                          {err, std::to_string(task_id)});
-        res.status = 400;
-        res.set_content(MakeErrorJson(err, task_id), "application/json");
-        return;
-    }
+    // 构造转发请求体
+    rapidjson::StringBuffer fwd_buf;
+    rapidjson::Writer<rapidjson::StringBuffer> fwd_w(fwd_buf);
+    fwd_w.StartObject();
+    fwd_w.Key("sql");
+    fwd_w.String(sql_text.c_str());
+    fwd_w.EndObject();
 
-    // 查找 operator
-    IOperator* op = registry_->GetOperator(stmt.op_catelog, stmt.op_name);
-    if (!op) {
-        // 尝试遍历查找（兼容动态注册的算子）
-        registry_->TraverseOperators([&](IOperator* o) {
-            if (o->Catelog() == stmt.op_catelog && o->Name() == stmt.op_name) op = o;
-        });
-    }
-    if (!op) {
-        std::string err = "operator not found: " + stmt.op_catelog + "." + stmt.op_name;
-        db_.ExecuteParams("UPDATE tasks SET status='failed', error_msg=?1, finished_at=CURRENT_TIMESTAMP WHERE id=?2",
-                          {err, std::to_string(task_id)});
-        res.status = 400;
-        res.set_content(MakeErrorJson(err, task_id), "application/json");
-        return;
-    }
+    auto result = client.Post("/scheduler/execute", fwd_buf.GetString(), "application/json");
 
-    try {
-        // 传递 WITH 参数
-        for (auto& [k, v] : stmt.with_params) {
-            op->Configure(k.c_str(), v.c_str());
-        }
-
-        // 准备 sink channel
-        std::shared_ptr<DataFrameChannel> temp_sink;
-        IChannel* sink = nullptr;
-
-        if (!stmt.dest.empty()) {
-            // INTO 指定了目标通道，查找或创建
-            registry_->TraverseChannels([&](IChannel* ch) {
-                if (std::string(ch->Name()) == stmt.dest ||
-                    (std::string(ch->Catelog()) + "." + ch->Name()) == stmt.dest) {
-                    sink = ch;
-                }
-            });
-            if (!sink) {
-                // 创建新的 DataFrameChannel 并注册
-                temp_sink = std::make_shared<DataFrameChannel>("result", stmt.dest);
-                temp_sink->Open();
-                registry_->Register(IID_CHANNEL, "result." + stmt.dest, temp_sink);
-                registry_->Register(IID_DATAFRAME_CHANNEL, "result." + stmt.dest, temp_sink);
-                sink = temp_sink.get();
-                // 同步到数据库
-                db_.ExecuteParams(
-                    "INSERT OR IGNORE INTO channels (catelog, name, type) VALUES ('result', ?1, 'dataframe')",
-                    {stmt.dest});
-            }
-        } else {
-            // 无 INTO，创建临时 sink
-            temp_sink = std::make_shared<DataFrameChannel>("_temp", "sink");
-            temp_sink->Open();
-            sink = temp_sink.get();
-        }
-
-        // 执行 Pipeline
-        auto pipeline = PipelineBuilder().SetSource(source).SetOperator(op).SetSink(sink).Build();
-        pipeline->Run();
-
-        if (pipeline->State() == PipelineState::FAILED) {
-            // 优先从算子获取详细错误信息
-            std::string err = op->LastError();
-            if (err.empty()) err = pipeline->ErrorMessage();
-            if (err.empty()) err = "pipeline execution failed";
-            db_.ExecuteParams(
-                "UPDATE tasks SET status='failed', error_msg=?1, finished_at=CURRENT_TIMESTAMP WHERE id=?2",
-                {err, std::to_string(task_id)});
-            res.status = 500;
-            res.set_content(MakeErrorJson(err, task_id), "application/json");
-            return;
-        }
-
-        // 从 sink 读取结果
-        auto* df_sink = dynamic_cast<IDataFrameChannel*>(sink);
-        DataFrame result;
-        std::string result_json = "[]";
-        if (df_sink && df_sink->Read(&result) == 0 && result.RowCount() > 0) {
-            result_json = result.ToJson();
-        }
-
-        // 更新任务状态（参数化查询，无需转义）
-        db_.ExecuteParams(
-            "UPDATE tasks SET status='completed', result_json=?1, finished_at=CURRENT_TIMESTAMP WHERE id=?2",
-            {result_json, std::to_string(task_id)});
-
-        // 返回结果
-        rapidjson::StringBuffer buf;
-        rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-        w.StartObject();
-        w.Key("task_id"); w.Int64(task_id);
-        w.Key("status"); w.String("completed");
-        w.Key("rows"); w.Int(result.RowCount());
-        w.EndObject();
-        res.set_content(buf.GetString(), "application/json");
-
-    } catch (const std::exception& e) {
-        // 捕获执行过程中的异常，返回具体错误信息
-        std::string err = std::string("internal error: ") + e.what();
-        printf("HandleCreateTask: exception: %s\n", err.c_str());
+    if (!result) {
+        // 网络错误
+        std::string err = "scheduler unreachable";
         db_.ExecuteParams(
             "UPDATE tasks SET status='failed', error_msg=?1, finished_at=CURRENT_TIMESTAMP WHERE id=?2",
             {err, std::to_string(task_id)});
-        res.status = 500;
+        res.status = 502;
         res.set_content(MakeErrorJson(err, task_id), "application/json");
-    } catch (...) {
-        // 捕获非标准异常
-        std::string err = "internal error: unknown exception";
-        printf("HandleCreateTask: unknown exception\n");
+        return;
+    }
+
+    // 解析 Scheduler 响应
+    rapidjson::Document sched_doc;
+    sched_doc.Parse(result->body.c_str());
+
+    if (result->status != 200) {
+        // Scheduler 返回错误
+        std::string err = "scheduler error";
+        if (!sched_doc.HasParseError() && sched_doc.HasMember("error") && sched_doc["error"].IsString()) {
+            err = sched_doc["error"].GetString();
+        }
         db_.ExecuteParams(
             "UPDATE tasks SET status='failed', error_msg=?1, finished_at=CURRENT_TIMESTAMP WHERE id=?2",
             {err, std::to_string(task_id)});
-        res.status = 500;
+        res.status = result->status;
         res.set_content(MakeErrorJson(err, task_id), "application/json");
+        return;
     }
+
+    // Scheduler 执行成功，提取结果
+    std::string result_json = "[]";
+    int row_count = 0;
+    if (!sched_doc.HasParseError()) {
+        if (sched_doc.HasMember("data")) {
+            // 将 data 字段序列化为 JSON 字符串存入数据库
+            rapidjson::StringBuffer data_buf;
+            rapidjson::Writer<rapidjson::StringBuffer> data_w(data_buf);
+            sched_doc["data"].Accept(data_w);
+            result_json = data_buf.GetString();
+        }
+        if (sched_doc.HasMember("rows") && sched_doc["rows"].IsInt()) {
+            row_count = sched_doc["rows"].GetInt();
+        }
+    }
+
+    // 更新任务状态
+    db_.ExecuteParams(
+        "UPDATE tasks SET status='completed', result_json=?1, finished_at=CURRENT_TIMESTAMP WHERE id=?2",
+        {result_json, std::to_string(task_id)});
+
+    // 返回结果
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    w.StartObject();
+    w.Key("task_id");
+    w.Int64(task_id);
+    w.Key("status");
+    w.String("completed");
+    w.Key("rows");
+    w.Int(row_count);
+    w.EndObject();
+    res.set_content(buf.GetString(), "application/json");
 }
 
 void WebServer::HandleGetTaskResult(const httplib::Request& req, httplib::Response& res) {

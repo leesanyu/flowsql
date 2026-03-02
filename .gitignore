@@ -1,12 +1,10 @@
 # Build directories
-src/build/
-src/output/
 build/
 output/
 
 # Third-party dependency cache (outside build dir)
-src/.thirdparts_installed/
-src/.thirdparts_prefix/
+.thirdparts_installed/
+.thirdparts_prefix/
 
 # CMake
 CMakeCache.txt
@@ -16,7 +14,7 @@ Makefile
 *.cmake
 !CMakeLists.txt
 !subjects.cmake
-!src/thirdparts/**/*.cmake
+!thirdparts/**/*.cmake
 
 # Compiled Object files
 *.o

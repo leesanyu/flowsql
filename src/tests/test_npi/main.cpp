@@ -14,7 +14,7 @@
 
 #include <map>
 #include <string.h>
-#include <plugins/protocol/npi/iprotocol.h>
+#include <plugins/npi/iprotocol.h>
 #include <stdio.h>
 #include <common/launcher.hpp>
 #include <common/loader.hpp>

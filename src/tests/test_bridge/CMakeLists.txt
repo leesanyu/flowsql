@@ -13,7 +13,7 @@ target_link_libraries(${PROJECT_NAME} flowsql_framework)
 
 # 直接链接 bridge 的 .o 文件（测试不需要加载 .so）
 target_sources(${PROJECT_NAME} PRIVATE
-    ${CMAKE_SOURCE_DIR}/bridge/arrow_ipc_serializer.cpp
+    ${CMAKE_SOURCE_DIR}/services/bridge/arrow_ipc_serializer.cpp
 )
 
 set_target_properties(${PROJECT_NAME} PROPERTIES

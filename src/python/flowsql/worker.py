@@ -1,55 +1,32 @@
-"""FlowSQL Python Worker — FastAPI 应用"""
+"""FlowSQL Python Worker — FastAPI 应用（Gateway 架构版）"""
 
 import asyncio
 import os
+import threading
+import time
 
 from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi.responses import JSONResponse
+import httpx
 import uvicorn
 
-from .arrow_codec import decode_arrow_ipc, encode_arrow_ipc
+from .arrow_codec import decode_arrow_ipc, encode_arrow_ipc, decode_arrow_ipc_file, encode_arrow_ipc_file
 from .config import WorkerConfig
-from .control_client import ControlClient
 from .operator_registry import OperatorRegistry
 
 app = FastAPI(title="FlowSQL Python Worker")
 registry = OperatorRegistry()
-control_client: ControlClient = None
 
 
 def _do_reload():
-    """重载算子的共享逻辑（问题 7）"""
+    """重载算子的共享逻辑"""
     config = WorkerConfig.from_args()
     old_keys = set(f"{op['catelog']}.{op['name']}" for op in registry.list_operators())
-
     registry.reload(config.operators_dir)
-
     new_keys = set(f"{op['catelog']}.{op['name']}" for op in registry.list_operators())
-
     added = new_keys - old_keys
     removed = old_keys - new_keys
-
     print(f"Worker _do_reload: added={len(added)}, removed={len(removed)}")
-
-    if control_client:
-        for key in added:
-            op = registry.get(*key.split(".", 1))
-            if op:
-                attr = op.attribute()
-                ok = control_client.send_operator_added(attr.catelog, attr.name, attr.description, attr.position)
-                if ok:
-                    print(f"Worker: sent operator_added: {key}")
-                else:
-                    print(f"Worker: FAILED to send operator_added: {key}")
-        for key in removed:
-            parts = key.split(".", 1)
-            ok = control_client.send_operator_removed(parts[0], parts[1])
-            if ok:
-                print(f"Worker: sent operator_removed: {key}")
-            else:
-                print(f"Worker: FAILED to send operator_removed: {key}")
-    else:
-        print("Worker: control_client not connected, skipping notifications")
-
     return added, removed
 
 
@@ -65,7 +42,7 @@ async def list_operators():
 
 @app.post("/reload")
 async def reload_operators():
-    """重新扫描算子目录，发现新增/移除的算子并通知 C++ 端"""
+    """重新扫描算子目录"""
     loop = asyncio.get_event_loop()
     added, removed = await loop.run_in_executor(None, _do_reload)
     return {"added": list(added), "removed": list(removed)}
@@ -77,26 +54,29 @@ async def work(catelog: str, name: str, request: Request):
     if not op:
         raise HTTPException(status_code=404, detail=f"Operator {catelog}.{name} not found")
 
-    body = await request.body()
-    if not body:
-        raise HTTPException(status_code=400, detail="Empty request body")
+    body = await request.json()
+    input_path = body.get("input")
+    if not input_path:
+        raise HTTPException(status_code=400, detail="Missing 'input' field in request body")
 
     try:
-        df_in = decode_arrow_ipc(body)
+        df_in = decode_arrow_ipc_file(input_path)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to decode Arrow IPC: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to decode Arrow IPC file: {e}")
 
     try:
         df_out = op.work(df_in)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Operator error: {e}")
 
-    try:
-        result = encode_arrow_ipc(df_out)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to encode Arrow IPC: {e}")
+    output_path = input_path.replace("_in", "_out")
 
-    return Response(content=result, media_type="application/vnd.apache.arrow.stream")
+    try:
+        encode_arrow_ipc_file(df_out, output_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to encode Arrow IPC file: {e}")
+
+    return JSONResponse(content={"output": output_path})
 
 
 @app.post("/configure/{catelog}/{name}")
@@ -111,62 +91,65 @@ async def configure(catelog: str, name: str, request: Request):
     return {"status": "ok"}
 
 
-def main():
-    global control_client
+def _register_with_gateway(gateway_addr: str, service_name: str, local_addr: str, prefixes: list):
+    """向 Gateway 注册路由"""
+    for prefix in prefixes:
+        try:
+            resp = httpx.post(
+                f"http://{gateway_addr}/gateway/register",
+                json={"prefix": prefix, "address": local_addr, "service": service_name},
+                timeout=3,
+            )
+            if resp.status_code == 200:
+                print(f"Worker: registered route {prefix} -> {local_addr}")
+            else:
+                print(f"Worker: failed to register route {prefix}: {resp.text}")
+        except Exception as e:
+            print(f"Worker: failed to register route {prefix}: {e}")
 
+
+def _heartbeat_loop(gateway_addr: str, service_name: str, interval: int):
+    """心跳线程"""
+    while True:
+        try:
+            httpx.post(
+                f"http://{gateway_addr}/gateway/heartbeat",
+                json={"service": service_name},
+                timeout=2,
+            )
+        except Exception:
+            pass
+        time.sleep(interval)
+
+
+def main():
     config = WorkerConfig.from_args()
 
-    # 1. 连接到 C++ 控制服务器
-    control_socket = os.environ.get('FLOWSQL_CONTROL_SOCKET')
-    if not control_socket:
-        print("ERROR: FLOWSQL_CONTROL_SOCKET environment variable not set")
-        return
-
-    control_client = ControlClient(control_socket)
-    if not control_client.connect(timeout=5):
-        print("ERROR: Failed to connect to control server")
-        control_client = None
-        return
-
-    # 2. 注册命令处理器
-    def handle_reload_operators(payload):
-        """收到 C++ 端的重载命令，重新扫描算子目录"""
-        print("Worker: received reload_operators command")
-        _do_reload()
-
-    def handle_shutdown(payload):
-        print("Worker: received shutdown command")
-        # TODO: 优雅关闭
-
-    control_client.register_handler("reload_operators", handle_reload_operators)
-    control_client.register_handler("shutdown", handle_shutdown)
-
-    # 3. 发现并注册算子
+    # 1. 发现并注册算子
     registry.discover(config.operators_dir)
-
-    # 4. 发送就绪通知
     operators = registry.list_operators()
-    if not control_client.send_worker_ready(operators):
-        print("ERROR: Failed to send worker_ready message")
-        control_client.disconnect()
-        return
 
-    print(f"FlowSQL Worker: sent ready notification with {len(operators)} operators")
-
-    # 5. 启动消息接收循环（异步）
-    control_client.start_message_loop()
-
-    # 6. 启动 HTTP 服务
     print(f"FlowSQL Worker starting on {config.host}:{config.port}")
     print(f"Operators directory: {config.operators_dir}")
     print(f"Registered operators: {len(operators)}")
 
+    # 2. 向 Gateway 注册路由（如果有 Gateway 地址）
+    gateway_addr = os.environ.get("FLOWSQL_GATEWAY_ADDR")
+    if gateway_addr:
+        local_addr = f"{config.host}:{config.port}"
+        prefixes = ["/pyworker/health", "/pyworker/operators", "/pyworker/work",
+                    "/pyworker/reload", "/pyworker/configure"]
+        _register_with_gateway(gateway_addr, "pyworker", local_addr, prefixes)
+
+        # 启动心跳线程
+        t = threading.Thread(target=_heartbeat_loop, args=(gateway_addr, "pyworker", 5), daemon=True)
+        t.start()
+
+    # 3. 启动 HTTP 服务
     try:
         uvicorn.run(app, host=config.host, port=config.port, log_level="warning")
-    finally:
-        # 清理
-        if control_client:
-            control_client.disconnect()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

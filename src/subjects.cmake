@@ -12,11 +12,11 @@ macro(add_subprojets parent)
 endmacro()
 
 # 第三方依赖的安装目录，独立于 build 目录，清理重建时不受影响
-set(THIRDPARTS_INSTALL_DIR ${CMAKE_SOURCE_DIR}/.thirdparts_installed)
-set(THIRDPARTS_PREFIX_DIR  ${CMAKE_SOURCE_DIR}/.thirdparts_prefix)
+set(THIRDPARTS_INSTALL_DIR ${CMAKE_SOURCE_DIR}/../.thirdparts_installed)
+set(THIRDPARTS_PREFIX_DIR  ${CMAKE_SOURCE_DIR}/../.thirdparts_prefix)
 
 macro(add_thirdparts)
-	set(THIRDPARTS_DIR ${CMAKE_SOURCE_DIR}/thirdparts)
+	set(THIRDPARTS_DIR ${CMAKE_SOURCE_DIR}/../thirdparts)
 	file(GLOB_RECURSE PROJECTS ${THIRDPARTS_DIR}/*.cmake)
 	foreach(PROJECT ${PROJECTS})
 		include(${PROJECT})

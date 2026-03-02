@@ -2,6 +2,11 @@
 
 #include <vector>
 
+#include <common/toolkit.hpp>
+
+#include "framework/interfaces/ichannel.h"
+#include "framework/interfaces/ioperator.h"
+
 namespace flowsql {
 
 PluginRegistry* PluginRegistry::Instance() {
@@ -14,20 +19,26 @@ PluginRegistry::PluginRegistry() : loader_(PluginLoader::Single()) {}
 PluginRegistry::~PluginRegistry() {}
 
 int PluginRegistry::LoadPlugin(const std::string& path) {
+    return LoadPlugin(path, nullptr);
+}
+
+int PluginRegistry::LoadPlugin(const std::string& path, const char* option) {
     {
         std::unique_lock lock(mutex_);
-        const char* paths[] = {path.c_str()};
-        int ret = loader_->Load(paths, 1);
+        std::string app_path = get_absolute_process_path();
+        const char* relapath[] = {path.c_str()};
+        const char* options[] = {option};
+        int ret = loader_->Load(app_path.c_str(), relapath, options, 1);
         if (ret != 0) return ret;
         BuildIndex();
     }
-    // 锁已释放，安全启动模块（模块的 Start() 可能回调 Register()）
-    return loader_->StartModules();
+    // 锁已释放，安全启动插件（插件的 Start() 可能回调 Register()）
+    return loader_->StartAll();
 }
 
 void PluginRegistry::UnloadAll() {
-    // 先在锁外停止模块（Stop 可能回调 Unregister，持锁会死锁）
-    loader_->StopModules();
+    // 先在锁外停止插件（Stop 可能回调 Unregister，持锁会死锁）
+    loader_->StopAll();
 
     std::unique_lock lock(mutex_);
     // 先析构动态对象（shared_ptr），再卸载 .so（问题 4）
@@ -53,14 +64,14 @@ void PluginRegistry::Unregister(const Guid& iid, const std::string& key) {
     }
 }
 
-int PluginRegistry::StartModules() {
+int PluginRegistry::StartAll() {
     // 不持有 mutex_，直接委托 PluginLoader
-    // 模块的 Start() 可能回调 Register()，如果持锁会死锁
-    return loader_->StartModules();
+    // 插件的 Start() 可能回调 Register()，如果持锁会死锁
+    return loader_->StartAll();
 }
 
-void PluginRegistry::StopModules() {
-    loader_->StopModules();
+void PluginRegistry::StopAll() {
+    loader_->StopAll();
 }
 // BuildIndex 内部方法，调用者需持有写锁
 void PluginRegistry::BuildIndex() {
