@@ -91,3 +91,5 @@
 - 2026-03-03: 修复 Python 算子列表不可见问题：IBridge 新增 TraverseOperators 遍历方法；Scheduler HandleGetOperators 除遍历 IID_OPERATOR（C++算子）外，增加 IBridge::TraverseOperators 列出 Python 算子
 - 2026-03-03: 修复 Python 算子执行报错 'DataFrame' object has no attribute 'to_arrow'：arrow_codec.py 新增 _ensure_arrow_table() 统一转换层，encode 函数兼容 Polars/Pandas/Arrow Table 三种输入
 - 2026-03-03: 清理 IDataEntity 死代码：删除 idata_entity.h，DataType/FieldValue/Field 移入 idataframe.h，删除 DataFrame 中 AppendEntity/GetEntity/GenericDataEntity，清理 test_bridge 无用 include，更新 stage3.md
+- 2026-03-03: 多服务框架基本实现，创建分支 feature/multi-service-framework 并提交代码（统一插件系统 + 应用启动器）
+- 2026-03-03: 推送分支到远程（网络连接失败，待重试）
