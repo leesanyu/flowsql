@@ -2,10 +2,18 @@
 #define _FLOWSQL_GATEWAY_CONFIG_H_
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace flowsql {
 namespace gateway {
+
+// 数据库配置（新增）
+struct DatabaseConfig {
+    std::string type;                                      // 数据库类型（sqlite/mysql/postgresql）
+    std::string name;                                      // 实例名称
+    std::unordered_map<std::string, std::string> params;  // 其他参数（path/host/port/user/password等）
+};
 
 // 子服务配置
 struct ServiceConfig {
@@ -13,6 +21,7 @@ struct ServiceConfig {
     std::string type = "cpp";    // "cpp" | "python"
     std::string command;         // Python 服务启动命令
     std::vector<std::string> plugins;
+    std::vector<DatabaseConfig> databases;  // 数据库配置列表（新增）
     std::string host = "127.0.0.1";
     int port = 0;
     std::string option;          // 传给插件的 Option 参数

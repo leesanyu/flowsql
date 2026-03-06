@@ -2,7 +2,6 @@
 #define _FLOWSQL_SERVICES_DATABASE_IDB_DRIVER_H_
 
 #include <common/typedef.h>
-#include <framework/interfaces/idatabase_channel.h>
 
 #include <string>
 #include <unordered_map>
@@ -10,8 +9,9 @@
 namespace flowsql {
 namespace database {
 
-// IDbDriver — 数据库驱动抽象
-// 封装具体数据库客户端库的连接管理和数据操作
+// IDbDriver — 数据库驱动基础接口（所有驱动必须实现）
+// 只包含连接管理和元数据，不包含数据读写方法
+// 数据读写能力通过能力接口（IBatchReadable/IBatchWritable等）按需组合
 interface IDbDriver {
     virtual ~IDbDriver() = default;
 
@@ -20,11 +20,7 @@ interface IDbDriver {
     virtual int Disconnect() = 0;
     virtual bool IsConnected() = 0;
 
-    // 数据操作（创建 Reader/Writer，生命周期由调用者管理）
-    virtual int CreateReader(const char* query, IBatchReader** reader) = 0;
-    virtual int CreateWriter(const char* table, IBatchWriter** writer) = 0;
-
-    // 元数据
+    // 驱动元数据
     virtual const char* DriverName() = 0;
     virtual const char* LastError() = 0;
 };

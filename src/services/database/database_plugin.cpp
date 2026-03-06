@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "drivers/sqlite_driver.h"
+#include "drivers/mysql_driver.h"
 
 namespace flowsql {
 namespace database {
@@ -32,9 +33,34 @@ static std::string ExpandEnvVars(const std::string& input) {
 }
 
 // 解析 "type=sqlite;name=mydb;path=/data/test.db" 格式的配置
+// 支持多个配置用 | 分隔：config1|config2|config3
 int DatabasePlugin::Option(const char* arg) {
+    printf("DatabasePlugin::Option called with: %s\n", arg ? arg : "(null)");
+
     if (!arg || !*arg) return 0;
 
+    // 按 | 分隔多个配置
+    std::string all_configs(arg);
+    size_t start = 0;
+    while (start < all_configs.size()) {
+        size_t end = all_configs.find('|', start);
+        if (end == std::string::npos) end = all_configs.size();
+
+        std::string single_config = all_configs.substr(start, end - start);
+        if (!single_config.empty()) {
+            if (ParseSingleConfig(single_config.c_str()) != 0) {
+                return -1;
+            }
+        }
+
+        start = end + 1;
+    }
+
+    return 0;
+}
+
+// 解析单个数据库配置
+int DatabasePlugin::ParseSingleConfig(const char* arg) {
     std::unordered_map<std::string, std::string> params;
     std::string opts(arg);
     size_t pos = 0;
@@ -57,7 +83,7 @@ int DatabasePlugin::Option(const char* arg) {
     auto type_it = params.find("type");
     auto name_it = params.find("name");
     if (type_it == params.end() || name_it == params.end()) {
-        printf("DatabasePlugin::Option: missing 'type' or 'name' in: %s\n", arg);
+        printf("DatabasePlugin::ParseSingleConfig: missing 'type' or 'name' in: %s\n", arg);
         return -1;
     }
 
@@ -65,7 +91,7 @@ int DatabasePlugin::Option(const char* arg) {
 
     std::lock_guard<std::mutex> lock(mutex_);
     configs_[key] = std::move(params);
-    printf("DatabasePlugin::Option: configured %s\n", key.c_str());
+    printf("DatabasePlugin::ParseSingleConfig: configured %s (total configs: %zu)\n", key.c_str(), configs_.size());
     return 0;
 }
 
@@ -171,9 +197,14 @@ const char* DatabasePlugin::LastError() {
 
 // 驱动工厂
 std::unique_ptr<IDbDriver> DatabasePlugin::CreateDriver(const std::string& type) {
-    if (type == "sqlite") return std::make_unique<SqliteDriver>();
-    // TODO: 未来添加 mysql, clickhouse 等驱动
-    last_error_ = "no driver available for type: " + type;
+    if (type == "sqlite") {
+        return std::make_unique<SqliteDriver>();
+    }
+    if (type == "mysql") {
+        return std::make_unique<MysqlDriver>();
+    }
+    // TODO: 未来添加 postgresql, clickhouse 等驱动
+    last_error_ = "unsupported database type: " + type;
     return nullptr;
 }
 

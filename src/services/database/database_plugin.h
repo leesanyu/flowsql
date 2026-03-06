@@ -38,6 +38,9 @@ class DatabasePlugin : public IPlugin, public IDatabaseFactory {
     // 创建指定类型的数据库驱动
     std::unique_ptr<IDbDriver> CreateDriver(const std::string& type);
 
+    // 解析单个数据库配置
+    int ParseSingleConfig(const char* arg);
+
     // 通道池：key = "type.name"
     std::unordered_map<std::string, std::shared_ptr<DatabaseChannel>> channels_;
 

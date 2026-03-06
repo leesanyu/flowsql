@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: flowsql-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: "flowSQL@mysql"
+      MYSQL_DATABASE: flowsql_db
+      MYSQL_USER: flowsql_user
+      MYSQL_PASSWORD: "flowSQL@user"
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command:
+      - --default-authentication-plugin=caching_sha2_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pflowSQL@mysql"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mysql_data:

@@ -299,7 +299,7 @@ static std::shared_ptr<DataFrameChannel> ApplyDataFrameFilter(
 int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
                                       const std::string& source_type,
                                       const std::string& sink_type,
-                                      const SqlStatement& stmt) {
+                                      const SqlStatement& stmt, int64_t* rows_affected) {
     if (source_type == "dataframe" && sink_type == "dataframe") {
         auto* src = dynamic_cast<IDataFrameChannel*>(source);
         auto* dst = dynamic_cast<IDataFrameChannel*>(sink);
@@ -324,9 +324,13 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
         if (!stmt.where_clause.empty()) {
             auto filtered = ApplyDataFrameFilter(src, stmt.where_clause);
             if (!filtered) return -1;
-            return ChannelAdapter::WriteFromDataFrame(filtered.get(), dst, table.c_str());
+            int64_t rows = ChannelAdapter::WriteFromDataFrame(filtered.get(), dst, table.c_str());
+            if (rows_affected) *rows_affected = rows;
+            return (rows < 0) ? -1 : 0;
         }
-        return ChannelAdapter::WriteFromDataFrame(src, dst, table.c_str());
+        int64_t rows = ChannelAdapter::WriteFromDataFrame(src, dst, table.c_str());
+        if (rows_affected) *rows_affected = rows;
+        return (rows < 0) ? -1 : 0;
     }
 
     if (source_type == "database" && sink_type == "dataframe") {
@@ -350,7 +354,9 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
         if (rc != 0) return rc;
 
         std::string table = ExtractTableName(stmt.dest);
-        return ChannelAdapter::WriteFromDataFrame(tmp.get(), dst, table.c_str());
+        int64_t rows = ChannelAdapter::WriteFromDataFrame(tmp.get(), dst, table.c_str());
+        if (rows_affected) *rows_affected = rows;
+        return (rows < 0) ? -1 : 0;
     }
 
     printf("SchedulerPlugin: unsupported transfer: %s → %s\n",
@@ -363,7 +369,7 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
                                           IOperator* op,
                                           const std::string& source_type,
                                           const std::string& sink_type,
-                                          const SqlStatement& stmt) {
+                                          const SqlStatement& stmt, int64_t* rows_affected) {
     IChannel* actual_source = source;
     IChannel* actual_sink = sink;
     std::shared_ptr<DataFrameChannel> tmp_in, tmp_out;
@@ -412,8 +418,15 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
         if (!db_sink) return -1;
 
         std::string table = ExtractTableName(stmt.dest);
-        int rc = ChannelAdapter::WriteFromDataFrame(tmp_out.get(), db_sink, table.c_str());
-        if (rc != 0) return rc;
+        int64_t written_rows = ChannelAdapter::WriteFromDataFrame(tmp_out.get(), db_sink, table.c_str());
+        if (written_rows < 0) return -1;
+
+        printf("SchedulerPlugin::ExecuteTransfer: wrote %ld rows to database\n", written_rows);
+
+        // 返回写入的行数
+        if (rows_affected) {
+            *rows_affected = written_rows;
+        }
     }
 
     return 0;
@@ -488,11 +501,12 @@ void SchedulerPlugin::HandleExecute(const httplib::Request& req, httplib::Respon
         std::string sink_type(sink->Type());
 
         int rc = 0;
+        int64_t affected_rows = 0;
 
         if (!op) {
-            rc = ExecuteTransfer(source, sink, source_type, sink_type, stmt);
+            rc = ExecuteTransfer(source, sink, source_type, sink_type, stmt, &affected_rows);
         } else {
-            rc = ExecuteWithOperator(source, sink, op, source_type, sink_type, stmt);
+            rc = ExecuteWithOperator(source, sink, op, source_type, sink_type, stmt, &affected_rows);
         }
 
         if (rc != 0) {
@@ -511,12 +525,8 @@ void SchedulerPlugin::HandleExecute(const httplib::Request& req, httplib::Respon
             result_json = result.ToJson();
             row_count = result.RowCount();
         } else if (sink_type == "database") {
-            // 写入数据库时，从 source 端统计行数
-            auto* df_src = dynamic_cast<IDataFrameChannel*>(source);
-            if (df_src) {
-                DataFrame src_data;
-                if (df_src->Read(&src_data) == 0) row_count = src_data.RowCount();
-            }
+            // 写入数据库时，使用 ExecuteTransfer 返回的行数
+            row_count = affected_rows;
         }
 
         rapidjson::StringBuffer buf;

@@ -16,8 +16,9 @@ class ChannelAdapter {
                                IDataFrameChannel* df_out);
 
     // DataFrame → Database：将 DataFrameChannel 数据写入数据库表
-    static int WriteFromDataFrame(IDataFrameChannel* df_in,
-                                  IDatabaseChannel* db, const char* table);
+    // 返回：成功返回写入的行数（>= 0），失败返回 -1
+    static int64_t WriteFromDataFrame(IDataFrameChannel* df_in,
+                                      IDatabaseChannel* db, const char* table);
 
     // DataFrame → DataFrame：纯数据搬运（无算子场景）
     static int CopyDataFrame(IDataFrameChannel* src, IDataFrameChannel* dst);

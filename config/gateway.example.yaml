@@ -1,0 +1,67 @@
+# FlowSQL Gateway 配置示例
+# 展示新旧两种配置格式
+
+gateway:
+  host: 127.0.0.1
+  port: 18800
+  heartbeat_interval_s: 5
+  heartbeat_timeout_count: 3
+
+services:
+  - name: web
+    plugins:
+      - libflowsql_web.so
+    port: 8081
+
+  - name: scheduler
+    plugins:
+      - libflowsql_scheduler.so
+      - libflowsql_bridge.so
+      - libflowsql_example.so
+
+      # ========================================
+      # 新格式：嵌套对象数组（推荐）
+      # ========================================
+      - name: libflowsql_database.so
+        databases:
+          # SQLite 实例
+          - type: sqlite
+            name: testdb
+            path: ":memory:"
+
+          - type: sqlite
+            name: proddb
+            path: /data/prod.db
+            readonly: "true"
+
+          # MySQL 实例（支持环境变量）
+          - type: mysql
+            name: userdb
+            host: ${MYSQL_HOST}
+            port: ${MYSQL_PORT}
+            user: ${MYSQL_USER}
+            password: ${MYSQL_PASSWORD}
+            database: users
+            charset: utf8mb4
+            timeout: "10"
+
+          - type: mysql
+            name: orderdb
+            host: 192.168.1.100
+            port: "3306"
+            user: app
+            password: pass123
+            database: orders
+
+      # ========================================
+      # 旧格式：字符串拼接（向后兼容）
+      # ========================================
+      # - "libflowsql_database.so:type=sqlite;name=testdb;path=:memory:"
+      # - "libflowsql_database.so:type=mysql;name=userdb;host=localhost;port=3306;user=root;password=secret;database=users"
+
+    port: 18803
+
+  - name: pyworker
+    type: python
+    command: "python3 -m flowsql.worker"
+    port: 18900

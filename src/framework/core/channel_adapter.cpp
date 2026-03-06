@@ -97,8 +97,8 @@ int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query,
     return df_out->Write(&result);
 }
 
-int ChannelAdapter::WriteFromDataFrame(IDataFrameChannel* df_in,
-                                        IDatabaseChannel* db, const char* table) {
+int64_t ChannelAdapter::WriteFromDataFrame(IDataFrameChannel* df_in,
+                                           IDatabaseChannel* db, const char* table) {
     if (!df_in || !db || !table) return -1;
 
     // 从 DataFrame 通道读取数据
@@ -152,7 +152,9 @@ int ChannelAdapter::WriteFromDataFrame(IDataFrameChannel* df_in,
 
     printf("ChannelAdapter::WriteFromDataFrame: wrote %ld rows, %ld bytes in %ld ms\n",
            stats.rows_written, stats.bytes_written, stats.elapsed_ms);
-    return 0;
+
+    // 返回写入的行数
+    return stats.rows_written;
 }
 
 int ChannelAdapter::CopyDataFrame(IDataFrameChannel* src, IDataFrameChannel* dst) {

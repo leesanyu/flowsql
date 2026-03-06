@@ -6,32 +6,37 @@
 #include <string>
 #include <unordered_map>
 
-#include "../idb_driver.h"
+#include "../row_based_db_driver_base.h"
 
 namespace flowsql {
 namespace database {
 
 // SqliteDriver — SQLite 数据库驱动
 // 使用 FULLMUTEX 模式保证多线程安全，WAL 模式提升并发读写性能
-class SqliteDriver : public IDbDriver {
+class __attribute__((visibility("default"))) SqliteDriver : public RowBasedDbDriverBase {
  public:
     SqliteDriver() = default;
     ~SqliteDriver() override;
 
+    // IDbDriver 实现
     int Connect(const std::unordered_map<std::string, std::string>& params) override;
     int Disconnect() override;
     bool IsConnected() override { return db_ != nullptr; }
-
-    int CreateReader(const char* query, IBatchReader** reader) override;
-    int CreateWriter(const char* table, IBatchWriter** writer) override;
-
     const char* DriverName() override { return "sqlite"; }
-    const char* LastError() override { return last_error_.c_str(); }
+
+ protected:
+    // 钩子方法实现
+    void* ExecuteQueryImpl(const char* sql, std::string* error) override;
+    std::shared_ptr<arrow::Schema> InferSchemaImpl(void* result, std::string* error) override;
+    int FetchRowImpl(void* result,
+                    const std::vector<std::unique_ptr<arrow::ArrayBuilder>>& builders,
+                    std::string* error) override;
+    void FreeResultImpl(void* result) override;
+    int ExecuteSqlImpl(const char* sql, std::string* error) override;
 
  private:
     sqlite3* db_ = nullptr;
     std::string db_path_;
-    std::string last_error_;
     bool readonly_ = false;
 };
 

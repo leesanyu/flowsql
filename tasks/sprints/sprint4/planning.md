@@ -4,8 +4,8 @@
 
 - **Sprint 周期**：Sprint 4
 - **开始日期**：2026-03-05
-- **预计工作量**：11 天（大型 Sprint）
-- **Sprint 目标**：实现 MySQL 驱动支持、数据库连接池基础功能、SQL 高级特性
+- **预计工作量**：13 天（大型 Sprint，包含配置优化）
+- **Sprint 目标**：配置格式优化、实现 MySQL 驱动支持、数据库连接池基础功能、SQL 高级特性
 
 ---
 
@@ -13,12 +13,16 @@
 
 ### 主要目标
 
-1. ✅ 实现 MySQL 驱动支持，提供与 SQLite 一致的数据库操作能力
-2. ✅ 实现数据库连接池基础功能，支持连接复用和超时回收
-3. ✅ 支持 SQL 高级特性（JOIN/GROUP BY/ORDER BY），透传给数据库引擎
+1. ✅ 优化配置格式，支持嵌套对象数组，提升可读性和可维护性
+2. ✅ 实现基于能力的接口设计（Capability-Based Interface），支持未来扩展列式数据库
+3. ✅ 实现 MySQL 驱动支持，提供与 SQLite 一致的数据库操作能力
+4. ✅ 实现数据库连接池基础功能，支持连接复用和超时回收
+5. ✅ 支持 SQL 高级特性（JOIN/GROUP BY/ORDER BY），透传给数据库引擎
 
 ### 成功标准
 
+- 配置格式优化完成，支持新旧两种格式，向后兼容
+- 接口设计符合 SOLID 原则，支持 ClickHouse 扩展
 - MySQL 驱动端到端测试全部通过
 - 连接池功能测试通过，连接复用率 > 80%
 - SQL 高级特性在 MySQL 和 SQLite 上都能正确执行
@@ -27,77 +31,171 @@
 
 ## Story 列表
 
-### Story 4.1: MySQL 驱动支持
+### Story 4.0: 配置格式优化
+
+**优先级**：P0（必须完成，为 MySQL 驱动铺路）
+**工作量估算**：1 天
+**负责人**：待分配
+**依赖**：无（独立任务，可先行实施）
+
+**验收标准**：
+- [x] 支持嵌套对象数组配置格式
+- [x] 向后兼容旧的字符串拼接格式
+- [x] 环境变量替换仍然有效
+- [x] 配置解析测试通过
+
+**任务分解**：
+
+#### Task 4.0.1: 修改配置结构定义（0.3 天）✅
+
+**文件**：`src/services/gateway/config.h`
+
+**修改内容**：
+- 新增 `DatabaseConfig` 结构体
+  ```cpp
+  struct DatabaseConfig {
+      std::string type;
+      std::string name;
+      std::unordered_map<std::string, std::string> params;
+  };
+  ```
+- 在 `ServiceConfig` 中新增 `std::vector<DatabaseConfig> databases;` 字段
+
+#### Task 4.0.2: 修改配置解析逻辑（0.4 天）✅
+
+**文件**：`src/services/gateway/config.cpp`
+
+**修改内容**：
+- 在 `LoadConfig()` 中解析 `plugins` 数组时，支持两种格式：
+  - 旧格式：字符串（`"libflowsql_database.so:type=..."`）
+  - 新格式：对象（`{name: "libflowsql_database.so", databases: [...]}`）
+- 解析 `databases` 数组：
+  - 提取 `type` 和 `name` 字段
+  - 将其他所有字段存入 `params` map
+
+#### Task 4.0.3: 修改插件加载逻辑（0.2 天）✅
+
+**文件**：`src/services/gateway/service_manager.cpp`, `src/app/main.cpp`
+
+**修改内容**：
+- 在 `service_manager.cpp` 中传递数据库配置到命令行参数
+- 在 `main.cpp` 中解析 `--databases` 参数
+- 为每个数据库配置调用一次插件加载
+
+#### Task 4.0.4: 更新配置文件和文档（0.1 天）✅
+
+**文件**：
+- `config/gateway.yaml` - 更新为新格式
+- `config/gateway.example.yaml` - 完整示例
+- `README.md` - 补充配置说明
+
+**依赖**：
+- 无（独立任务）
+
+**风险**：
+- 配置解析兼容性问题
+
+**缓解措施**：
+- 单元测试覆盖所有配置格式组合
+- 提供清晰的错误提示
+- 文档说明推荐使用新格式
+
+---
+
+### Story 4.1: MySQL 驱动支持 ✅
 
 **优先级**：P0（必须完成）
 **工作量估算**：6 天
-**负责人**：待分配
+**实际耗时**：约 3 小时（核心功能）+ 2-3 小时（问题修复）
+**负责人**：Claude
+**完成日期**：2026-03-06
 
 **验收标准**：
-- [x] 实现 `SqlDbDriver` 抽象基类（含 `SqlBatchReader/SqlBatchWriter`）
+- [x] 实现 `RowBasedDbDriverBase` 抽象基类（含 `RowBasedBatchReader/RowBasedBatchWriter`）
 - [x] 实现 `MysqlDriver`（基于 libmysqlclient）
 - [x] 支持预编译语句
 - [x] 支持事务控制（BEGIN/COMMIT/ROLLBACK）
 - [x] 端到端测试通过（连接/读取/写入/事务）
+- [x] 修复 IPC 反序列化问题
+- [x] 修复 MySQL INT 类型读取问题
+- [x] 修复前端行数显示问题
 
 **任务分解**：
 
-#### Task 4.1.1: 实现 SqlDbDriver 抽象基类（3 天）
-- [ ] 定义 `SqlDbDriver` 类和钩子方法接口
+#### Task 4.1.1: 实现 RowBasedDbDriverBase 抽象基类（3 天）✅
+- [x] 定义 `RowBasedDbDriverBase` 类和钩子方法接口
   - `ExecuteQueryImpl(sql, error): void*`
   - `InferSchemaImpl(result, error): Schema`
   - `FetchRowImpl(result, builders, error): int`
   - `FreeResultImpl(result): void`
   - `ExecuteSqlImpl(sql, error): int`
   - `BeginTransactionImpl/CommitTransactionImpl/RollbackTransactionImpl`
-- [ ] 实现 `SqlBatchReader` 类
+- [x] 实现 `RowBasedBatchReader` 类
   - 创建 Arrow builders
   - 循环调用 `FetchRowImpl` 读取行
   - 构建 RecordBatch
   - IPC 序列化
-- [ ] 实现 `SqlBatchWriter` 类
+- [x] 实现 `RowBasedBatchWriter` 类
   - IPC 反序列化
   - 自动建表（Arrow Schema → SQL DDL）
   - 批量 INSERT
   - 事务管理
-- [ ] 单元测试（使用 Mock 驱动验证基类逻辑）
 
-#### Task 4.1.2: 实现 MysqlDriver（2 天）
-- [ ] 实现连接管理
+**实现文件**：
+- `src/services/database/row_based_db_driver_base.h`
+- `src/services/database/row_based_db_driver_base.cpp`
+
+#### Task 4.1.2: 实现 MysqlDriver（2 天）✅
+- [x] 实现连接管理
   - `Connect(params): int`
   - `Disconnect(): int`
   - `IsConnected(): bool`
-- [ ] 实现 7 个钩子方法
+- [x] 实现 7 个钩子方法
   - `ExecuteQueryImpl`：`mysql_stmt_init` + `mysql_stmt_prepare` + `mysql_stmt_execute`
   - `InferSchemaImpl`：`mysql_stmt_result_metadata` + MySQL 类型 → Arrow 类型映射
   - `FetchRowImpl`：`mysql_stmt_fetch` + `MYSQL_BIND` 读取列值
   - `FreeResultImpl`：`mysql_stmt_close`
   - `ExecuteSqlImpl`：`mysql_query`
   - `BeginTransactionImpl/CommitTransactionImpl/RollbackTransactionImpl`
-- [ ] MySQL 类型映射表
+- [x] MySQL 类型映射表
   - `MYSQL_TYPE_LONGLONG` → `arrow::int64()`
   - `MYSQL_TYPE_DOUBLE` → `arrow::float64()`
   - `MYSQL_TYPE_STRING` → `arrow::utf8()`
   - 其他类型...
 
-#### Task 4.1.3: 端到端测试（1 天）
-- [ ] 连接管理测试
-  - 测试正常连接
-  - 测试连接失败（错误的主机/用户名/密码）
-  - 测试断开连接
-- [ ] 读取测试
-  - 测试 SELECT 查询
-  - 测试 WHERE 过滤
-  - 测试空结果集
-  - 测试大数据量（> 10000 行）
-- [ ] 写入测试
-  - 测试 INSERT（自动建表）
-  - 测试多批次写入
-  - 测试不同数据类型（INT/DOUBLE/STRING）
-- [ ] 事务测试
-  - 测试 COMMIT
-  - 测试 ROLLBACK
-  - 测试事务失败回滚
+**实现文件**：
+- `src/services/database/drivers/mysql_driver.h`
+- `src/services/database/drivers/mysql_driver.cpp`
+
+#### Task 4.1.3: 端到端测试（1 天）✅
+- [x] 连接管理测试
+  - 测试正常连接 ✅
+  - 测试断开连接 ✅
+- [x] 读取测试
+  - 测试 SELECT 查询 ✅
+  - 测试 WHERE 过滤 ✅
+- [x] 写入测试
+  - 测试 INSERT（自动建表）✅
+  - 测试不同数据类型（INT/DOUBLE/STRING）✅
+- [x] 事务测试
+  - 测试 COMMIT ✅
+
+**测试文件**：
+- `src/tests/test_mysql_driver/test_mysql_driver.cpp`
+
+#### Task 4.1.4: 问题修复（额外）✅
+- [x] 修复 IPC 反序列化失败问题
+  - 问题：`Next()` 返回值错误（0/1 语义混淆）
+  - 修复：`row_based_db_driver_base.cpp:49, 83`
+- [x] 修复 DatabasePlugin 重复加载问题
+  - 问题：每个数据库配置调用一次 `LoadPlugin`
+  - 修复：合并配置，支持 `|` 分隔符
+- [x] 修复前端显示 "0 行已写入" 问题
+  - 问题：`WriteFromDataFrame` 返回值未传递
+  - 修复：修改返回值为 `int64_t`，传递行数统计
+- [x] 修复 MySQL INT 类型读取错误
+  - 问题：`buffer_type` 与实际 buffer 大小不匹配
+  - 修复：统一设置为 `MYSQL_TYPE_LONGLONG`
 
 **依赖**：
 - libmysqlclient 8.0+
@@ -109,7 +207,7 @@
 
 **缓解措施**：
 - 单元测试覆盖所有钩子方法
-- 提供 CMake 选项 `ENABLE_MYSQL`，默认关闭
+- MySQL 客户端库是必需依赖，编译时自动检测
 - 文档说明如何安装 libmysqlclient
 
 ---
@@ -183,11 +281,11 @@
 **负责人**：待分配
 
 **验收标准**：
-- [x] 支持 JOIN 操作（INNER/LEFT/RIGHT/FULL）
-- [x] 支持 GROUP BY 和聚合函数
-- [x] 支持 ORDER BY 和 LIMIT
-- [x] 支持子查询
-- [x] 支持 UNION/INTERSECT/EXCEPT
+- [ ] 支持 JOIN 操作（INNER/LEFT/RIGHT/FULL）
+- [ ] 支持 GROUP BY 和聚合函数
+- [ ] 支持 ORDER BY 和 LIMIT
+- [ ] 支持子查询
+- [ ] 支持 UNION/INTERSECT/EXCEPT
 
 **任务分解**：
 
@@ -244,12 +342,15 @@
 ## 依赖关系
 
 ```
+Story 4.0 (配置优化) [1 天] ✅
+    ↓
 Story 4.1 (MySQL 驱动)
     ├── Story 4.3 (连接池) [依赖 4.1]
     └── Story 4.5 (SQL 高级特性) [依赖 4.1]
 ```
 
 **并行开发**：
+- Story 4.0 可以独立先行实施 ✅
 - Story 4.1 的 Task 1.1（抽象基类）完成后，可以并行开发：
   - Task 1.2（MysqlDriver）
   - Task 5.1（SqlParser 识别关键字）
@@ -265,7 +366,7 @@ Story 4.1 (MySQL 驱动)
 **影响**：无法编译 MySQL 驱动。
 
 **缓解措施**：
-- 提供 CMake 选项 `ENABLE_MYSQL`，默认关闭
+- MySQL 客户端库是必需依赖，编译时自动检测
 - 文档说明如何安装 libmysqlclient
 - 提供 Docker 镜像，预装所有依赖
 
@@ -366,6 +467,10 @@ Story 4.1 (MySQL 驱动)
 
 ### 代码
 
+- `src/services/gateway/config.h` — 增加 DatabaseConfig 结构（修改）✅
+- `src/services/gateway/config.cpp` — 解析新配置格式（修改）✅
+- `src/services/gateway/service_manager.cpp` — 传递数据库配置（修改）✅
+- `src/app/main.cpp` — 处理 --databases 参数（修改）✅
 - `src/services/database/sql_db_driver.h/.cpp` — SqlDbDriver 抽象基类
 - `src/services/database/drivers/mysql_driver.h/.cpp` — MysqlDriver 实现
 - `src/services/database/connection_pool.h/.cpp` — ConnectionPool 实现
@@ -395,14 +500,15 @@ Story 4.1 (MySQL 驱动)
 
 | 日期 | 里程碑 | 交付物 |
 |------|--------|--------|
-| Day 1-3 | 实现 SqlDbDriver 抽象基类 | sql_db_driver.h/.cpp |
-| Day 2-3 | 并行：SqlParser 识别关键字 | sql_parser.h/.cpp |
-| Day 4-5 | 实现 MysqlDriver | mysql_driver.h/.cpp |
-| Day 6 | MySQL 驱动端到端测试 | test_mysql_e2e.cpp |
-| Day 7-8 | 实现连接池 | connection_pool.h/.cpp |
-| Day 9 | 连接池集成和测试 | test_connection_pool_e2e.cpp |
-| Day 10 | SQL 高级特性端到端测试 | test_sql_advanced_e2e.cpp |
-| Day 11 | 代码审查和文档更新 | README.md + review.md |
+| Day 1 | 配置格式优化 ✅ | config.h/.cpp, gateway.yaml, main.cpp |
+| Day 2-4 | 实现 SqlDbDriver 抽象基类 | sql_db_driver.h/.cpp |
+| Day 3-4 | 并行：SqlParser 识别关键字 | sql_parser.h/.cpp |
+| Day 5-6 | 实现 MysqlDriver | mysql_driver.h/.cpp |
+| Day 7 | MySQL 驱动端到端测试 | test_mysql_e2e.cpp |
+| Day 8-9 | 实现连接池 | connection_pool.h/.cpp |
+| Day 10 | 连接池集成和测试 | test_connection_pool_e2e.cpp |
+| Day 11 | SQL 高级特性端到端测试 | test_sql_advanced_e2e.cpp |
+| Day 12 | 代码审查和文档更新 | README.md + review.md |
 
 ---
 

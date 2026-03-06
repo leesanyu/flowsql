@@ -36,7 +36,38 @@ int LoadConfig(const std::string& path, GatewayConfig* config) {
             if (node["option"]) svc.option = node["option"].as<std::string>();
             if (node["plugins"]) {
                 for (const auto& p : node["plugins"]) {
-                    svc.plugins.push_back(p.as<std::string>());
+                    if (p.IsScalar()) {
+                        // 旧格式：字符串 "libflowsql_database.so:type=sqlite;name=testdb;path=:memory:"
+                        svc.plugins.push_back(p.as<std::string>());
+                    } else if (p.IsMap()) {
+                        // 新格式：对象 {name: "libflowsql_database.so", databases: [...]}
+                        if (!p["name"]) {
+                            printf("LoadConfig: plugin map missing 'name' field\n");
+                            continue;
+                        }
+                        std::string plugin_name = p["name"].as<std::string>();
+                        svc.plugins.push_back(plugin_name);
+
+                        // 解析 databases 数组
+                        if (p["databases"]) {
+                            for (const auto& db : p["databases"]) {
+                                DatabaseConfig dbcfg;
+                                dbcfg.type = db["type"].as<std::string>();
+                                dbcfg.name = db["name"].as<std::string>();
+
+                                // 解析所有其他字段到 params
+                                for (const auto& kv : db) {
+                                    std::string key = kv.first.as<std::string>();
+                                    if (key != "type" && key != "name") {
+                                        dbcfg.params[key] = kv.second.as<std::string>();
+                                    }
+                                }
+                                svc.databases.push_back(std::move(dbcfg));
+                            }
+                        }
+                    } else {
+                        printf("LoadConfig: unknown plugin format (not scalar or map)\n");
+                    }
                 }
             }
             config->services.push_back(std::move(svc));

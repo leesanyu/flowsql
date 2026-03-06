@@ -20,6 +20,7 @@ struct Args {
     std::string gateway_addr; // Service 模式：Gateway 地址
     int port = 0;             // Service 模式：监听端口
     std::string plugins;      // Service 模式：插件列表（逗号分隔）
+    std::string databases;    // Service 模式：数据库配置列表（| 分隔）
     std::string option;       // 传给插件的 Option 参数
 };
 
@@ -36,6 +37,8 @@ static Args ParseArgs(int argc, char* argv[]) {
             args.port = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--plugins") == 0 && i + 1 < argc) {
             args.plugins = argv[++i];
+        } else if (strcmp(argv[i], "--databases") == 0 && i + 1 < argc) {
+            args.databases = argv[++i];
         } else if (strcmp(argv[i], "--option") == 0 && i + 1 < argc) {
             args.option = argv[++i];
         }
@@ -128,12 +131,36 @@ static int RunService(const Args& args) {
     } else {
         auto_option = args.option;
     }
+
+    // 处理数据库配置（新增）
+    std::vector<std::string> database_configs;
+    if (!args.databases.empty()) {
+        database_configs = Split(args.databases, '|');
+    }
+
     for (const auto& plugin : plugin_list) {
-        const char* opt = auto_option.empty() ? nullptr : auto_option.c_str();
-        if (LoadPlugin(loader, plugin, opt) != 0) {
-            printf("Failed to load plugin: %s\n", plugin.c_str());
+        // 特殊处理 database 插件
+        if (plugin.find("libflowsql_database.so") != std::string::npos && !database_configs.empty()) {
+            // 只加载一次插件，但为每个数据库配置调用一次 Option
+            // 将所有配置合并为一个字符串，用 | 分隔
+            std::string merged_config;
+            for (size_t i = 0; i < database_configs.size(); ++i) {
+                if (i > 0) merged_config += "|";
+                merged_config += database_configs[i];
+            }
+            if (LoadPlugin(loader, "libflowsql_database.so:" + merged_config, nullptr) != 0) {
+                printf("Failed to load database plugin\n");
+            } else {
+                printf("Loaded database plugin with %zu database(s)\n", database_configs.size());
+            }
         } else {
-            printf("Loaded plugin: %s\n", plugin.c_str());
+            // 普通插件或旧格式
+            const char* opt = auto_option.empty() ? nullptr : auto_option.c_str();
+            if (LoadPlugin(loader, plugin, opt) != 0) {
+                printf("Failed to load plugin: %s\n", plugin.c_str());
+            } else {
+                printf("Loaded plugin: %s\n", plugin.c_str());
+            }
         }
     }
 

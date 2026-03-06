@@ -15,7 +15,24 @@ services:
       - libflowsql_scheduler.so
       - libflowsql_bridge.so
       - libflowsql_example.so
-      - "libflowsql_database.so:type=sqlite;name=testdb;path=:memory:"
+      # 数据库配置：SQLite + MySQL
+      - name: libflowsql_database.so
+        databases:
+          # SQLite 测试数据库
+          - type: sqlite
+            name: testdb
+            path: ":memory:"
+
+          # MySQL 测试数据库
+          - type: mysql
+            name: mysqldb
+            host: 127.0.0.1
+            port: 3306
+            user: flowsql_user
+            password: "flowSQL@user"
+            database: flowsql_db
+            charset: utf8mb4
+            timeout: 10
     port: 18803
 
   - name: pyworker

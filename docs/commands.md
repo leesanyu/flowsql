@@ -105,3 +105,20 @@
 - 2026-03-04: 补充 tasks/lessons.md：从 Sprint 回顾中提炼 7 条经验教训（接口设计、静态库单例、测试同步、依赖隔离、资源泄漏、架构问题、文档同步）
 - 2026-03-05: 清理文档目录：删除 tasks/todo.md（已完成的临时清单）；归档 7 个历史文档到 docs/archive/（stage1/2/3.md、design_database_channel.md、frontend_verification.md、operator_editor_*.md）
 - 2026-03-05: 提交 Scrum 任务管理体系到 main 分支（commit e379b6a）：产品待办列表、Sprint 1/2/3 文档、经验教训补充、文档清理
+- 2026-03-05: Sprint 4 规划完成，采用基于能力的接口设计（Capability-Based Interface）
+  - 定义 IDbDriver 基础接口 + 5 个能力接口
+  - 实现 RowBasedDbDriverBase 辅助基类
+  - 实现 MysqlDriver
+  - 实现连接池基础功能
+  - 支持 SQL 高级特性
+  - 总工作量：12 天（增加接口重构 1 天）
+  - 设计文档已更新：tasks/sprints/sprint4/design.md
+  - 规划文档已更新：tasks/sprints/sprint4/planning.md（Task 编号已修正为完整编号）
+- 2026-03-05: Story 4.0 配置格式优化实施完成（1 天）
+  - 新增 DatabaseConfig 结构体（config.h）
+  - 支持嵌套对象数组配置格式（config.cpp）
+  - 向后兼容旧的字符串拼接格式
+  - 修改插件加载逻辑（service_manager.cpp、main.cpp）
+  - 创建完整配置示例（config/gateway.example.yaml）
+  - 更新 planning.md 和 design.md 文档
+  - 编译验证通过

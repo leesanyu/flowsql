@@ -168,6 +168,20 @@ int ServiceManager::SpawnService(ServiceInfo& info, const std::string& gateway_a
             }
             arg_strings.push_back(plugins_str);
         }
+        // 数据库配置（新增）
+        if (!svc.databases.empty()) {
+            arg_strings.push_back("--databases");
+            std::string databases_str;
+            for (size_t i = 0; i < svc.databases.size(); ++i) {
+                if (i > 0) databases_str += "|";  // 使用 | 分隔多个数据库
+                // 格式: type=sqlite;name=testdb;path=:memory:
+                databases_str += "type=" + svc.databases[i].type + ";name=" + svc.databases[i].name;
+                for (const auto& [k, v] : svc.databases[i].params) {
+                    databases_str += ";" + k + "=" + v;
+                }
+            }
+            arg_strings.push_back(databases_str);
+        }
         // Option 参数
         if (!svc.option.empty()) {
             arg_strings.push_back("--option");

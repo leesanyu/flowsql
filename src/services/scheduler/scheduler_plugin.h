@@ -52,14 +52,15 @@ class SchedulerPlugin : public IPlugin {
     std::shared_ptr<IOperator> FindOperator(const std::string& catelog, const std::string& name);
 
     // 执行路径：无算子的纯数据搬运
+    // rows_affected: 可选的输出参数，返回受影响的行数（写入/读取的行数）
     int ExecuteTransfer(IChannel* source, IChannel* sink,
                         const std::string& source_type, const std::string& sink_type,
-                        const SqlStatement& stmt);
+                        const SqlStatement& stmt, int64_t* rows_affected = nullptr);
 
     // 执行路径：有算子，自动适配通道类型
     int ExecuteWithOperator(IChannel* source, IChannel* sink, IOperator* op,
                             const std::string& source_type, const std::string& sink_type,
-                            const SqlStatement& stmt);
+                            const SqlStatement& stmt, int64_t* rows_affected = nullptr);
 
     IQuerier* querier_ = nullptr;  // Load 时传入，用于查询算子等插件接口
     httplib::Server server_;
