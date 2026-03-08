@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <regex>
 
 #include "framework/core/channel_adapter.h"
 #include "framework/core/dataframe.h"
@@ -227,44 +228,23 @@ std::shared_ptr<IOperator> SchedulerPlugin::FindOperator(const std::string& cate
     return nullptr;
 }
 
-// --- 构建 Database 查询语句 ---
-// 支持三段式 type.name.table 和两段式 catelog.table
-static std::string BuildQuery(const std::string& source_name, const SqlStatement& stmt) {
-    // 从 source_name 中提取表名
-    // 三段式: sqlite.mydb.users → users
-    // 两段式: catelog.table → table
-    std::string table;
-    auto pos1 = source_name.find('.');
-    if (pos1 != std::string::npos) {
-        auto pos2 = source_name.find('.', pos1 + 1);
-        if (pos2 != std::string::npos) {
-            // 三段式
-            table = source_name.substr(pos2 + 1);
-        } else {
-            // 两段式
-            table = source_name.substr(pos1 + 1);
-        }
-    } else {
-        table = source_name;
-    }
+// --- Build Database Query ---
+// Normalize table names in sql_part and replace FROM clause table
+// Depends on: NormalizeFromTableName, ExtractTableName
 
-    std::string select_clause = "*";
-    if (!stmt.columns.empty()) {
-        select_clause.clear();
-        for (size_t i = 0; i < stmt.columns.size(); ++i) {
-            if (i > 0) select_clause += ", ";
-            select_clause += stmt.columns[i];
-        }
-    }
+// Normalize table names in SQL FROM clauses
+// Supports three-part (catalog.database.table), two-part (database.table), one-part (table)
+// Example: FROM sqlite.mydb.users -> FROM users
+static std::string NormalizeFromTableName(const std::string& sql) {
+    std::string result = sql;
 
-    std::string query = "SELECT " + select_clause + " FROM " + table;
+    // Match table name after FROM keyword (supports multi-part names)
+    std::regex FROM_PATTERN(R"((\bFROM\s+)((?:[\w]+\.)*)([\w]+))");
 
-    // 使用解析后的 WHERE 子句
-    if (!stmt.where_clause.empty()) {
-        query += " WHERE " + stmt.where_clause;
-    }
+    // Replace with: FROM + last segment (table name only)
+    result = std::regex_replace(result, FROM_PATTERN, "$1$3");
 
-    return query;
+    return result;
 }
 
 // 从目标名称中提取表名（支持三段式 type.name.table）
@@ -278,6 +258,24 @@ static std::string ExtractTableName(const std::string& dest_name) {
         return dest_name.substr(pos1 + 1);  // 两段式
     }
     return dest_name;
+}
+
+// BuildQuery: 构建数据库查询语句
+static std::string BuildQuery(const std::string& source_name, const SqlStatement& stmt) {
+    // Database channel: use sql_part + table name replacement
+    std::string sql = stmt.sql_part;
+
+    // 1. Normalize all table names (including subqueries)
+    sql = NormalizeFromTableName(sql);
+
+    // 2. Replace main FROM clause source with actual table name
+    std::string table = ExtractTableName(source_name);
+
+    // Use regex to replace table name after FROM (supports subqueries)
+    std::regex FROM_PATTERN(R"((\bFROM\s+)[\w\.]+)");
+    sql = std::regex_replace(sql, FROM_PATTERN, "$1" + table);
+
+    return sql;
 }
 
 // --- 辅助：对 DataFrame 通道应用 WHERE 过滤 ---

@@ -53,6 +53,47 @@ std::string SqlParser::ReadValue() {
     return std::string(start, pos_);
 }
 
+// 辅助：从 SQL 中正向查找 USING/WITH/INTO 的最早出现位置
+static size_t FindExtensionStart(const std::string& sql) {
+    size_t earliest_pos = std::string::npos;
+    const char* keywords[] = {"USING", "WITH", "INTO"};
+
+    for (const char* kw : keywords) {
+        size_t len = strlen(kw);
+        size_t pos = 0;
+
+        while (pos + len <= sql.size()) {
+            // 跳过空白后检查关键字
+            while (pos < sql.size() && std::isspace(static_cast<unsigned char>(sql[pos]))) ++pos;
+            if (pos + len > sql.size()) break;
+
+            // 检查是否匹配关键字
+            bool match = true;
+            for (size_t j = 0; j < len; ++j) {
+                if (std::toupper(static_cast<unsigned char>(sql[pos + j])) != std::toupper(static_cast<unsigned char>(kw[j]))) {
+                    match = false;
+                    break;
+                }
+            }
+
+            // 关键字后必须是空白或结尾
+            if (match && (pos + len >= sql.size() || std::isspace(static_cast<unsigned char>(sql[pos + len])))) {
+                // 关键字前必须是空白或开头
+                if (pos == 0 || std::isspace(static_cast<unsigned char>(sql[pos - 1]))) {
+                    if (earliest_pos == std::string::npos || pos < earliest_pos) {
+                        earliest_pos = pos;
+                    }
+                    break;  // 找到这个关键字的第一个匹配，继续找下一个关键字
+                }
+            }
+
+            ++pos;
+        }
+    }
+
+    return earliest_pos;
+}
+
 SqlStatement SqlParser::Parse(const std::string& sql) {
     SqlStatement stmt;
     pos_ = sql.c_str();
@@ -64,15 +105,59 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
         return stmt;
     }
 
-    // 列选择：* 或 col1, col2, ...
+    // 列选择：* 或 col1, col2, ...（支持函数调用）
     SkipWhitespace();
     if (pos_ < end_ && *pos_ == '*') {
         ++pos_;
-        // columns 为空表示 SELECT *
     } else {
-        // 读取列名列表
         while (true) {
-            std::string col = ReadIdentifier();
+            SkipWhitespace();
+            const char* col_start = pos_;
+            int paren_depth = 0;
+            bool in_string = false;
+            char string_char = 0;
+
+            while (pos_ < end_) {
+                char c = *pos_;
+
+                if (!in_string && (c == '\'' || c == '"')) {
+                    in_string = true;
+                    string_char = c;
+                    ++pos_;
+                    continue;
+                }
+                if (in_string && c == string_char) {
+                    in_string = false;
+                    ++pos_;
+                    continue;
+                }
+                if (in_string) {
+                    ++pos_;
+                    continue;
+                }
+
+                if (c == '(') {
+                    ++paren_depth;
+                    ++pos_;
+                    continue;
+                }
+                if (c == ')') {
+                    if (paren_depth > 0) {
+                        --paren_depth;
+                        ++pos_;
+                        continue;
+                    }
+                    break;
+                }
+
+                if (paren_depth == 0 && (c == ',' || std::isspace(static_cast<unsigned char>(c)))) {
+                    break;
+                }
+
+                ++pos_;
+            }
+
+            std::string col(col_start, pos_);
             if (col.empty()) {
                 stmt.error = "expected column name or * after SELECT";
                 return stmt;
@@ -81,7 +166,7 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
 
             SkipWhitespace();
             if (pos_ < end_ && *pos_ == ',') {
-                ++pos_;  // 跳过逗号
+                ++pos_;
             } else {
                 break;
             }
@@ -99,45 +184,76 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
         return stmt;
     }
 
-    // [WHERE <condition>]（可选）
-    // WHERE 子句读取到下一个关键字（USING/WITH/INTO）或结尾
-    {
-        const char* saved = pos_;
-        if (MatchKeyword("WHERE")) {
+    // WHERE（可选）- 简单处理：读到行尾或 USING/WITH/INTO
+    const char* saved = pos_;
+    if (MatchKeyword("WHERE")) {
+        SkipWhitespace();
+        const char* where_start = pos_;
+
+        // 读取 WHERE 条件直到遇到 USING/WITH/INTO 或结尾
+        while (pos_ < end_) {
+            const char* check = pos_;
             SkipWhitespace();
-            const char* where_start = pos_;
-            // 向前扫描直到遇到 USING/WITH/INTO 关键字或结尾
-            while (pos_ < end_) {
-                const char* check = pos_;
-                SkipWhitespace();
-                if (MatchKeyword("USING") || MatchKeyword("WITH") || MatchKeyword("INTO")) {
-                    pos_ = check;  // 回退到关键字之前
-                    break;
+
+            // 检查是否遇到扩展关键字
+            bool found_ext = false;
+            const char* ext_keywords[] = {"USING", "WITH", "INTO"};
+            for (const char* kw : ext_keywords) {
+                size_t len = strlen(kw);
+                if (pos_ + len <= end_) {
+                    bool match = true;
+                    for (size_t j = 0; j < len; ++j) {
+                        if (std::toupper(static_cast<unsigned char>(pos_[j])) != std::toupper(static_cast<unsigned char>(kw[j]))) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match && (pos_ + len >= end_ || !std::isalnum(static_cast<unsigned char>(pos_[len])))) {
+                        found_ext = true;
+                        break;
+                    }
                 }
+            }
+
+            if (found_ext) {
                 pos_ = check;
-                if (pos_ < end_) ++pos_;
+                break;
             }
-            // 去除尾部空白
-            const char* where_end = pos_;
-            while (where_end > where_start && std::isspace(*(where_end - 1))) --where_end;
-            stmt.where_clause = std::string(where_start, where_end);
+            ++pos_;
+        }
 
-            if (stmt.where_clause.empty()) {
-                stmt.error = "expected condition after WHERE";
-                return stmt;
-            }
+        // 去除尾部空白
+        const char* where_end = pos_;
+        while (where_end > where_start && std::isspace(*(where_end - 1))) --where_end;
+        stmt.where_clause = std::string(where_start, where_end);
 
-            // 安全验证
+        if (!stmt.where_clause.empty()) {
             if (!ValidateWhereClause(stmt.where_clause)) {
-                stmt.error = "WHERE clause contains forbidden keywords: " + stmt.where_clause;
+                stmt.error = "WHERE clause contains forbidden keywords";
                 return stmt;
             }
         } else {
-            pos_ = saved;
+            pos_ = saved;  // 回退，WHERE 无效
         }
+    } else {
+        pos_ = saved;
     }
 
-    // [USING <catelog.name>]（可选）
+    // 反向查找 USING/WITH/INTO 的位置，提取 sql_part
+    size_t extension_start = FindExtensionStart(sql);
+    if (extension_start != std::string::npos) {
+        // 去除尾部空白
+        size_t end = extension_start;
+        while (end > 0 && std::isspace(static_cast<unsigned char>(sql[end - 1]))) --end;
+        stmt.sql_part = sql.substr(0, end);
+
+        // 设置 pos_ 到扩展关键字位置，供后续解析
+        pos_ = sql.c_str() + extension_start;
+    } else {
+        stmt.sql_part = sql;
+    }
+
+    // [USING <catelog.name>]
     const char* saved_pos = pos_;
     if (MatchKeyword("USING")) {
         std::string op_full = ReadIdentifier();
@@ -149,7 +265,7 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
         stmt.op_catelog = op_full.substr(0, dot);
         stmt.op_name = op_full.substr(dot + 1);
     } else {
-        pos_ = saved_pos;  // 回退，USING 不存在
+        pos_ = saved_pos;
     }
 
     // [WITH key=val, ...]
@@ -163,14 +279,14 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
                 stmt.error = "expected = after WITH key: " + key;
                 return stmt;
             }
-            ++pos_;  // 跳过 =
+            ++pos_;
 
             std::string val = ReadValue();
             stmt.with_params[key] = val;
 
             SkipWhitespace();
             if (pos_ < end_ && *pos_ == ',') {
-                ++pos_;  // 跳过逗号
+                ++pos_;
             } else {
                 break;
             }
@@ -189,14 +305,10 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
     return stmt;
 }
 
-// 验证 WHERE 子句安全性
-// 拒绝包含 DDL/DML 危险关键字的条件
 bool SqlParser::ValidateWhereClause(const std::string& clause) {
-    // 转为大写进行检查
     std::string upper = clause;
     std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
 
-    // 危险关键字列表
     static const char* forbidden[] = {
         "DROP", "DELETE", "INSERT", "UPDATE", "ALTER", "CREATE",
         "EXEC", "EXECUTE", "TRUNCATE", "GRANT", "REVOKE",
@@ -207,14 +319,13 @@ bool SqlParser::ValidateWhereClause(const std::string& clause) {
         std::string keyword(kw);
         auto pos = upper.find(keyword);
         if (pos != std::string::npos) {
-            // 对于字母关键字，确保是独立单词（前后不是字母数字下划线）
             if (std::isalpha(keyword[0])) {
                 bool word_start = (pos == 0 || !std::isalnum(upper[pos - 1]));
                 bool word_end = (pos + keyword.size() >= upper.size() ||
                                  !std::isalnum(upper[pos + keyword.size()]));
                 if (word_start && word_end) return false;
             } else {
-                return false;  // 符号类直接拒绝
+                return false;
             }
         }
     }

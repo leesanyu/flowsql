@@ -16,6 +16,7 @@ struct SqlStatement {
     std::string dest;         // INTO 后的目标通道名（可选，空表示直接返回结果）
     std::vector<std::string> columns;  // SELECT 后的列名（空表示 *）
     std::string where_clause; // WHERE 后的过滤条件（可选，空表示无过滤）
+    std::string sql_part;     // 完整 SQL 部分（不含 USING/WITH/INTO），数据库通道直接使用
     std::string error;        // 解析错误信息（空表示成功）
 
     // 是否有算子
