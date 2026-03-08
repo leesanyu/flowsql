@@ -23,6 +23,9 @@ interface IDbDriver {
     // 驱动元数据
     virtual const char* DriverName() = 0;
     virtual const char* LastError() = 0;
+
+    // 健康检查
+    virtual bool Ping() = 0;
 };
 
 }  // namespace database

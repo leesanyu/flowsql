@@ -3,6 +3,7 @@
 
 #include "capability_interfaces.h"
 #include "idb_driver.h"
+#include "db_session.h"
 
 #include <arrow/api.h>
 
@@ -13,50 +14,67 @@
 namespace flowsql {
 namespace database {
 
-// RowBasedDbDriverBase — 行式数据库辅助基类
-// 实现 IDbDriver + IBatchReadable + IBatchWritable + ITransactional
-// 提供模板方法实现，子类只需实现 5 个钩子方法
-class __attribute__((visibility("default"))) RowBasedDbDriverBase : public IDbDriver,
-                              public IBatchReadable,
-                              public IBatchWritable,
-                              public ITransactional {
+// RowBasedBatchReader — 通用批量读取器
+// 持有 shared_ptr<IDbSession>，析构时自动释放结果集资源
+class RowBasedBatchReader : public IBatchReader {
 public:
-    // IDbDriver 实现
-    const char* LastError() override { return last_error_.c_str(); }
+    RowBasedBatchReader(std::shared_ptr<IDbSession> session,
+                       IResultSet* result,
+                       std::shared_ptr<arrow::Schema> schema);
 
-    // IBatchReadable 实现（模板方法）
-    int CreateReader(const char* query, IBatchReader** reader) override;
+    ~RowBasedBatchReader() override;
 
-    // IBatchWritable 实现（模板方法）
-    int CreateWriter(const char* table, IBatchWriter** writer) override;
-
-    // ITransactional 实现
-    int BeginTransaction(std::string* error) override {
-        return ExecuteSqlImpl("BEGIN", error);
-    }
-    int CommitTransaction(std::string* error) override {
-        return ExecuteSqlImpl("COMMIT", error);
-    }
-    int RollbackTransaction(std::string* error) override {
-        return ExecuteSqlImpl("ROLLBACK", error);
-    }
+    int GetSchema(const uint8_t** data, size_t* size) override;
+    int Next(const uint8_t** data, size_t* size) override;
+    void Cancel() override;
+    void Close() override;
+    const char* GetLastError() override;
+    void Release() override;
 
 protected:
-    // 子类实现的钩子方法
-    // void* 是数据库特定的结果集类型（如 sqlite3_stmt*、MYSQL_RES*）
-    virtual void* ExecuteQueryImpl(const char* sql, std::string* error) = 0;
-    virtual std::shared_ptr<arrow::Schema> InferSchemaImpl(void* result, std::string* error) = 0;
-    virtual int FetchRowImpl(void* result,
-                            const std::vector<std::unique_ptr<arrow::ArrayBuilder>>& builders,
-                            std::string* error) = 0;
-    virtual void FreeResultImpl(void* result) = 0;
-    virtual int ExecuteSqlImpl(const char* sql, std::string* error) = 0;
+    // 释放结果集资源（由具体数据库驱动实现）
+    virtual void FreeResultImpl(IResultSet* result) = 0;
 
+protected:
+    std::shared_ptr<IDbSession> session_;  // 持有 Session
+    IResultSet* result_;
+    std::shared_ptr<arrow::Schema> schema_;
+    std::shared_ptr<arrow::Buffer> schema_buffer_;
+    std::shared_ptr<arrow::Buffer> batch_buffer_;
     std::string last_error_;
+    bool done_ = false;
+    bool cancelled_ = false;
+};
 
-    // 友元类，允许访问钩子方法
-    friend class RowBasedBatchReader;
-    friend class RowBasedBatchWriter;
+// RowBasedBatchWriter — 通用批量写入器
+// 持有 shared_ptr<IDbSession>，事务管理由 Session 负责
+class RowBasedBatchWriter : public IBatchWriter {
+public:
+    RowBasedBatchWriter(std::shared_ptr<IDbSession> session, const char* table);
+
+    ~RowBasedBatchWriter() override;
+
+    int Write(const uint8_t* data, size_t size) override;
+    int Flush() override;
+    void Close(BatchWriteStats* stats) override;
+    const char* GetLastError() override;
+    void Release() override;
+
+protected:
+    // 创建表（由具体数据库驱动实现）
+    virtual int CreateTableImpl(std::shared_ptr<arrow::Schema> schema) = 0;
+
+    // 插入一行（由具体数据库驱动实现）
+    virtual int InsertRowImpl(const std::vector<std::string>& values) = 0;
+
+protected:
+    std::shared_ptr<IDbSession> session_;  // 持有 Session
+    std::string table_;
+    std::string last_error_;
+    int64_t rows_written_ = 0;
+    int64_t bytes_written_ = 0;
+    bool transaction_started_ = false;
+    bool committed_ = false;
 };
 
 }  // namespace database

@@ -197,370 +197,176 @@ protected:
 
 ---
 
-## Story 4.3: 数据库连接池基础实现
+## Story 4.3: 数据库连接池基础实现 ✅
 
-### 设计方案（方案 C）
+### 最终方案：IDbSession 完整封装模式
 
-**方案 C**：在每种数据库的 Driver 内部实现连接池
+**核心设计**：`IDbSession = 连接 + 操作`
 
-- MysqlDriver 内部管理多个 MYSQL* 连接
-- SqliteDriver 内部管理多个 sqlite3* 连接
-- 每个 Driver 自己负责连接的创建、健康检查、回收
+Session 不仅管理连接生命周期，还封装所有底层数据库操作。连接由 Session 的析构函数自动归还，无需显式调用 Detach。
 
-**优点**：
-1. 逻辑简单，修改范围小
-2. 每个 Driver 按自己的方式管理连接
-3. 不影响 RowBasedDbDriverBase 和 DatabaseChannel
+**关键设计决策**：
 
-### 架构
+| 决策点 | 方案 | 说明 |
+|--------|------|------|
+| `CreateSession()` 返回类型 | `std::shared_ptr<IDbSession>` | Reader/Writer 持有 Session，引用计数管理生命周期 |
+| 钩子方法访问权限 | `protected` | 钩子方法是框架内部调用，不是 public API |
+| `FreeResult` 设计 | 删除 `IDbSession::FreeResult(void*)` | 由 `RowBasedBatchReader` 析构时直接调用驱动的 `FreeResultImpl` |
+| 能力检测接口 | 删除 `AsBatchReadable()` 等 | 统一使用 `dynamic_cast` 检测能力 |
+| 模板参数优化 | 使用 traits 模式 | 封装 4 个模板参数，类型签名更清晰 |
+| 连接健康检查 | 新增 `Ping()` 接口 | 获取连接时检查有效性，自动重建失效连接 |
+| 列式数据库支持 | `IDbSession` 提供默认实现 | 行式/列式数据库按需 override |
 
-```
-DatabasePlugin
-  └── channels_["mysql.userdb"] → DatabaseChannel
-                                     └── MysqlDriver
-                                           └── 连接池
-                                                 ├── idle_conns_ [conn1, conn2, ...]
-                                                 └── active_conns_ {conn3, conn4}
-```
-
-### 连接池生命周期
-
-#### 1. 创建连接池
-
-**时机**：DatabasePlugin 初始化时，预创建 min_idle 个连接
+### 接口层次结构
 
 ```
-DatabasePlugin::Load()
+IDbDriver (基础接口)
     │
-    ▼
-MysqlDriver::SetPoolConfig(config)  ← 设置配置
-    │
-    ▼
-MysqlDriver::PreCreateConnections() ← 预创建 min_idle 个连接
+    ├─ IBatchReadable / IBatchWritable (行式能力)
+    ├─ IArrowReadable / IArrowWritable (列式能力)
+    └─ ITransactional (事务能力)
+            │
+            ▼
+        IDbSession (新增接口 = 连接 + 操作)
+                │
+        ┌───────┴────────┐
+        ▼                ▼
+┌───────────────────┐  ┌───────────────────┐
+│ RelationDbSession │  │  ArrowDbSession   │
+│ (行式数据库基类)   │  │ (列式数据库基类)   │
+└───────────────────┘  └───────────────────┘
 ```
+
+**列式数据库支持说明**：
+- `IDbSession` 中的 `ExecuteQuery`/`ExecuteSql` 提供默认实现（返回 -1 表示不支持）
+- 列式数据库 Session 可 override 这些方法，或直接使用 `IArrowReadable/IArrowWritable` 接口
+- `RelationDbSessionBase` 实现行式数据库通用逻辑（基于行的读取/写入）
+- `ArrowDbSessionBase` 实现列式数据库通用逻辑（基于 Arrow Batch 的读取/写入）
+
+#### 1. 整体架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  接口层 (capability_interfaces.h)                           │
+├─────────────────────────────────────────────────────────────┤
+│  IDbDriver (基础驱动接口)                                    │
+│  IBatchReadable / IBatchWritable (行式能力)                  │
+│  IArrowReadable / IArrowWritable (列式能力)                  │
+│  ITransactional (事务能力)                                   │
+│  IDbSession (会话接口 = 连接 + 操作)                         │
+└─────────────────────────────────────────────────────────────┘
+                            │
+        ┌───────────────────┴───────────────────┐
+        ▼                                       ▼
+┌───────────────────┐               ┌───────────────────┐
+│ 行式数据库          │               │ 列式数据库          │
+│ (MySQL/SQLite)    │               │ (ClickHouse)      │
+├───────────────────┤               ├───────────────────┤
+│ RelationDbSession │               │ ArrowDbSession    │
+│ <Conn,Stmt,Res>   │               │ <Conn,Batch>      │
+│ (模板基类)        │               │ (模板基类)        │
+└───────────────────┘               └───────────────────┘
+        │                                       │
+    ┌───┴───┐                           ┌───┴───┐
+    ▼       ▼                           ▼       ▼
+Mysql  Sqlite                        ClickHouse  ...
+Session Session                      Session
+```
+
+### 实现状态
+
+#### ✅ 已完成功能
+
+1. **核心接口定义** (`db_session.h`)
+   - `IDbSession` - 数据库会话接口
+   - `IResultSet` - 结果集接口
+
+2. **模板基类** (`relation_db_session.h`, `arrow_db_session.h`)
+   - `RelationDbSessionBase<Traits>` - 行式数据库模板基类
+   - `ArrowDbSessionBase<Traits>` - 列式数据库模板基类
+
+3. **连接池** (`connection_pool.h`)
+   - `ConnectionPool<T>` - 模板连接池
+   - 支持最大连接数、空闲超时、健康检查
+
+4. **具体 Session 实现**
+   - `MysqlSession` - MySQL 会话实现
+   - `SqliteSession` - SQLite 会话实现
+
+5. **DatabaseChannel 适配**
+   - 使用 `SessionFactory` 创建 Session
+   - 补充列式数据库接口 (`CreateArrowReader` 等)
+
+6. **单元测试**
+   - `test_connection_pool.cpp` - 连接池功能测试
+   - `test_session_e2e.cpp` - Session 端到端测试
+
+#### 列式数据库接口补充
+
+在 `idatabase_channel.h` 中新增列式数据库读写接口：
 
 ```cpp
-void MysqlDriver::PreCreateConnections() {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
+// IArrowReader — 列式读取器（Arrow 原生）
+interface IArrowReader {
+    virtual int ExecuteQueryArrow(const char* query,
+                                  std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
+                                  std::string* error) = 0;
+    virtual std::shared_ptr<arrow::Schema> GetSchema() = 0;
+    virtual const char* GetLastError() = 0;
+    virtual void Release() = 0;
+};
 
-    for (int i = 0; i < pool_config_.min_idle; ++i) {
-        auto conn = CreateConnection(params_, &last_error_);
-        if (conn) {
-            idle_conns_.push(conn);
-            ++total_connections_;
-        }
-    }
-}
-```
+// IArrowWriter — 列式写入器（Arrow 原生）
+interface IArrowWriter {
+    virtual int WriteBatches(const char* table,
+                            const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+                            std::string* error) = 0;
+    virtual const char* GetLastError() = 0;
+    virtual void Release() = 0;
+};
 
-#### 2. 获取连接
+// IDatabaseChannel 新增方法
+interface IDatabaseChannel : public IChannel {
+    // 行式数据库接口
+    int CreateReader(const char* query, IBatchReader** reader) = 0;
+    int CreateWriter(const char* table, IBatchWriter** writer) = 0;
 
-**时机**：CreateReader / CreateWriter 时
+    // 列式数据库接口
+    int CreateArrowReader(const char* query, IArrowReader** reader) = 0;
+    int CreateArrowWriter(const char* table, IArrowWriter** writer) = 0;
+    int ExecuteQueryArrow(const char* query,
+                          std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
+                          std::string* error) = 0;
+    int WriteArrowBatches(const char* table,
+                          const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+                          std::string* error) = 0;
 
-```
-DatabaseChannel::CreateReader(query)
-    │
-    ▼
-RowBasedDbDriverBase::CreateReader(query)
-    │
-    ▼
-MysqlDriver::AcquireConnection()  ← 从池获取
-    │
-    ├──[池有空闲]──> 返回连接
-    │
-    └──[池无空闲]──> 检查 total < max → 创建新连接 → 返回
-                    │
-                    └── 达到上限 → 返回错误
-    │
-    ▼
-ExecuteQueryImpl(conn, sql)  ← 使用传入的连接执行
-    │
-    ▼
-RowBasedBatchReader(conn, result, schema)  ← Reader 持有连接
-```
-
-```cpp
-// RowBasedDbDriverBase::CreateReader
-int RowBasedDbDriverBase::CreateReader(const char* query, IBatchReader** reader) {
-    // 1. 获取连接
-    auto conn = AcquireConnection(params_, &last_error_);
-    if (!conn) return -1;
-
-    // 2. 执行查询（传入连接）
-    auto result = ExecuteQueryImpl(conn, query, &last_error_);
-    if (!result) {
-        ReleaseConnection(conn);
-        return -1;
-    }
-
-    // 3. 获取 Schema
-    auto schema = InferSchemaImpl(result, &last_error_);
-    if (!schema) {
-        FreeResultImpl(result);
-        ReleaseConnection(conn);
-        return -1;
-    }
-
-    // 4. 创建 Reader，传入连接
-    *reader = new RowBasedBatchReader(this, conn, result, std::move(schema));
-    return 0;
-}
-```
-
-#### 3. 释放连接
-
-**时机**：Reader / Writer 析构时
-
-```
-~RowBasedBatchReader()
-    │
-    ▼
-FreeResultImpl(result)  ← 释放查询结果
-    │
-    ▼
-ReleaseConnection(conn)  ← 归还连接到池
-```
-
-```cpp
-// RowBasedBatchReader
-class RowBasedBatchReader : public IBatchReader {
-public:
-    RowBasedBatchReader(RowBasedDbDriverBase* driver, void* conn, void* result,
-                        std::shared_ptr<arrow::Schema> schema)
-        : driver_(driver), conn_(conn), result_(result), schema_(std::move(schema)) {}
-
-    ~RowBasedBatchReader() override {
-        if (result_ && driver_) {
-            driver_->FreeResultImpl(result_);  // 释放结果集
-        }
-        if (conn_ && driver_) {
-            driver_->ReleaseConnection(conn_);  // 归还连接
-        }
-    }
-
-private:
-    RowBasedDbDriverBase* driver_;
-    void* conn_;      // 持有连接
-    void* result_;
-    std::shared_ptr<arrow::Schema> schema_;
+    bool IsConnected() = 0;
 };
 ```
 
-### 完整流程图
+### 连接池配置参数
 
-```
-                    创建连接池
-                         │
-                         ▼
-    ┌────────────────────────────────────────┐
-    │  DatabasePlugin::Load()               │
-    │    → MysqlDriver::SetPoolConfig()     │
-    │    → PreCreateConnections()           │
-    │       → 创建 min_idle 个连接          │
-    └────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌────────────────────────────────────────┐
-    │  CreateReader(query)                   │
-    │    → AcquireConnection()              │
-    │       ├─ 从 idle_ 获取              │
-    │       ├─ 健康检查 mysql_ping()       │
-    │       └─ 或创建新连接                │
-    │    → ExecuteQueryImpl(conn, sql)     │
-    │    → new RowBasedBatchReader(conn...) │
-    └────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌────────────────────────────────────────┐
-    │  ~RowBasedBatchReader()                │
-    │    → FreeResultImpl(result)           │
-    │    → ReleaseConnection(conn)          │
-    │       ├─ 加入 idle_ 队列             │
-    │       └─ 或关闭（超过 max_connections）│
-    └────────────────────────────────────────┘
-```
-
-### MysqlDriver 连接池设计
+在 `DatabaseConfig` 中新增连接池配置参数：
 
 ```cpp
-// mysql_driver.h 新增
-
-class MysqlDriver : public RowBasedDbDriverBase {
-public:
-    // 连接池配置
-    struct PoolConfig {
-        int max_connections = 10;      // 最大连接数
-        int idle_timeout_sec = 300;    // 空闲超时（秒）
-        int min_idle = 1;              // 最小空闲连接数
-    };
-
-    void SetPoolConfig(const PoolConfig& config) { pool_config_ = config; }
-    void PreCreateConnections();
-
-    // 连接池方法
-    MYSQL* AcquireConnection(const std::unordered_map<std::string, std::string>& params,
-                              std::string* error);
-    void ReleaseConnection(MYSQL* conn);
-    void ClosePool();
-
-private:
-    MYSQL* CreateConnection(const std::unordered_map<std::string, std::string>& params,
-                             std::string* error);
-    bool IsConnectionAlive(MYSQL* conn);
-
-    // 连接参数（用于创建新连接）
-    std::string host_;
-    int port_ = 3306;
-    std::string user_;
-    std::string password_;
-    std::string database_;
-    std::string charset_ = "utf8mb4";
-    int timeout_ = 10;
-
-    // 连接池配置
-    PoolConfig pool_config_;
-    std::queue<MYSQL*> idle_conns_;           // 空闲连接队列
-    std::unordered_set<MYSQL*> active_conns_;  // 活跃连接集合
-    std::mutex pool_mutex_;
-    std::atomic<int> total_connections_{0};
+struct ConnectionPoolConfig {
+    int max_connections = 10;           // 最大连接数
+    int min_connections = 0;            // 最小空闲连接数（预热）
+    int idle_timeout_seconds = 300;     // 空闲超时（秒），超时连接自动回收
+    int health_check_interval_seconds = 60;  // 健康检查间隔（秒）
 };
-```
 
-### AcquireConnection 实现
-
-```cpp
-MYSQL* MysqlDriver::AcquireConnection(const auto& params, std::string* error) {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
-
-    // 1. 尝试从空闲队列获取
-    while (!idle_conns_.empty()) {
-        auto conn = idle_conns_.front();
-        idle_conns_.pop();
-
-        // 健康检查
-        if (IsConnectionAlive(conn)) {
-            active_conns_.insert(conn);
-            return conn;
-        } else {
-            // 连接失效，关闭
-            mysql_close(conn);
-            --total_connections_;
-        }
-    }
-
-    // 2. 创建新连接（未达上限）
-    if (total_connections_ < pool_config_.max_connections) {
-        auto conn = CreateConnection(params, error);
-        if (conn) {
-            active_conns_.insert(conn);
-            ++total_connections_;
-            return conn;
-        }
-    }
-
-    // 3. 达到上限
-    if (error) *error = "connection pool exhausted";
-    return nullptr;
-}
-```
-
-### ReleaseConnection 实现
-
-```cpp
-void MysqlDriver::ReleaseConnection(MYSQL* conn) {
-    if (!conn) return;
-
-    std::lock_guard<std::mutex> lock(pool_mutex_);
-
-    // 从活跃集合移除
-    active_conns_.erase(conn);
-
-    // 超过最大连接数则关闭，否则放入空闲队列
-    if (total_connections_ > pool_config_.max_connections) {
-        mysql_close(conn);
-        --total_connections_;
-    } else {
-        idle_conns_.push(conn);
-    }
-}
-```
-
-### 健康检查
-
-```cpp
-bool MysqlDriver::IsConnectionAlive(MYSQL* conn) {
-    if (!conn) return false;
-    return mysql_ping(conn) == 0;
-}
-```
-
-### 关闭连接池
-
-```cpp
-void MysqlDriver::ClosePool() {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
-
-    // 关闭所有空闲连接
-    while (!idle_conns_.empty()) {
-        mysql_close(idle_conns_.front());
-        idle_conns_.pop();
-    }
-
-    // 关闭所有活跃连接
-    for (auto conn : active_conns_) {
-        mysql_close(conn);
-    }
-    active_conns_.clear();
-
-    total_connections_ = 0;
-}
-```
-
-### RowBasedDbDriverBase 修改
-
-```cpp
-class RowBasedDbDriverBase : public IDbDriver,
-                              public IBatchReadable,
-                              public IBatchWritable,
-                              public ITransactional {
-public:
-    // IBatchReadable 实现（修改）
-    int CreateReader(const char* query, IBatchReader** reader) override;
-
-    // IBatchWritable 实现（修改）
-    int CreateWriter(const char* table, IBatchWriter** writer) override;
-
-    // 连接池方法（供 Reader/Writer 调用）
-    virtual void* AcquireConnection(const std::unordered_map<std::string, std::string>& params,
-                                   std::string* error) = 0;
-    virtual void ReleaseConnection(void* conn) = 0;
-
-protected:
-    // 钩子方法（修改：传入连接参数）
-    virtual void* ExecuteQueryImpl(void* conn, const char* sql, std::string* error) = 0;
-    virtual void FreeResultImpl(void* result) = 0;
-
-    std::string last_error_;
-};
-```
-
-### 配置参数
-
-在 `DatabaseConfig` 中添加：
-```cpp
 struct DatabaseConfig {
     std::string type;
     std::string name;
     std::unordered_map<std::string, std::string> params;
-
-    // 连接池配置（可选）
-    int pool_max_connections = 10;
-    int pool_idle_timeout_sec = 300;
-    int pool_min_idle = 1;
+    ConnectionPoolConfig pool;  // 连接池配置
 };
 ```
 
-在 `gateway.yaml` 中：
+**配置示例**（gateway.yaml）：
+
 ```yaml
 plugins:
   - name: libflowsql_database.so
@@ -572,34 +378,44 @@ plugins:
         user: root
         password: secret
         database: users
-        pool_max_connections: 20
-        pool_idle_timeout_sec: 600
+        # 连接池配置
+        pool:
+          max_connections: 20
+          idle_timeout_seconds: 300
 ```
 
-### 线程安全性
-
-- `std::mutex` 保护 idle_ 和 active_ 集合
-- `std::lock_guard` RAII 锁管理
-- `std::atomic` 计数 total_connections_
-- 每次查询从池中获取连接，使用完归还
-
-### 注意事项
-
-1. **当前连接切换**：每次 Connect() 可能获取不同连接，同一 Driver 实例可并发使用
-2. **事务支持**：如果使用连接池，事务边界需要明确（ BEGIN → COMMIT/ROLLBACK → 归还连接）
-3. **健康检查**：每次获取连接时用 mysql_ping 检查，发现失效立即重建
+---
 
 ### 修改文件清单
 
-| 文件 | 修改内容 |
-|------|----------|
-| `src/services/database/drivers/mysql_driver.h/.cpp` | 添加连接池管理：AcquireConnection/ReleaseConnection/PreCreateConnections |
-| `src/services/database/drivers/sqlite_driver.h/.cpp` | 添加连接池管理 |
-| `src/services/database/row_based_db_driver_base.h/.cpp` | 修改 CreateReader/CreateWriter 签名，调用 AcquireConnection |
-| `src/services/database/row_based_db_driver_base.cpp` | 修改 RowBasedBatchReader/Writer 持有连接 |
-| `src/services/gateway/config.h` | 添加连接池配置字段 |
-| `src/services/gateway/config.cpp` | 解析连接池配置 |
-| `src/app/main.cpp` | 传递连接池配置参数 |
+| 文件 | 修改内容 | 状态 |
+|------|----------|------|
+| `src/services/database/db_session.h` | 新增 `IDbSession` / `IResultSet` 接口 | ✅ |
+| `src/services/database/relation_db_session.h` | 新增行式数据库模板基类（traits 模式） | ✅ |
+| `src/services/database/arrow_db_session.h` | 新增列式数据库模板基类（traits 模式） | ✅ |
+| `src/services/database/connection_pool.h` | 新增连接池模板类 | ✅ |
+| `src/services/database/drivers/mysql_driver.h` | 新增 `MysqlSession` 类 + 连接池成员 | ✅ |
+| `src/services/database/drivers/mysql_driver.cpp` | 实现 `MysqlSession` 钩子方法 | ✅ |
+| `src/services/database/drivers/sqlite_driver.h` | 新增 `SqliteSession` 类 + 连接池成员 | ✅ |
+| `src/services/database/drivers/sqlite_driver.cpp` | 实现 `SqliteSession` 钩子方法 | ✅ |
+| `src/services/gateway/config.h` | 新增 `ConnectionPoolConfig` 结构体 | ✅ |
+| `src/services/database/idb_driver.h` | 新增 `Ping()` 健康检查接口 | ✅ |
+| `src/services/database/row_based_db_driver_base.h` | 改为抽象基类定义 | ✅ |
+| `src/services/database/row_based_db_driver_base.cpp` | 通用 Reader/Writer 实现 | ✅ |
+| `src/services/database/database_channel.h` | 使用 `SessionFactory` + 列式接口 | ✅ |
+| `src/services/database/database_channel.cpp` | 使用 `CreateSession` 创建 Reader/Writer | ✅ |
+| `src/services/database/database_plugin.h` | 新增 `driver_storage_` 成员 | ✅ |
+| `src/services/database/database_plugin.cpp` | 适配 Session 架构 | ✅ |
+| `src/framework/interfaces/idatabase_channel.h` | 新增 `IArrowReader`/`IArrowWriter` 接口 | ✅ |
+| `src/tests/test_database/test_connection_pool.cpp` | 连接池单元测试 | ✅ |
+| `src/tests/test_database/test_session_e2e.cpp` | Session 端到端测试 | ✅ |
+
+### 注意事项
+
+1. **Session 生命周期**：由 `shared_ptr` 管理，确保连接正确归还
+2. **Reader/Writer 持有 Session**：使用 `shared_ptr<IDbSession>` 确保 Session 存活到 Reader/Writer 销毁
+3. **连接池配置**：在 `Connect()` 时解析连接池参数，`CreateSession()` 时从池获取连接
+4. **ClickHouse 扩展**：使用 `ArrowDbSessionBase` 模板基类，实现 Arrow 原生读写
 
 ---
 
@@ -607,25 +423,210 @@ plugins:
 
 ### 设计要点
 
-**目标**：支持 SQL 高级特性（JOIN/GROUP BY/ORDER BY），透传给数据库引擎。
+**目标**：支持 SQL 高级特性（GROUP BY/ORDER BY/LIMIT 等），透传给数据库引擎执行。
 
-**支持的关键字**：
-- JOIN：`INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, `FULL JOIN`, `ON`
-- GROUP BY：`GROUP BY`, `HAVING`
-- ORDER BY：`ORDER BY`, `ASC`, `DESC`
-- 子查询：`SELECT ... WHERE ... IN (SELECT ...)`
-- 集合操作：`UNION`, `INTERSECT`, `EXCEPT`
+**核心设计原则**：
+1. **分通道类型处理**：数据库通道和 DataFrame 通道采用不同的处理策略
+2. **简化实现**：USING/WITH/INTO 都在 SQL 末尾，直接截断即可
+3. **保持兼容**：原有的 `where_clause` 等字段保留，供 DataFrame 通道使用
+
+### 最终方案：分通道类型处理
+
+#### 数据库通道（database channel）
+
+```
+用户 SQL: SELECT a, b FROM source WHERE x>1 GROUP BY a ORDER BY b USING ml.predict
+
+处理：
+1. 截断 USING/WITH/INTO → SELECT a, b FROM source WHERE x>1 GROUP BY a ORDER BY b
+2. 替换表名 → SELECT a, b FROM actual_table WHERE x>1 GROUP BY a ORDER BY b
+3. 直接交给数据库执行
+```
+
+#### DataFrame 通道（dataframe channel）
+
+```
+用户 SQL: SELECT a, b FROM source WHERE x>1 GROUP BY a USING ml.predict
+
+处理：
+1. 解析各子句：columns=[a,b], where_clause="x>1"
+2. DataFrame 在内存中执行：读取数据 → WHERE 过滤
+3. 结果传递给下一个操作
+```
+
+**注意**：DataFrame 通道的高级特性（GROUP BY/ORDER BY 等）由 DataFrame 库自身处理，SqlParser 只负责透传 `sql_part` 给数据库通道。
 
 ### 关键实现
 
-**SqlParser 扩展**：
-- 识别关键字并构建 AST 节点
-- 透传 SQL 给数据库引擎（不做本地执行）
+#### 1. SqlStatement 结构扩展
 
-**架构**：
+```cpp
+struct SqlStatement {
+    std::string source;                                    // FROM 后的源通道名
+    std::string op_catelog;                                // USING 后的 operator catalog
+    std::string op_name;                                   // USING 后的 operator name
+    std::unordered_map<std::string, std::string> with_params;  // WITH 参数
+    std::string dest;                                      // INTO 后的目标通道名
+    std::vector<std::string> columns;                      // SELECT 后的列名
+    std::string where_clause;                              // WHERE 子句（原有）
+
+    // 新增：完整 SQL 部分（不含 USING/WITH/INTO）
+    // 数据库通道直接使用这个，不再拼接
+    std::string sql_part;
+
+    std::string error;                                     // 解析错误
+};
 ```
-SqlParser → AST → SQL 改写（可选） → 数据库引擎执行
+
+**关键说明**：
+- `sql_part` = `SELECT ... FROM ... WHERE ... GROUP BY ... ORDER BY ...`（不含 USING/WITH/INTO）
+- DataFrame 通道继续使用 `columns`、`where_clause` 等字段进行内存处理
+- 数据库通道直接使用 `sql_part` + 表名替换透传给数据库
+
+#### 2. SqlParser 解析逻辑扩展
+
+**文件**: `src/framework/core/sql_parser.cpp`
+
+在 `Parse()` 方法中：
+
+```cpp
+SqlStatement SqlParser::Parse(const std::string& sql) {
+    SqlStatement stmt;
+
+    // ... 原有 SELECT/FROM/WHERE 解析 ...
+
+    // 依次检测 USING/WITH/INTO，记录它们的位置
+    size_t extension_start = std::string::npos;
+
+    // 向前扫描检测扩展语法的起始位置
+    for (size_t i = 0; i < sql.size(); ++i) {
+        if (MatchKeywordAt(sql, i, "USING") ||
+            MatchKeywordAt(sql, i, "WITH") ||
+            MatchKeywordAt(sql, i, "INTO")) {
+            extension_start = i;
+            break;
+        }
+    }
+
+    // sql_part = 原始 SQL 去掉 USING/WITH/INTO 部分
+    if (extension_start != std::string::npos) {
+        stmt.sql_part = TrimWhitespace(sql.substr(0, extension_start));
+    } else {
+        stmt.sql_part = TrimWhitespace(sql);
+    }
+
+    // 继续解析 USING/WITH/INTO（原有逻辑保持不变）
+    // ...
+
+    return stmt;
+}
 ```
+
+#### 3. NormalizeFromTableName() 函数
+
+**文件**: `src/services/scheduler/scheduler_plugin.cpp`
+
+```cpp
+// 只替换 FROM 子句后的表名（支持三段式/两段式）
+// 示例：FROM sqlite.mydb.users → FROM users
+std::string NormalizeFromTableName(const std::string& sql) {
+    std::string result = sql;
+
+    // 匹配 FROM 后面的表名（支持三段式/两段式/一段式）
+    // 只匹配 FROM 关键字后的第一个标识符
+    std::regex FROM_PATTERN("(\\bFROM\\s+)([\\w]+\\.)?([\\w]+\\.)?([\\w]+)");
+
+    // 替换为：FROM $4（只保留最后一段表名）
+    result = std::regex_replace(result, FROM_PATTERN, "$1$4");
+
+    return result;
+}
+```
+
+**说明**：
+- 只匹配 `FROM` 关键字后的表名，避免误伤其他地方的点号（如字符串字面量 `'John.Doe'`）
+- 支持三段式（`catalog.database.table`）、两段式（`database.table`）、一段式（`table`）
+- 替换后统一为单表名（`table`）
+
+**测试用例**：
+
+```cpp
+// 测试三段式表名
+TEST(NormalizeFromTableName, ThreePart) {
+    std::string sql = "SELECT * FROM sqlite.mydb.users WHERE id > 1";
+    std::string normalized = NormalizeFromTableName(sql);
+    ASSERT_EQ(normalized, "SELECT * FROM users WHERE id > 1");
+}
+
+// 测试两段式表名
+TEST(NormalizeFromTableName, TwoPart) {
+    std::string sql = "SELECT * FROM mydb.users WHERE id > 1";
+    std::string normalized = NormalizeFromTableName(sql);
+    ASSERT_EQ(normalized, "SELECT * FROM users WHERE id > 1");
+}
+
+// 测试一段式表名（无需替换）
+TEST(NormalizeFromTableName, OnePart) {
+    std::string sql = "SELECT * FROM users WHERE id > 1";
+    std::string normalized = NormalizeFromTableName(sql);
+    ASSERT_EQ(normalized, "SELECT * FROM users WHERE id > 1");
+}
+
+// 测试字符串字面量中的点号（不应被替换）
+TEST(NormalizeFromTableName, StringLiteral) {
+    std::string sql = "SELECT * FROM users WHERE name = 'John.Doe'";
+    std::string normalized = NormalizeFromTableName(sql);
+    ASSERT_EQ(normalized, "SELECT * FROM users WHERE name = 'John.Doe'");
+}
+```
+
+#### 4. BuildQuery 修改
+
+**文件**: `src/services/scheduler/scheduler_plugin.cpp`
+
+```cpp
+static std::string BuildQuery(const std::string& source_name, const SqlStatement& stmt) {
+    // 数据库通道：直接使用 sql_part + 表名替换
+    std::string sql = stmt.sql_part;
+
+    // 1. 替换 FROM 子句后的三段式/两段式表名为单表名
+    sql = NormalizeFromTableName(sql);
+
+    // 2. 替换主句 FROM 的 source 为实际表名
+    std::string table = ExtractTableName(source_name);
+
+    // 使用 regex 替换 FROM 后面的表名（支持子查询中的表名引用）
+    std::regex FROM_PATTERN("(\\bFROM\\s+)(\\w+)");
+    sql = std::regex_replace(sql, FROM_PATTERN, "$1" + table);
+
+    return sql;
+}
+```
+
+### 修改文件清单
+
+| 文件 | 修改内容 |
+|------|----------|
+| `src/framework/core/sql_parser.h` | 新增 `sql_part` 字段到 `SqlStatement` |
+| `src/framework/core/sql_parser.cpp` | 在 `Parse()` 方法中提取 `sql_part`（截断 USING/WITH/INTO） |
+| `src/services/scheduler/scheduler_plugin.cpp` | 修改 `BuildQuery()` 使用 `sql_part` + `NormalizeTableName()` |
+
+### 风险与缓解
+
+| 风险 | 缓解措施 |
+|------|----------|
+| 正则性能开销 | 仅在数据库通道使用，DataFrame 通道不走正则 |
+| 复杂 SQL 解析错误 | 保持 `where_clause` 原有逻辑，`sql_part` 作为原始 SQL 截断 |
+| 表名替换过度 | 使用 `\b` 单词边界，避免替换标识符中的点 |
+
+### 设计优势
+
+| 优势 | 说明 |
+|------|------|
+| 实现简单 | 不需要复杂的 AST 解析，只需截断扩展语法 |
+| 灵活性强 | 数据库支持的所有 SQL 特性都能透传 |
+| 向后兼容 | 保留原有字段供 DataFrame 通道使用 |
+| 子查询支持 | 正则全局替换支持子查询中的表名引用 |
 
 ---
 
@@ -655,32 +656,49 @@ SqlParser → AST → SQL 改写（可选） → 数据库引擎执行
 
 ### 风险与缓解
 
-**风险 1：void* 类型擦除**
+**风险 1：模板代码膨胀**
 
-`RowBasedDbDriverBase` 中使用 `void*` 失去类型安全。
+使用 traits 模式和模板基类可能导致编译时间增加和代码膨胀。
 
-- 缓解：在钩子方法文档中明确 `void*` 的实际类型
-- 缓解：使用 `static_cast` 而非 `reinterpret_cast`
+- 缓解：模板基类代码在头文件中，编译器可以优化
+- 缓解：数据库驱动类型有限（MySQL/SQLite/ClickHouse 等），影响可控
 
-**风险 2：dynamic_cast 性能开销**
+**风险 2：连接池并发安全**
 
-Scheduler 中频繁使用 `dynamic_cast` 检测能力。
+多线程环境下连接池可能出现竞态条件。
 
-- 缓解：能力检测结果可以缓存
-- 缓解：性能测试验证开销可接受
+- 缓解：使用 `std::mutex` 保护共享数据
+- 缓解：单元测试覆盖并发场景
+- 缓解：压力测试验证线程安全
 
 **风险 3：连接泄漏**
 
 请求异常导致连接未归还。
 
-- 缓解：使用 RAII 包装器 `ConnectionGuard` 确保释放
+- 缓解：使用 RAII，`Session` 析构自动归还
+- 缓解：`shared_ptr` 管理 `Session` 生命周期
+- 缓解：连接池定期清理超时连接
+
+**风险 4：健康检查开销**
+
+频繁的健康检查可能影响性能。
+
+- 缓解：仅在获取连接时检查，非每次操作都检查
+- 缓解：可配置健康检查间隔
+- 缓解：性能测试验证开销可接受
 
 ### 设计优势
 
-1. **符合接口隔离原则（ISP）**：每个驱动只实现它需要的能力
-2. **扩展性强**：新增驱动可以自由组合能力
-3. **性能优化**：Scheduler 优先使用高性能接口
-4. **类型安全**：通过 `dynamic_cast` 安全检测能力
+| 优势 | 说明 |
+|------|------|
+| 符合接口隔离原则（ISP） | 每个驱动只实现它需要的能力 |
+| 符合开闭原则（OCP） | 新增驱动无需修改现有代码 |
+| 符合依赖倒置原则（DIP） | 依赖 `IDbSession` 抽象，而非具体实现 |
+| 类型安全 | traits 模式和模板基类避免 `void*` 类型擦除 |
+| 扩展性强 | 新增驱动可以自由组合能力 |
+| 性能优化 | 优先使用本地接口，避免不必要的虚函数调用 |
+| 连接复用 | 连接池管理连接生命周期，提高资源利用率 |
+| 异常安全 | 智能指针和 RAII 确保资源正确释放 |
 
 ---
 

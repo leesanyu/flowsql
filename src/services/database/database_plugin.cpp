@@ -145,21 +145,46 @@ IDatabaseChannel* DatabasePlugin::Get(const char* type, const char* name) {
         return nullptr;
     }
 
-    // 3. 创建驱动
+    // 3. 创建驱动并连接到连接池
     auto driver = CreateDriver(type);
     if (!driver) {
         last_error_ = "unsupported database type: " + std::string(type);
         return nullptr;
     }
 
-    // 4. 创建通道并打开连接
-    auto channel = std::make_shared<DatabaseChannel>(type, name, std::move(driver), cfg_it->second);
+    // 使用驱动参数连接（初始化连接池）
+    if (driver->Connect(cfg_it->second) != 0) {
+        last_error_ = "connection failed: " + key;
+        return nullptr;
+    }
+
+    // 4. 创建 Session 工厂
+    IDbDriver* driver_ptr = driver.get();  // 弱引用，driver 由 channels_ 中的 Channel 持有
+    auto session_factory = [driver_ptr]() -> std::shared_ptr<IDbSession> {
+        // 使用 dynamic_cast 调用具体驱动的 CreateSession
+        if (auto* sqlite_driver = dynamic_cast<SqliteDriver*>(driver_ptr)) {
+            return sqlite_driver->CreateSession();
+        } else if (auto* mysql_driver = dynamic_cast<MysqlDriver*>(driver_ptr)) {
+            return mysql_driver->CreateSession();
+        }
+        return nullptr;
+    };
+
+    // 5. 创建通道并打开连接
+    auto channel = std::make_shared<DatabaseChannel>(type, name, driver_ptr, session_factory);
     if (channel->Open() != 0) {
         last_error_ = "connection failed: " + key;
         return nullptr;
     }
 
-    // 5. 加入通道池
+    // 6. 保存驱动所有权到 Channel（通过一个成员变量）
+    // 这里需要将驱动附加到 Channel 上
+    // 为简化，我们将 driver 释放并通过 channel 内部管理
+    // 实际上，driver 的生命周期应该与 channel 绑定
+    // 这里使用一个简单的方案：将 driver 存储在一个全局映射中
+    driver_storage_[key] = std::move(driver);
+
+    // 7. 加入通道池
     channels_[key] = channel;
     printf("DatabasePlugin: connected to %s\n", key.c_str());
     return channel.get();
@@ -187,6 +212,7 @@ int DatabasePlugin::Release(const char* type, const char* name) {
 
     it->second->Close();
     channels_.erase(it);
+    driver_storage_.erase(key);
     printf("DatabasePlugin: released %s\n", key.c_str());
     return 0;
 }

@@ -3,8 +3,17 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "ichannel.h"
+
+// Arrow 前向声明
+namespace arrow {
+class RecordBatch;
+class Schema;
+}
 
 namespace flowsql {
 
@@ -64,14 +73,75 @@ interface IBatchWriter {
     virtual void Release() = 0;
 };
 
+// IArrowReader — 列式读取器（Arrow 原生）
+// 生命周期：ExecuteQueryArrow() → 直接获取 RecordBatch 列表
+interface IArrowReader {
+    virtual ~IArrowReader() = default;
+
+    // 执行查询并直接获取 Arrow RecordBatch 列表
+    // 返回：0=成功，<0=错误
+    virtual int ExecuteQueryArrow(const char* query,
+                                  std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
+                                  std::string* error) = 0;
+
+    // 获取 Schema
+    virtual std::shared_ptr<arrow::Schema> GetSchema() = 0;
+
+    // 错误信息
+    virtual const char* GetLastError() = 0;
+
+    // 释放读取器自身
+    virtual void Release() = 0;
+};
+
+// IArrowWriter — 列式写入器（Arrow 原生）
+// 生命周期：CreateWriter() → WriteBatches() → Close() → Release()
+interface IArrowWriter {
+    virtual ~IArrowWriter() = default;
+
+    // 直接写入 Arrow RecordBatch 列表
+    // 返回：0=成功，<0=错误
+    virtual int WriteBatches(const char* table,
+                            const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+                            std::string* error) = 0;
+
+    // 错误信息
+    virtual const char* GetLastError() = 0;
+
+    // 释放写入器自身
+    virtual void Release() = 0;
+};
+
 // IDatabaseChannel — 数据库通道
 // 作为工厂创建 Reader/Writer，内部管理连接
 interface IDatabaseChannel : public IChannel {
+    // ==================== 行式数据库接口 ====================
+
     // 创建读取器，执行 query 并流式返回结果
     virtual int CreateReader(const char* query, IBatchReader** reader) = 0;
 
     // 创建写入器，指定目标表
     virtual int CreateWriter(const char* table, IBatchWriter** writer) = 0;
+
+    // ==================== 列式数据库接口（Arrow 原生） ====================
+
+    // 创建列式读取器，执行 query 并直接返回 Arrow RecordBatch 列表
+    virtual int CreateArrowReader(const char* query, IArrowReader** reader) = 0;
+
+    // 创建列式写入器，指定目标表
+    virtual int CreateArrowWriter(const char* table, IArrowWriter** writer) = 0;
+
+    // 直接执行 Arrow 查询，获取 RecordBatch 列表（便捷方法）
+    virtual int ExecuteQueryArrow(const char* query,
+                                  std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
+                                  std::string* error) = 0;
+
+    // 直接写入 Arrow RecordBatch 列表（便捷方法）
+    virtual int WriteArrowBatches(const char* table,
+                                  const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+                                  std::string* error) = 0;
+
+    // ==================== 通用接口 ====================
 
     // 测试连接是否可用
     virtual bool IsConnected() = 0;

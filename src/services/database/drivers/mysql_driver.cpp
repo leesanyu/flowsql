@@ -1,6 +1,9 @@
 #include "mysql_driver.h"
 
 #include <arrow/api.h>
+#include <arrow/io/memory.h>
+#include <arrow/ipc/reader.h>
+#include <arrow/ipc/writer.h>
 
 #include <cstdio>
 #include <cstring>
@@ -8,32 +11,488 @@
 namespace flowsql {
 namespace database {
 
-// MySQL 结果集包装（用于 void* 类型擦除）
-struct MysqlResult {
-    MYSQL_STMT* stmt = nullptr;
-    MYSQL_RES* metadata = nullptr;
-    MYSQL_BIND* binds = nullptr;
-    unsigned long* lengths = nullptr;
-    bool* is_nulls = nullptr;  // MySQL 8.0+ 使用 bool 替代 my_bool
-    bool* errors = nullptr;
-    int num_fields = 0;
-};
+// ==================== MysqlResultSet 实现 ====================
 
-MysqlDriver::~MysqlDriver() {
-    if (conn_) Disconnect();
+MysqlResultSet::MysqlResultSet(MYSQL_RES* result, std::function<void(MYSQL_RES*)> free_func)
+    : result_(result), free_func_(free_func), has_next_(true), fetched_(false) {}
+
+MysqlResultSet::~MysqlResultSet() {
+    if (result_ && free_func_) {
+        free_func_(result_);
+    }
 }
 
-int MysqlDriver::Connect(const std::unordered_map<std::string, std::string>& params) {
-    if (conn_) return 0;  // 已连接
+int MysqlResultSet::FieldCount() {
+    return result_ ? mysql_num_fields(result_) : 0;
+}
 
-    // 解析连接参数
+const char* MysqlResultSet::FieldName(int index) {
+    if (!result_) return nullptr;
+    MYSQL_FIELD* fields = mysql_fetch_fields(result_);
+    return (index >= 0 && index < mysql_num_fields(result_)) ? fields[index].name : nullptr;
+}
+
+int MysqlResultSet::FieldType(int index) {
+    if (!result_) return 0;
+    MYSQL_FIELD* fields = mysql_fetch_fields(result_);
+    return (index >= 0 && index < mysql_num_fields(result_)) ? fields[index].type : 0;
+}
+
+int MysqlResultSet::FieldLength(int index) {
+    if (!result_) return 0;
+    MYSQL_FIELD* fields = mysql_fetch_fields(result_);
+    return (index >= 0 && index < mysql_num_fields(result_)) ? fields[index].length : 0;
+}
+
+bool MysqlResultSet::HasNext() {
+    return has_next_;
+}
+
+bool MysqlResultSet::Next() {
+    if (!result_ || !has_next_) return false;
+
+    MYSQL_ROW row = mysql_fetch_row(result_);
+    if (!row) {
+        has_next_ = false;
+        return false;
+    }
+
+    current_row_ = row;
+    fetched_ = true;
+    return true;
+}
+
+int MysqlResultSet::GetInt(int index, int* value) {
+    if (!current_row_ || !fetched_) return -1;
+    if (index < 0 || index >= mysql_num_fields(result_)) return -1;
+    if (!current_row_[index]) return -1;
+    *value = std::atoi(current_row_[index]);
+    return 0;
+}
+
+int MysqlResultSet::GetInt64(int index, int64_t* value) {
+    if (!current_row_ || !fetched_) return -1;
+    if (index < 0 || index >= mysql_num_fields(result_)) return -1;
+    if (!current_row_[index]) return -1;
+    *value = std::atoll(current_row_[index]);
+    return 0;
+}
+
+int MysqlResultSet::GetDouble(int index, double* value) {
+    if (!current_row_ || !fetched_) return -1;
+    if (index < 0 || index >= mysql_num_fields(result_)) return -1;
+    if (!current_row_[index]) return -1;
+    *value = std::atof(current_row_[index]);
+    return 0;
+}
+
+int MysqlResultSet::GetString(int index, const char** val, size_t* len) {
+    if (!current_row_ || !fetched_) return -1;
+    if (index < 0 || index >= mysql_num_fields(result_)) return -1;
+    if (!current_row_[index]) return -1;
+    *val = current_row_[index];
+    if (len) {
+        MYSQL_FIELD* fields = mysql_fetch_fields(result_);
+        *len = fields[index].max_length;
+    }
+    return 0;
+}
+
+bool MysqlResultSet::IsNull(int index) {
+    if (!current_row_ || !fetched_) return true;
+    if (index < 0 || index >= mysql_num_fields(result_)) return true;
+    return current_row_[index] == nullptr;
+}
+
+// ==================== MysqlSession 实现 ====================
+
+MysqlSession::MysqlSession(MysqlDriver* driver, MYSQL* conn)
+    : RelationDbSessionBase<MysqlTraits>(driver, conn) {}
+
+MysqlSession::~MysqlSession() = default;
+
+MYSQL_STMT* MysqlSession::PrepareStatement(MYSQL* conn, const char* sql, std::string* error) {
+    if (!conn) {
+        *error = "null connection";
+        return nullptr;
+    }
+
+    MYSQL_STMT* stmt = mysql_stmt_init(conn);
+    if (!stmt) {
+        *error = "mysql_stmt_init failed: " + std::string(mysql_error(conn));
+        return nullptr;
+    }
+
+    if (mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0) {
+        *error = "mysql_stmt_prepare failed: " + std::string(mysql_stmt_error(stmt));
+        mysql_stmt_close(stmt);
+        return nullptr;
+    }
+
+    return stmt;
+}
+
+int MysqlSession::ExecuteStatement(MYSQL_STMT* stmt, std::string* error) {
+    if (!stmt) {
+        *error = "null statement";
+        return -1;
+    }
+
+    if (mysql_stmt_execute(stmt) != 0) {
+        *error = "mysql_stmt_execute failed: " + std::string(mysql_stmt_error(stmt));
+        return -1;
+    }
+
+    return 0;
+}
+
+MYSQL_RES* MysqlSession::GetResultMetadata(MYSQL_STMT* stmt, std::string* error) {
+    (void)error;
+    if (!stmt) return nullptr;
+
+    MYSQL_RES* metadata = mysql_stmt_result_metadata(stmt);
+    if (!metadata) {
+        return nullptr;
+    }
+
+    return metadata;
+}
+
+int MysqlSession::GetAffectedRows(MYSQL_STMT* stmt) {
+    if (!stmt) return 0;
+    return static_cast<int>(mysql_stmt_affected_rows(stmt));
+}
+
+std::string MysqlSession::GetDriverError(MYSQL* conn) {
+    if (!conn) return "null connection";
+    return mysql_error(conn);
+}
+
+void MysqlSession::FreeResult(MYSQL_RES* result) {
+    if (result) {
+        mysql_free_result(result);
+    }
+}
+
+void MysqlSession::FreeStatement(MYSQL_STMT* stmt) {
+    if (stmt) {
+        mysql_stmt_close(stmt);
+    }
+}
+
+bool MysqlSession::PingImpl(MYSQL* conn) {
+    if (!conn) return false;
+    return mysql_ping(conn) == 0;
+}
+
+void MysqlSession::ReturnConnection(MYSQL* conn) {
+    auto* mysql_driver = static_cast<MysqlDriver*>(this->driver_);
+    if (mysql_driver) {
+        mysql_driver->ReturnToPool(conn);
+    }
+}
+
+IResultSet* MysqlSession::CreateResultSet(MYSQL_RES* result,
+                                          std::function<void(MYSQL_RES*)> free_func) {
+    return new MysqlResultSet(result, free_func);
+}
+
+// ==================== MysqlBatchReader 实现 ====================
+
+class MysqlBatchReader : public IBatchReader {
+public:
+    MysqlBatchReader(std::shared_ptr<IDbSession> session,
+                     IResultSet* result,
+                     std::shared_ptr<arrow::Schema> schema)
+        : session_(session), result_(result), schema_(std::move(schema)) {}
+
+    ~MysqlBatchReader() override = default;
+
+    int GetSchema(const uint8_t** data, size_t* size) override {
+        if (schema_buffer_) {
+            *data = schema_buffer_->data();
+            *size = schema_buffer_->size();
+            return 0;
+        }
+
+        auto buffer_output_result = arrow::io::BufferOutputStream::Create();
+        if (!buffer_output_result.ok()) return -1;
+        auto buffer_output = buffer_output_result.ValueOrDie();
+
+        auto writer_result = arrow::ipc::MakeStreamWriter(buffer_output, schema_);
+        if (!writer_result.ok()) return -1;
+        auto writer = writer_result.ValueOrDie();
+
+        if (!writer->Close().ok()) return -1;
+
+        auto buffer_result = buffer_output->Finish();
+        if (!buffer_result.ok()) return -1;
+        schema_buffer_ = buffer_result.ValueOrDie();
+
+        *data = schema_buffer_->data();
+        *size = schema_buffer_->size();
+        return 0;
+    }
+
+    int Next(const uint8_t** data, size_t* size) override {
+        if (done_) {
+            *data = nullptr;
+            *size = 0;
+            return 1;
+        }
+
+        std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;
+        for (const auto& field : schema_->fields()) {
+            std::unique_ptr<arrow::ArrayBuilder> builder;
+            auto status = arrow::MakeBuilder(arrow::default_memory_pool(), field->type(), &builder);
+            if (!status.ok()) return -1;
+            builders.push_back(std::move(builder));
+        }
+
+        const int batch_size = 1024;
+        int row_count = 0;
+
+        for (int i = 0; i < batch_size; ++i) {
+            if (!result_->Next()) {
+                done_ = true;
+                break;
+            }
+
+            for (int col = 0; col < schema_->num_fields(); ++col) {
+                auto* builder = builders[col].get();
+                auto arrow_type = builder->type();
+
+                if (result_->IsNull(col)) {
+                    builder->AppendNull();
+                    continue;
+                }
+
+                if (arrow_type->id() == arrow::Type::INT64) {
+                    int64_t value;
+                    if (result_->GetInt64(col, &value) == 0)
+                        static_cast<arrow::Int64Builder*>(builder)->Append(value);
+                    else
+                        builder->AppendNull();
+                } else if (arrow_type->id() == arrow::Type::DOUBLE) {
+                    double value;
+                    if (result_->GetDouble(col, &value) == 0)
+                        static_cast<arrow::DoubleBuilder*>(builder)->Append(value);
+                    else
+                        builder->AppendNull();
+                } else if (arrow_type->id() == arrow::Type::STRING) {
+                    const char* str;
+                    size_t len;
+                    if (result_->GetString(col, &str, &len) == 0)
+                        static_cast<arrow::StringBuilder*>(builder)->Append(str, len);
+                    else
+                        builder->AppendNull();
+                }
+            }
+            ++row_count;
+        }
+
+        if (row_count == 0) {
+            *data = nullptr;
+            *size = 0;
+            return 1;
+        }
+
+        std::vector<std::shared_ptr<arrow::Array>> arrays;
+        for (auto& builder : builders) {
+            std::shared_ptr<arrow::Array> array;
+            if (!builder->Finish(&array).ok()) return -1;
+            arrays.push_back(array);
+        }
+
+        auto batch = arrow::RecordBatch::Make(schema_, row_count, arrays);
+
+        auto buffer_output_result = arrow::io::BufferOutputStream::Create();
+        if (!buffer_output_result.ok()) return -1;
+        auto buffer_output = buffer_output_result.ValueOrDie();
+
+        auto writer_result = arrow::ipc::MakeStreamWriter(buffer_output, schema_);
+        if (!writer_result.ok()) return -1;
+        auto writer = writer_result.ValueOrDie();
+
+        if (!writer->WriteRecordBatch(*batch).ok()) return -1;
+        if (!writer->Close().ok()) return -1;
+
+        auto buffer_result = buffer_output->Finish();
+        if (!buffer_result.ok()) return -1;
+        batch_buffer_ = buffer_result.ValueOrDie();
+
+        *data = batch_buffer_->data();
+        *size = batch_buffer_->size();
+        return 0;
+    }
+
+    void Cancel() override { cancelled_ = true; }
+    void Close() override {}
+    const char* GetLastError() override { return last_error_.c_str(); }
+    void Release() override { delete this; }
+
+private:
+    std::shared_ptr<IDbSession> session_;
+    IResultSet* result_;
+    std::shared_ptr<arrow::Schema> schema_;
+    std::shared_ptr<arrow::Buffer> schema_buffer_;
+    std::shared_ptr<arrow::Buffer> batch_buffer_;
+    std::string last_error_;
+    bool done_ = false;
+    bool cancelled_ = false;
+};
+
+IBatchReader* MysqlSession::CreateBatchReader(IResultSet* result,
+                                               std::shared_ptr<arrow::Schema> schema) {
+    auto self = std::shared_ptr<IDbSession>(this, [](IDbSession*){});
+    return new MysqlBatchReader(self, result, schema);
+}
+
+// ==================== MysqlBatchWriter 实现 ====================
+
+class MysqlBatchWriter : public IBatchWriter {
+public:
+    MysqlBatchWriter(std::shared_ptr<IDbSession> session, const char* table)
+        : session_(session), table_(table) {}
+
+    ~MysqlBatchWriter() override {
+        if (transaction_started_ && !committed_) {
+            std::string error;
+            session_->RollbackTransaction(&error);
+        }
+    }
+
+    int Write(const uint8_t* data, size_t size) override {
+        auto buffer = arrow::Buffer::Wrap(data, size);
+        auto buffer_reader = std::make_shared<arrow::io::BufferReader>(buffer);
+        auto reader_result = arrow::ipc::RecordBatchStreamReader::Open(buffer_reader);
+        if (!reader_result.ok()) return -1;
+        auto reader = reader_result.ValueOrDie();
+
+        std::shared_ptr<arrow::RecordBatch> batch;
+        if (!reader->ReadNext(&batch).ok() || !batch) return -1;
+
+        if (!transaction_started_) {
+            std::string error;
+            if (session_->BeginTransaction(&error) != 0) {
+                last_error_ = "BeginTransaction failed: " + error;
+                return -1;
+            }
+            transaction_started_ = true;
+            if (CreateTable(batch->schema()) != 0) return -1;
+        }
+
+        if (InsertBatch(batch) != 0) return -1;
+        return 0;
+    }
+
+    int Flush() override { return 0; }
+
+    void Close(BatchWriteStats* stats) override {
+        if (transaction_started_ && !committed_) {
+            std::string error;
+            if (session_->CommitTransaction(&error) != 0) {
+                last_error_ = "CommitTransaction failed: " + error;
+            } else {
+                committed_ = true;
+            }
+        }
+        if (stats) {
+            stats->rows_written = rows_written_;
+            stats->bytes_written = bytes_written_;
+            stats->elapsed_ms = 0;
+        }
+    }
+
+    const char* GetLastError() override { return last_error_.c_str(); }
+    void Release() override { delete this; }
+
+private:
+    int CreateTable(std::shared_ptr<arrow::Schema> schema) {
+        std::string ddl = "CREATE TABLE IF NOT EXISTS " + table_ + " (";
+        for (int i = 0; i < schema->num_fields(); ++i) {
+            if (i > 0) ddl += ", ";
+            ddl += schema->field(i)->name() + " ";
+            auto type_id = schema->field(i)->type()->id();
+            if (type_id == arrow::Type::INT64) ddl += "BIGINT";
+            else if (type_id == arrow::Type::DOUBLE) ddl += "DOUBLE";
+            else ddl += "TEXT";
+        }
+        ddl += ")";
+        std::string error;
+        if (session_->ExecuteSql(ddl.c_str(), &error) != 0) {
+            last_error_ = "CREATE TABLE failed: " + error;
+            return -1;
+        }
+        return 0;
+    }
+
+    int InsertBatch(std::shared_ptr<arrow::RecordBatch> batch) {
+        for (int64_t row = 0; row < batch->num_rows(); ++row) {
+            std::string sql = "INSERT INTO " + table_ + " VALUES (";
+            for (int col = 0; col < batch->num_columns(); ++col) {
+                if (col > 0) sql += ", ";
+                auto array = batch->column(col);
+                if (array->IsNull(row)) {
+                    sql += "NULL";
+                } else if (array->type()->id() == arrow::Type::INT64) {
+                    auto int_array = std::static_pointer_cast<arrow::Int64Array>(array);
+                    sql += std::to_string(int_array->Value(row));
+                } else if (array->type()->id() == arrow::Type::DOUBLE) {
+                    auto double_array = std::static_pointer_cast<arrow::DoubleArray>(array);
+                    sql += std::to_string(double_array->Value(row));
+                } else {
+                    auto string_array = std::static_pointer_cast<arrow::StringArray>(array);
+                    std::string value = string_array->GetString(row);
+                    sql += "'";
+                    for (char c : value) {
+                        if (c == '\'') sql += "''";
+                        else sql += c;
+                    }
+                    sql += "'";
+                }
+            }
+            sql += ")";
+            std::string error;
+            if (session_->ExecuteSql(sql.c_str(), &error) != 0) {
+                last_error_ = "INSERT failed: " + error;
+                return -1;
+            }
+            ++rows_written_;
+        }
+        return 0;
+    }
+
+    std::shared_ptr<IDbSession> session_;
+    std::string table_;
+    std::string last_error_;
+    int64_t rows_written_ = 0;
+    int64_t bytes_written_ = 0;
+    bool transaction_started_ = false;
+    bool committed_ = false;
+};
+
+IBatchWriter* MysqlSession::CreateBatchWriter(const char* table) {
+    auto self = std::shared_ptr<IDbSession>(this, [](IDbSession*){});
+    return new MysqlBatchWriter(self, table);
+}
+
+// ==================== MysqlDriver 实现 ====================
+
+MysqlDriver::~MysqlDriver() = default;
+
+int MysqlDriver::Connect(const std::unordered_map<std::string, std::string>& params) {
+    ConnectionPoolConfig config;
+    config.max_connections = 10;
+    config.min_connections = 0;
+    config.idle_timeout = std::chrono::seconds(300);
+    config.health_check_interval = std::chrono::seconds(60);
+
     auto it = params.find("host");
     host_ = (it != params.end()) ? it->second : "localhost";
 
     it = params.find("port");
-    if (it != params.end()) {
-        port_ = std::stoi(it->second);
-    }
+    if (it != params.end()) port_ = std::stoi(it->second);
 
     it = params.find("user");
     user_ = (it != params.end()) ? it->second : "root";
@@ -45,321 +504,104 @@ int MysqlDriver::Connect(const std::unordered_map<std::string, std::string>& par
     database_ = (it != params.end()) ? it->second : "";
 
     it = params.find("charset");
-    if (it != params.end()) {
-        charset_ = it->second;
-    }
+    if (it != params.end()) charset_ = it->second;
 
     it = params.find("timeout");
-    if (it != params.end()) {
-        timeout_ = std::stoi(it->second);
-    }
+    if (it != params.end()) timeout_ = std::stoi(it->second);
 
-    // 初始化 MySQL 连接
-    conn_ = mysql_init(nullptr);
-    if (!conn_) {
-        last_error_ = "mysql_init failed";
-        return -1;
-    }
+    auto factory = [this](std::string* error) -> MYSQL* {
+        MYSQL* conn = mysql_init(nullptr);
+        if (!conn) {
+            *error = "mysql_init failed";
+            return nullptr;
+        }
+        mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout_);
+        mysql_options(conn, MYSQL_SET_CHARSET_NAME, charset_.c_str());
+        if (!mysql_real_connect(conn, host_.c_str(), user_.c_str(), password_.c_str(),
+                                database_.c_str(), port_, nullptr, 0)) {
+            *error = mysql_error(conn);
+            mysql_close(conn);
+            return nullptr;
+        }
+        return conn;
+    };
 
-    // 设置连接超时
-    mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &timeout_);
+    auto closer = [](MYSQL* conn) { if (conn) mysql_close(conn); };
+    auto pinger = [](MYSQL* conn) -> bool { return conn && mysql_ping(conn) == 0; };
 
-    // 设置字符集
-    mysql_options(conn_, MYSQL_SET_CHARSET_NAME, charset_.c_str());
-
-    // 连接到 MySQL 服务器
-    if (!mysql_real_connect(conn_, host_.c_str(), user_.c_str(), password_.c_str(), database_.c_str(), port_,
-                            nullptr, 0)) {
-        last_error_ = mysql_error(conn_);
-        mysql_close(conn_);
-        conn_ = nullptr;
-        return -1;
-    }
-
-    printf("MysqlDriver: connected to %s:%d/%s\n", host_.c_str(), port_, database_.c_str());
+    pool_ = std::make_unique<ConnectionPool<MYSQL*>>(config, factory, closer, pinger);
+    printf("MysqlDriver: initialized connection pool for %s:%d/%s\n", host_.c_str(), port_, database_.c_str());
     return 0;
 }
 
 int MysqlDriver::Disconnect() {
-    if (!conn_) return 0;
-    mysql_close(conn_);
-    conn_ = nullptr;
-    printf("MysqlDriver: disconnected from %s:%d\n", host_.c_str(), port_);
+    pool_.reset();
+    printf("MysqlDriver: disconnected\n");
     return 0;
 }
 
-// 钩子方法实现
-void* MysqlDriver::ExecuteQueryImpl(const char* sql, std::string* error) {
-    if (!conn_) {
-        *error = "database not connected";
-        return nullptr;
-    }
-
-    // 创建预编译语句
-    MYSQL_STMT* stmt = mysql_stmt_init(conn_);
-    if (!stmt) {
-        *error = "mysql_stmt_init failed: " + std::string(mysql_error(conn_));
-        return nullptr;
-    }
-
-    // 预编译 SQL
-    if (mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0) {
-        *error = "mysql_stmt_prepare failed: " + std::string(mysql_stmt_error(stmt));
-        mysql_stmt_close(stmt);
-        return nullptr;
-    }
-
-    // 执行查询
-    if (mysql_stmt_execute(stmt) != 0) {
-        *error = "mysql_stmt_execute failed: " + std::string(mysql_stmt_error(stmt));
-        mysql_stmt_close(stmt);
-        return nullptr;
-    }
-
-    // 获取元数据
-    MYSQL_RES* metadata = mysql_stmt_result_metadata(stmt);
-    if (!metadata) {
-        *error = "mysql_stmt_result_metadata failed: " + std::string(mysql_stmt_error(stmt));
-        mysql_stmt_close(stmt);
-        return nullptr;
-    }
-
-    // 创建结果集包装
-    auto* result = new MysqlResult();
-    result->stmt = stmt;
-    result->metadata = metadata;
-    result->num_fields = mysql_num_fields(metadata);
-
-    // 分配 MYSQL_BIND 数组
-    result->binds = new MYSQL_BIND[result->num_fields];
-    result->lengths = new unsigned long[result->num_fields];
-    result->is_nulls = new bool[result->num_fields];
-    result->errors = new bool[result->num_fields];
-    memset(result->binds, 0, sizeof(MYSQL_BIND) * result->num_fields);
-
-    // 绑定结果集列（使用动态缓冲区）
-    MYSQL_FIELD* fields = mysql_fetch_fields(metadata);
-    for (int i = 0; i < result->num_fields; ++i) {
-        result->binds[i].is_null = &result->is_nulls[i];
-        result->binds[i].length = &result->lengths[i];
-        result->binds[i].error = &result->errors[i];
-
-        // 根据类型分配缓冲区
-        switch (fields[i].type) {
-            case MYSQL_TYPE_TINY:
-            case MYSQL_TYPE_SHORT:
-            case MYSQL_TYPE_LONG:
-            case MYSQL_TYPE_LONGLONG:
-            case MYSQL_TYPE_INT24:
-                result->binds[i].buffer = new int64_t;
-                result->binds[i].buffer_length = sizeof(int64_t);
-                result->binds[i].buffer_type = MYSQL_TYPE_LONGLONG;  // 统一使用 LONGLONG
-                break;
-            case MYSQL_TYPE_FLOAT:
-            case MYSQL_TYPE_DOUBLE:
-                result->binds[i].buffer = new double;
-                result->binds[i].buffer_length = sizeof(double);
-                result->binds[i].buffer_type = MYSQL_TYPE_DOUBLE;  // 统一使用 DOUBLE
-                break;
-            default:
-                // 字符串/BLOB 类型使用动态缓冲区
-                result->binds[i].buffer = new char[65536];  // 64KB 缓冲区
-                result->binds[i].buffer_length = 65536;
-                result->binds[i].buffer_type = fields[i].type;  // 保持原始类型
-                break;
-        }
-    }
-
-    // 绑定结果集
-    if (mysql_stmt_bind_result(stmt, result->binds) != 0) {
-        *error = "mysql_stmt_bind_result failed: " + std::string(mysql_stmt_error(stmt));
-        // 清理资源
-        for (int i = 0; i < result->num_fields; ++i) {
-            delete[] static_cast<char*>(result->binds[i].buffer);
-        }
-        delete[] result->binds;
-        delete[] result->lengths;
-        delete[] result->is_nulls;
-        delete[] result->errors;
-        mysql_free_result(metadata);
-        mysql_stmt_close(stmt);
-        delete result;
-        return nullptr;
-    }
-
-    return result;
+bool MysqlDriver::Ping() {
+    return pool_ != nullptr;
 }
 
-std::shared_ptr<arrow::Schema> MysqlDriver::InferSchemaImpl(void* result, std::string* error) {
-    auto* mysql_result = static_cast<MysqlResult*>(result);
-    if (!mysql_result || !mysql_result->metadata) {
-        *error = "invalid result";
+std::shared_ptr<IDbSession> MysqlDriver::CreateSession() {
+    if (!pool_) {
+        last_error_ = "Driver not connected";
         return nullptr;
     }
 
-    MYSQL_FIELD* fields = mysql_fetch_fields(mysql_result->metadata);
-    std::vector<std::shared_ptr<arrow::Field>> arrow_fields;
-
-    for (int i = 0; i < mysql_result->num_fields; ++i) {
-        std::string col_name = fields[i].name;
-        std::shared_ptr<arrow::DataType> arrow_type;
-
-        // MySQL 类型 → Arrow 类型映射
-        switch (fields[i].type) {
-            case MYSQL_TYPE_TINY:
-            case MYSQL_TYPE_SHORT:
-            case MYSQL_TYPE_LONG:
-            case MYSQL_TYPE_LONGLONG:
-            case MYSQL_TYPE_INT24:
-                arrow_type = arrow::int64();
-                break;
-            case MYSQL_TYPE_FLOAT:
-            case MYSQL_TYPE_DOUBLE:
-            case MYSQL_TYPE_DECIMAL:
-            case MYSQL_TYPE_NEWDECIMAL:
-                arrow_type = arrow::float64();
-                break;
-            case MYSQL_TYPE_BLOB:
-            case MYSQL_TYPE_TINY_BLOB:
-            case MYSQL_TYPE_MEDIUM_BLOB:
-            case MYSQL_TYPE_LONG_BLOB:
-                arrow_type = arrow::binary();
-                break;
-            default:
-                arrow_type = arrow::utf8();
-                break;
-        }
-
-        arrow_fields.push_back(arrow::field(col_name, arrow_type));
+    MYSQL* conn = nullptr;
+    std::string error;
+    if (!pool_->Acquire(&conn, &error)) {
+        last_error_ = error;
+        return nullptr;
     }
 
-    return arrow::schema(arrow_fields);
+    return std::make_shared<MysqlSession>(this, conn);
 }
 
-int MysqlDriver::FetchRowImpl(void* result, const std::vector<std::unique_ptr<arrow::ArrayBuilder>>& builders,
-                              std::string* error) {
-    auto* mysql_result = static_cast<MysqlResult*>(result);
-    if (!mysql_result || !mysql_result->stmt) {
-        *error = "invalid result";
-        return -1;
+void MysqlDriver::ReturnToPool(MYSQL* conn) {
+    if (pool_ && conn) {
+        pool_->Return(conn);
     }
-
-    // 获取下一行
-    int ret = mysql_stmt_fetch(mysql_result->stmt);
-    if (ret == MYSQL_NO_DATA) {
-        return 0;  // 没有更多行
-    }
-    if (ret != 0 && ret != MYSQL_DATA_TRUNCATED) {
-        *error = "mysql_stmt_fetch failed: " + std::string(mysql_stmt_error(mysql_result->stmt));
-        return -1;
-    }
-
-    // 逐列读取值并追加到 builder
-    MYSQL_FIELD* fields = mysql_fetch_fields(mysql_result->metadata);
-    for (int col = 0; col < mysql_result->num_fields; ++col) {
-        auto* builder = builders[col].get();
-
-        // 处理 NULL 值
-        if (mysql_result->is_nulls[col]) {
-            if (!builder->AppendNull().ok()) {
-                *error = "failed to append null";
-                return -1;
-            }
-            continue;
-        }
-
-        // 根据类型读取值
-        auto arrow_type = builder->type();
-        if (arrow_type->id() == arrow::Type::INT64) {
-            int64_t value = *static_cast<int64_t*>(mysql_result->binds[col].buffer);
-            auto status = static_cast<arrow::Int64Builder*>(builder)->Append(value);
-            if (!status.ok()) {
-                *error = "failed to append int64: " + status.ToString();
-                return -1;
-            }
-        } else if (arrow_type->id() == arrow::Type::DOUBLE) {
-            double value = *static_cast<double*>(mysql_result->binds[col].buffer);
-            auto status = static_cast<arrow::DoubleBuilder*>(builder)->Append(value);
-            if (!status.ok()) {
-                *error = "failed to append double: " + status.ToString();
-                return -1;
-            }
-        } else if (arrow_type->id() == arrow::Type::STRING) {
-            char* str = static_cast<char*>(mysql_result->binds[col].buffer);
-            auto status = static_cast<arrow::StringBuilder*>(builder)->Append(str, mysql_result->lengths[col]);
-            if (!status.ok()) {
-                *error = "failed to append string: " + status.ToString();
-                return -1;
-            }
-        } else if (arrow_type->id() == arrow::Type::BINARY) {
-            char* data = static_cast<char*>(mysql_result->binds[col].buffer);
-            auto status = static_cast<arrow::BinaryBuilder*>(builder)->Append(
-                reinterpret_cast<const uint8_t*>(data), mysql_result->lengths[col]);
-            if (!status.ok()) {
-                *error = "failed to append binary: " + status.ToString();
-                return -1;
-            }
-        } else {
-            // 默认当字符串处理
-            char* str = static_cast<char*>(mysql_result->binds[col].buffer);
-            auto status = static_cast<arrow::StringBuilder*>(builder)->Append(str, mysql_result->lengths[col]);
-            if (!status.ok()) {
-                *error = "failed to append string: " + status.ToString();
-                return -1;
-            }
-        }
-    }
-
-    return 1;  // 成功读取一行
 }
 
-void MysqlDriver::FreeResultImpl(void* result) {
-    auto* mysql_result = static_cast<MysqlResult*>(result);
-    if (!mysql_result) return;
+int MysqlDriver::CreateReader(const char* query, IBatchReader** reader) {
+    auto session = CreateSession();
+    if (!session) return -1;
 
-    // 释放缓冲区
-    if (mysql_result->binds) {
-        for (int i = 0; i < mysql_result->num_fields; ++i) {
-            if (mysql_result->binds[i].buffer) {
-                delete[] static_cast<char*>(mysql_result->binds[i].buffer);
-            }
-        }
-        delete[] mysql_result->binds;
-    }
+    auto* batch_readable = dynamic_cast<IBatchReadable*>(session.get());
+    if (!batch_readable) return -1;
 
-    delete[] mysql_result->lengths;
-    delete[] mysql_result->is_nulls;
-    delete[] mysql_result->errors;
-
-    if (mysql_result->metadata) {
-        mysql_free_result(mysql_result->metadata);
-    }
-
-    if (mysql_result->stmt) {
-        mysql_stmt_close(mysql_result->stmt);
-    }
-
-    delete mysql_result;
+    return batch_readable->CreateReader(query, reader);
 }
 
-int MysqlDriver::ExecuteSqlImpl(const char* sql, std::string* error) {
-    if (!conn_) {
-        *error = "database not connected";
-        return -1;
-    }
+int MysqlDriver::CreateWriter(const char* table, IBatchWriter** writer) {
+    auto session = CreateSession();
+    if (!session) return -1;
 
-    if (mysql_query(conn_, sql) != 0) {
-        *error = "mysql_query failed: " + std::string(mysql_error(conn_));
-        return -1;
-    }
+    auto* batch_writable = dynamic_cast<IBatchWritable*>(session.get());
+    if (!batch_writable) return -1;
 
-    // 清理结果集（如果有）
-    MYSQL_RES* res = mysql_store_result(conn_);
-    if (res) {
-        mysql_free_result(res);
-    }
+    return batch_writable->CreateWriter(table, writer);
+}
 
-    return 0;
+int MysqlDriver::BeginTransaction(std::string* error) {
+    auto session = CreateSession();
+    if (!session) { *error = "Failed to create session"; return -1; }
+    return session->BeginTransaction(error);
+}
+
+int MysqlDriver::CommitTransaction(std::string* error) {
+    auto session = CreateSession();
+    if (!session) { *error = "Failed to create session"; return -1; }
+    return session->CommitTransaction(error);
+}
+
+int MysqlDriver::RollbackTransaction(std::string* error) {
+    auto session = CreateSession();
+    if (!session) { *error = "Failed to create session"; return -1; }
+    return session->RollbackTransaction(error);
 }
 
 }  // namespace database

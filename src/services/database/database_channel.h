@@ -6,19 +6,23 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <functional>
 
 #include "idb_driver.h"
+#include "db_session.h"
 
 namespace flowsql {
 namespace database {
 
 // DatabaseChannel — 通用数据库通道实现
-// 持有 IDbDriver，委托所有数据库操作给驱动
+// 持有 IDbDriver 弱引用和 Session 工厂，支持连接池复用
 class DatabaseChannel : public IDatabaseChannel {
  public:
+    using SessionFactory = std::function<std::shared_ptr<IDbSession>()>;
+
     DatabaseChannel(const std::string& type, const std::string& name,
-                    std::unique_ptr<IDbDriver> driver,
-                    const std::unordered_map<std::string, std::string>& params);
+                    IDbDriver* driver,  // 弱引用，不持有所有权
+                    SessionFactory session_factory);
     ~DatabaseChannel() override;
 
     // IChannel
@@ -32,16 +36,26 @@ class DatabaseChannel : public IDatabaseChannel {
     bool IsOpened() const override { return opened_; }
     int Flush() override { return 0; }
 
-    // IDatabaseChannel（委托给 driver_）
+    // IDatabaseChannel（使用 Session 创建 Reader/Writer）
     int CreateReader(const char* query, IBatchReader** reader) override;
     int CreateWriter(const char* table, IBatchWriter** writer) override;
     bool IsConnected() override;
 
+    // IDatabaseChannel 列式接口
+    int CreateArrowReader(const char* query, IArrowReader** reader) override;
+    int CreateArrowWriter(const char* table, IArrowWriter** writer) override;
+    int ExecuteQueryArrow(const char* query,
+                          std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
+                          std::string* error) override;
+    int WriteArrowBatches(const char* table,
+                          const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+                          std::string* error) override;
+
  private:
     std::string type_;
     std::string name_;
-    std::unique_ptr<IDbDriver> driver_;
-    std::unordered_map<std::string, std::string> params_;
+    IDbDriver* driver_;  // 弱引用
+    SessionFactory session_factory_;
     bool opened_ = false;
 };
 

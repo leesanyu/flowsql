@@ -44,6 +44,9 @@ class DatabasePlugin : public IPlugin, public IDatabaseFactory {
     // 通道池：key = "type.name"
     std::unordered_map<std::string, std::shared_ptr<DatabaseChannel>> channels_;
 
+    // 驱动存储：key = "type.name"（持有所有权）
+    std::unordered_map<std::string, std::unique_ptr<IDbDriver>> driver_storage_;
+
     // 配置表：key = "type.name", value = 连接参数
     std::unordered_map<std::string, std::unordered_map<std::string, std::string>> configs_;
 
