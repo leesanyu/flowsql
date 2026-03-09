@@ -11,6 +11,7 @@
 #include <services/database/db_session.h>
 #include <services/database/drivers/sqlite_driver.h>
 
+using namespace flowsql;
 using namespace flowsql::database;
 
 // ============================================================

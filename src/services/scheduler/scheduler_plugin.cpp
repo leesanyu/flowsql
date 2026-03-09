@@ -297,7 +297,8 @@ static std::shared_ptr<DataFrameChannel> ApplyDataFrameFilter(
 int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
                                       const std::string& source_type,
                                       const std::string& sink_type,
-                                      const SqlStatement& stmt, int64_t* rows_affected) {
+                                      const SqlStatement& stmt, int64_t* rows_affected,
+                                      std::string* error) {
     if (source_type == "dataframe" && sink_type == "dataframe") {
         auto* src = dynamic_cast<IDataFrameChannel*>(source);
         auto* dst = dynamic_cast<IDataFrameChannel*>(sink);
@@ -322,11 +323,11 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
         if (!stmt.where_clause.empty()) {
             auto filtered = ApplyDataFrameFilter(src, stmt.where_clause);
             if (!filtered) return -1;
-            int64_t rows = ChannelAdapter::WriteFromDataFrame(filtered.get(), dst, table.c_str());
+            int64_t rows = ChannelAdapter::WriteFromDataFrame(filtered.get(), dst, table.c_str(), error);
             if (rows_affected) *rows_affected = rows;
             return (rows < 0) ? -1 : 0;
         }
-        int64_t rows = ChannelAdapter::WriteFromDataFrame(src, dst, table.c_str());
+        int64_t rows = ChannelAdapter::WriteFromDataFrame(src, dst, table.c_str(), error);
         if (rows_affected) *rows_affected = rows;
         return (rows < 0) ? -1 : 0;
     }
@@ -336,7 +337,7 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
         auto* dst = dynamic_cast<IDataFrameChannel*>(sink);
         if (!src || !dst) return -1;
         std::string query = BuildQuery(stmt.source, stmt);
-        return ChannelAdapter::ReadToDataFrame(src, query.c_str(), dst);
+        return ChannelAdapter::ReadToDataFrame(src, query.c_str(), dst, error);
     }
 
     if (source_type == "database" && sink_type == "database") {
@@ -348,17 +349,16 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
         tmp->Open();
 
         std::string query = BuildQuery(stmt.source, stmt);
-        int rc = ChannelAdapter::ReadToDataFrame(src, query.c_str(), tmp.get());
+        int rc = ChannelAdapter::ReadToDataFrame(src, query.c_str(), tmp.get(), error);
         if (rc != 0) return rc;
 
         std::string table = ExtractTableName(stmt.dest);
-        int64_t rows = ChannelAdapter::WriteFromDataFrame(tmp.get(), dst, table.c_str());
+        int64_t rows = ChannelAdapter::WriteFromDataFrame(tmp.get(), dst, table.c_str(), error);
         if (rows_affected) *rows_affected = rows;
         return (rows < 0) ? -1 : 0;
     }
 
-    printf("SchedulerPlugin: unsupported transfer: %s → %s\n",
-           source_type.c_str(), sink_type.c_str());
+    if (error) *error = "unsupported transfer: " + source_type + " → " + sink_type;
     return -1;
 }
 
@@ -367,7 +367,8 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
                                           IOperator* op,
                                           const std::string& source_type,
                                           const std::string& sink_type,
-                                          const SqlStatement& stmt, int64_t* rows_affected) {
+                                          const SqlStatement& stmt, int64_t* rows_affected,
+                                          std::string* error) {
     IChannel* actual_source = source;
     IChannel* actual_sink = sink;
     std::shared_ptr<DataFrameChannel> tmp_in, tmp_out;
@@ -380,7 +381,7 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
         tmp_in->Open();
 
         std::string query = BuildQuery(stmt.source, stmt);
-        int rc = ChannelAdapter::ReadToDataFrame(db_src, query.c_str(), tmp_in.get());
+        int rc = ChannelAdapter::ReadToDataFrame(db_src, query.c_str(), tmp_in.get(), error);
         if (rc != 0) return rc;
 
         actual_source = tmp_in.get();
@@ -408,6 +409,7 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
     pipeline->Run();
 
     if (pipeline->State() == PipelineState::FAILED) {
+        if (error) *error = pipeline->ErrorMessage();
         return -1;
     }
 
@@ -416,15 +418,10 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
         if (!db_sink) return -1;
 
         std::string table = ExtractTableName(stmt.dest);
-        int64_t written_rows = ChannelAdapter::WriteFromDataFrame(tmp_out.get(), db_sink, table.c_str());
+        int64_t written_rows = ChannelAdapter::WriteFromDataFrame(tmp_out.get(), db_sink, table.c_str(), error);
         if (written_rows < 0) return -1;
 
-        printf("SchedulerPlugin::ExecuteTransfer: wrote %ld rows to database\n", written_rows);
-
-        // 返回写入的行数
-        if (rows_affected) {
-            *rows_affected = written_rows;
-        }
+        if (rows_affected) *rows_affected = written_rows;
     }
 
     return 0;
@@ -500,15 +497,17 @@ void SchedulerPlugin::HandleExecute(const httplib::Request& req, httplib::Respon
 
         int rc = 0;
         int64_t affected_rows = 0;
+        std::string exec_error;
 
         if (!op) {
-            rc = ExecuteTransfer(source, sink, source_type, sink_type, stmt, &affected_rows);
+            rc = ExecuteTransfer(source, sink, source_type, sink_type, stmt, &affected_rows, &exec_error);
         } else {
-            rc = ExecuteWithOperator(source, sink, op, source_type, sink_type, stmt, &affected_rows);
+            rc = ExecuteWithOperator(source, sink, op, source_type, sink_type, stmt, &affected_rows, &exec_error);
         }
 
         if (rc != 0) {
-            std::string err = op ? op->LastError() : "";
+            std::string err = exec_error;
+            if (err.empty() && op) err = op->LastError();
             if (err.empty()) err = "execution failed";
             res.status = 500;
             res.set_content(MakeErrorJson(err), "application/json");

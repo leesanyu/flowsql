@@ -60,7 +60,9 @@ interface IResultSet {
 
 // IDbSession — 数据库会话接口
 // 封装单个数据库连接，提供查询执行、事务管理和健康检查
-interface IDbSession {
+// 继承 enable_shared_from_this 以支持在成员方法中安全获取 shared_ptr<IDbSession>
+class IDbSession : public std::enable_shared_from_this<IDbSession> {
+public:
     virtual ~IDbSession() = default;
 
     // ==================== 行式数据库接口 ====================

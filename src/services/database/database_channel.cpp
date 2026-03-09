@@ -18,17 +18,15 @@ DatabaseChannel::~DatabaseChannel() {
 
 int DatabaseChannel::Open() {
     if (opened_) return 0;
-    if (!driver_) return -1;
-
-    // 初始化连接（连接池在 Connect 中初始化）
-    int ret = driver_->Connect({});
-    if (ret == 0) opened_ = true;
-    return ret;
+    // 驱动已由 DatabasePlugin 负责连接，这里只验证连接状态
+    if (!driver_ || !driver_->IsConnected()) return -1;
+    opened_ = true;
+    return 0;
 }
 
 int DatabaseChannel::Close() {
     if (!opened_) return 0;
-    if (driver_) driver_->Disconnect();
+    // 只标记关闭，不调用 Disconnect()，驱动由 DatabasePlugin 统一管理生命周期
     opened_ = false;
     return 0;
 }

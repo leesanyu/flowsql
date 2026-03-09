@@ -92,8 +92,8 @@ int MysqlResultSet::GetString(int index, const char** val, size_t* len) {
     if (!current_row_[index]) return -1;
     *val = current_row_[index];
     if (len) {
-        MYSQL_FIELD* fields = mysql_fetch_fields(result_);
-        *len = fields[index].max_length;
+        unsigned long* lengths = mysql_fetch_lengths(result_);
+        *len = lengths ? lengths[index] : strlen(current_row_[index]);
     }
     return 0;
 }
@@ -109,7 +109,12 @@ bool MysqlResultSet::IsNull(int index) {
 MysqlSession::MysqlSession(MysqlDriver* driver, MYSQL* conn)
     : RelationDbSessionBase<MysqlTraits>(driver, conn) {}
 
-MysqlSession::~MysqlSession() = default;
+MysqlSession::~MysqlSession() {
+    if (conn_) {
+        ReturnConnection(conn_);
+        conn_ = nullptr;
+    }
+}
 
 MYSQL_STMT* MysqlSession::PrepareStatement(MYSQL* conn, const char* sql, std::string* error) {
     if (!conn) {
@@ -197,6 +202,58 @@ IResultSet* MysqlSession::CreateResultSet(MYSQL_RES* result,
     return new MysqlResultSet(result, free_func);
 }
 
+// 使用简单 API 执行查询（替代 prepared statement 路径）
+int MysqlSession::ExecuteQuery(const char* sql, IResultSet** result, std::string* error) {
+    if (mysql_query(conn_, sql) != 0) {
+        if (error) *error = mysql_error(conn_);
+        return -1;
+    }
+    MYSQL_RES* res = mysql_store_result(conn_);
+    if (!res) {
+        if (error) *error = mysql_error(conn_);
+        return -1;
+    }
+    *result = new MysqlResultSet(res, [](MYSQL_RES* r) { mysql_free_result(r); });
+    return 0;
+}
+
+int MysqlSession::ExecuteSql(const char* sql, std::string* error) {
+    if (mysql_query(conn_, sql) != 0) {
+        if (error) *error = mysql_error(conn_);
+        return -1;
+    }
+    return static_cast<int>(mysql_affected_rows(conn_));
+}
+
+std::shared_ptr<arrow::Schema> MysqlSession::InferSchema(IResultSet* result, std::string* error) {
+    auto* rs = static_cast<MysqlResultSet*>(result);
+    MYSQL_RES* mysql_res = rs->GetResult();
+    int n = mysql_num_fields(mysql_res);
+    MYSQL_FIELD* fields = mysql_fetch_fields(mysql_res);
+    std::vector<std::shared_ptr<arrow::Field>> arrow_fields;
+    for (int i = 0; i < n; ++i) {
+        std::shared_ptr<arrow::DataType> type;
+        switch (fields[i].type) {
+            case MYSQL_TYPE_TINY:
+            case MYSQL_TYPE_SHORT:
+            case MYSQL_TYPE_LONG:
+            case MYSQL_TYPE_INT24:   type = arrow::int32();   break;
+            case MYSQL_TYPE_LONGLONG: type = arrow::int64();  break;
+            case MYSQL_TYPE_FLOAT:   type = arrow::float32(); break;
+            case MYSQL_TYPE_DOUBLE:
+            case MYSQL_TYPE_DECIMAL:
+            case MYSQL_TYPE_NEWDECIMAL: type = arrow::float64(); break;
+            case MYSQL_TYPE_BLOB:
+            case MYSQL_TYPE_TINY_BLOB:
+            case MYSQL_TYPE_MEDIUM_BLOB:
+            case MYSQL_TYPE_LONG_BLOB: type = arrow::binary(); break;
+            default:                 type = arrow::utf8();    break;
+        }
+        arrow_fields.push_back(arrow::field(fields[i].name, type));
+    }
+    return arrow::schema(arrow_fields);
+}
+
 // ==================== MysqlBatchReader 实现 ====================
 
 class MysqlBatchReader : public IBatchReader {
@@ -267,10 +324,22 @@ public:
                     continue;
                 }
 
-                if (arrow_type->id() == arrow::Type::INT64) {
+                if (arrow_type->id() == arrow::Type::INT32) {
+                    int value;
+                    if (result_->GetInt(col, &value) == 0)
+                        static_cast<arrow::Int32Builder*>(builder)->Append(value);
+                    else
+                        builder->AppendNull();
+                } else if (arrow_type->id() == arrow::Type::INT64) {
                     int64_t value;
                     if (result_->GetInt64(col, &value) == 0)
                         static_cast<arrow::Int64Builder*>(builder)->Append(value);
+                    else
+                        builder->AppendNull();
+                } else if (arrow_type->id() == arrow::Type::FLOAT) {
+                    double value;
+                    if (result_->GetDouble(col, &value) == 0)
+                        static_cast<arrow::FloatBuilder*>(builder)->Append(static_cast<float>(value));
                     else
                         builder->AppendNull();
                 } else if (arrow_type->id() == arrow::Type::DOUBLE) {
@@ -286,6 +355,9 @@ public:
                         static_cast<arrow::StringBuilder*>(builder)->Append(str, len);
                     else
                         builder->AppendNull();
+                } else {
+                    // 未知类型，填 NULL 保持列长度一致
+                    builder->AppendNull();
                 }
             }
             ++row_count;
@@ -344,8 +416,7 @@ private:
 
 IBatchReader* MysqlSession::CreateBatchReader(IResultSet* result,
                                                std::shared_ptr<arrow::Schema> schema) {
-    auto self = std::shared_ptr<IDbSession>(this, [](IDbSession*){});
-    return new MysqlBatchReader(self, result, schema);
+    return new MysqlBatchReader(shared_from_this(), result, schema);
 }
 
 // ==================== MysqlBatchWriter 实现 ====================
@@ -473,8 +544,7 @@ private:
 };
 
 IBatchWriter* MysqlSession::CreateBatchWriter(const char* table) {
-    auto self = std::shared_ptr<IDbSession>(this, [](IDbSession*){});
-    return new MysqlBatchWriter(self, table);
+    return new MysqlBatchWriter(shared_from_this(), table);
 }
 
 // ==================== MysqlDriver 实现 ====================
@@ -564,44 +634,6 @@ void MysqlDriver::ReturnToPool(MYSQL* conn) {
     if (pool_ && conn) {
         pool_->Return(conn);
     }
-}
-
-int MysqlDriver::CreateReader(const char* query, IBatchReader** reader) {
-    auto session = CreateSession();
-    if (!session) return -1;
-
-    auto* batch_readable = dynamic_cast<IBatchReadable*>(session.get());
-    if (!batch_readable) return -1;
-
-    return batch_readable->CreateReader(query, reader);
-}
-
-int MysqlDriver::CreateWriter(const char* table, IBatchWriter** writer) {
-    auto session = CreateSession();
-    if (!session) return -1;
-
-    auto* batch_writable = dynamic_cast<IBatchWritable*>(session.get());
-    if (!batch_writable) return -1;
-
-    return batch_writable->CreateWriter(table, writer);
-}
-
-int MysqlDriver::BeginTransaction(std::string* error) {
-    auto session = CreateSession();
-    if (!session) { *error = "Failed to create session"; return -1; }
-    return session->BeginTransaction(error);
-}
-
-int MysqlDriver::CommitTransaction(std::string* error) {
-    auto session = CreateSession();
-    if (!session) { *error = "Failed to create session"; return -1; }
-    return session->CommitTransaction(error);
-}
-
-int MysqlDriver::RollbackTransaction(std::string* error) {
-    auto session = CreateSession();
-    if (!session) { *error = "Failed to create session"; return -1; }
-    return session->RollbackTransaction(error);
 }
 
 }  // namespace database

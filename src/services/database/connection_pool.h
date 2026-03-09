@@ -121,26 +121,15 @@ public:
         return false;
     }
 
-    // 归还连接
+    // 归还连接（直接放回池中，超时清理在 Acquire 时进行）
     void Return(ConnectionType conn) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         auto it = conn_info_.find(conn);
-        if (it != conn_info_.end()) {
-            it->second.in_use = false;
-            it->second.last_used = std::chrono::steady_clock::now();
-        }
-
-        // 检查池中连接数是否超过最小值
-        if (static_cast<int>(pool_.size()) >= config_.max_connections) {
-            // 池已满，关闭连接
-            closer_(conn);
-            conn_info_.erase(conn);
-            total_connections_--;
-        } else {
-            // 归还到池中
-            pool_.push_back(conn);
-        }
+        if (it == conn_info_.end()) return;
+        it->second.in_use = false;
+        it->second.last_used = std::chrono::steady_clock::now();
+        pool_.push_back(conn);
     }
 
     // 获取当前池状态

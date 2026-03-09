@@ -106,7 +106,12 @@ bool SqliteResultSet::IsNull(int index) {
 SqliteSession::SqliteSession(SqliteDriver* driver, sqlite3* db)
     : RelationDbSessionBase<SqliteTraits>(driver, db) {}
 
-SqliteSession::~SqliteSession() = default;
+SqliteSession::~SqliteSession() {
+    if (conn_) {
+        ReturnConnection(conn_);
+        conn_ = nullptr;
+    }
+}
 
 sqlite3_stmt* SqliteSession::PrepareStatement(sqlite3* db, const char* sql, std::string* error) {
     if (!db) {
@@ -130,8 +135,12 @@ int SqliteSession::ExecuteStatement(sqlite3_stmt* stmt, std::string* error) {
         return -1;
     }
 
+    // SELECT 语句（有列）不预先 step，让 ResultSet 自己迭代
+    if (sqlite3_column_count(stmt) > 0) return 0;
+
+    // 非 SELECT（INSERT/UPDATE/DELETE/DDL）
     int rc = sqlite3_step(stmt);
-    if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+    if (rc != SQLITE_DONE) {
         *error = sqlite3_errmsg(sqlite3_db_handle(stmt));
         return -1;
     }
@@ -334,8 +343,7 @@ private:
 
 IBatchReader* SqliteSession::CreateBatchReader(IResultSet* result,
                                                 std::shared_ptr<arrow::Schema> schema) {
-    auto self = std::shared_ptr<IDbSession>(this, [](IDbSession*){});
-    return new SqliteBatchReader(self, result, schema);
+    return new SqliteBatchReader(shared_from_this(), result, schema);
 }
 
 // ==================== SqliteBatchWriter 实现 ====================
@@ -426,9 +434,15 @@ private:
                 auto array = batch->column(col);
                 if (array->IsNull(row)) {
                     sql += "NULL";
+                } else if (array->type()->id() == arrow::Type::INT32) {
+                    auto int_array = std::static_pointer_cast<arrow::Int32Array>(array);
+                    sql += std::to_string(int_array->Value(row));
                 } else if (array->type()->id() == arrow::Type::INT64) {
                     auto int_array = std::static_pointer_cast<arrow::Int64Array>(array);
                     sql += std::to_string(int_array->Value(row));
+                } else if (array->type()->id() == arrow::Type::FLOAT) {
+                    auto float_array = std::static_pointer_cast<arrow::FloatArray>(array);
+                    sql += std::to_string(float_array->Value(row));
                 } else if (array->type()->id() == arrow::Type::DOUBLE) {
                     auto double_array = std::static_pointer_cast<arrow::DoubleArray>(array);
                     sql += std::to_string(double_array->Value(row));
@@ -474,11 +488,35 @@ private:
 };
 
 IBatchWriter* SqliteSession::CreateBatchWriter(const char* table) {
-    auto self = std::shared_ptr<IDbSession>(this, [](IDbSession*){});
-    return new SqliteBatchWriter(self, table);
+    return new SqliteBatchWriter(shared_from_this(), table);
 }
 
 // ==================== SqliteDriver 实现 ====================
+
+std::shared_ptr<arrow::Schema> SqliteSession::InferSchema(IResultSet* result, std::string* error) {
+    auto* rs = static_cast<SqliteResultSet*>(result);
+    sqlite3_stmt* stmt = rs->GetStmt();
+    int n = sqlite3_column_count(stmt);
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    for (int i = 0; i < n; ++i) {
+        const char* name = sqlite3_column_name(stmt, i);
+        const char* decl = sqlite3_column_decltype(stmt, i);
+        std::shared_ptr<arrow::DataType> type = arrow::utf8();
+        if (decl) {
+            std::string t = decl;
+            for (auto& c : t) c = static_cast<char>(toupper(c));
+            if (t.find("INT") != std::string::npos)
+                type = arrow::int64();
+            else if (t.find("REAL") != std::string::npos || t.find("FLOAT") != std::string::npos ||
+                     t.find("DOUBLE") != std::string::npos)
+                type = arrow::float64();
+            else if (t.find("BLOB") != std::string::npos)
+                type = arrow::binary();
+        }
+        fields.push_back(arrow::field(name ? name : "", type));
+    }
+    return arrow::schema(fields);
+}
 
 SqliteDriver::~SqliteDriver() = default;
 
@@ -557,44 +595,6 @@ void SqliteDriver::ReturnToPool(sqlite3* db) {
     if (pool_ && db) {
         pool_->Return(db);
     }
-}
-
-int SqliteDriver::CreateReader(const char* query, IBatchReader** reader) {
-    auto session = CreateSession();
-    if (!session) return -1;
-
-    auto* batch_readable = dynamic_cast<IBatchReadable*>(session.get());
-    if (!batch_readable) return -1;
-
-    return batch_readable->CreateReader(query, reader);
-}
-
-int SqliteDriver::CreateWriter(const char* table, IBatchWriter** writer) {
-    auto session = CreateSession();
-    if (!session) return -1;
-
-    auto* batch_writable = dynamic_cast<IBatchWritable*>(session.get());
-    if (!batch_writable) return -1;
-
-    return batch_writable->CreateWriter(table, writer);
-}
-
-int SqliteDriver::BeginTransaction(std::string* error) {
-    auto session = CreateSession();
-    if (!session) { *error = "Failed to create session"; return -1; }
-    return session->BeginTransaction(error);
-}
-
-int SqliteDriver::CommitTransaction(std::string* error) {
-    auto session = CreateSession();
-    if (!session) { *error = "Failed to create session"; return -1; }
-    return session->CommitTransaction(error);
-}
-
-int SqliteDriver::RollbackTransaction(std::string* error) {
-    auto session = CreateSession();
-    if (!session) { *error = "Failed to create session"; return -1; }
-    return session->RollbackTransaction(error);
 }
 
 }  // namespace database

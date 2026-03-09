@@ -40,12 +40,12 @@ static void AppendBatchToDataFrame(const std::shared_ptr<arrow::RecordBatch>& ba
 }
 
 int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query,
-                                     IDataFrameChannel* df_out) {
+                                     IDataFrameChannel* df_out, std::string* error) {
     if (!db || !df_out) return -1;
 
     IBatchReader* reader = nullptr;
     if (db->CreateReader(query, &reader) != 0 || !reader) {
-        printf("ChannelAdapter::ReadToDataFrame: CreateReader failed\n");
+        if (error) *error = "CreateReader failed for query: " + std::string(query ? query : "");
         return -1;
     }
 
@@ -59,8 +59,7 @@ int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query,
         int rc = reader->Next(&buf, &len);
         if (rc == 1) break;  // 已读完
         if (rc < 0) {
-            printf("ChannelAdapter::ReadToDataFrame: Next() error: %s\n",
-                   reader->GetLastError());
+            if (error) *error = std::string(reader->GetLastError());
             reader->Close();
             reader->Release();
             return -1;
@@ -82,8 +81,7 @@ int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query,
             }
         } else {
             // IPC 反序列化失败，报错并终止读取
-            printf("ChannelAdapter::ReadToDataFrame: IPC deserialize failed: %s\n",
-                   stream_result.status().ToString().c_str());
+            if (error) *error = "IPC deserialize failed: " + stream_result.status().ToString();
             reader->Close();
             reader->Release();
             return -1;
@@ -98,27 +96,28 @@ int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query,
 }
 
 int64_t ChannelAdapter::WriteFromDataFrame(IDataFrameChannel* df_in,
-                                           IDatabaseChannel* db, const char* table) {
+                                           IDatabaseChannel* db, const char* table,
+                                           std::string* error) {
     if (!df_in || !db || !table) return -1;
 
     // 从 DataFrame 通道读取数据
     DataFrame data;
     if (df_in->Read(&data) != 0 || data.RowCount() == 0) {
-        printf("ChannelAdapter::WriteFromDataFrame: no data to write\n");
+        if (error) *error = "no data to write";
         return -1;
     }
 
     // 创建写入器
     IBatchWriter* writer = nullptr;
     if (db->CreateWriter(table, &writer) != 0 || !writer) {
-        printf("ChannelAdapter::WriteFromDataFrame: CreateWriter failed\n");
+        if (error) *error = "CreateWriter failed for table: " + std::string(table);
         return -1;
     }
 
     // DataFrame → Arrow RecordBatch → IPC 序列化 → Writer
     auto batch = data.ToArrow();
     if (!batch) {
-        printf("ChannelAdapter::WriteFromDataFrame: ToArrow failed\n");
+        if (error) *error = "ToArrow conversion failed";
         writer->Close(nullptr);
         writer->Release();
         return -1;
@@ -129,7 +128,7 @@ int64_t ChannelAdapter::WriteFromDataFrame(IDataFrameChannel* df_in,
     auto ipc_writer = arrow::ipc::MakeStreamWriter(sink_stream, batch->schema()).ValueOrDie();
     auto status = ipc_writer->WriteRecordBatch(*batch);
     if (!status.ok()) {
-        printf("ChannelAdapter::WriteFromDataFrame: IPC serialize failed\n");
+        if (error) *error = "IPC serialize failed: " + status.ToString();
         writer->Close(nullptr);
         writer->Release();
         return -1;
@@ -138,8 +137,7 @@ int64_t ChannelAdapter::WriteFromDataFrame(IDataFrameChannel* df_in,
 
     auto buffer = sink_stream->Finish().ValueOrDie();
     if (writer->Write(buffer->data(), static_cast<size_t>(buffer->size())) != 0) {
-        printf("ChannelAdapter::WriteFromDataFrame: Write failed: %s\n",
-               writer->GetLastError());
+        if (error) *error = std::string(writer->GetLastError());
         writer->Close(nullptr);
         writer->Release();
         return -1;

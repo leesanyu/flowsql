@@ -8,7 +8,6 @@
 #include <unordered_map>
 #include <memory>
 
-#include "../row_based_db_driver_base.h"
 #include "../connection_pool.h"
 #include "../db_session.h"
 #include "../relation_db_session.h"
@@ -47,17 +46,6 @@ class __attribute__((visibility("default"))) SqliteDriver : public IDbDriver {
     std::shared_ptr<IDbSession> CreateSession();
     void ReturnToPool(sqlite3* db);
 
-    // IBatchReadable 实现（委托给 Session）
-    int CreateReader(const char* query, IBatchReader** reader);
-
-    // IBatchWritable 实现（委托给 Session）
-    int CreateWriter(const char* table, IBatchWriter** writer);
-
-    // ITransactional 实现
-    int BeginTransaction(std::string* error);
-    int CommitTransaction(std::string* error);
-    int RollbackTransaction(std::string* error);
-
  private:
     // 连接池
     std::unique_ptr<ConnectionPool<sqlite3*>> pool_;
@@ -84,6 +72,9 @@ public:
     int GetDouble(int index, double* value) override;
     int GetString(int index, const char** value, size_t* len) override;
     bool IsNull(int index) override;
+
+    // 供 InferSchema 访问底层 stmt
+    sqlite3_stmt* GetStmt() const { return stmt_; }
 
 private:
     sqlite3_stmt* stmt_;
@@ -115,6 +106,7 @@ protected:
     IBatchReader* CreateBatchReader(IResultSet* result,
                                     std::shared_ptr<arrow::Schema> schema) override;
     IBatchWriter* CreateBatchWriter(const char* table) override;
+    std::shared_ptr<arrow::Schema> InferSchema(IResultSet* result, std::string* error) override;
 };
 
 }  // namespace database
