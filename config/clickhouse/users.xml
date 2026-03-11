@@ -1,0 +1,53 @@
+<clickhouse>
+    <users>
+        <flowsql_user>
+            <password>flowSQL@user</password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>flowsql_profile</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+            <databases>
+                <database>flowsql_db</database>
+            </databases>
+        </flowsql_user>
+    </users>
+
+    <profiles>
+        <flowsql_profile>
+            <!-- 单查询最大内存：4GB -->
+            <max_memory_usage>4294967296</max_memory_usage>
+            <!-- 允许超出内存限制时写临时文件到磁盘 -->
+            <max_bytes_before_external_group_by>2147483648</max_bytes_before_external_group_by>
+            <max_bytes_before_external_sort>2147483648</max_bytes_before_external_sort>
+            <!-- 查询超时：60s -->
+            <max_execution_time>60</max_execution_time>
+            <!-- 结果集行数上限：1000万 -->
+            <max_result_rows>10000000</max_result_rows>
+            <!-- 允许 DDL -->
+            <allow_ddl>1</allow_ddl>
+            <!-- 读取线程数 -->
+            <max_threads>4</max_threads>
+        </flowsql_profile>
+
+        <default>
+            <max_memory_usage>1073741824</max_memory_usage>
+            <max_execution_time>30</max_execution_time>
+            <readonly>1</readonly>
+        </default>
+    </profiles>
+
+    <quotas>
+        <default>
+            <interval>
+                <duration>3600</duration>
+                <queries>0</queries>
+                <errors>0</errors>
+                <result_rows>0</result_rows>
+                <read_rows>0</read_rows>
+                <execution_time>0</execution_time>
+            </interval>
+        </default>
+    </quotas>
+</clickhouse>

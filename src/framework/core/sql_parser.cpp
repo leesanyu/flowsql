@@ -13,14 +13,19 @@ void SqlParser::SkipWhitespace() {
 bool SqlParser::MatchKeyword(const char* keyword) {
     SkipWhitespace();
     size_t len = strlen(keyword);
+
+    // 剩余输入不足以容纳关键字
     if (pos_ + len > end_) return false;
 
     // 大小写不敏感匹配
     for (size_t i = 0; i < len; ++i) {
-        if (std::toupper(pos_[i]) != std::toupper(keyword[i])) return false;
+        if (std::toupper(static_cast<unsigned char>(pos_[i])) !=
+            std::toupper(static_cast<unsigned char>(keyword[i]))) return false;
     }
-    // 关键字后必须是空白或结尾
-    if (pos_ + len < end_ && !std::isspace(pos_[len]) && pos_[len] != '\0') return false;
+
+    // 关键字后必须是空白、结尾或 '\0'，防止前缀误匹配（如 "SELECT" 匹配 "SELECTFOO"）
+    const char* after = pos_ + len;
+    if (after < end_ && std::isalnum(static_cast<unsigned char>(*after))) return false;
 
     pos_ += len;
     return true;
@@ -233,7 +238,9 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
                 return stmt;
             }
         } else {
-            pos_ = saved;  // 回退，WHERE 无效
+            // WHERE 子句为空，清除并回退 pos_
+            stmt.where_clause.clear();
+            pos_ = saved;
         }
     } else {
         pos_ = saved;
@@ -250,7 +257,10 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
         // 设置 pos_ 到扩展关键字位置，供后续解析
         pos_ = sql.c_str() + extension_start;
     } else {
-        stmt.sql_part = sql;
+        // 无扩展关键字，去除尾部空白
+        size_t end = sql.size();
+        while (end > 0 && std::isspace(static_cast<unsigned char>(sql[end - 1]))) --end;
+        stmt.sql_part = sql.substr(0, end);
     }
 
     // [USING <catelog.name>]
@@ -306,7 +316,29 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
 }
 
 bool SqlParser::ValidateWhereClause(const std::string& clause) {
-    std::string upper = clause;
+    // 先剥离注释，防止注释内的关键字绕过检查
+    std::string stripped;
+    stripped.reserve(clause.size());
+    size_t i = 0;
+    while (i < clause.size()) {
+        // 块注释 /* ... */
+        if (i + 1 < clause.size() && clause[i] == '/' && clause[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < clause.size() && !(clause[i] == '*' && clause[i + 1] == '/')) ++i;
+            if (i + 1 < clause.size()) i += 2;  // 跳过 */
+            stripped += ' ';
+            continue;
+        }
+        // 行注释 -- ...
+        if (i + 1 < clause.size() && clause[i] == '-' && clause[i + 1] == '-') {
+            while (i < clause.size() && clause[i] != '\n') ++i;
+            stripped += ' ';
+            continue;
+        }
+        stripped += clause[i++];
+    }
+
+    std::string upper = stripped;
     std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
 
     static const char* forbidden[] = {

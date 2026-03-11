@@ -14,40 +14,6 @@
 namespace flowsql {
 namespace database {
 
-// ==================== 行式数据库结果集实现 ====================
-
-// 通用的基于行的结果集实现
-template<typename Traits>
-class RelationDbResultSet : public IResultSet {
-public:
-    RelationDbResultSet(typename Traits::ResultType result,
-                       std::function<void(typename Traits::ResultType)> free_func)
-        : result_(result), free_func_(free_func), has_next_(true) {}
-
-    ~RelationDbResultSet() override {
-        if (result_ && free_func_) {
-            free_func_(result_);
-        }
-    }
-
-    int FieldCount() override = 0;
-    const char* FieldName(int index) override = 0;
-    int FieldType(int index) override = 0;
-    int FieldLength(int index) override = 0;
-    bool HasNext() override { return has_next_; }
-    bool Next() override = 0;
-    int GetInt(int index, int* value) override = 0;
-    int GetInt64(int index, int64_t* value) override = 0;
-    int GetDouble(int index, double* value) override = 0;
-    int GetString(int index, const char** value, size_t* len) override = 0;
-    bool IsNull(int index) override = 0;
-
-protected:
-    typename Traits::ResultType result_;
-    std::function<void(typename Traits::ResultType)> free_func_;
-    bool has_next_;
-};
-
 // ==================== 行式数据库模板基类 ====================
 
 // RelationDbSessionBase - 行式数据库通用模板基类
@@ -116,10 +82,10 @@ public:
             return -1;
         }
         int ret = ExecuteSql("BEGIN", error);
-        if (ret == 0) {
+        if (ret != -1) {
             in_transaction_ = true;
         }
-        return ret;
+        return (ret != -1) ? 0 : -1;
     }
 
     int CommitTransaction(std::string* error) override {
@@ -128,10 +94,10 @@ public:
             return -1;
         }
         int ret = ExecuteSql("COMMIT", error);
-        if (ret == 0) {
+        if (ret != -1) {
             in_transaction_ = false;
         }
-        return ret;
+        return (ret != -1) ? 0 : -1;
     }
 
     int RollbackTransaction(std::string* error) override {
@@ -140,10 +106,10 @@ public:
             return -1;
         }
         int ret = ExecuteSql("ROLLBACK", error);
-        if (ret == 0) {
+        if (ret != -1) {
             in_transaction_ = false;
         }
-        return ret;
+        return (ret != -1) ? 0 : -1;
     }
 
     bool Ping() override {
@@ -153,25 +119,30 @@ public:
     // IBatchReadable 实现
     int CreateReader(const char* query, IBatchReader** reader) override {
         std::string error;
-        IResultSet* result = nullptr;
-        if (ExecuteQuery(query, &result, &error) != 0) {
+        IResultSet* raw_result = nullptr;
+        if (ExecuteQuery(query, &raw_result, &error) != 0) {
             return -1;
         }
+        // RAII 包装，确保异常或提前返回时不泄漏
+        std::unique_ptr<IResultSet> result(raw_result);
 
         // 推断 Schema
-        auto schema = InferSchema(result, &error);
+        auto schema = InferSchema(result.get(), &error);
         if (!schema) {
-            delete result;
             return -1;
         }
 
-        // 创建批量读取器
-        *reader = CreateBatchReader(result, schema);
+        // 创建批量读取器（Reader 接管 result 所有权）
+        *reader = CreateBatchReader(result.release(), schema);
         return (*reader) ? 0 : -1;
     }
 
     // IBatchWritable 实现
     int CreateWriter(const char* table, IBatchWriter** writer) override {
+        if (!table || table[0] == '\0') {
+            *writer = nullptr;
+            return -1;
+        }
         *writer = CreateBatchWriter(table);
         return (*writer) ? 0 : -1;
     }
@@ -227,41 +198,9 @@ protected:
     // 批量写入器工厂
     virtual IBatchWriter* CreateBatchWriter(const char* table) = 0;
 
-    // 推断 Schema
+    // 推断 Schema（各驱动类型映射不同，子类必须实现）
     virtual std::shared_ptr<arrow::Schema> InferSchema(IResultSet* result,
-                                                       std::string* error) {
-        // 使用 Arrow 的类型推断
-        std::vector<std::shared_ptr<arrow::Field>> fields;
-        int field_count = result->FieldCount();
-
-        for (int i = 0; i < field_count; ++i) {
-            const char* name = result->FieldName(i);
-            int type = result->FieldType(i);
-
-            // 根据数据库类型映射到 Arrow 类型
-            std::shared_ptr<arrow::DataType> arrow_type;
-            switch (type) {
-                case 1:  // 假设 1 = INT
-                    arrow_type = arrow::int32();
-                    break;
-                case 2:  // 假设 2 = BIGINT
-                    arrow_type = arrow::int64();
-                    break;
-                case 3:  // 假设 3 = DOUBLE
-                    arrow_type = arrow::float64();
-                    break;
-                case 4:  // 假设 4 = STRING
-                    arrow_type = arrow::utf8();
-                    break;
-                default:
-                    arrow_type = arrow::utf8();  // 默认为字符串
-            }
-
-            fields.push_back(arrow::field(name, arrow_type));
-        }
-
-        return arrow::schema(fields);
-    }
+                                                       std::string* error) = 0;
 
 protected:
     IDbDriver* driver_;

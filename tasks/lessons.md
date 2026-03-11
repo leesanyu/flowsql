@@ -133,3 +133,64 @@
 - 将文档更新纳入 Story 的验收标准
 - 在 Sprint Review 时检查文档完整性
 
+---
+
+## L9: 集成测试必须走完整生产路径，禁止绕过插件层
+
+**来源**：Sprint 4 回顾 — 测试策略根本性错误
+
+**问题**：`test_mysql_driver.cpp` 直接 `#include` 驱动头文件、`new MysqlDriver()` 调用底层 API，绕过了 `PluginLoader → IDatabaseFactory → IDatabaseChannel` 的完整生产路径。这类测试只验证了零件，无法发现插件加载、工厂注册、Channel 生命周期管理等集成层面的 bug。`test_plugin_e2e.cpp` 的 double-loading 堆损坏问题，正是因为测试直接链接了 `flowsql_database.so` 才暴露，而驱动层测试永远不会发现这个问题。
+
+**原则**：集成测试必须走完整生产路径。对于插件架构，测试入口是 `PluginLoader::dlopen`，而非 `#include` 驱动头文件。
+
+---
+
+## L10: 测试数据必须覆盖所有声明支持的类型
+
+**来源**：Sprint 4 回顾 — INT32 类型处理 bug 发现滞后
+
+**问题**：`MysqlBatchWriter::BuildRowValues()` 对 `INT32` 没有处理分支，但测试数据只用了 `INT64`/`DOUBLE`/`STRING`，`INT32` 路径从未被覆盖，导致 bug 在 Sprint 主体开发完成后才被发现。
+
+**原则**：写入路径的测试数据必须系统性覆盖所有声明支持的 Arrow 类型（INT32/INT64/FLOAT/DOUBLE/STRING/BOOL 等），不能只用"方便构造"的类型。类型分支覆盖是写入路径测试的最低要求。
+
+---
+
+## L11: 测试目标必须显式 -UNDEBUG，assert 是测试的最后防线
+
+**来源**：Sprint 4 回顾 — assert 被 NDEBUG 静默禁用
+
+**问题**：顶层 `CMakeLists.txt` 的 Release 配置传递了 `-DNDEBUG`，测试二进制中所有 `assert` 被预处理器删除，测试运行"通过"但断言从未执行。`batch` 为 null 时 `batch->num_columns()` 直接 SIGSEGV，而测试无法捕获。
+
+**原则**：每个测试目标的 `CMakeLists.txt` 必须显式加 `target_compile_options(... PRIVATE -UNDEBUG)`。关键错误检查不依赖 assert，改用显式 `if` + `printf` + `exit(1)`，确保在任何编译配置下都能中止。
+
+---
+
+## L12: 涉及共享对象的接口必须有多线程并发测试
+
+**来源**：Sprint 4 回顾 — 多线程并发测试完全缺失
+
+**问题**：`DatabaseChannel::CreateReader/CreateWriter` 是多线程共享入口，整个 Sprint 4 没有一个并发读写测试。连接池并发安全有测，但上层 Channel 的并发行为无测。
+
+**原则**：凡是可能被多线程并发调用的接口（Channel、Factory、Pool），Story 验收标准中必须包含多线程测试用例，验证：① 无 crash；② 无数据串扰；③ 资源无泄漏（in_use 归零）。
+
+---
+
+## L13: 测试为了"发现问题"，不是为了"通过"
+
+**来源**：Sprint 4 回顾 — 专家视角模式二
+
+**问题**：Sprint 4 的测试策略存在系统性偏差——所有选择都在降低测试通过的阻力，而不是提升测试发现问题的能力：
+- 用 SQLite `:memory:` 替代 MySQL：启动快、不依赖外部环境，但不是生产路径
+- 直接 `new MysqlDriver()` 绕过插件层：代码简单，但集成层 bug 永远不会暴露
+- `assert` 被 NDEBUG 删除：测试永远不会因断言失败而中止，制造虚假绿灯
+
+这三个选择的共同动机是降低阻力。但**一个永远通过的测试套件，价值为零，甚至是负值**——它制造虚假安全感，让团队相信代码是正确的，而实际上什么都没有验证。
+
+NDEBUG 问题尤其严重：它破坏的不是单个测试用例，而是整个测试体系的可信度基础。整个 Sprint 期间"测试全部通过"是一个谎言，而没有人察觉。
+
+**原则**：
+- 测试的价值在于它能在代码出错时**失败**，而不是在代码正确时通过
+- 测试环境应尽量贴近生产环境，而不是选择最方便的替代品
+- 任何让测试"更容易通过"的决策，都要先问：这会不会同时让测试"更难发现问题"？
+- 测试基础设施（编译配置、断言机制）的可信度，优先于测试用例数量
+

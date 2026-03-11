@@ -1,0 +1,34 @@
+<clickhouse>
+    <!-- 最大内存使用：8GB，防止单查询打爆内存 -->
+    <max_server_memory_usage>8589934592</max_server_memory_usage>
+
+    <!-- 后台线程池：写入合并、数据移动 -->
+    <background_pool_size>8</background_pool_size>
+    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+
+    <!-- 连接限制 -->
+    <max_connections>1024</max_connections>
+    <keep_alive_timeout>10</keep_alive_timeout>
+
+    <!-- 压缩：默认 LZ4，可选 ZSTD -->
+    <compression>
+        <case>
+            <method>lz4</method>
+        </case>
+    </compression>
+
+    <!-- 日志级别：生产用 warning，调试时改为 debug -->
+    <logger>
+        <level>warning</level>
+        <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+        <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+        <size>500M</size>
+        <count>5</count>
+    </logger>
+
+    <!-- 时区 -->
+    <timezone>Asia/Shanghai</timezone>
+
+    <!-- 允许外部访问（容器内默认只监听 localhost，需显式开放） -->
+    <listen_host>0.0.0.0</listen_host>
+</clickhouse>

@@ -1,6 +1,7 @@
 #include "pipeline.h"
 
 #include <cstdio>
+#include <common/log.h>
 
 namespace flowsql {
 
@@ -10,7 +11,7 @@ void Pipeline::Run() {
 
     if (!source_ || !operator_ || !sink_) {
         error_message_ = "missing source, operator, or sink";
-        printf("Pipeline::Run: %s\n", error_message_.c_str());
+        LOG_INFO("Pipeline::Run: %s", error_message_.c_str());
         state_ = PipelineState::FAILED;
         return;
     }

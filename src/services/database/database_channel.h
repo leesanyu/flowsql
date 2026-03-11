@@ -28,7 +28,7 @@ class DatabaseChannel : public IDatabaseChannel {
     // IChannel
     const char* Catelog() override { return type_.c_str(); }
     const char* Name() override { return name_.c_str(); }
-    const char* Type() override { return "database"; }
+    const char* Type() override { return ChannelType::kDatabase; }
     const char* Schema() override { return "[]"; }  // TODO: 查询数据库元数据
 
     int Open() override;

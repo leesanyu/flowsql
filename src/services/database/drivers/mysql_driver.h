@@ -8,7 +8,6 @@
 #include <unordered_map>
 #include <memory>
 
-#include "../row_based_db_driver_base.h"
 #include "../connection_pool.h"
 #include "../db_session.h"
 #include "../relation_db_session.h"
@@ -46,17 +45,6 @@ bool IsConnected() override { return pool_ != nullptr; }
     std::shared_ptr<IDbSession> CreateSession();
     void ReturnToPool(MYSQL* conn);
 
-    // IBatchReadable 实现（委托给 Session）
-    int CreateReader(const char* query, IBatchReader** reader);
-
-    // IBatchWritable 实现（委托给 Session）
-    int CreateWriter(const char* table, IBatchWriter** writer);
-
-    // ITransactional 实现
-    int BeginTransaction(std::string* error);
-    int CommitTransaction(std::string* error);
-    int RollbackTransaction(std::string* error);
-
  private:
     // 连接池
     std::unique_ptr<ConnectionPool<MYSQL*>> pool_;
@@ -82,8 +70,8 @@ public:
     ~MysqlResultSet() override;
 
     int FieldCount() override;
-    const char* FieldName(int index) override;
-    int FieldType(int index) override;
+    const char* FieldName(int index) const override;
+    int FieldType(int index) const override;
     int FieldLength(int index) override;
     bool HasNext() override;
     bool Next() override;
@@ -92,6 +80,11 @@ public:
     int GetDouble(int index, double* value) override;
     int GetString(int index, const char** value, size_t* len) override;
     bool IsNull(int index) override;
+
+protected:
+    // 仅供同驱动内部（InferSchema）访问底层 MYSQL_RES，不对外暴露
+    MYSQL_RES* GetResult() const { return result_; }
+    friend class MysqlSession;
 
 private:
     MYSQL_RES* result_;
@@ -107,6 +100,10 @@ class MysqlSession : public RelationDbSessionBase<MysqlTraits> {
 public:
     MysqlSession(MysqlDriver* driver, MYSQL* conn);
     ~MysqlSession() override;
+
+    // 覆盖基类模板方法，使用简单 API（非 prepared statement）
+    int ExecuteQuery(const char* sql, IResultSet** result, std::string* error) override;
+    int ExecuteSql(const char* sql, std::string* error) override;
 
 protected:
     // 钩子方法实现
@@ -128,6 +125,7 @@ protected:
     IBatchReader* CreateBatchReader(IResultSet* result,
                                     std::shared_ptr<arrow::Schema> schema) override;
     IBatchWriter* CreateBatchWriter(const char* table) override;
+    std::shared_ptr<arrow::Schema> InferSchema(IResultSet* result, std::string* error) override;
 };
 
 }  // namespace database

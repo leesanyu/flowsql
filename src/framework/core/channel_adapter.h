@@ -13,12 +13,13 @@ class ChannelAdapter {
     // Database → DataFrame：执行查询并将结果写入 DataFrameChannel
     // query 为空时读取整表（需要 table 参数拼接 SELECT *）
     static int ReadToDataFrame(IDatabaseChannel* db, const char* query,
-                               IDataFrameChannel* df_out);
+                               IDataFrameChannel* df_out, std::string* error = nullptr);
 
     // DataFrame → Database：将 DataFrameChannel 数据写入数据库表
     // 返回：成功返回写入的行数（>= 0），失败返回 -1
     static int64_t WriteFromDataFrame(IDataFrameChannel* df_in,
-                                      IDatabaseChannel* db, const char* table);
+                                      IDatabaseChannel* db, const char* table,
+                                      std::string* error = nullptr);
 
     // DataFrame → DataFrame：纯数据搬运（无算子场景）
     static int CopyDataFrame(IDataFrameChannel* src, IDataFrameChannel* dst);
