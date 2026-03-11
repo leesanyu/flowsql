@@ -3,6 +3,7 @@
 
 #include <httplib.h>
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <thread>
@@ -73,6 +74,9 @@ class SchedulerPlugin : public IPlugin {
 
     std::string host_ = "127.0.0.1";
     int port_ = 18803;
+
+    // 用于生成唯一临时通道名，避免并发请求冲突
+    std::atomic<uint64_t> tmp_channel_seq_{0};
 };
 
 }  // namespace scheduler

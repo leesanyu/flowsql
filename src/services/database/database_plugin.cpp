@@ -1,6 +1,7 @@
 #include "database_plugin.h"
 
 #include <cstdio>
+#include <common/log.h>
 #include <cstdlib>
 #include <cstring>
 
@@ -35,7 +36,7 @@ static std::string ExpandEnvVars(const std::string& input) {
 // 解析 "type=sqlite;name=mydb;path=/data/test.db" 格式的配置
 // 支持多个配置用 | 分隔：config1|config2|config3
 int DatabasePlugin::Option(const char* arg) {
-    printf("DatabasePlugin::Option called with: %s\n", arg ? arg : "(null)");
+    LOG_INFO("DatabasePlugin::Option called with: %s", arg ? arg : "(null)");
 
     if (!arg || !*arg) return 0;
 
@@ -83,7 +84,7 @@ int DatabasePlugin::ParseSingleConfig(const char* arg) {
     auto type_it = params.find("type");
     auto name_it = params.find("name");
     if (type_it == params.end() || name_it == params.end()) {
-        printf("DatabasePlugin::ParseSingleConfig: missing 'type' or 'name' in: %s\n", arg);
+        LOG_INFO("DatabasePlugin::ParseSingleConfig: missing 'type' or 'name' in: %s", arg);
         return -1;
     }
 
@@ -91,13 +92,13 @@ int DatabasePlugin::ParseSingleConfig(const char* arg) {
 
     std::lock_guard<std::mutex> lock(mutex_);
     configs_[key] = std::move(params);
-    printf("DatabasePlugin::ParseSingleConfig: configured %s (total configs: %zu)\n", key.c_str(), configs_.size());
+    LOG_INFO("DatabasePlugin::ParseSingleConfig: configured %s (total configs: %zu)", key.c_str(), configs_.size());
     return 0;
 }
 
 int DatabasePlugin::Load(IQuerier* querier) {
     querier_ = querier;
-    printf("DatabasePlugin::Load: %zu database(s) configured\n", configs_.size());
+    LOG_INFO("DatabasePlugin::Load: %zu database(s) configured", configs_.size());
     return 0;
 }
 
@@ -112,7 +113,7 @@ int DatabasePlugin::Stop() {
         ch->Close();
     }
     channels_.clear();
-    printf("DatabasePlugin::Stop: all connections closed\n");
+    LOG_INFO("DatabasePlugin::Stop: all connections closed");
     return 0;
 }
 
@@ -131,7 +132,7 @@ IDatabaseChannel* DatabasePlugin::Get(const char* type, const char* name) {
     if (it != channels_.end()) {
         // 检查连接是否仍然有效，断开则移除并重建
         if (!it->second->IsConnected()) {
-            printf("DatabasePlugin: connection lost for %s, reconnecting...\n", key.c_str());
+            LOG_INFO("DatabasePlugin: connection lost for %s, reconnecting...", key.c_str());
             channels_.erase(it);
         } else {
             return it->second.get();
@@ -186,7 +187,7 @@ IDatabaseChannel* DatabasePlugin::Get(const char* type, const char* name) {
 
     // 7. 加入通道池
     channels_[key] = channel;
-    printf("DatabasePlugin: connected to %s\n", key.c_str());
+    LOG_INFO("DatabasePlugin: connected to %s", key.c_str());
     return channel.get();
 }
 
@@ -213,7 +214,7 @@ int DatabasePlugin::Release(const char* type, const char* name) {
     it->second->Close();
     channels_.erase(it);
     driver_storage_.erase(key);
-    printf("DatabasePlugin: released %s\n", key.c_str());
+    LOG_INFO("DatabasePlugin: released %s", key.c_str());
     return 0;
 }
 

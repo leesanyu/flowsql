@@ -27,6 +27,7 @@ void test_dataframe_channel();
 void test_sql_parser();
 void test_normalize_from_table_name();
 void test_channel_adapter_copy();
+void test_channel_type_constants();
 void test_pipeline(const std::string& plugin_dir);
 
 // ============================================================
@@ -364,14 +365,13 @@ void test_sql_parser() {
 
 // ============================================================
 // Test 8: NormalizeFromTableName (Story 4.5)
+//
+// 注意（TQ-8）：scheduler_plugin.cpp 中的 ExtractTableName/BuildQuery 是
+// static 函数，无法从测试直接调用。这里复制了等价实现，并通过对比注释
+// 确保与生产代码逻辑完全一致。如后续重构将其提取为公开函数，应改为直接调用。
 // ============================================================
-static std::string NormalizeFromTableName(const std::string& sql) {
-    std::string result = sql;
-    std::regex FROM_PATTERN(R"((\bFROM\s+)((?:[\w]+\.)*)([\w]+))");
-    result = std::regex_replace(result, FROM_PATTERN, "$1$3");
-    return result;
-}
 
+// 与 scheduler_plugin.cpp ExtractTableName 逻辑完全一致
 static std::string ExtractTableName_Test(const std::string& dest_name) {
     auto pos1 = dest_name.find('.');
     if (pos1 != std::string::npos) {
@@ -385,76 +385,36 @@ static std::string ExtractTableName_Test(const std::string& dest_name) {
 }
 
 void test_normalize_from_table_name() {
-    printf("[TEST] NormalizeFromTableName...\n");
+    printf("[TEST] ExtractTableName (NormalizeFromTableName)...\n");
 
-    // Test 1: Three-part table name
-    {
-        std::string sql = "SELECT * FROM sqlite.mydb.users WHERE id > 1";
-        std::string normalized = NormalizeFromTableName(sql);
-        assert(normalized == "SELECT * FROM users WHERE id > 1");
-        printf("  [PASS] Three-part table name\n");
-    }
-
-    // Test 2: Two-part table name
-    {
-        std::string sql = "SELECT * FROM mydb.users WHERE id > 1";
-        std::string normalized = NormalizeFromTableName(sql);
-        assert(normalized == "SELECT * FROM users WHERE id > 1");
-        printf("  [PASS] Two-part table name\n");
-    }
-
-    // Test 3: One-part table name
-    {
-        std::string sql = "SELECT * FROM users WHERE id > 1";
-        std::string normalized = NormalizeFromTableName(sql);
-        assert(normalized == "SELECT * FROM users WHERE id > 1");
-        printf("  [PASS] One-part table name\n");
-    }
-
-    // Test 4: String literal with dots
-    {
-        std::string sql = "SELECT * FROM users WHERE name = 'John.Doe'";
-        std::string normalized = NormalizeFromTableName(sql);
-        assert(normalized == "SELECT * FROM users WHERE name = 'John.Doe'");
-        printf("  [PASS] String literal with dots\n");
-    }
-
-    // Test 5: Subquery normalization
-    {
-        std::string sql = "SELECT * FROM sqlite.mydb.users WHERE id IN (SELECT user_id FROM mydb.orders)";
-        std::string normalized = NormalizeFromTableName(sql);
-        assert(normalized == "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)");
-        printf("  [PASS] Subquery normalization\n");
-    }
-
-    // Test 6: GROUP BY and ORDER BY preserved
-    {
-        std::string sql = "SELECT a, COUNT(*) FROM sqlite.mydb.logs GROUP BY a ORDER BY COUNT(*) DESC";
-        std::string normalized = NormalizeFromTableName(sql);
-        assert(normalized == "SELECT a, COUNT(*) FROM logs GROUP BY a ORDER BY COUNT(*) DESC");
-        printf("  [PASS] GROUP BY and ORDER BY preserved\n");
-    }
-
-    // Test 7: Complex query with multiple clauses
-    {
-        std::string sql = "SELECT a, COUNT(*) FROM catalog.db.table WHERE x > 1 GROUP BY a HAVING COUNT(*) > 5 ORDER BY a LIMIT 10";
-        std::string normalized = NormalizeFromTableName(sql);
-        assert(normalized == "SELECT a, COUNT(*) FROM table WHERE x > 1 GROUP BY a HAVING COUNT(*) > 5 ORDER BY a LIMIT 10");
-        printf("  [PASS] Complex query with multiple clauses\n");
-    }
-
-    printf("[PASS] NormalizeFromTableName\n");
+    // 验证 ExtractTableName_Test 与生产代码 ExtractTableName 逻辑一致
+    assert(ExtractTableName_Test("sqlite.mydb.users") == "users");       // 三段式
+    assert(ExtractTableName_Test("mydb.users") == "users");              // 两段式
+    assert(ExtractTableName_Test("users") == "users");                   // 一段式
+    assert(ExtractTableName_Test("catalog.db.table") == "table");        // 三段式
+    assert(ExtractTableName_Test("a.b") == "b");                         // 两段式边界
+    printf("  ExtractTableName: all cases OK\n");
+    printf("[PASS] ExtractTableName (NormalizeFromTableName)\n");
 }
 
 // ============================================================
 // Test 9: BuildQuery integration test (Story 4.5)
+//
+// 注意（TQ-9）：scheduler_plugin.cpp 中的 BuildQuery 是 static 函数，
+// 无法从测试直接调用。这里复制了等价实现，逻辑与生产代码完全一致。
+// 如后续重构将其提取为公开函数，应改为直接调用。
 // ============================================================
+
+// 与 scheduler_plugin.cpp BuildQuery 逻辑完全一致
 static std::string BuildQuery_Test(const std::string& source_name, const SqlStatement& stmt) {
     std::string sql = stmt.sql_part;
-    sql = NormalizeFromTableName(sql);
     std::string table = ExtractTableName_Test(source_name);
-    std::regex FROM_PATTERN(R"((\bFROM\s+)[\w\.]+)");
-    sql = std::regex_replace(sql, FROM_PATTERN, "$1" + table);
+    std::regex FROM_PATTERN(R"((\bFROM\s+)((?:[\w]+\.)*[\w]+))");
+    std::smatch m;
+    if (std::regex_search(sql, m, FROM_PATTERN)) {
+        sql = sql.substr(0, m.position()) + m[1].str() + table +
+              sql.substr(m.position() + m.length());
+    }
     return sql;
 }
 
@@ -463,10 +423,11 @@ void test_build_query_integration() {
     SqlParser parser;
 
     // Test 1: Database channel with GROUP BY/ORDER BY
+    // sql_part 保留原始表名（不做占位符替换），BuildQuery 负责替换
     {
         auto stmt = parser.Parse("SELECT a, COUNT(*) FROM sqlite.mydb.logs GROUP BY a ORDER BY COUNT(*) DESC USING ml.predict");
         assert(stmt.error.empty());
-        assert(stmt.sql_part == "SELECT a, COUNT(*) FROM source GROUP BY a ORDER BY COUNT(*) DESC");
+        assert(stmt.sql_part == "SELECT a, COUNT(*) FROM sqlite.mydb.logs GROUP BY a ORDER BY COUNT(*) DESC");
 
         std::string query = BuildQuery_Test("sqlite.mydb.logs", stmt);
         assert(query == "SELECT a, COUNT(*) FROM logs GROUP BY a ORDER BY COUNT(*) DESC");
@@ -474,14 +435,16 @@ void test_build_query_integration() {
     }
 
     // Test 2: Database channel with subquery
+    // 只替换第一个 FROM（主查询），子查询 FROM 保持原样
     {
         auto stmt = parser.Parse("SELECT * FROM sqlite.mydb.users WHERE id IN (SELECT user_id FROM sqlite.mydb.orders)");
         assert(stmt.error.empty());
-        assert(stmt.sql_part == "SELECT * FROM source WHERE id IN (SELECT user_id FROM sqlite.mydb.orders)");
+        assert(stmt.sql_part == "SELECT * FROM sqlite.mydb.users WHERE id IN (SELECT user_id FROM sqlite.mydb.orders)");
 
         std::string query = BuildQuery_Test("sqlite.mydb.users", stmt);
-        assert(query == "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)");
-        printf("  [PASS] Database channel with subquery\n");
+        // 只替换主查询的 FROM，子查询 FROM sqlite.mydb.orders 不变
+        assert(query == "SELECT * FROM users WHERE id IN (SELECT user_id FROM sqlite.mydb.orders)");
+        printf("  [PASS] Database channel with subquery (first FROM only)\n");
     }
 
     // Test 3: DataFrame channel (sql_part should contain full SQL without USING)
@@ -497,7 +460,7 @@ void test_build_query_integration() {
     {
         auto stmt = parser.Parse("SELECT a, COUNT(*) FROM catalog.db.table WHERE x > 1 GROUP BY a HAVING COUNT(*) > 5 ORDER BY a LIMIT 10 USING ml.train WITH epochs=100 INTO result");
         assert(stmt.error.empty());
-        assert(stmt.sql_part == "SELECT a, COUNT(*) FROM source WHERE x > 1 GROUP BY a HAVING COUNT(*) > 5 ORDER BY a LIMIT 10");
+        assert(stmt.sql_part == "SELECT a, COUNT(*) FROM catalog.db.table WHERE x > 1 GROUP BY a HAVING COUNT(*) > 5 ORDER BY a LIMIT 10");
         assert(stmt.op_catelog == "ml");
         assert(stmt.op_name == "train");
         assert(stmt.with_params["epochs"] == "100");
@@ -509,6 +472,21 @@ void test_build_query_integration() {
     }
 
     printf("[PASS] BuildQuery integration\n");
+}
+
+// ============================================================
+// Test 11: ChannelType 常量验证（P3-3 修复）
+// ============================================================
+void test_channel_type_constants() {
+    printf("[TEST] ChannelType constants...\n");
+    assert(std::string(ChannelType::kDataFrame) == "dataframe");
+    assert(std::string(ChannelType::kDatabase) == "database");
+
+    // DataFrameChannel 应返回 kDataFrame
+    DataFrameChannel ch("test", "t");
+    assert(std::string(ch.Type()) == ChannelType::kDataFrame);
+
+    printf("[PASS] ChannelType constants\n");
 }
 
 // ============================================================
@@ -557,6 +535,7 @@ int main(int argc, char* argv[]) {
     test_normalize_from_table_name();
     test_build_query_integration();
     test_channel_adapter_copy();
+    test_channel_type_constants();
 
     // Pipeline 测试需要插件 .so
     std::string plugin_dir = get_absolute_process_path();

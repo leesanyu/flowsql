@@ -5,6 +5,7 @@
 #include <string>
 
 #include "dataframe.h"
+#include "framework/interfaces/ichannel.h"
 #include "framework/interfaces/idataframe_channel.h"
 
 namespace flowsql {
@@ -19,7 +20,7 @@ class DataFrameChannel : public IDataFrameChannel {
     // IChannel — 身份
     const char* Catelog() override { return catelog_.c_str(); }
     const char* Name() override { return name_.c_str(); }
-    const char* Type() override { return "dataframe"; }
+    const char* Type() override { return ChannelType::kDataFrame; }
     const char* Schema() override;
 
     // IChannel — 生命周期

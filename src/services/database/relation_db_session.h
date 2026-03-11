@@ -115,25 +115,30 @@ public:
     // IBatchReadable 实现
     int CreateReader(const char* query, IBatchReader** reader) override {
         std::string error;
-        IResultSet* result = nullptr;
-        if (ExecuteQuery(query, &result, &error) != 0) {
+        IResultSet* raw_result = nullptr;
+        if (ExecuteQuery(query, &raw_result, &error) != 0) {
             return -1;
         }
+        // RAII 包装，确保异常或提前返回时不泄漏
+        std::unique_ptr<IResultSet> result(raw_result);
 
         // 推断 Schema
-        auto schema = InferSchema(result, &error);
+        auto schema = InferSchema(result.get(), &error);
         if (!schema) {
-            delete result;
             return -1;
         }
 
-        // 创建批量读取器
-        *reader = CreateBatchReader(result, schema);
+        // 创建批量读取器（Reader 接管 result 所有权）
+        *reader = CreateBatchReader(result.release(), schema);
         return (*reader) ? 0 : -1;
     }
 
     // IBatchWritable 实现
     int CreateWriter(const char* table, IBatchWriter** writer) override {
+        if (!table || table[0] == '\0') {
+            *writer = nullptr;
+            return -1;
+        }
         *writer = CreateBatchWriter(table);
         return (*writer) ? 0 : -1;
     }

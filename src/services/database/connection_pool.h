@@ -56,69 +56,90 @@ public:
     // 获取连接（带健康检查）
     // 返回 true 表示成功，false 表示失败（error 会包含错误信息）
     bool Acquire(ConnectionType* conn, std::string* error) {
-        std::unique_lock<std::mutex> lock(mutex_);
+        while (true) {
+            ConnectionType candidate{};
+            bool need_ping = false;
+            bool need_close = false;
 
-        // 尝试从池中获取可用连接
-        auto now = std::chrono::steady_clock::now();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (pool_.empty()) {
+                    // 池中没有可用连接，尝试创建新连接
+                    if (total_connections_ < config_.max_connections) {
+                        ConnectionType new_conn = factory_(error);
+                        if (new_conn) {
+                            auto now = std::chrono::steady_clock::now();
+                            total_connections_++;
+                            conn_info_[new_conn] = {now, now, true};
+                            *conn = new_conn;
+                            return true;
+                        }
+                        return false;
+                    }
+                    if (error) {
+                        *error = "Connection pool exhausted (max_connections=" +
+                                 std::to_string(config_.max_connections) + ")";
+                    }
+                    return false;
+                }
 
-        while (!pool_.empty()) {
-            auto candidate = pool_.front();
-            pool_.pop_front();
+                candidate = pool_.front();
+                pool_.pop_front();
 
-            // 检查连接是否超时
-            auto& info = conn_info_[candidate];
-            auto idle_time = std::chrono::duration_cast<std::chrono::seconds>(
-                now - info.last_used).count();
+                auto now = std::chrono::steady_clock::now();
+                auto& info = conn_info_[candidate];
+                auto idle_time = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - info.last_used).count();
 
-            if (idle_time > config_.idle_timeout.count()) {
-                // 连接已超时，关闭并继续尝试下一个
-                closer_(candidate);
-                conn_info_.erase(candidate);
-                total_connections_--;
-                continue;
-            }
-
-            // 定期健康检查（超过检查间隔）
-            auto since_check = std::chrono::duration_cast<std::chrono::seconds>(
-                now - info.last_check).count();
-            if (since_check >= config_.health_check_interval.count()) {
-                if (!pinger_(candidate)) {
-                    // 健康检查失败，关闭并继续尝试下一个
-                    closer_(candidate);
+                if (idle_time > config_.idle_timeout.count()) {
+                    // 超时，锁外关闭
                     conn_info_.erase(candidate);
                     total_connections_--;
+                    need_close = true;
+                } else {
+                    auto since_check = std::chrono::duration_cast<std::chrono::seconds>(
+                        now - info.last_check).count();
+                    if (since_check >= config_.health_check_interval.count()) {
+                        // 需要健康检查，锁外 ping
+                        need_ping = true;
+                    } else {
+                        // 连接可用，直接返回
+                        info.last_used = now;
+                        info.in_use = true;
+                        *conn = candidate;
+                        return true;
+                    }
+                }
+            }  // 释放锁
+
+            if (need_close) {
+                closer_(candidate);
+                continue;  // 重新尝试获取
+            }
+
+            if (need_ping) {
+                bool alive = pinger_(candidate);
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!alive) {
+                    conn_info_.erase(candidate);
+                    total_connections_--;
+                    closer_(candidate);
+                    continue;  // 重新尝试获取
+                }
+                auto now = std::chrono::steady_clock::now();
+                auto it = conn_info_.find(candidate);
+                if (it == conn_info_.end()) {
+                    // 极端情况：ping 期间连接被其他路径清理
+                    closer_(candidate);
                     continue;
                 }
-                info.last_check = now;
-            }
-
-            // 连接可用
-            *conn = candidate;
-            info.last_used = now;
-            info.in_use = true;
-            return true;
-        }
-
-        // 池中没有可用连接，尝试创建新连接
-        if (total_connections_ < config_.max_connections) {
-            ConnectionType new_conn = factory_(error);
-            if (new_conn) {
-                total_connections_++;
-                auto now = std::chrono::steady_clock::now();
-                conn_info_[new_conn] = {now, now, true};
-                *conn = new_conn;
+                it->second.last_check = now;
+                it->second.last_used = now;
+                it->second.in_use = true;
+                *conn = candidate;
                 return true;
             }
-            return false;
         }
-
-        // 连接池已满，等待并重试
-        // 简化实现：直接返回错误
-        if (error) {
-            *error = "Connection pool exhausted (max_connections=" +
-                     std::to_string(config_.max_connections) + ")";
-        }
-        return false;
     }
 
     // 归还连接（直接放回池中，超时清理在 Acquire 时进行）
@@ -126,7 +147,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
 
         auto it = conn_info_.find(conn);
-        if (it == conn_info_.end()) return;
+        if (it == conn_info_.end()) {
+            // 连接不在 map 中（可能已被清理），直接关闭避免泄漏
+            closer_(conn);
+            return;
+        }
         it->second.in_use = false;
         it->second.last_used = std::chrono::steady_clock::now();
         pool_.push_back(conn);

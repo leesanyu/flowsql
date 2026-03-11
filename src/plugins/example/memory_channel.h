@@ -23,7 +23,7 @@ class MemoryChannel : public IDataFrameChannel, public IPlugin {
     // IChannel — 身份
     const char* Catelog() override { return "example"; }
     const char* Name() override { return "memory"; }
-    const char* Type() override { return "dataframe"; }
+    const char* Type() override { return ChannelType::kDataFrame; }
     const char* Schema() override { return "[]"; }
 
     // IChannel — 生命周期

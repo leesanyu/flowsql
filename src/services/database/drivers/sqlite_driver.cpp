@@ -6,6 +6,7 @@
 #include <arrow/ipc/writer.h>
 
 #include <cstdio>
+#include <common/log.h>
 #include <cstring>
 
 namespace flowsql {
@@ -26,13 +27,13 @@ int SqliteResultSet::FieldCount() {
     return stmt_ ? sqlite3_column_count(stmt_) : 0;
 }
 
-const char* SqliteResultSet::FieldName(int index) {
+const char* SqliteResultSet::FieldName(int index) const {
     if (!stmt_) return nullptr;
     return (index >= 0 && index < sqlite3_column_count(stmt_))
            ? sqlite3_column_name(stmt_, index) : nullptr;
 }
 
-int SqliteResultSet::FieldType(int index) {
+int SqliteResultSet::FieldType(int index) const {
     if (!stmt_) return 0;
     return (index >= 0 && index < sqlite3_column_count(stmt_))
            ? sqlite3_column_type(stmt_, index) : 0;
@@ -55,9 +56,11 @@ bool SqliteResultSet::Next() {
         return true;
     } else if (rc == SQLITE_DONE) {
         has_next_ = false;
+        fetched_ = false;
         return false;
     } else {
         has_next_ = false;
+        fetched_ = false;
         return false;
     }
 }
@@ -196,8 +199,10 @@ class SqliteBatchReader : public IBatchReader {
 public:
     SqliteBatchReader(std::shared_ptr<IDbSession> session,
                       IResultSet* result,
-                      std::shared_ptr<arrow::Schema> schema)
-        : session_(session), result_(result), schema_(std::move(schema)) {}
+                      std::shared_ptr<arrow::Schema> schema,
+                      int batch_size = 1024)
+        : session_(session), result_(result), schema_(std::move(schema)),
+          batch_size_(batch_size) {}
 
     ~SqliteBatchReader() override = default;
 
@@ -241,7 +246,7 @@ public:
             builders.push_back(std::move(builder));
         }
 
-        const int batch_size = 1024;
+        const int batch_size = batch_size_;
         int row_count = 0;
 
         for (int i = 0; i < batch_size; ++i) {
@@ -337,6 +342,7 @@ private:
     std::shared_ptr<arrow::Buffer> schema_buffer_;
     std::shared_ptr<arrow::Buffer> batch_buffer_;
     std::string last_error_;
+    int batch_size_ = 1024;
     bool done_ = false;
     bool cancelled_ = false;
 };
@@ -406,11 +412,22 @@ public:
     void Release() override { delete this; }
 
 private:
+    // 用双引号包裹 SQLite 标识符，并转义内部双引号（"" 转义）
+    static std::string QuoteIdentifier(const std::string& name) {
+        std::string result = "\"";
+        for (char c : name) {
+            if (c == '"') result += "\"\"";
+            else result += c;
+        }
+        result += "\"";
+        return result;
+    }
+
     int CreateTable(std::shared_ptr<arrow::Schema> schema) {
-        std::string ddl = "CREATE TABLE IF NOT EXISTS " + table_ + " (";
+        std::string ddl = "CREATE TABLE IF NOT EXISTS " + QuoteIdentifier(table_) + " (";
         for (int i = 0; i < schema->num_fields(); ++i) {
             if (i > 0) ddl += ", ";
-            ddl += schema->field(i)->name() + " ";
+            ddl += QuoteIdentifier(schema->field(i)->name()) + " ";
             auto type_id = schema->field(i)->type()->id();
             if (type_id == arrow::Type::INT64) ddl += "BIGINT";
             else if (type_id == arrow::Type::DOUBLE) ddl += "REAL";
@@ -419,7 +436,7 @@ private:
         }
         ddl += ")";
         std::string error;
-        if (session_->ExecuteSql(ddl.c_str(), &error) != 0) {
+        if (session_->ExecuteSql(ddl.c_str(), &error) < 0) {
             last_error_ = "CREATE TABLE failed: " + error;
             return -1;
         }
@@ -428,7 +445,7 @@ private:
 
     int InsertBatch(std::shared_ptr<arrow::RecordBatch> batch) {
         for (int64_t row = 0; row < batch->num_rows(); ++row) {
-            std::string sql = "INSERT INTO " + table_ + " VALUES (";
+            std::string sql = "INSERT INTO " + QuoteIdentifier(table_) + " VALUES (";
             for (int col = 0; col < batch->num_columns(); ++col) {
                 if (col > 0) sql += ", ";
                 auto array = batch->column(col);
@@ -469,7 +486,7 @@ private:
             }
             sql += ")";
             std::string error;
-            if (session_->ExecuteSql(sql.c_str(), &error) != 0) {
+            if (session_->ExecuteSql(sql.c_str(), &error) < 0) {
                 last_error_ = "INSERT failed: " + error;
                 return -1;
             }
@@ -510,8 +527,21 @@ std::shared_ptr<arrow::Schema> SqliteSession::InferSchema(IResultSet* result, st
             else if (t.find("REAL") != std::string::npos || t.find("FLOAT") != std::string::npos ||
                      t.find("DOUBLE") != std::string::npos)
                 type = arrow::float64();
+            else if (t.find("NUMERIC") != std::string::npos || t.find("DECIMAL") != std::string::npos)
+                type = arrow::float64();
+            else if (t.find("BOOL") != std::string::npos)
+                type = arrow::boolean();
             else if (t.find("BLOB") != std::string::npos)
                 type = arrow::binary();
+            else if (t.find("DATE") != std::string::npos || t.find("TIME") != std::string::npos)
+                type = arrow::utf8();  // SQLite 无原生日期类型，以字符串存储
+            // CHAR/VARCHAR/TEXT/CLOB 等均映射为 utf8（默认值）
+        } else {
+            // 无声明类型（如表达式列），根据运行时类型推断
+            int runtime_type = sqlite3_column_type(stmt, i);
+            if (runtime_type == SQLITE_INTEGER) type = arrow::int64();
+            else if (runtime_type == SQLITE_FLOAT) type = arrow::float64();
+            else if (runtime_type == SQLITE_BLOB) type = arrow::binary();
         }
         fields.push_back(arrow::field(name ? name : "", type));
     }
@@ -561,13 +591,13 @@ int SqliteDriver::Connect(const std::unordered_map<std::string, std::string>& pa
     };
 
     pool_ = std::make_unique<ConnectionPool<sqlite3*>>(config, factory, closer, pinger);
-    printf("SqliteDriver: initialized connection pool for %s\n", db_path_.c_str());
+    LOG_INFO("SqliteDriver: initialized connection pool for %s", db_path_.c_str());
     return 0;
 }
 
 int SqliteDriver::Disconnect() {
     pool_.reset();
-    printf("SqliteDriver: disconnected\n");
+    LOG_INFO("SqliteDriver: disconnected");
     return 0;
 }
 

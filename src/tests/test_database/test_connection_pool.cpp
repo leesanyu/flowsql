@@ -1,8 +1,11 @@
 #include <cassert>
 #include <cstdio>
+#include <atomic>
 #include <chrono>
+#include <mutex>
 #include <thread>
 #include <string>
+#include <vector>
 
 #include <services/database/connection_pool.h>
 
@@ -121,7 +124,9 @@ void test_pool_idle_timeout() {
     ConnectionPoolConfig config;
     config.max_connections = 5;
     config.min_connections = 0;
-    config.idle_timeout = std::chrono::seconds(1);  // 1s 超时
+    // idle_timeout=1s，需等待 >1s 才能触发（duration_cast<seconds> 截断）
+    // 实际等待 2100ms，确保 idle_time=2 > 1
+    config.idle_timeout = std::chrono::seconds(1);
     config.health_check_interval = std::chrono::seconds(60);
 
     int create_count = 0;
@@ -146,8 +151,8 @@ void test_pool_idle_timeout() {
     pool.Return(conn1);
     printf("  Acquired and returned connection %d\n", conn1);
 
-    // 等待超时
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    // 等待超时：idle_timeout=1s，duration_cast<seconds> 截断，需等 2100ms 使 idle_time=2 > 1
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
 
     // 再次获取，应创建新连接（旧连接已超时）
     int conn2;
@@ -174,7 +179,8 @@ void test_pool_health_check() {
     config.max_connections = 5;
     config.min_connections = 0;
     config.idle_timeout = std::chrono::seconds(300);
-    config.health_check_interval = std::chrono::seconds(1);  // 1s 检查间隔
+    // health_check_interval=1s，duration_cast<seconds> 用 >=，等 1100ms 即可触发
+    config.health_check_interval = std::chrono::seconds(1);
 
     int create_count = 0;
     int close_count = 0;
@@ -188,15 +194,12 @@ void test_pool_health_check() {
         close_count++;
     };
 
-    auto pinger = [&ping_fail_count](int conn) -> bool {
-        // 模拟连接失效：第 2 次检查失败
-        static int check_count = 0;
+    int check_count = 0;
+    auto pinger = [&ping_fail_count, &check_count](int conn) -> bool {
+        // 模拟连接失效：第 1 次检查就失败
         check_count++;
-        if (check_count == 2) {
-            ping_fail_count++;
-            return false;  // 健康检查失败
-        }
-        return true;
+        ping_fail_count++;
+        return false;  // 健康检查失败，连接被丢弃
     };
 
     ConnectionPool<int> pool(config, factory, closer, pinger);
@@ -206,8 +209,8 @@ void test_pool_health_check() {
     assert(pool.Acquire(&conn1, nullptr));
     pool.Return(conn1);
 
-    // 等待健康检查间隔
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // 等待健康检查间隔：health_check_interval=1s，since_check >= 1s 即触发，等 1100ms
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
 
     // 再次获取，应创建新连接（健康检查失败）
     int conn2;
@@ -298,14 +301,25 @@ void test_pool_concurrency() {
 
     ConnectionPool<int> pool(config, factory, closer, pinger);
 
+    std::atomic<int> peak_in_use{0};
+    std::atomic<int> current_in_use{0};
+
     // 多线程并发获取和归还
     std::vector<std::thread> threads;
     for (int i = 0; i < 20; ++i) {
-        threads.emplace_back([&pool, &mtx, &connections_used]() {
+        threads.emplace_back([&pool, &mtx, &connections_used,
+                              &peak_in_use, &current_in_use]() {
             int conn;
             if (pool.Acquire(&conn, nullptr)) {
-                // 模拟使用连接
+                int cur = ++current_in_use;
+                // 记录峰值并发数
+                int expected = peak_in_use.load();
+                while (cur > expected &&
+                       !peak_in_use.compare_exchange_weak(expected, cur)) {}
+
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+                --current_in_use;
                 pool.Return(conn);
                 std::lock_guard<std::mutex> lock(mtx);
                 connections_used.push_back(conn);
@@ -317,8 +331,18 @@ void test_pool_concurrency() {
         t.join();
     }
 
-    printf("  Concurrent operations completed, connections used: %zu\n", connections_used.size());
+    printf("  Concurrent operations: %zu succeeded, peak_in_use=%d (max=%d)\n",
+           connections_used.size(), peak_in_use.load(), config.max_connections);
+
+    // ① 至少有连接被使用
     assert(connections_used.size() > 0);
+    // ② 峰值并发数不超过 max_connections
+    assert(peak_in_use.load() <= config.max_connections);
+    // ③ 所有线程结束后无连接泄漏（in_use 归零）
+    assert(current_in_use.load() == 0);
+    // ④ 连接池统计一致
+    auto stats = pool.GetStats();
+    assert(stats.in_use_connections == 0);
 
     printf("[PASS] Connection pool: concurrency\n");
 }

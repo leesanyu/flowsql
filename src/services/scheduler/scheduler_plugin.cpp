@@ -5,6 +5,7 @@
 #include <rapidjson/writer.h>
 
 #include <cstdio>
+#include <common/log.h>
 #include <cstdlib>
 #include <cstring>
 #include <regex>
@@ -63,7 +64,7 @@ int SchedulerPlugin::Option(const char* arg) {
 
 int SchedulerPlugin::Load(IQuerier* querier) {
     querier_ = querier;
-    printf("SchedulerPlugin::Load: host=%s, port=%d\n", host_.c_str(), port_);
+    LOG_INFO("SchedulerPlugin::Load: host=%s, port=%d", host_.c_str(), port_);
     return 0;
 }
 
@@ -106,9 +107,9 @@ int SchedulerPlugin::Start() {
     RegisterRoutes();
 
     server_thread_ = std::thread([this]() {
-        printf("SchedulerPlugin: listening on %s:%d\n", host_.c_str(), port_);
+        LOG_INFO("SchedulerPlugin: listening on %s:%d", host_.c_str(), port_);
         if (!server_.listen(host_, port_)) {
-            printf("SchedulerPlugin: failed to start HTTP server\n");
+            LOG_ERROR("SchedulerPlugin: failed to start HTTP server");
         }
     });
 
@@ -119,7 +120,7 @@ int SchedulerPlugin::Stop() {
     server_.stop();
     if (server_thread_.joinable()) server_thread_.join();
     channels_.clear();
-    printf("SchedulerPlugin::Stop: done\n");
+    LOG_INFO("SchedulerPlugin::Stop: done");
     return 0;
 }
 
@@ -229,23 +230,6 @@ std::shared_ptr<IOperator> SchedulerPlugin::FindOperator(const std::string& cate
 }
 
 // --- Build Database Query ---
-// Normalize table names in sql_part and replace FROM clause table
-// Depends on: NormalizeFromTableName, ExtractTableName
-
-// Normalize table names in SQL FROM clauses
-// Supports three-part (catalog.database.table), two-part (database.table), one-part (table)
-// Example: FROM sqlite.mydb.users -> FROM users
-static std::string NormalizeFromTableName(const std::string& sql) {
-    std::string result = sql;
-
-    // Match table name after FROM keyword (supports multi-part names)
-    std::regex FROM_PATTERN(R"((\bFROM\s+)((?:[\w]+\.)*)([\w]+))");
-
-    // Replace with: FROM + last segment (table name only)
-    result = std::regex_replace(result, FROM_PATTERN, "$1$3");
-
-    return result;
-}
 
 // 从目标名称中提取表名（支持三段式 type.name.table）
 static std::string ExtractTableName(const std::string& dest_name) {
@@ -261,33 +245,34 @@ static std::string ExtractTableName(const std::string& dest_name) {
 }
 
 // BuildQuery: 构建数据库查询语句
+// 将 sql_part 中的第一个 FROM 子句替换为实际表名（支持多段式表名规范化）
+// 子查询中的 FROM 保持原样，不做替换
 static std::string BuildQuery(const std::string& source_name, const SqlStatement& stmt) {
-    // Database channel: use sql_part + table name replacement
     std::string sql = stmt.sql_part;
-
-    // 1. Normalize all table names (including subqueries)
-    sql = NormalizeFromTableName(sql);
-
-    // 2. Replace main FROM clause source with actual table name
     std::string table = ExtractTableName(source_name);
 
-    // Use regex to replace table name after FROM (supports subqueries)
-    std::regex FROM_PATTERN(R"((\bFROM\s+)[\w\.]+)");
-    sql = std::regex_replace(sql, FROM_PATTERN, "$1" + table);
+    // 匹配第一个 FROM 子句（支持多段式表名如 catalog.db.table）
+    std::regex FROM_PATTERN(R"((\bFROM\s+)((?:[\w]+\.)*[\w]+))");
+    std::smatch m;
+    if (std::regex_search(sql, m, FROM_PATTERN)) {
+        // 只替换第一个匹配（主查询的 FROM），子查询不受影响
+        sql = sql.substr(0, m.position()) +
+              m[1].str() + table +
+              sql.substr(m.position() + m.length());
+    }
 
     return sql;
 }
 
 // --- 辅助：对 DataFrame 通道应用 WHERE 过滤 ---
-// 读取数据，过滤后写回临时通道，返回过滤后的通道
 static std::shared_ptr<DataFrameChannel> ApplyDataFrameFilter(
-    IDataFrameChannel* src, const std::string& where_clause) {
+    IDataFrameChannel* src, const std::string& where_clause, uint64_t seq) {
     DataFrame data;
     if (src->Read(&data) != 0 || data.RowCount() == 0) return nullptr;
 
     if (data.Filter(where_clause.c_str()) != 0) return nullptr;
 
-    auto filtered = std::make_shared<DataFrameChannel>("_filter", "tmp");
+    auto filtered = std::make_shared<DataFrameChannel>("_filter", std::to_string(seq));
     filtered->Open();
     filtered->Write(&data);
     return filtered;
@@ -299,21 +284,21 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
                                       const std::string& sink_type,
                                       const SqlStatement& stmt, int64_t* rows_affected,
                                       std::string* error) {
-    if (source_type == "dataframe" && sink_type == "dataframe") {
+    if (source_type == ChannelType::kDataFrame && sink_type == ChannelType::kDataFrame) {
         auto* src = dynamic_cast<IDataFrameChannel*>(source);
         auto* dst = dynamic_cast<IDataFrameChannel*>(sink);
         if (!src || !dst) return -1;
 
         // DataFrame + WHERE → 先过滤再复制
         if (!stmt.where_clause.empty()) {
-            auto filtered = ApplyDataFrameFilter(src, stmt.where_clause);
+            auto filtered = ApplyDataFrameFilter(src, stmt.where_clause, ++tmp_channel_seq_);
             if (!filtered) return -1;
             return ChannelAdapter::CopyDataFrame(filtered.get(), dst);
         }
         return ChannelAdapter::CopyDataFrame(src, dst);
     }
 
-    if (source_type == "dataframe" && sink_type == "database") {
+    if (source_type == ChannelType::kDataFrame && sink_type == ChannelType::kDatabase) {
         auto* src = dynamic_cast<IDataFrameChannel*>(source);
         auto* dst = dynamic_cast<IDatabaseChannel*>(sink);
         if (!src || !dst) return -1;
@@ -321,7 +306,7 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
 
         // DataFrame + WHERE → 先过滤再写入
         if (!stmt.where_clause.empty()) {
-            auto filtered = ApplyDataFrameFilter(src, stmt.where_clause);
+            auto filtered = ApplyDataFrameFilter(src, stmt.where_clause, ++tmp_channel_seq_);
             if (!filtered) return -1;
             int64_t rows = ChannelAdapter::WriteFromDataFrame(filtered.get(), dst, table.c_str(), error);
             if (rows_affected) *rows_affected = rows;
@@ -332,7 +317,7 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
         return (rows < 0) ? -1 : 0;
     }
 
-    if (source_type == "database" && sink_type == "dataframe") {
+    if (source_type == ChannelType::kDatabase && sink_type == ChannelType::kDataFrame) {
         auto* src = dynamic_cast<IDatabaseChannel*>(source);
         auto* dst = dynamic_cast<IDataFrameChannel*>(sink);
         if (!src || !dst) return -1;
@@ -340,12 +325,12 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
         return ChannelAdapter::ReadToDataFrame(src, query.c_str(), dst, error);
     }
 
-    if (source_type == "database" && sink_type == "database") {
+    if (source_type == ChannelType::kDatabase && sink_type == ChannelType::kDatabase) {
         auto* src = dynamic_cast<IDatabaseChannel*>(source);
         auto* dst = dynamic_cast<IDatabaseChannel*>(sink);
         if (!src || !dst) return -1;
 
-        auto tmp = std::make_shared<DataFrameChannel>("_adapter", "tmp");
+        auto tmp = std::make_shared<DataFrameChannel>("_adapter", std::to_string(++tmp_channel_seq_));
         tmp->Open();
 
         std::string query = BuildQuery(stmt.source, stmt);
@@ -373,11 +358,11 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
     IChannel* actual_sink = sink;
     std::shared_ptr<DataFrameChannel> tmp_in, tmp_out;
 
-    if (source_type == "database") {
+    if (source_type == ChannelType::kDatabase) {
         auto* db_src = dynamic_cast<IDatabaseChannel*>(source);
         if (!db_src) return -1;
 
-        tmp_in = std::make_shared<DataFrameChannel>("_adapter", "in");
+        tmp_in = std::make_shared<DataFrameChannel>("_adapter", std::to_string(++tmp_channel_seq_));
         tmp_in->Open();
 
         std::string query = BuildQuery(stmt.source, stmt);
@@ -385,18 +370,18 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
         if (rc != 0) return rc;
 
         actual_source = tmp_in.get();
-    } else if (source_type == "dataframe" && !stmt.where_clause.empty()) {
+    } else if (source_type == ChannelType::kDataFrame && !stmt.where_clause.empty()) {
         // DataFrame + WHERE → 先过滤
         auto* df_src = dynamic_cast<IDataFrameChannel*>(source);
         if (!df_src) return -1;
 
-        tmp_in = ApplyDataFrameFilter(df_src, stmt.where_clause);
+        tmp_in = ApplyDataFrameFilter(df_src, stmt.where_clause, ++tmp_channel_seq_);
         if (!tmp_in) return -1;
         actual_source = tmp_in.get();
     }
 
-    if (sink_type == "database") {
-        tmp_out = std::make_shared<DataFrameChannel>("_adapter", "out");
+    if (sink_type == ChannelType::kDatabase) {
+        tmp_out = std::make_shared<DataFrameChannel>("_adapter", std::to_string(++tmp_channel_seq_));
         tmp_out->Open();
         actual_sink = tmp_out.get();
     }
@@ -406,6 +391,8 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
                         .SetOperator(op)
                         .SetSink(actual_sink)
                         .Build();
+    // 注意：Run() 当前为同步执行，返回时 pipeline 已完成或失败。
+    // 若未来改为异步，需在此处等待完成（如 pipeline->Wait()）再检查 State()。
     pipeline->Run();
 
     if (pipeline->State() == PipelineState::FAILED) {
@@ -413,7 +400,7 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
         return -1;
     }
 
-    if (sink_type == "database" && tmp_out) {
+    if (sink_type == ChannelType::kDatabase && tmp_out) {
         auto* db_sink = dynamic_cast<IDatabaseChannel*>(sink);
         if (!db_sink) return -1;
 
@@ -439,6 +426,14 @@ void SchedulerPlugin::HandleExecute(const httplib::Request& req, httplib::Respon
         return;
     }
     std::string sql_text = doc["sql"].GetString();
+
+    // 限制 SQL 长度，防止超大请求导致 DoS
+    static constexpr size_t kMaxSqlLength = 64 * 1024;  // 64KB
+    if (sql_text.size() > kMaxSqlLength) {
+        res.status = 400;
+        res.set_content(MakeErrorJson("SQL too long (max 64KB)"), "application/json");
+        return;
+    }
 
     SqlParser parser;
     auto stmt = parser.Parse(sql_text);
@@ -517,11 +512,11 @@ void SchedulerPlugin::HandleExecute(const httplib::Request& req, httplib::Respon
         auto* df_sink = dynamic_cast<IDataFrameChannel*>(sink);
         DataFrame result;
         std::string result_json = "[]";
-        int row_count = 0;
+        int64_t row_count = 0;
         if (df_sink && df_sink->Read(&result) == 0 && result.RowCount() > 0) {
             result_json = result.ToJson();
             row_count = result.RowCount();
-        } else if (sink_type == "database") {
+        } else if (sink_type == ChannelType::kDatabase) {
             // 写入数据库时，使用 ExecuteTransfer 返回的行数
             row_count = affected_rows;
         }
@@ -532,7 +527,7 @@ void SchedulerPlugin::HandleExecute(const httplib::Request& req, httplib::Respon
         w.Key("status");
         w.String("completed");
         w.Key("rows");
-        w.Int(row_count);
+        w.Int64(row_count);
         w.Key("data");
         w.RawValue(result_json.c_str(), result_json.size(), rapidjson::kArrayType);
         w.EndObject();
@@ -540,11 +535,11 @@ void SchedulerPlugin::HandleExecute(const httplib::Request& req, httplib::Respon
 
     } catch (const std::exception& e) {
         std::string err = std::string("internal error: ") + e.what();
-        printf("SchedulerPlugin::HandleExecute: exception: %s\n", err.c_str());
+        LOG_ERROR("SchedulerPlugin::HandleExecute: exception: %s", err.c_str());
         res.status = 500;
         res.set_content(MakeErrorJson(err), "application/json");
     } catch (...) {
-        printf("SchedulerPlugin::HandleExecute: unknown exception\n");
+        LOG_ERROR("SchedulerPlugin::HandleExecute: unknown exception");
         res.status = 500;
         res.set_content(MakeErrorJson("internal error: unknown exception"), "application/json");
     }
@@ -589,7 +584,7 @@ void SchedulerPlugin::HandleGetChannels(const httplib::Request&, httplib::Respon
                 w.StartObject();
                 w.Key("catelog"); w.String(type);
                 w.Key("name"); w.String(name);
-                w.Key("type"); w.String("database");
+                w.Key("type"); w.String(ChannelType::kDatabase);
                 w.Key("schema"); w.String("[]");
                 w.EndObject();
             });

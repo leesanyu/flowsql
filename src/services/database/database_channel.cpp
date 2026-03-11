@@ -3,6 +3,7 @@
 #include "capability_interfaces.h"
 
 #include <cstdio>
+#include <common/log.h>
 
 namespace flowsql {
 namespace database {
@@ -33,33 +34,33 @@ int DatabaseChannel::Close() {
 
 int DatabaseChannel::CreateReader(const char* query, IBatchReader** reader) {
     if (!opened_) {
-        printf("DatabaseChannel::CreateReader: channel not opened (%s.%s)\n", type_.c_str(), name_.c_str());
+        LOG_ERROR("DatabaseChannel::CreateReader: channel not opened (%s.%s)", type_.c_str(), name_.c_str());
         return -1;
     }
     if (!session_factory_) {
-        printf("DatabaseChannel::CreateReader: session factory not set (%s.%s)\n", type_.c_str(), name_.c_str());
+        LOG_ERROR("DatabaseChannel::CreateReader: session factory not set (%s.%s)", type_.c_str(), name_.c_str());
         return -1;
     }
 
     // 使用 Session 创建 Reader
     auto session = session_factory_();
     if (!session) {
-        printf("DatabaseChannel::CreateReader: failed to create session (%s.%s)\n", type_.c_str(), name_.c_str());
+        LOG_ERROR("DatabaseChannel::CreateReader: failed to create session (%s.%s)", type_.c_str(), name_.c_str());
         return -1;
     }
 
     // 检查 Session 是否支持 IBatchReadable
     auto* batch_readable = dynamic_cast<IBatchReadable*>(session.get());
     if (!batch_readable) {
-        printf("DatabaseChannel: session does not support batch reading\n");
+        LOG_ERROR("DatabaseChannel: session does not support batch reading");
         return -1;
     }
 
-    printf("DatabaseChannel::CreateReader: executing query on %s.%s: %s\n",
+    LOG_INFO("DatabaseChannel::CreateReader: executing query on %s.%s: %s",
            type_.c_str(), name_.c_str(), query);
     int ret = batch_readable->CreateReader(query, reader);
     if (ret != 0) {
-        printf("DatabaseChannel::CreateReader: CreateReader failed with code %d\n", ret);
+        LOG_ERROR("DatabaseChannel::CreateReader: CreateReader failed with code %d", ret);
     }
     return ret;
 }
@@ -76,7 +77,7 @@ int DatabaseChannel::CreateWriter(const char* table, IBatchWriter** writer) {
     // 检查 Session 是否支持 IBatchWritable
     auto* batch_writable = dynamic_cast<IBatchWritable*>(session.get());
     if (!batch_writable) {
-        printf("DatabaseChannel: session does not support batch writing\n");
+        LOG_ERROR("DatabaseChannel: session does not support batch writing");
         return -1;
     }
 
@@ -91,91 +92,15 @@ bool DatabaseChannel::IsConnected() {
 // ==================== 列式数据库接口实现 ====================
 
 int DatabaseChannel::CreateArrowReader(const char* query, IArrowReader** reader) {
-    if (!opened_) {
-        printf("DatabaseChannel::CreateArrowReader: channel not opened (%s.%s)\n", type_.c_str(), name_.c_str());
-        return -1;
-    }
-    if (!session_factory_) {
-        printf("DatabaseChannel::CreateArrowReader: session factory not set (%s.%s)\n", type_.c_str(), name_.c_str());
-        return -1;
-    }
-
-    // 使用 Session 创建 Arrow Reader
-    auto session = session_factory_();
-    if (!session) {
-        printf("DatabaseChannel::CreateArrowReader: failed to create session (%s.%s)\n", type_.c_str(), name_.c_str());
-        return -1;
-    }
-
-    // 检查 Session 是否支持 IArrowReadable
-    auto* arrow_readable = dynamic_cast<IArrowReadable*>(session.get());
-    if (!arrow_readable) {
-        printf("DatabaseChannel: session does not support arrow reading (row-based database)\n");
-        return -1;
-    }
-
-    // 创建适配器包装器（将 IArrowReadable 转换为 IArrowReader）
-    class ArrowReaderAdapter : public IArrowReader {
-    public:
-        ArrowReaderAdapter(std::shared_ptr<IDbSession> session,
-                           std::shared_ptr<arrow::Schema> schema)
-            : session_(session), schema_(std::move(schema)) {}
-
-        int ExecuteQueryArrow(const char* query,
-                              std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
-                              std::string* error) override {
-            auto* arrow_readable = dynamic_cast<IArrowReadable*>(session_.get());
-            if (!arrow_readable) {
-                *error = "Session does not support Arrow reading";
-                return -1;
-            }
-            return arrow_readable->ExecuteQueryArrow(query, batches, error);
-        }
-
-        std::shared_ptr<arrow::Schema> GetSchema() override {
-            return schema_;
-        }
-
-        const char* GetLastError() override {
-            return last_error_.c_str();
-        }
-
-        void Release() override {
-            delete this;
-        }
-
-    private:
-        std::shared_ptr<IDbSession> session_;
-        std::shared_ptr<arrow::Schema> schema_;
-        std::string last_error_;
-    };
-
-    // 对于行式数据库，返回不支持的错误
+    // 行式数据库不支持 Arrow 直读，调用方应使用 CreateReader + IBatchReader
+    (void)query;
     *reader = nullptr;
-    printf("DatabaseChannel::CreateArrowReader: %s\n", "Arrow reading not supported for row-based databases");
     return -1;
 }
 
 int DatabaseChannel::CreateArrowWriter(const char* table, IArrowWriter** writer) {
-    if (!opened_ || !session_factory_) {
-        return -1;
-    }
-
-    // 使用 Session 创建 Arrow Writer
-    auto session = session_factory_();
-    if (!session) {
-        return -1;
-    }
-
-    // 检查 Session 是否支持 IArrowWritable
-    auto* arrow_writable = dynamic_cast<IArrowWritable*>(session.get());
-    if (!arrow_writable) {
-        printf("DatabaseChannel: session does not support arrow writing (row-based database)\n");
-        *writer = nullptr;
-        return -1;
-    }
-
-    // 对于行式数据库，返回不支持的错误
+    // 行式数据库不支持 Arrow 直写，调用方应使用 CreateWriter + IBatchWriter
+    (void)table;
     *writer = nullptr;
     return -1;
 }

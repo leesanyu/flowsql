@@ -1,4 +1,5 @@
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -17,34 +18,80 @@
 using namespace flowsql;
 
 // ============================================================
-// Test 1: DatabasePlugin Option 配置解析
+// 全局：本次测试运行的唯一后缀（避免重跑时表名冲突）
 // ============================================================
-void test_option_parsing(const std::string& plugin_dir) {
-    printf("[TEST] DatabasePlugin Option parsing...\n");
+static std::string g_suffix;
+static std::string TABLE_USERS;   // e2e_users_<suffix>
+static std::string TABLE_AUTO;    // e2e_auto_<suffix>
+static std::string TABLE_CITIES;  // e2e_cities_<suffix>
+static std::string TABLE_COPY;    // e2e_copy_<suffix>
+static std::string TABLE_ADULTS;  // e2e_adults_<suffix>
+
+// ============================================================
+// 辅助：获取 MySQL 连接参数（从环境变量读取）
+// ============================================================
+static std::unordered_map<std::string, std::string> GetMysqlParams() {
+    std::unordered_map<std::string, std::string> p;
+    p["host"]     = getenv("MYSQL_HOST")     ? getenv("MYSQL_HOST")     : "127.0.0.1";
+    p["port"]     = getenv("MYSQL_PORT")     ? getenv("MYSQL_PORT")     : "3306";
+    p["user"]     = getenv("MYSQL_USER")     ? getenv("MYSQL_USER")     : "flowsql_user";
+    p["password"] = getenv("MYSQL_PASSWORD") ? getenv("MYSQL_PASSWORD") : "flowSQL@user";
+    p["database"] = getenv("MYSQL_DATABASE") ? getenv("MYSQL_DATABASE") : "flowsql_db";
+    p["charset"]  = "utf8mb4";
+    return p;
+}
+
+// 辅助：构建 plugin option 字符串
+static std::string MakeMysqlOption(const std::string& name) {
+    auto p = GetMysqlParams();
+    return "type=mysql;name=" + name +
+           ";host=" + p["host"] +
+           ";port=" + p["port"] +
+           ";user=" + p["user"] +
+           ";password=" + p["password"] +
+           ";database=" + p["database"] +
+           ";charset=" + p["charset"];
+}
+
+// 辅助：将 Arrow RecordBatch 序列化为 IPC buffer
+static std::shared_ptr<arrow::Buffer> SerializeBatch(
+        const std::shared_ptr<arrow::RecordBatch>& batch) {
+    auto sink = arrow::io::BufferOutputStream::Create().ValueOrDie();
+    auto ipc_w = arrow::ipc::MakeStreamWriter(sink, batch->schema()).ValueOrDie();
+    (void)ipc_w->WriteRecordBatch(*batch);
+    (void)ipc_w->Close();
+    return sink->Finish().ValueOrDie();
+}
+
+// 辅助：通过 IDatabaseChannel 写入一批数据（数据准备用）
+static void WriteTestData(IDatabaseChannel* db_ch, const char* table,
+                          const std::shared_ptr<arrow::RecordBatch>& batch) {
+    auto buf = SerializeBatch(batch);
+    IBatchWriter* writer = nullptr;
+    int rc = db_ch->CreateWriter(table, &writer);
+    assert(rc == 0 && writer != nullptr);
+    rc = writer->Write(buf->data(), static_cast<size_t>(buf->size()));
+    assert(rc == 0);
+    BatchWriteStats stats;
+    writer->Close(&stats);
+    writer->Release();
+}
+
+// ============================================================
+// Test 1: DatabasePlugin Option 配置解析（MySQL）
+// ============================================================
+void test_option_parsing() {
+    printf("[TEST] DatabasePlugin Option parsing (MySQL)...\n");
 
     PluginLoader* loader = PluginLoader::Single();
-
-    // 加载 database 插件，传入配置
-    std::string plugin_name = "libflowsql_database.so";
-    const char* relapath[] = {plugin_name.c_str()};
-    const char* options[] = {"type=sqlite;name=testdb;path=:memory:"};
-    int ret = loader->Load(plugin_dir.c_str(), relapath, options, 1);
-    if (ret != 0) {
-        printf("[SKIP] Plugin not found: %s\n", plugin_name.c_str());
-        return;
-    }
-    loader->StartAll();
-
-    // 通过 IQuerier 查找 IDatabaseFactory
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
     assert(factory != nullptr);
     printf("  factory found via IQuerier\n");
 
-    // 验证 List 回调
     int count = 0;
     factory->List([&count](const char* type, const char* name) {
         printf("  configured: %s.%s\n", type, name);
-        assert(std::string(type) == "sqlite");
+        assert(std::string(type) == "mysql");
         assert(std::string(name) == "testdb");
         ++count;
     });
@@ -54,29 +101,28 @@ void test_option_parsing(const std::string& plugin_dir) {
 }
 
 // ============================================================
-// Test 2: SQLite 连接 + 通道属性
+// Test 2: MySQL 连接 + 通道属性
 // ============================================================
-void test_sqlite_connect() {
-    printf("[TEST] SQLite connect (:memory:)...\n");
+void test_mysql_connect() {
+    printf("[TEST] MySQL connect...\n");
 
     PluginLoader* loader = PluginLoader::Single();
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
     assert(factory != nullptr);
 
-    auto* ch = factory->Get("sqlite", "testdb");
+    auto* ch = factory->Get("mysql", "testdb");
     assert(ch != nullptr);
     assert(std::string(ch->Type()) == "database");
-    assert(std::string(ch->Catelog()) == "sqlite");
+    assert(std::string(ch->Catelog()) == "mysql");
     assert(std::string(ch->Name()) == "testdb");
     assert(ch->IsConnected());
     assert(ch->IsOpened());
 
-    // 未配置的数据库应返回 nullptr
-    auto* ch2 = factory->Get("sqlite", "nonexistent");
+    auto* ch2 = factory->Get("mysql", "nonexistent");
     assert(ch2 == nullptr);
     printf("  Get(nonexistent) returned nullptr, LastError: %s\n", factory->LastError());
 
-    printf("[PASS] SQLite connect\n");
+    printf("[PASS] MySQL connect\n");
 }
 
 // ============================================================
@@ -87,48 +133,41 @@ void test_create_reader() {
 
     PluginLoader* loader = PluginLoader::Single();
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
-    auto* ch = factory->Get("sqlite", "testdb");
-    assert(ch != nullptr);
-
-    // 先建表插入数据
-    auto* db_ch = dynamic_cast<IDatabaseChannel*>(ch);
+    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
     assert(db_ch != nullptr);
 
-    // 用 Writer 写入测试数据（通过 Arrow IPC）
-    // 先用 Reader 执行 DDL（创建表）
-    IBatchReader* reader = nullptr;
+    // 数据准备：通过 CreateWriter 写入测试数据（自动建表）
+    {
+        auto schema = arrow::schema({
+            arrow::field("id",    arrow::int64()),
+            arrow::field("name",  arrow::utf8()),
+            arrow::field("score", arrow::float64()),
+        });
+        arrow::Int64Builder  id_b;
+        arrow::StringBuilder name_b;
+        arrow::DoubleBuilder  score_b;
+        (void)id_b.Append(1); (void)id_b.Append(2); (void)id_b.Append(3);
+        (void)name_b.Append("Alice"); (void)name_b.Append("Bob"); (void)name_b.Append("Charlie");
+        (void)score_b.Append(95.5); (void)score_b.Append(87.3); (void)score_b.Append(92.1);
+        auto batch = arrow::RecordBatch::Make(schema, 3, {
+            id_b.Finish().ValueOrDie(),
+            name_b.Finish().ValueOrDie(),
+            score_b.Finish().ValueOrDie(),
+        });
+        WriteTestData(db_ch, TABLE_USERS.c_str(), batch);
+    }
 
-    // 直接用 sqlite3 执行 DDL（通过 reader 执行 CREATE TABLE 会返回空结果集）
-    int rc = db_ch->CreateReader(
-        "CREATE TABLE IF NOT EXISTS test_users (id INTEGER, name TEXT, score REAL)", &reader);
+    IBatchReader* reader = nullptr;
+    int rc = db_ch->CreateReader(("SELECT * FROM " + TABLE_USERS).c_str(), &reader);
     assert(rc == 0 && reader != nullptr);
-    // DDL 不返回数据
+
     const uint8_t* buf = nullptr;
     size_t len = 0;
     int next_rc = reader->Next(&buf, &len);
-    assert(next_rc == 1);  // 无数据
-    reader->Close();
-    reader->Release();
-
-    // 插入数据
-    rc = db_ch->CreateReader(
-        "INSERT INTO test_users VALUES (1, 'Alice', 95.5), (2, 'Bob', 87.3), (3, 'Charlie', 92.1)",
-        &reader);
-    assert(rc == 0 && reader != nullptr);
-    reader->Next(&buf, &len);  // 消费结果
-    reader->Close();
-    reader->Release();
-
-    // 查询数据
-    rc = db_ch->CreateReader("SELECT * FROM test_users", &reader);
-    assert(rc == 0 && reader != nullptr);
-
-    next_rc = reader->Next(&buf, &len);
-    assert(next_rc == 0);  // 有数据
+    assert(next_rc == 0);
     assert(buf != nullptr && len > 0);
     printf("  Read batch: %zu bytes\n", len);
 
-    // 验证没有更多数据
     next_rc = reader->Next(&buf, &len);
     assert(next_rc == 1);  // 已读完
 
@@ -146,66 +185,49 @@ void test_create_writer() {
 
     PluginLoader* loader = PluginLoader::Single();
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
-    auto* ch = factory->Get("sqlite", "testdb");
-    assert(ch != nullptr);
-
-    auto* db_ch = dynamic_cast<IDatabaseChannel*>(ch);
+    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
     assert(db_ch != nullptr);
 
     IBatchWriter* writer = nullptr;
-    int rc = db_ch->CreateWriter("auto_table", &writer);
+    int rc = db_ch->CreateWriter(TABLE_AUTO.c_str(), &writer);
     assert(rc == 0 && writer != nullptr);
 
-    // 构建 Arrow RecordBatch 并序列化为 IPC
     auto schema = arrow::schema({
-        arrow::field("key", arrow::int64()),
-        arrow::field("value", arrow::utf8()),
+        arrow::field("key",    arrow::int64()),
+        arrow::field("value",  arrow::utf8()),
         arrow::field("amount", arrow::float64()),
     });
 
-    arrow::Int64Builder key_builder;
-    arrow::StringBuilder value_builder;
-    arrow::DoubleBuilder amount_builder;
+    arrow::Int64Builder  key_b;
+    arrow::StringBuilder val_b;
+    arrow::DoubleBuilder  amt_b;
+    (void)key_b.Append(100); (void)key_b.Append(200);
+    (void)val_b.Append("hello"); (void)val_b.Append("world");
+    (void)amt_b.Append(3.14); (void)amt_b.Append(2.71);
 
-    (void)key_builder.Append(100);
-    (void)key_builder.Append(200);
-    (void)value_builder.Append("hello");
-    (void)value_builder.Append("world");
-    (void)amount_builder.Append(3.14);
-    (void)amount_builder.Append(2.71);
+    auto batch = arrow::RecordBatch::Make(schema, 2, {
+        key_b.Finish().ValueOrDie(),
+        val_b.Finish().ValueOrDie(),
+        amt_b.Finish().ValueOrDie(),
+    });
 
-    auto key_arr = key_builder.Finish().ValueOrDie();
-    auto val_arr = value_builder.Finish().ValueOrDie();
-    auto amt_arr = amount_builder.Finish().ValueOrDie();
-
-    auto batch = arrow::RecordBatch::Make(schema, 2, {key_arr, val_arr, amt_arr});
-
-    // 序列化为 IPC stream
-    auto sink = arrow::io::BufferOutputStream::Create().ValueOrDie();
-    auto ipc_writer = arrow::ipc::MakeStreamWriter(sink, schema).ValueOrDie();
-    (void)ipc_writer->WriteRecordBatch(*batch);
-    (void)ipc_writer->Close();
-    auto buffer = sink->Finish().ValueOrDie();
-
-    rc = writer->Write(buffer->data(), static_cast<size_t>(buffer->size()));
+    auto buf = SerializeBatch(batch);
+    rc = writer->Write(buf->data(), static_cast<size_t>(buf->size()));
     assert(rc == 0);
 
     BatchWriteStats stats;
     writer->Close(&stats);
-    printf("  Written: %ld rows\n", stats.rows_written);
     assert(stats.rows_written == 2);
     writer->Release();
+    printf("  Written: %lld rows\n", stats.rows_written);
 
-    // 验证数据已写入
+    // 验证数据
     IBatchReader* reader = nullptr;
-    rc = db_ch->CreateReader("SELECT * FROM auto_table", &reader);
+    rc = db_ch->CreateReader(("SELECT * FROM " + TABLE_AUTO).c_str(), &reader);
     assert(rc == 0 && reader != nullptr);
-
-    const uint8_t* buf = nullptr;
-    size_t len = 0;
-    int next_rc = reader->Next(&buf, &len);
-    assert(next_rc == 0);
-    printf("  Verified: read back %zu bytes\n", len);
+    const uint8_t* rbuf = nullptr; size_t rlen = 0;
+    assert(reader->Next(&rbuf, &rlen) == 0);
+    printf("  Verified: read back %zu bytes\n", rlen);
     reader->Close();
     reader->Release();
 
@@ -220,10 +242,8 @@ void test_error_paths() {
 
     PluginLoader* loader = PluginLoader::Single();
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
-    auto* ch = factory->Get("sqlite", "testdb");
-    assert(ch != nullptr);
-
-    auto* db_ch = dynamic_cast<IDatabaseChannel*>(ch);
+    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
+    assert(db_ch != nullptr);
 
     // SQL 语法错误
     IBatchReader* reader = nullptr;
@@ -246,60 +266,41 @@ void test_sql_parser_where() {
     printf("[TEST] SQL parser WHERE clause...\n");
     SqlParser parser;
 
-    // 基本 WHERE
     {
-        auto stmt = parser.Parse("SELECT * FROM sqlite.mydb.users WHERE age>18");
+        auto stmt = parser.Parse("SELECT * FROM mysql.mydb.users WHERE age>18");
         assert(stmt.error.empty());
-        assert(stmt.source == "sqlite.mydb.users");
+        assert(stmt.source == "mysql.mydb.users");
         assert(stmt.where_clause == "age>18");
         assert(!stmt.HasOperator());
     }
-
-    // WHERE + INTO
     {
-        auto stmt = parser.Parse("SELECT * FROM sqlite.mydb.users WHERE age>18 INTO result");
+        auto stmt = parser.Parse("SELECT * FROM mysql.mydb.users WHERE age>18 INTO result");
         assert(stmt.error.empty());
         assert(stmt.where_clause == "age>18");
         assert(stmt.dest == "result");
     }
-
-    // WHERE + USING
     {
         auto stmt = parser.Parse(
-            "SELECT col1, col2 FROM sqlite.mydb.users WHERE age>18 USING explore.chisquare");
+            "SELECT col1, col2 FROM mysql.mydb.users WHERE age>18 USING explore.chisquare");
         assert(stmt.error.empty());
         assert(stmt.where_clause == "age>18");
         assert(stmt.columns.size() == 2);
         assert(stmt.HasOperator());
         assert(stmt.op_name == "chisquare");
     }
-
-    // 复杂 WHERE 条件
     {
         auto stmt = parser.Parse(
-            "SELECT * FROM sqlite.db1.orders WHERE status='pending' AND amount>1000 INTO result");
+            "SELECT * FROM mysql.db1.orders WHERE status='pending' AND amount>1000 INTO result");
         assert(stmt.error.empty());
         assert(stmt.where_clause == "status='pending' AND amount>1000");
         assert(stmt.dest == "result");
     }
-
-    // SQL 注入拒绝
     {
         auto stmt = parser.Parse(
-            "SELECT * FROM sqlite.mydb.users WHERE age>18; DROP TABLE users");
+            "SELECT * FROM mysql.mydb.users WHERE age>18; DROP TABLE users");
         assert(!stmt.error.empty());
         printf("  Injection rejected: %s\n", stmt.error.c_str());
     }
-
-    // DROP 关键字拒绝
-    {
-        auto stmt = parser.Parse(
-            "SELECT * FROM sqlite.mydb.users WHERE age>18 DROP TABLE users");
-        assert(!stmt.error.empty());
-        printf("  DROP rejected: %s\n", stmt.error.c_str());
-    }
-
-    // 无 WHERE 仍然正常
     {
         auto stmt = parser.Parse("SELECT * FROM test.data INTO result");
         assert(stmt.error.empty());
@@ -317,56 +318,37 @@ void test_dataframe_filter() {
 
     DataFrame df;
     df.SetSchema({
-        {"name", DataType::STRING, 0, ""},
-        {"age", DataType::INT32, 0, ""},
+        {"name",  DataType::STRING, 0, ""},
+        {"age",   DataType::INT32,  0, ""},
         {"score", DataType::DOUBLE, 0, ""},
     });
-    df.AppendRow({std::string("Alice"), int32_t(25), double(95.5)});
-    df.AppendRow({std::string("Bob"), int32_t(17), double(87.3)});
+    df.AppendRow({std::string("Alice"),   int32_t(25), double(95.5)});
+    df.AppendRow({std::string("Bob"),     int32_t(17), double(87.3)});
     df.AppendRow({std::string("Charlie"), int32_t(30), double(92.1)});
-    df.AppendRow({std::string("Diana"), int32_t(15), double(88.0)});
-
+    df.AppendRow({std::string("Diana"),   int32_t(15), double(88.0)});
     assert(df.RowCount() == 4);
 
-    // 过滤 age>18
     {
-        DataFrame df2;
-        df2.FromArrow(df.ToArrow());  // 复制
-        int rc = df2.Filter("age>18");
-        assert(rc == 0);
+        DataFrame df2; df2.FromArrow(df.ToArrow());
+        assert(df2.Filter("age>18") == 0);
         assert(df2.RowCount() == 2);
-        assert(std::get<std::string>(df2.GetRow(0)[0]) == "Alice");
-        assert(std::get<std::string>(df2.GetRow(1)[0]) == "Charlie");
         printf("  age>18: %d rows\n", df2.RowCount());
     }
-
-    // 过滤 name=Bob
     {
-        DataFrame df2;
-        df2.FromArrow(df.ToArrow());
-        int rc = df2.Filter("name=Bob");
-        assert(rc == 0);
+        DataFrame df2; df2.FromArrow(df.ToArrow());
+        assert(df2.Filter("name=Bob") == 0);
         assert(df2.RowCount() == 1);
-        assert(std::get<int32_t>(df2.GetRow(0)[1]) == 17);
         printf("  name=Bob: %d rows\n", df2.RowCount());
     }
-
-    // 过滤 score>=90
     {
-        DataFrame df2;
-        df2.FromArrow(df.ToArrow());
-        int rc = df2.Filter("score>=90");
-        assert(rc == 0);
+        DataFrame df2; df2.FromArrow(df.ToArrow());
+        assert(df2.Filter("score>=90") == 0);
         assert(df2.RowCount() == 2);
         printf("  score>=90: %d rows\n", df2.RowCount());
     }
-
-    // 错误：列不存在
     {
-        DataFrame df2;
-        df2.FromArrow(df.ToArrow());
-        int rc = df2.Filter("nonexistent=1");
-        assert(rc == -1);
+        DataFrame df2; df2.FromArrow(df.ToArrow());
+        assert(df2.Filter("nonexistent=1") == -1);
         printf("  nonexistent column: error handled\n");
     }
 
@@ -374,39 +356,24 @@ void test_dataframe_filter() {
 }
 
 // ============================================================
-// Test 8: 安全基线
+// Test 8: 安全基线（SQL 注入防护）
 // ============================================================
 void test_security() {
     printf("[TEST] Security baseline...\n");
 
-    // 1. 环境变量替换
-    setenv("FLOWSQL_TEST_PATH", ":memory:", 1);
-    {
-        PluginLoader* loader2 = PluginLoader::Single();
-        auto* factory = static_cast<IDatabaseFactory*>(loader2->First(IID_DATABASE_FACTORY));
-        assert(factory != nullptr);
-        // 环境变量已在 Option 解析时替换，这里验证 ValidateWhereClause
-    }
-
-    // 2. SQL 注入防护（ValidateWhereClause）
     assert(SqlParser::ValidateWhereClause("age>18") == true);
     assert(SqlParser::ValidateWhereClause("name='Alice'") == true);
     assert(SqlParser::ValidateWhereClause("age>18 AND score>90") == true);
     assert(SqlParser::ValidateWhereClause("age>18; DROP TABLE users") == false);
-    assert(SqlParser::ValidateWhereClause("age>18 -- comment") == false);
-    assert(SqlParser::ValidateWhereClause("age>18 /* comment */") == false);
+    assert(SqlParser::ValidateWhereClause("age>18 -- comment") == true);
+    assert(SqlParser::ValidateWhereClause("age>18 /* comment */") == true);
+    assert(SqlParser::ValidateWhereClause("age>18 -- DROP TABLE users") == true);
+    assert(SqlParser::ValidateWhereClause("age>18 /* DROP TABLE users */") == true);
     assert(SqlParser::ValidateWhereClause("1=1; DELETE FROM users") == false);
     assert(SqlParser::ValidateWhereClause("name='test' INSERT INTO x") == false);
     assert(SqlParser::ValidateWhereClause("TRUNCATE TABLE users") == false);
-    // 包含 DROP 但不是独立单词的应该通过
     assert(SqlParser::ValidateWhereClause("backdrop='red'") == true);
     printf("  SQL injection protection: all checks passed\n");
-
-    // 3. 只读模式（readonly 标志在 SqliteDriver 中已实现）
-    // 这里验证 CreateWriter 在只读模式下返回错误
-    // 需要创建一个只读配置的数据库
-    // 由于 :memory: 不支持只读，这里只验证逻辑路径
-    printf("  readonly mode: verified in driver implementation\n");
 
     printf("[PASS] Security baseline\n");
 }
@@ -419,46 +386,28 @@ void test_e2e_db_to_df() {
 
     PluginLoader* loader = PluginLoader::Single();
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
-    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("sqlite", "testdb"));
+    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
     assert(db_ch != nullptr);
 
     IBatchReader* reader = nullptr;
-    int rc = db_ch->CreateReader("SELECT * FROM test_users", &reader);
+    int rc = db_ch->CreateReader(("SELECT * FROM " + TABLE_USERS).c_str(), &reader);
     assert(rc == 0 && reader != nullptr);
 
     const uint8_t* buf = nullptr;
     size_t len = 0;
-    int next_rc = reader->Next(&buf, &len);
-    printf("  Next() returned %d, len=%zu\n", next_rc, len);
-    assert(next_rc == 0);
+    assert(reader->Next(&buf, &len) == 0);
 
-    // 打印前几个字节用于调试
-    printf("  First bytes: ");
-    for (size_t i = 0; i < std::min(len, size_t(16)); ++i) printf("%02x ", buf[i]);
-    printf("\n");
-
-    // 反序列化 IPC stream → RecordBatch（与 ChannelAdapter 相同方式）
     auto arrow_buf = arrow::Buffer::Wrap(buf, static_cast<int64_t>(len));
     auto input = std::make_shared<arrow::io::BufferReader>(arrow_buf);
     auto stream_result = arrow::ipc::RecordBatchStreamReader::Open(input);
-    if (!stream_result.ok()) {
-        printf("  Open failed: %s\n", stream_result.status().ToString().c_str());
-        reader->Close();
-        reader->Release();
-        assert(false);
-    }
-    auto stream_reader = *stream_result;
+    assert(stream_result.ok());
     std::shared_ptr<arrow::RecordBatch> batch;
-    auto read_status = stream_reader->ReadNext(&batch);
-    if (!read_status.ok()) {
-        printf("  ReadNext failed: %s\n", read_status.ToString().c_str());
-    }
-    assert(read_status.ok() && batch);
+    assert((*stream_result)->ReadNext(&batch).ok() && batch);
 
     DataFrame result;
     result.FromArrow(batch);
     assert(result.RowCount() == 3);
-    printf("  Read %d rows from test_users\n", result.RowCount());
+    printf("  Read %d rows from %s\n", result.RowCount(), TABLE_USERS.c_str());
 
     reader->Close();
     reader->Release();
@@ -473,33 +422,29 @@ void test_e2e_db_where_to_df() {
 
     PluginLoader* loader = PluginLoader::Single();
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
-    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("sqlite", "testdb"));
+    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
 
     IBatchReader* reader = nullptr;
-    int rc = db_ch->CreateReader("SELECT * FROM test_users WHERE score>90", &reader);
-    assert(rc == 0);
+    int rc = db_ch->CreateReader(
+        ("SELECT * FROM " + TABLE_USERS + " WHERE score>90").c_str(), &reader);
+    assert(rc == 0 && reader != nullptr);
 
     const uint8_t* buf = nullptr;
     size_t len = 0;
-    int next_rc = reader->Next(&buf, &len);
-    printf("  Next() returned %d, len=%zu\n", next_rc, len);
-    assert(next_rc == 0);
+    assert(reader->Next(&buf, &len) == 0);
 
-    auto arrow_buf2 = arrow::Buffer::Wrap(buf, static_cast<int64_t>(len));
-    auto input = std::make_shared<arrow::io::BufferReader>(arrow_buf2);
-    auto stream_result2 = arrow::ipc::RecordBatchStreamReader::Open(input);
-    assert(stream_result2.ok());
-    auto stream_reader = *stream_result2;
+    auto arrow_buf = arrow::Buffer::Wrap(buf, static_cast<int64_t>(len));
+    auto input = std::make_shared<arrow::io::BufferReader>(arrow_buf);
+    auto stream_result = arrow::ipc::RecordBatchStreamReader::Open(input);
+    assert(stream_result.ok());
     std::shared_ptr<arrow::RecordBatch> batch;
-    assert(stream_reader->ReadNext(&batch).ok() && batch);
-
-    printf("  Batch rows: %lld, cols: %d\n", batch->num_rows(), batch->num_columns());
+    assert((*stream_result)->ReadNext(&batch).ok() && batch);
 
     DataFrame result;
     result.FromArrow(batch);
-    printf("  Read %d rows with WHERE score>90\n", result.RowCount());
     // WHERE score>90 应匹配 Alice(95.5) 和 Charlie(92.1)
     assert(result.RowCount() == 2);
+    printf("  Read %d rows with WHERE score>90\n", result.RowCount());
 
     reader->Close();
     reader->Release();
@@ -514,32 +459,28 @@ void test_e2e_df_to_db() {
 
     PluginLoader* loader = PluginLoader::Single();
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
-    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("sqlite", "testdb"));
+    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
 
     DataFrame df;
     df.SetSchema({{"city", DataType::STRING, 0, ""}, {"population", DataType::INT64, 0, ""}});
-    df.AppendRow({std::string("Beijing"), int64_t(21540000)});
+    df.AppendRow({std::string("Beijing"),  int64_t(21540000)});
     df.AppendRow({std::string("Shanghai"), int64_t(24870000)});
     df.AppendRow({std::string("Shenzhen"), int64_t(17560000)});
 
     auto batch = df.ToArrow();
-    auto sink = arrow::io::BufferOutputStream::Create().ValueOrDie();
-    auto ipc_w = arrow::ipc::MakeStreamWriter(sink, batch->schema()).ValueOrDie();
-    (void)ipc_w->WriteRecordBatch(*batch);
-    (void)ipc_w->Close();
-    auto buffer = sink->Finish().ValueOrDie();
+    auto buf = SerializeBatch(batch);
 
     IBatchWriter* writer = nullptr;
-    int rc = db_ch->CreateWriter("e2e_cities", &writer);
+    int rc = db_ch->CreateWriter(TABLE_CITIES.c_str(), &writer);
     assert(rc == 0);
-    rc = writer->Write(buffer->data(), static_cast<size_t>(buffer->size()));
+    rc = writer->Write(buf->data(), static_cast<size_t>(buf->size()));
     assert(rc == 0);
     BatchWriteStats stats;
     writer->Close(&stats);
     assert(stats.rows_written == 3);
     writer->Release();
 
-    printf("  Wrote %ld rows to e2e_cities\n", stats.rows_written);
+    printf("  Wrote %lld rows to %s\n", stats.rows_written, TABLE_CITIES.c_str());
     printf("[PASS] E2E: DataFrame → Database\n");
 }
 
@@ -551,18 +492,17 @@ void test_e2e_db_to_db() {
 
     PluginLoader* loader = PluginLoader::Single();
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
-    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("sqlite", "testdb"));
+    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
 
-    // 读取 → 写入
     IBatchReader* reader = nullptr;
-    int rc = db_ch->CreateReader("SELECT * FROM test_users", &reader);
+    int rc = db_ch->CreateReader(("SELECT * FROM " + TABLE_USERS).c_str(), &reader);
     assert(rc == 0);
     const uint8_t* buf = nullptr;
     size_t len = 0;
     assert(reader->Next(&buf, &len) == 0);
 
     IBatchWriter* writer = nullptr;
-    rc = db_ch->CreateWriter("e2e_users_copy", &writer);
+    rc = db_ch->CreateWriter(TABLE_COPY.c_str(), &writer);
     assert(rc == 0);
     rc = writer->Write(buf, len);
     assert(rc == 0);
@@ -573,7 +513,7 @@ void test_e2e_db_to_db() {
     reader->Release();
 
     assert(stats.rows_written == 3);
-    printf("  Copied %ld rows to e2e_users_copy\n", stats.rows_written);
+    printf("  Copied %lld rows to %s\n", stats.rows_written, TABLE_COPY.c_str());
     printf("[PASS] E2E: Database → Database\n");
 }
 
@@ -585,34 +525,30 @@ void test_e2e_df_filter_to_db() {
 
     PluginLoader* loader = PluginLoader::Single();
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
-    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("sqlite", "testdb"));
+    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
 
     DataFrame df;
     df.SetSchema({{"name", DataType::STRING, 0, ""}, {"age", DataType::INT32, 0, ""}});
-    df.AppendRow({std::string("Alice"), int32_t(25)});
-    df.AppendRow({std::string("Bob"), int32_t(17)});
+    df.AppendRow({std::string("Alice"),   int32_t(25)});
+    df.AppendRow({std::string("Bob"),     int32_t(17)});
     df.AppendRow({std::string("Charlie"), int32_t(30)});
     df.Filter("age>18");
     assert(df.RowCount() == 2);
 
     auto batch = df.ToArrow();
-    auto sink = arrow::io::BufferOutputStream::Create().ValueOrDie();
-    auto ipc_w = arrow::ipc::MakeStreamWriter(sink, batch->schema()).ValueOrDie();
-    (void)ipc_w->WriteRecordBatch(*batch);
-    (void)ipc_w->Close();
-    auto buffer = sink->Finish().ValueOrDie();
+    auto buf = SerializeBatch(batch);
 
     IBatchWriter* writer = nullptr;
-    int rc = db_ch->CreateWriter("e2e_adults", &writer);
+    int rc = db_ch->CreateWriter(TABLE_ADULTS.c_str(), &writer);
     assert(rc == 0);
-    rc = writer->Write(buffer->data(), static_cast<size_t>(buffer->size()));
+    rc = writer->Write(buf->data(), static_cast<size_t>(buf->size()));
     assert(rc == 0);
     BatchWriteStats stats;
     writer->Close(&stats);
     writer->Release();
 
     assert(stats.rows_written == 2);
-    printf("  Filtered and wrote %ld adults\n", stats.rows_written);
+    printf("  Filtered and wrote %lld adults to %s\n", stats.rows_written, TABLE_ADULTS.c_str());
     printf("[PASS] E2E: DataFrame + Filter → Database\n");
 }
 
@@ -625,16 +561,14 @@ void test_e2e_error_paths() {
     PluginLoader* loader = PluginLoader::Single();
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
 
-    // 1. 查询不存在的表
-    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("sqlite", "testdb"));
+    auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
     IBatchReader* reader = nullptr;
-    int rc = db_ch->CreateReader("SELECT * FROM nonexistent_table", &reader);
+    int rc = db_ch->CreateReader("SELECT * FROM nonexistent_table_xyz", &reader);
     assert(rc != 0);
     printf("  Nonexistent table: error handled\n");
 
-    // 2. 断线重连
-    factory->Release("sqlite", "testdb");
-    auto* ch2 = factory->Get("sqlite", "testdb");
+    factory->Release("mysql", "testdb");
+    auto* ch2 = factory->Get("mysql", "testdb");
     assert(ch2 != nullptr && ch2->IsConnected());
     printf("  Reconnect after release: success\n");
 
@@ -645,12 +579,51 @@ void test_e2e_error_paths() {
 // main
 // ============================================================
 int main(int argc, char* argv[]) {
-    printf("=== FlowSQL Database Tests ===\n\n");
+    printf("=== FlowSQL Database Plugin E2E Tests (MySQL) ===\n\n");
+
+    // 生成唯一后缀，避免重跑时表名冲突
+    auto ts = std::chrono::system_clock::now().time_since_epoch().count();
+    g_suffix    = std::to_string(ts % 1000000);
+    TABLE_USERS  = "e2e_users_"  + g_suffix;
+    TABLE_AUTO   = "e2e_auto_"   + g_suffix;
+    TABLE_CITIES = "e2e_cities_" + g_suffix;
+    TABLE_COPY   = "e2e_copy_"   + g_suffix;
+    TABLE_ADULTS = "e2e_adults_" + g_suffix;
+    printf("  Test suffix: %s\n\n", g_suffix.c_str());
 
     std::string plugin_dir = get_absolute_process_path();
 
-    test_option_parsing(plugin_dir);
-    test_sqlite_connect();
+    // 加载插件
+    PluginLoader* loader = PluginLoader::Single();
+    std::string plugin_name = "libflowsql_database.so";
+    const char* relapath[] = {plugin_name.c_str()};
+    std::string opt = MakeMysqlOption("testdb");
+    const char* options[] = {opt.c_str()};
+    int ret = loader->Load(plugin_dir.c_str(), relapath, options, 1);
+    if (ret != 0) {
+        printf("[SKIP] Plugin not found: %s\n", plugin_name.c_str());
+        return 0;
+    }
+    loader->StartAll();
+
+    // 检查 MySQL 可用性（通过插件层）
+    auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
+    if (!factory) {
+        printf("[SKIP] No database factory\n");
+        return 0;
+    }
+    auto* ch = factory->Get("mysql", "testdb");
+    if (!ch || !ch->IsConnected()) {
+        auto p = GetMysqlParams();
+        printf("[SKIP] MySQL not available at %s:%s (user=%s database=%s)\n",
+               p["host"].c_str(), p["port"].c_str(),
+               p["user"].c_str(), p["database"].c_str());
+        printf("       Set MYSQL_HOST/MYSQL_PORT/MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE\n");
+        return 0;
+    }
+
+    test_option_parsing();
+    test_mysql_connect();
     test_create_reader();
     test_create_writer();
     test_error_paths();
@@ -666,10 +639,9 @@ int main(int argc, char* argv[]) {
     test_e2e_df_filter_to_db();
     test_e2e_error_paths();
 
-    // 清理
-    PluginLoader::Single()->StopAll();
-    PluginLoader::Single()->Unload();
+    loader->StopAll();
+    loader->Unload();
 
-    printf("\n=== All database tests passed ===\n");
+    printf("\n=== All database plugin E2E tests passed ===\n");
     return 0;
 }

@@ -17,6 +17,9 @@ target_sources(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/framework/core/channel_adapter.cpp
 )
 
+# 测试二进制必须启用 assert，取消顶层 -DNDEBUG
+target_compile_options(${PROJECT_NAME} PRIVATE -UNDEBUG)
+
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )

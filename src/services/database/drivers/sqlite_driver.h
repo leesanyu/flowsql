@@ -62,8 +62,8 @@ public:
     ~SqliteResultSet() override;
 
     int FieldCount() override;
-    const char* FieldName(int index) override;
-    int FieldType(int index) override;
+    const char* FieldName(int index) const override;
+    int FieldType(int index) const override;
     int FieldLength(int index) override;
     bool HasNext() override;
     bool Next() override;
@@ -73,8 +73,10 @@ public:
     int GetString(int index, const char** value, size_t* len) override;
     bool IsNull(int index) override;
 
-    // 供 InferSchema 访问底层 stmt
+protected:
+    // 仅供同驱动内部（InferSchema）访问底层 stmt，不对外暴露
     sqlite3_stmt* GetStmt() const { return stmt_; }
+    friend class SqliteSession;
 
 private:
     sqlite3_stmt* stmt_;

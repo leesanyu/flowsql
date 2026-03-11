@@ -21,6 +21,10 @@ namespace database {
 
 // IResultSet — 查询结果集接口
 // 封装数据库查询结果，提供行迭代和元数据访问
+//
+// 所有权说明：IResultSet 由 ExecuteQuery 的调用方负责释放（delete）。
+// 在 RelationDbSessionBase 中，IResultSet 被传入 IBatchReader，由 IBatchReader 持有并在
+// Release() 时释放。直接调用 ExecuteQuery 的代码需手动 delete 返回的 IResultSet。
 interface IResultSet {
     virtual ~IResultSet() = default;
 
@@ -28,10 +32,10 @@ interface IResultSet {
     virtual int FieldCount() = 0;
 
     // 获取字段名
-    virtual const char* FieldName(int index) = 0;
+    virtual const char* FieldName(int index) const = 0;
 
     // 获取字段类型
-    virtual int FieldType(int index) = 0;
+    virtual int FieldType(int index) const = 0;
 
     // 获取字段长度
     virtual int FieldLength(int index) = 0;
@@ -104,23 +108,24 @@ public:
     }
 
     // ==================== 事务控制 ====================
-    // 注意：某些列式数据库（如 ClickHouse）不支持事务，可返回 0（空实现）
+    // 返回值语义统一：0 = 成功，-1 = 失败（error 包含原因）
+    // 注意：某些列式数据库（如 ClickHouse）不支持事务，默认实现直接返回 0（空操作）
 
     // 开始事务
     virtual int BeginTransaction(std::string* error) {
-        if (error) *error = "BeginTransaction not supported";
-        return 0;  // 默认空实现
+        (void)error;
+        return 0;  // 默认空实现（不支持事务的数据库）
     }
 
     // 提交事务
     virtual int CommitTransaction(std::string* error) {
-        if (error) *error = "CommitTransaction not supported";
+        (void)error;
         return 0;  // 默认空实现
     }
 
     // 回滚事务
     virtual int RollbackTransaction(std::string* error) {
-        if (error) *error = "RollbackTransaction not supported";
+        (void)error;
         return 0;  // 默认空实现
     }
 

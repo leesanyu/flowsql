@@ -9,6 +9,12 @@ namespace flowsql {
 // {0xc1d2e3f4-abcd-ef01-2345-6789abcdef01}
 const Guid IID_CHANNEL = {0xc1d2e3f4, 0xabcd, 0xef01, {0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01}};
 
+// 通道类型常量
+namespace ChannelType {
+    constexpr const char* kDataFrame = "dataframe";
+    constexpr const char* kDatabase  = "database";
+}  // namespace ChannelType
+
 // IChannel — 数据通道基类（纯接口，不继承 IPlugin）
 // 只定义生命周期、身份和元数据，数据读写方法由子类定义（IDataFrameChannel、IDatabaseChannel 等）
 interface IChannel {

@@ -68,8 +68,8 @@ public:
     ~MysqlResultSet() override;
 
     int FieldCount() override;
-    const char* FieldName(int index) override;
-    int FieldType(int index) override;
+    const char* FieldName(int index) const override;
+    int FieldType(int index) const override;
     int FieldLength(int index) override;
     bool HasNext() override;
     bool Next() override;
@@ -79,8 +79,10 @@ public:
     int GetString(int index, const char** value, size_t* len) override;
     bool IsNull(int index) override;
 
-    // 供 InferSchema 访问底层 MYSQL_RES
+protected:
+    // 仅供同驱动内部（InferSchema）访问底层 MYSQL_RES，不对外暴露
     MYSQL_RES* GetResult() const { return result_; }
+    friend class MysqlSession;
 
 private:
     MYSQL_RES* result_;
