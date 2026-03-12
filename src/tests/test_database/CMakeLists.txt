@@ -50,3 +50,14 @@ target_compile_options(test_mysql PRIVATE -UNDEBUG)
 set_target_properties(test_mysql PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
+
+# ClickHouse 驱动独立测试（需要运行中的 ClickHouse，通过环境变量配置连接参数）
+add_executable(test_clickhouse test_clickhouse.cpp)
+target_include_directories(test_clickhouse PUBLIC ${CMAKE_SOURCE_DIR})
+add_thirddepen(test_clickhouse arrow rapidjson)
+add_dependencies(test_clickhouse flowsql_common flowsql_database)
+target_link_libraries(test_clickhouse flowsql_common flowsql_database)
+target_compile_options(test_clickhouse PRIVATE -UNDEBUG)
+set_target_properties(test_clickhouse PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
+)

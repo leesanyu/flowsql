@@ -51,6 +51,9 @@ class DatabaseChannel : public IDatabaseChannel {
                           const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
                           std::string* error) override;
 
+    // IDatabaseChannel 通用接口
+    int ExecuteSql(const char* sql, std::string* error) override;
+
  private:
     std::string type_;
     std::string name_;

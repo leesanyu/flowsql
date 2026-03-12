@@ -739,6 +739,354 @@ void test_concurrent_writers() {
 }
 
 // ============================================================
+// ClickHouse E2E 辅助
+// ============================================================
+static std::string g_ch_suffix;
+
+static std::string MakeClickHouseOption(const std::string& name) {
+    const char* host = getenv("CH_HOST")     ? getenv("CH_HOST")     : "127.0.0.1";
+    const char* port = getenv("CH_PORT")     ? getenv("CH_PORT")     : "8123";
+    const char* user = getenv("CH_USER")     ? getenv("CH_USER")     : "default";
+    const char* pass = getenv("CH_PASSWORD") ? getenv("CH_PASSWORD") : "";
+    const char* db   = getenv("CH_DATABASE") ? getenv("CH_DATABASE") : "default";
+    return "type=clickhouse;name=" + name +
+           ";host=" + host + ";port=" + port +
+           ";user=" + user + ";password=" + pass + ";database=" + db;
+}
+
+static std::shared_ptr<arrow::RecordBatch> MakeChTypeMatrixBatch() {
+    auto schema = arrow::schema({
+        arrow::field("c_int32",   arrow::int32()),
+        arrow::field("c_int64",   arrow::int64()),
+        arrow::field("c_float32", arrow::float32()),
+        arrow::field("c_float64", arrow::float64()),
+        arrow::field("c_string",  arrow::utf8()),
+        arrow::field("c_bool",    arrow::boolean()),
+    });
+    arrow::Int32Builder   b_i32;
+    arrow::Int64Builder   b_i64;
+    arrow::FloatBuilder   b_f32;
+    arrow::DoubleBuilder  b_f64;
+    arrow::StringBuilder  b_str;
+    arrow::BooleanBuilder b_bool;
+    (void)b_i32.AppendValues({1, 2, 3});
+    (void)b_i64.AppendValues({100LL, 200LL, 300LL});
+    (void)b_f32.AppendValues({1.1f, 2.2f, 3.3f});
+    (void)b_f64.AppendValues({1.11, 2.22, 3.33});
+    (void)b_str.AppendValues({"hello", "world", "clickhouse"});
+    (void)b_bool.AppendValues(std::vector<bool>{true, false, true});
+    std::shared_ptr<arrow::Array> a_i32, a_i64, a_f32, a_f64, a_str, a_bool;
+    (void)b_i32.Finish(&a_i32); (void)b_i64.Finish(&a_i64);
+    (void)b_f32.Finish(&a_f32); (void)b_f64.Finish(&a_f64);
+    (void)b_str.Finish(&a_str); (void)b_bool.Finish(&a_bool);
+    return arrow::RecordBatch::Make(schema, 3, {a_i32, a_i64, a_f32, a_f64, a_str, a_bool});
+}
+
+// ============================================================
+// E1: ClickHouse 通道连接
+// ============================================================
+void test_clickhouse_connect(IDatabaseFactory* factory) {
+    printf("[TEST] E1: ClickHouse connect via plugin...\n");
+
+    auto* ch = factory->Get("clickhouse", "ch1");
+    assert(ch != nullptr);
+    assert(ch->IsConnected());
+    assert(std::string(ch->Catelog()) == "clickhouse");
+    assert(std::string(ch->Name()) == "ch1");
+    printf("  factory->Get(clickhouse, ch1): connected OK\n");
+
+    printf("[PASS] E1: ClickHouse connect\n");
+}
+
+// ============================================================
+// E2: CreateArrowReader — 通过插件层读取 RecordBatch
+// ============================================================
+void test_clickhouse_create_arrow_reader(IDatabaseFactory* factory) {
+    printf("[TEST] E2: ClickHouse CreateArrowReader...\n");
+
+    auto* ch = dynamic_cast<IDatabaseChannel*>(factory->Get("clickhouse", "ch1"));
+    assert(ch != nullptr);
+
+    // 建表并写入数据
+    std::string table = "e2e_ch_reader_" + g_ch_suffix;
+    std::string error;
+    {
+        std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+        ch->ExecuteQueryArrow(
+            ("CREATE TABLE " + table + " (id Int32, val String)"
+             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy, &error);
+    }
+    auto schema = arrow::schema({arrow::field("id", arrow::int32()),
+                                  arrow::field("val", arrow::utf8())});
+    arrow::Int32Builder b_id; arrow::StringBuilder b_val;
+    (void)b_id.AppendValues({1, 2, 3});
+    (void)b_val.AppendValues({"a", "b", "c"});
+    std::shared_ptr<arrow::Array> a_id, a_val;
+    (void)b_id.Finish(&a_id); (void)b_val.Finish(&a_val);
+    auto batch = arrow::RecordBatch::Make(schema, 3, {a_id, a_val});
+    ch->WriteArrowBatches(table.c_str(), {batch}, &error);
+
+    // 通过 CreateArrowReader 读取
+    IArrowReader* reader = nullptr;
+    int rc = ch->CreateArrowReader(("SELECT * FROM " + table).c_str(), &reader);
+    assert(rc == 0 && reader != nullptr);
+
+    std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+    rc = reader->ExecuteQueryArrow(nullptr, &batches, &error);
+    assert(rc == 0);
+    assert(!batches.empty());
+    int64_t total = 0;
+    for (const auto& b : batches) total += b->num_rows();
+    assert(total == 3);
+    assert(batches[0]->num_columns() == 2);
+    printf("  CreateArrowReader: %lld rows, %d columns\n",
+           (long long)total, batches[0]->num_columns());
+    reader->Release();
+
+    // 清理
+    std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
+    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+    printf("[PASS] E2: ClickHouse CreateArrowReader\n");
+}
+
+// ============================================================
+// E3: CreateArrowWriter — 通过插件层写入 RecordBatch
+// ============================================================
+void test_clickhouse_create_arrow_writer(IDatabaseFactory* factory) {
+    printf("[TEST] E3: ClickHouse CreateArrowWriter...\n");
+
+    auto* ch = dynamic_cast<IDatabaseChannel*>(factory->Get("clickhouse", "ch1"));
+    assert(ch != nullptr);
+
+    std::string table = "e2e_ch_writer_" + g_ch_suffix;
+    std::string error;
+    {
+        std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+        ch->ExecuteQueryArrow(
+            ("CREATE TABLE " + table + " (id Int32)"
+             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy, &error);
+    }
+
+    // 通过 CreateArrowWriter 写入
+    IArrowWriter* writer = nullptr;
+    int rc = ch->CreateArrowWriter(table.c_str(), &writer);
+    assert(rc == 0 && writer != nullptr);
+
+    auto schema = arrow::schema({arrow::field("id", arrow::int32())});
+    arrow::Int32Builder b;
+    (void)b.AppendValues({10, 20, 30, 40, 50});
+    std::shared_ptr<arrow::Array> a;
+    (void)b.Finish(&a);
+    auto batch = arrow::RecordBatch::Make(schema, 5, {a});
+
+    rc = writer->WriteBatches(table.c_str(), {batch}, &error);
+    assert(rc == 0);
+    writer->Release();
+
+    // 回读验证行数
+    std::vector<std::shared_ptr<arrow::RecordBatch>> read_batches;
+    rc = ch->ExecuteQueryArrow(("SELECT * FROM " + table).c_str(), &read_batches, &error);
+    assert(rc == 0);
+    int64_t total = 0;
+    for (const auto& b2 : read_batches) total += b2->num_rows();
+    assert(total == 5);
+    printf("  CreateArrowWriter: wrote and read back %lld rows\n", (long long)total);
+
+    std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
+    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+    printf("[PASS] E3: ClickHouse CreateArrowWriter\n");
+}
+
+// ============================================================
+// E4: Arrow 类型矩阵 — 通过插件层写入/读取全类型
+// ============================================================
+void test_clickhouse_arrow_type_matrix(IDatabaseFactory* factory) {
+    printf("[TEST] E4: ClickHouse Arrow type matrix via plugin...\n");
+
+    auto* ch = dynamic_cast<IDatabaseChannel*>(factory->Get("clickhouse", "ch1"));
+    assert(ch != nullptr);
+
+    std::string table = "e2e_ch_types_" + g_ch_suffix;
+    std::string error;
+    {
+        std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+        ch->ExecuteQueryArrow(
+            ("CREATE TABLE " + table +
+             " (c_int32 Int32, c_int64 Int64, c_float32 Float32,"
+             "  c_float64 Float64, c_string String, c_bool Bool)"
+             " ENGINE = MergeTree() ORDER BY c_int32").c_str(), &dummy, &error);
+    }
+
+    auto batch = MakeChTypeMatrixBatch();
+    int rc = ch->WriteArrowBatches(table.c_str(), {batch}, &error);
+    assert(rc == 0);
+
+    std::vector<std::shared_ptr<arrow::RecordBatch>> read_batches;
+    rc = ch->ExecuteQueryArrow(
+        ("SELECT * FROM " + table + " ORDER BY c_int32").c_str(), &read_batches, &error);
+    assert(rc == 0);
+    assert(!read_batches.empty());
+    int64_t total = 0;
+    for (const auto& b : read_batches) total += b->num_rows();
+    assert(total == 3);
+    assert(read_batches[0]->num_columns() == 6);
+
+    // 验证 c_int32 和 c_string 两列（代表整数和字符串类型）
+    auto col_i32 = std::static_pointer_cast<arrow::Int32Array>(read_batches[0]->column(0));
+    assert(col_i32->Value(0) == 1 && col_i32->Value(1) == 2 && col_i32->Value(2) == 3);
+    auto col_str = std::static_pointer_cast<arrow::StringArray>(read_batches[0]->column(4));
+    assert(col_str->GetString(0) == "hello");
+    printf("  type matrix: %lld rows, 6 columns, values verified\n", (long long)total);
+
+    std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
+    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+    printf("[PASS] E4: ClickHouse Arrow type matrix\n");
+}
+
+// ============================================================
+// E5: ClickHouse 通道调用行式接口 CreateReader 应返回 -1
+// ============================================================
+void test_clickhouse_create_reader_unsupported(IDatabaseFactory* factory) {
+    printf("[TEST] E5: ClickHouse CreateReader (row interface) should return -1...\n");
+
+    auto* ch = dynamic_cast<IDatabaseChannel*>(factory->Get("clickhouse", "ch1"));
+    assert(ch != nullptr);
+
+    IBatchReader* reader = nullptr;
+    int rc = ch->CreateReader("SELECT 1", &reader);
+    assert(rc != 0);
+    assert(reader == nullptr);
+    printf("  CreateReader on ClickHouse channel returned %d (expected -1)\n", rc);
+
+    printf("[PASS] E5: ClickHouse CreateReader unsupported\n");
+}
+
+// ============================================================
+// E6: 8 线程并发 CreateArrowReader
+// ============================================================
+void test_concurrent_arrow_readers(IDatabaseFactory* factory) {
+    printf("[TEST] E6: Concurrent CreateArrowReader (8 threads)...\n");
+
+    auto* ch = dynamic_cast<IDatabaseChannel*>(factory->Get("clickhouse", "ch1"));
+    assert(ch != nullptr);
+
+    // 准备共享表
+    std::string table = "e2e_ch_conc_r_" + g_ch_suffix;
+    std::string error;
+    {
+        std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+        ch->ExecuteQueryArrow(
+            ("CREATE TABLE " + table + " (id Int32)"
+             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy, &error);
+        auto schema = arrow::schema({arrow::field("id", arrow::int32())});
+        arrow::Int32Builder b;
+        for (int i = 0; i < 10; ++i) (void)b.Append(i);
+        std::shared_ptr<arrow::Array> a; (void)b.Finish(&a);
+        auto batch = arrow::RecordBatch::Make(schema, 10, {a});
+        ch->WriteArrowBatches(table.c_str(), {batch}, &error);
+    }
+
+    const int N = 8;
+    std::atomic<int> success{0}, fail{0};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < N; ++i) {
+        threads.emplace_back([&, ch, table]() {
+            IArrowReader* reader = nullptr;
+            std::string err;
+            int rc = ch->CreateArrowReader(("SELECT * FROM " + table).c_str(), &reader);
+            if (rc != 0 || !reader) { fail++; return; }
+            std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+            rc = reader->ExecuteQueryArrow(nullptr, &batches, &err);
+            reader->Release();
+            if (rc != 0) { fail++; return; }
+            int64_t total = 0;
+            for (const auto& b : batches) total += b->num_rows();
+            if (total == 10) success++;
+            else fail++;
+        });
+    }
+    for (auto& t : threads) t.join();
+
+    printf("  %d/%d threads succeeded\n", success.load(), N);
+    assert(fail == 0);
+    assert(success == N);
+
+    std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
+    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+    printf("[PASS] E6: Concurrent CreateArrowReader\n");
+}
+
+// ============================================================
+// E7: 6 线程并发 CreateArrowWriter（各写不同表）
+// ============================================================
+void test_concurrent_arrow_writers(IDatabaseFactory* factory) {
+    printf("[TEST] E7: Concurrent CreateArrowWriter (6 threads)...\n");
+
+    auto* ch = dynamic_cast<IDatabaseChannel*>(factory->Get("clickhouse", "ch1"));
+    assert(ch != nullptr);
+
+    const int N = 6;
+    const int ROWS = 50;
+    std::vector<std::string> tables;
+    std::string error;
+
+    // 预建表
+    for (int i = 0; i < N; ++i) {
+        std::string t = "e2e_ch_conc_w_" + g_ch_suffix + "_" + std::to_string(i);
+        tables.push_back(t);
+        std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + t).c_str(), &dummy, &error);
+        ch->ExecuteQueryArrow(
+            ("CREATE TABLE " + t + " (id Int32)"
+             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy, &error);
+    }
+
+    std::atomic<int> success{0}, fail{0};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < N; ++i) {
+        threads.emplace_back([&, ch, i]() {
+            IArrowWriter* writer = nullptr;
+            std::string err;
+            int rc = ch->CreateArrowWriter(tables[i].c_str(), &writer);
+            if (rc != 0 || !writer) { fail++; return; }
+
+            auto schema = arrow::schema({arrow::field("id", arrow::int32())});
+            arrow::Int32Builder b;
+            for (int r = 0; r < ROWS; ++r) (void)b.Append(r);
+            std::shared_ptr<arrow::Array> a; (void)b.Finish(&a);
+            auto batch = arrow::RecordBatch::Make(schema, ROWS, {a});
+
+            rc = writer->WriteBatches(tables[i].c_str(), {batch}, &err);
+            writer->Release();
+            if (rc == 0) success++;
+            else fail++;
+        });
+    }
+    for (auto& t : threads) t.join();
+
+    printf("  %d/%d threads wrote successfully\n", success.load(), N);
+    assert(fail == 0);
+    assert(success == N);
+
+    // 验证每张表行数
+    for (int i = 0; i < N; ++i) {
+        std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+        ch->ExecuteQueryArrow(("SELECT * FROM " + tables[i]).c_str(), &batches, &error);
+        int64_t total = 0;
+        for (const auto& b : batches) total += b->num_rows();
+        assert(total == ROWS);
+        std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + tables[i]).c_str(), &dummy, &error);
+    }
+    printf("  all %d tables verified (%d rows each)\n", N, ROWS);
+    printf("[PASS] E7: Concurrent CreateArrowWriter\n");
+}
+
+// ============================================================
 // main
 // ============================================================
 int main(int argc, char* argv[]) {
@@ -804,9 +1152,75 @@ int main(int argc, char* argv[]) {
     test_concurrent_readers();
     test_concurrent_writers();
 
+    // 清理 MySQL 测试产生的所有临时表
+    {
+        auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
+        auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
+        if (db_ch) {
+            std::string err;
+            // 全局表
+            for (const auto& t : {TABLE_USERS, TABLE_AUTO, TABLE_CITIES, TABLE_COPY, TABLE_ADULTS}) {
+                db_ch->ExecuteSql(("DROP TABLE IF EXISTS " + t).c_str(), &err);
+            }
+            // 并发读测试表
+            db_ch->ExecuteSql(("DROP TABLE IF EXISTS mt_readers_" + g_suffix).c_str(), &err);
+            // 并发写测试表（6 张）
+            for (int i = 0; i < 6; ++i) {
+                db_ch->ExecuteSql(
+                    ("DROP TABLE IF EXISTS mt_writers_" + g_suffix + "_" + std::to_string(i)).c_str(), &err);
+            }
+            printf("  [CLEANUP] MySQL temp tables dropped\n");
+        }
+    }
+
     loader->StopAll();
     loader->Unload();
 
     printf("\n=== All database plugin E2E tests passed ===\n");
+
+    // ============================================================
+    // ClickHouse E2E（E1-E7）— 复用同一 loader，重新加载插件
+    // ============================================================
+    printf("\n=== FlowSQL Database Plugin E2E Tests (ClickHouse) ===\n\n");
+
+    auto ts2 = std::chrono::system_clock::now().time_since_epoch().count();
+    g_ch_suffix = std::to_string(ts2 % 1000000);
+    printf("  Test suffix: %s\n\n", g_ch_suffix.c_str());
+
+    std::string ch_opt = MakeClickHouseOption("ch1");
+    const char* ch_relapath[] = {plugin_name.c_str()};
+    const char* ch_options[]  = {ch_opt.c_str()};
+    int ch_ret = loader->Load(plugin_dir.c_str(), ch_relapath, ch_options, 1);
+    if (ch_ret != 0) {
+        printf("[SKIP] Plugin not found for ClickHouse tests\n");
+        return 0;
+    }
+    loader->StartAll();
+
+    auto* ch_factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
+    if (!ch_factory) {
+        printf("[SKIP] No database factory for ClickHouse\n");
+        loader->StopAll(); loader->Unload();
+        return 0;
+    }
+    auto* ch_ch = ch_factory->Get("clickhouse", "ch1");
+    if (!ch_ch || !ch_ch->IsConnected()) {
+        printf("[SKIP] ClickHouse not available. Set CH_HOST/CH_PORT/CH_USER/CH_PASSWORD/CH_DATABASE\n");
+        loader->StopAll(); loader->Unload();
+        return 0;
+    }
+
+    test_clickhouse_connect(ch_factory);
+    test_clickhouse_create_arrow_reader(ch_factory);
+    test_clickhouse_create_arrow_writer(ch_factory);
+    test_clickhouse_arrow_type_matrix(ch_factory);
+    test_clickhouse_create_reader_unsupported(ch_factory);
+    test_concurrent_arrow_readers(ch_factory);
+    test_concurrent_arrow_writers(ch_factory);
+
+    loader->StopAll();
+    loader->Unload();
+
+    printf("\n=== All ClickHouse E2E tests passed (E1-E7) ===\n");
     return 0;
 }

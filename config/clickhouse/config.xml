@@ -3,7 +3,10 @@
     <max_server_memory_usage>8589934592</max_server_memory_usage>
 
     <!-- 后台线程池：写入合并、数据移动 -->
-    <background_pool_size>8</background_pool_size>
+    <!-- background_pool_size * background_merges_mutations_concurrency_ratio 必须 >= -->
+    <!-- number_of_free_entries_in_pool_to_execute_mutation（默认 20），否则启动报错 -->
+    <!-- 16 * 2 = 32 >= 20，满足约束 -->
+    <background_pool_size>16</background_pool_size>
     <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
 
     <!-- 连接限制 -->

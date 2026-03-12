@@ -1,5 +1,7 @@
 #include "mysql_driver.h"
 
+#include "../relation_adapters.h"
+
 #include <arrow/api.h>
 #include <arrow/io/memory.h>
 #include <arrow/ipc/reader.h>
@@ -274,236 +276,22 @@ std::shared_ptr<arrow::Schema> MysqlSession::InferSchema(IResultSet* result, std
     return arrow::schema(arrow_fields);
 }
 
-// ==================== MysqlBatchReader 实现 ====================
-
-class MysqlBatchReader : public IBatchReader {
-public:
-    MysqlBatchReader(std::shared_ptr<IDbSession> session,
-                     IResultSet* result,
-                     std::shared_ptr<arrow::Schema> schema,
-                     int batch_size = 1024)
-        : session_(session), result_(result), schema_(std::move(schema)),
-          batch_size_(batch_size) {}
-
-    ~MysqlBatchReader() override = default;
-
-    int GetSchema(const uint8_t** data, size_t* size) override {
-        if (schema_buffer_) {
-            *data = schema_buffer_->data();
-            *size = schema_buffer_->size();
-            return 0;
-        }
-
-        auto buffer_output_result = arrow::io::BufferOutputStream::Create();
-        if (!buffer_output_result.ok()) return -1;
-        auto buffer_output = buffer_output_result.ValueOrDie();
-
-        auto writer_result = arrow::ipc::MakeStreamWriter(buffer_output, schema_);
-        if (!writer_result.ok()) return -1;
-        auto writer = writer_result.ValueOrDie();
-
-        if (!writer->Close().ok()) return -1;
-
-        auto buffer_result = buffer_output->Finish();
-        if (!buffer_result.ok()) return -1;
-        schema_buffer_ = buffer_result.ValueOrDie();
-
-        *data = schema_buffer_->data();
-        *size = schema_buffer_->size();
-        return 0;
-    }
-
-    int Next(const uint8_t** data, size_t* size) override {
-        if (done_) {
-            *data = nullptr;
-            *size = 0;
-            return 1;
-        }
-
-        std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;
-        for (const auto& field : schema_->fields()) {
-            std::unique_ptr<arrow::ArrayBuilder> builder;
-            auto status = arrow::MakeBuilder(arrow::default_memory_pool(), field->type(), &builder);
-            if (!status.ok()) return -1;
-            builders.push_back(std::move(builder));
-        }
-
-        const int batch_size = batch_size_;
-        int row_count = 0;
-
-        for (int i = 0; i < batch_size; ++i) {
-            if (!result_->Next()) {
-                done_ = true;
-                break;
-            }
-
-            for (int col = 0; col < schema_->num_fields(); ++col) {
-                auto* builder = builders[col].get();
-                auto arrow_type = builder->type();
-
-                if (result_->IsNull(col)) {
-                    builder->AppendNull();
-                    continue;
-                }
-
-                if (arrow_type->id() == arrow::Type::INT32) {
-                    int value;
-                    if (result_->GetInt(col, &value) == 0)
-                        static_cast<arrow::Int32Builder*>(builder)->Append(value);
-                    else
-                        builder->AppendNull();
-                } else if (arrow_type->id() == arrow::Type::INT64) {
-                    int64_t value;
-                    if (result_->GetInt64(col, &value) == 0)
-                        static_cast<arrow::Int64Builder*>(builder)->Append(value);
-                    else
-                        builder->AppendNull();
-                } else if (arrow_type->id() == arrow::Type::FLOAT) {
-                    double value;
-                    if (result_->GetDouble(col, &value) == 0)
-                        static_cast<arrow::FloatBuilder*>(builder)->Append(static_cast<float>(value));
-                    else
-                        builder->AppendNull();
-                } else if (arrow_type->id() == arrow::Type::DOUBLE) {
-                    double value;
-                    if (result_->GetDouble(col, &value) == 0)
-                        static_cast<arrow::DoubleBuilder*>(builder)->Append(value);
-                    else
-                        builder->AppendNull();
-                } else if (arrow_type->id() == arrow::Type::STRING) {
-                    const char* str;
-                    size_t len;
-                    if (result_->GetString(col, &str, &len) == 0)
-                        static_cast<arrow::StringBuilder*>(builder)->Append(str, len);
-                    else
-                        builder->AppendNull();
-                } else {
-                    // 未知类型，填 NULL 保持列长度一致
-                    builder->AppendNull();
-                }
-            }
-            ++row_count;
-        }
-
-        if (row_count == 0) {
-            *data = nullptr;
-            *size = 0;
-            return 1;
-        }
-
-        std::vector<std::shared_ptr<arrow::Array>> arrays;
-        for (auto& builder : builders) {
-            std::shared_ptr<arrow::Array> array;
-            if (!builder->Finish(&array).ok()) return -1;
-            arrays.push_back(array);
-        }
-
-        auto batch = arrow::RecordBatch::Make(schema_, row_count, arrays);
-
-        auto buffer_output_result = arrow::io::BufferOutputStream::Create();
-        if (!buffer_output_result.ok()) return -1;
-        auto buffer_output = buffer_output_result.ValueOrDie();
-
-        auto writer_result = arrow::ipc::MakeStreamWriter(buffer_output, schema_);
-        if (!writer_result.ok()) return -1;
-        auto writer = writer_result.ValueOrDie();
-
-        if (!writer->WriteRecordBatch(*batch).ok()) return -1;
-        if (!writer->Close().ok()) return -1;
-
-        auto buffer_result = buffer_output->Finish();
-        if (!buffer_result.ok()) return -1;
-        batch_buffer_ = buffer_result.ValueOrDie();
-
-        *data = batch_buffer_->data();
-        *size = batch_buffer_->size();
-        return 0;
-    }
-
-    void Cancel() override { cancelled_ = true; }
-    void Close() override {}
-    const char* GetLastError() override { return last_error_.c_str(); }
-    void Release() override { delete this; }
-
-private:
-    std::shared_ptr<IDbSession> session_;
-    IResultSet* result_;
-    std::shared_ptr<arrow::Schema> schema_;
-    std::shared_ptr<arrow::Buffer> schema_buffer_;
-    std::shared_ptr<arrow::Buffer> batch_buffer_;
-    std::string last_error_;
-    int batch_size_ = 1024;
-    bool done_ = false;
-    bool cancelled_ = false;
-};
 
 IBatchReader* MysqlSession::CreateBatchReader(IResultSet* result,
                                                std::shared_ptr<arrow::Schema> schema) {
-    return new MysqlBatchReader(shared_from_this(), result, schema);
+    return new RelationBatchReader(shared_from_this(), result, schema);
 }
 
 // ==================== MysqlBatchWriter 实现 ====================
 
-class MysqlBatchWriter : public IBatchWriter {
+class MysqlBatchWriter : public RelationBatchWriterBase {
 public:
     MysqlBatchWriter(std::shared_ptr<IDbSession> session, const char* table)
-        : session_(session), table_(table) {}
+        : RelationBatchWriterBase(std::move(session), table) {}
 
-    ~MysqlBatchWriter() override {
-        if (transaction_started_ && !committed_) {
-            std::string error;
-            session_->RollbackTransaction(&error);
-        }
-    }
-
-    int Write(const uint8_t* data, size_t size) override {
-        auto buffer = arrow::Buffer::Wrap(data, size);
-        auto buffer_reader = std::make_shared<arrow::io::BufferReader>(buffer);
-        auto reader_result = arrow::ipc::RecordBatchStreamReader::Open(buffer_reader);
-        if (!reader_result.ok()) return -1;
-        auto reader = reader_result.ValueOrDie();
-
-        std::shared_ptr<arrow::RecordBatch> batch;
-        if (!reader->ReadNext(&batch).ok() || !batch) return -1;
-
-        if (!transaction_started_) {
-            std::string error;
-            if (session_->BeginTransaction(&error) != 0) {
-                last_error_ = "BeginTransaction failed: " + error;
-                return -1;
-            }
-            transaction_started_ = true;
-            if (CreateTable(batch->schema()) != 0) return -1;
-        }
-
-        if (InsertBatch(batch) != 0) return -1;
-        return 0;
-    }
-
-    int Flush() override { return 0; }
-
-    void Close(BatchWriteStats* stats) override {
-        if (transaction_started_ && !committed_) {
-            std::string error;
-            if (session_->CommitTransaction(&error) != 0) {
-                last_error_ = "CommitTransaction failed: " + error;
-            } else {
-                committed_ = true;
-            }
-        }
-        if (stats) {
-            stats->rows_written = rows_written_;
-            stats->bytes_written = bytes_written_;
-            stats->elapsed_ms = 0;
-        }
-    }
-
-    const char* GetLastError() override { return last_error_.c_str(); }
-    void Release() override { delete this; }
-
-private:
-    // 用反引号包裹 MySQL 标识符，并转义内部反引号（`` 转义）
-    static std::string QuoteIdentifier(const std::string& name) {
+protected:
+    // MySQL 用反引号包裹标识符，内部反引号用 `` 转义
+    std::string QuoteIdentifier(const std::string& name) override {
         std::string result = "`";
         for (char c : name) {
             if (c == '`') result += "``";
@@ -513,14 +301,15 @@ private:
         return result;
     }
 
-    int CreateTable(std::shared_ptr<arrow::Schema> schema) {
+    int CreateTable(std::shared_ptr<arrow::Schema> schema) override {
         std::string ddl = "CREATE TABLE IF NOT EXISTS " + QuoteIdentifier(table_) + " (";
         for (int i = 0; i < schema->num_fields(); ++i) {
             if (i > 0) ddl += ", ";
             ddl += QuoteIdentifier(schema->field(i)->name()) + " ";
             auto type_id = schema->field(i)->type()->id();
-            if (type_id == arrow::Type::INT32) ddl += "INT";
-            else if (type_id == arrow::Type::INT64) ddl += "BIGINT";
+            if (type_id == arrow::Type::INT32)  ddl += "INT";
+            else if (type_id == arrow::Type::INT64)  ddl += "BIGINT";
+            else if (type_id == arrow::Type::FLOAT)  ddl += "FLOAT";
             else if (type_id == arrow::Type::DOUBLE) ddl += "DOUBLE";
             else ddl += "TEXT";
         }
@@ -533,41 +322,23 @@ private:
         return 0;
     }
 
-    // 构建单行的值列表字符串
-    static std::string BuildRowValues(const std::shared_ptr<arrow::RecordBatch>& batch, int64_t row) {
-        std::string values = "(";
-        for (int col = 0; col < batch->num_columns(); ++col) {
-            if (col > 0) values += ", ";
-            auto array = batch->column(col);
-            if (array->IsNull(row)) {
-                values += "NULL";
-            } else if (array->type()->id() == arrow::Type::INT32) {
-                values += std::to_string(std::static_pointer_cast<arrow::Int32Array>(array)->Value(row));
-            } else if (array->type()->id() == arrow::Type::INT64) {
-                values += std::to_string(std::static_pointer_cast<arrow::Int64Array>(array)->Value(row));
-            } else if (array->type()->id() == arrow::Type::DOUBLE) {
-                values += std::to_string(std::static_pointer_cast<arrow::DoubleArray>(array)->Value(row));
-            } else {
-                auto string_array = std::static_pointer_cast<arrow::StringArray>(array);
-                std::string value = string_array->GetString(row);
-                values += "'";
-                for (char c : value) {
-                    if (c == '\'') values += "\\'";
-                    else if (c == '\\') values += "\\\\";
-                    else values += c;
-                }
-                values += "'";
-            }
-        }
-        values += ")";
-        return values;
-    }
-
-    int InsertBatch(std::shared_ptr<arrow::RecordBatch> batch) {
+    /* MySQL 分块多值 INSERT（每次最多 1000 行，性能优化）
+       字符串转义：' → \'，\ → \\
+    */
+    int InsertBatch(std::shared_ptr<arrow::RecordBatch> batch) override {
         if (batch->num_rows() == 0) return 0;
 
-        // 多值 INSERT：INSERT INTO t VALUES (...), (...), ...
-        // 每次最多 1000 行，避免单条 SQL 过长
+        auto quote_string = [](const std::string& s) -> std::string {
+            std::string r = "'";
+            for (char c : s) {
+                if (c == '\'') r += "\\'";
+                else if (c == '\\') r += "\\\\";
+                else r += c;
+            }
+            r += "'";
+            return r;
+        };
+
         const int64_t chunk_size = 1000;
         std::string prefix = "INSERT INTO " + QuoteIdentifier(table_) + " VALUES ";
 
@@ -576,7 +347,7 @@ private:
             std::string sql = prefix;
             for (int64_t row = start; row < end; ++row) {
                 if (row > start) sql += ", ";
-                sql += BuildRowValues(batch, row);
+                sql += BuildRowValues(batch, row, quote_string);
             }
             std::string error;
             if (session_->ExecuteSql(sql.c_str(), &error) < 0) {
@@ -587,19 +358,12 @@ private:
         }
         return 0;
     }
-
-    std::shared_ptr<IDbSession> session_;
-    std::string table_;
-    std::string last_error_;
-    int64_t rows_written_ = 0;
-    int64_t bytes_written_ = 0;
-    bool transaction_started_ = false;
-    bool committed_ = false;
 };
 
 IBatchWriter* MysqlSession::CreateBatchWriter(const char* table) {
     return new MysqlBatchWriter(shared_from_this(), table);
 }
+
 
 // ==================== MysqlDriver 实现 ====================
 

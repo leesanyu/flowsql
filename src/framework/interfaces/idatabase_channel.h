@@ -143,6 +143,10 @@ interface IDatabaseChannel : public IChannel {
 
     // ==================== 通用接口 ====================
 
+    // 执行任意 SQL（DDL/DML），不返回结果集
+    // 适用于 CREATE TABLE / DROP TABLE / INSERT 等无需读取结果的操作
+    virtual int ExecuteSql(const char* sql, std::string* error) = 0;
+
     // 测试连接是否可用
     virtual bool IsConnected() = 0;
 };

@@ -16,6 +16,7 @@
 
     <profiles>
         <flowsql_profile>
+            <readonly>0</readonly>
             <!-- 单查询最大内存：4GB -->
             <max_memory_usage>4294967296</max_memory_usage>
             <!-- 允许超出内存限制时写临时文件到磁盘 -->
@@ -34,7 +35,6 @@
         <default>
             <max_memory_usage>1073741824</max_memory_usage>
             <max_execution_time>30</max_execution_time>
-            <readonly>1</readonly>
         </default>
     </profiles>
 

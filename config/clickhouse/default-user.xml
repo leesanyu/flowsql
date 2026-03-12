@@ -1,0 +1,6 @@
+<clickhouse>
+    <users>
+        <!-- 移除内置 default 用户，避免匿名访问 -->
+        <default remove="remove"/>
+    </users>
+</clickhouse>

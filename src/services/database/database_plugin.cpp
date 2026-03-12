@@ -7,6 +7,7 @@
 
 #include "drivers/sqlite_driver.h"
 #include "drivers/mysql_driver.h"
+#include "drivers/clickhouse_driver.h"
 
 namespace flowsql {
 namespace database {
@@ -163,11 +164,9 @@ IDatabaseChannel* DatabasePlugin::Get(const char* type, const char* name) {
     IDbDriver* driver_ptr = driver.get();  // 弱引用，driver 由 channels_ 中的 Channel 持有
     auto session_factory = [driver_ptr]() -> std::shared_ptr<IDbSession> {
         // 使用 dynamic_cast 调用具体驱动的 CreateSession
-        if (auto* sqlite_driver = dynamic_cast<SqliteDriver*>(driver_ptr)) {
-            return sqlite_driver->CreateSession();
-        } else if (auto* mysql_driver = dynamic_cast<MysqlDriver*>(driver_ptr)) {
-            return mysql_driver->CreateSession();
-        }
+        if (auto* d = dynamic_cast<SqliteDriver*>(driver_ptr))      return d->CreateSession();
+        if (auto* d = dynamic_cast<MysqlDriver*>(driver_ptr))       return d->CreateSession();
+        if (auto* d = dynamic_cast<ClickHouseDriver*>(driver_ptr))  return d->CreateSession();
         return nullptr;
     };
 
@@ -230,7 +229,10 @@ std::unique_ptr<IDbDriver> DatabasePlugin::CreateDriver(const std::string& type)
     if (type == "mysql") {
         return std::make_unique<MysqlDriver>();
     }
-    // TODO: 未来添加 postgresql, clickhouse 等驱动
+    if (type == "clickhouse") {
+        return std::make_unique<ClickHouseDriver>();
+    }
+    // TODO: 未来添加 postgresql 等驱动
     last_error_ = "unsupported database type: " + type;
     return nullptr;
 }

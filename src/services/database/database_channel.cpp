@@ -1,5 +1,6 @@
 #include "database_channel.h"
 
+#include "arrow_adapters.h"
 #include "capability_interfaces.h"
 
 #include <cstdio>
@@ -92,17 +93,25 @@ bool DatabaseChannel::IsConnected() {
 // ==================== 列式数据库接口实现 ====================
 
 int DatabaseChannel::CreateArrowReader(const char* query, IArrowReader** reader) {
-    // 行式数据库不支持 Arrow 直读，调用方应使用 CreateReader + IBatchReader
-    (void)query;
-    *reader = nullptr;
-    return -1;
+    if (!opened_ || !session_factory_) { *reader = nullptr; return -1; }
+    auto session = session_factory_();
+    if (!session) { *reader = nullptr; return -1; }
+    // dynamic_cast 检查 IArrowReadable 能力接口（仅列式数据库 Session 实现此接口）
+    auto* arrow_readable = dynamic_cast<IArrowReadable*>(session.get());
+    if (!arrow_readable) { *reader = nullptr; return -1; }
+    *reader = new ArrowReaderAdapter(std::move(session), query);
+    return 0;
 }
 
 int DatabaseChannel::CreateArrowWriter(const char* table, IArrowWriter** writer) {
-    // 行式数据库不支持 Arrow 直写，调用方应使用 CreateWriter + IBatchWriter
-    (void)table;
-    *writer = nullptr;
-    return -1;
+    if (!opened_ || !session_factory_) { *writer = nullptr; return -1; }
+    auto session = session_factory_();
+    if (!session) { *writer = nullptr; return -1; }
+    // dynamic_cast 检查 IArrowWritable 能力接口（仅列式数据库 Session 实现此接口）
+    auto* arrow_writable = dynamic_cast<IArrowWritable*>(session.get());
+    if (!arrow_writable) { *writer = nullptr; return -1; }
+    *writer = new ArrowWriterAdapter(std::move(session), table);
+    return 0;
 }
 
 int DatabaseChannel::ExecuteQueryArrow(const char* query,
@@ -139,6 +148,19 @@ int DatabaseChannel::WriteArrowBatches(const char* table,
 
     // 直接调用 Session 的 WriteArrowBatches
     return session->WriteArrowBatches(table, batches, error);
+}
+
+int DatabaseChannel::ExecuteSql(const char* sql, std::string* error) {
+    if (!opened_ || !session_factory_) {
+        if (error) *error = "Channel not opened or session factory not set";
+        return -1;
+    }
+    auto session = session_factory_();
+    if (!session) {
+        if (error) *error = "Failed to create session";
+        return -1;
+    }
+    return session->ExecuteSql(sql, error);
 }
 
 }  // namespace database

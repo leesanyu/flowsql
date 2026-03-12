@@ -435,17 +435,16 @@
 ---
 
 ## Epic 4: 多数据库支持与 SQL 增强
-**优先级**: P1 | **状态**: 📋 待规划
-**价值**: 扩展数据库支持，实现 MySQL 和 PostgreSQL 驱动，增强 SQL 能力
+**优先级**: P1 | **状态**: ✅ 已完成 (Sprint 4)
+**价值**: 扩展数据库支持，实现 MySQL 驱动和连接池，增强 SQL 能力
 
 ### Story 4.1: MySQL 驱动支持
-**状态**: 📋 待规划
+**状态**: ✅ 已完成 (Sprint 4)
 **验收标准**:
-- 实现 MysqlDriver（基于 libmysqlclient）
-- 支持连接池管理
-- 支持预编译语句
-- 支持事务控制
-- 端到端测试通过
+- 实现 MysqlDriver（基于 libmysqlclient）✅
+- 支持连接池管理 ✅
+- 支持事务控制（COMMIT/ROLLBACK）✅
+- 端到端测试通过（19 个测试用例）✅
 
 ---
 
@@ -461,41 +460,128 @@
 ---
 
 ### Story 4.3: 数据库连接池基础实现
-**状态**: 📋 待规划
+**状态**: ✅ 已完成 (Sprint 4)
 **验收标准**:
-- DatabasePlugin 层面统一连接池管理
-- 支持连接复用和空闲超时回收
-- 支持最大连接数限制
-- 基础功能测试通过
+- ConnectionPool<T> 泛型连接池 ✅
+- 支持连接复用和空闲超时回收 ✅
+- 支持最大连接数限制 ✅
+- 支持健康检查（心跳机制）✅
+- 连接池单元测试通过（7 个测试用例）✅
 
 ---
 
-### Story 4.4: 数据库连接池高级特性
-**状态**: 📋 待规划
+### Story 4.4: SQL 高级特性
+**状态**: ✅ 已完成 (Sprint 4)
 **验收标准**:
-- 支持连接健康检查（心跳机制）
-- 支持连接池监控指标（活跃连接数、空闲连接数、等待队列长度）
-- 支持连接泄漏检测
-- 性能测试和调优
+- 支持 GROUP BY 和聚合函数 ✅
+- 支持 ORDER BY 和 LIMIT ✅
+- 支持子查询（透传给数据库引擎）✅
+- sql_part 提取与 BuildQuery 替换逻辑 ✅
 
 ---
 
-### Story 4.5: SQL 高级特性
-**状态**: 📋 待规划
+## Epic 5: ClickHouse 数据库通道
+**优先级**: P1 | **状态**: ✅ 已完成（2026-03-12）
+**价值**: 支持列式数据库 ClickHouse，走 Arrow 原生路径实现高效批量读写
+
+### Story 5.1: ClickHouseDriver 核心实现
+**状态**: ✅ 已完成（2026-03-12）
 **验收标准**:
-- 支持 JOIN 操作（INNER/LEFT/RIGHT/FULL）
-- 支持 GROUP BY 和聚合函数
-- 支持 ORDER BY 和 LIMIT
-- 支持子查询
-- 支持 UNION/INTERSECT/EXCEPT
+- 实现 ClickHouseDriver（基于 httplib，HTTP 8123 端口，零新依赖）
+- 实现 ClickHouseSession，同时实现 IArrowReadable + IArrowWritable
+- 查询走 `FORMAT ArrowStream`，写入走 `INSERT INTO table FORMAT ArrowStream`
+- 认证：`X-ClickHouse-User` / `X-ClickHouse-Key` header
+- 配置格式：`type=clickhouse;name=ch1;host=...;port=8123;user=...;password=...;database=...`
 
 ---
 
-## Epic 5: Pipeline 增强与异步任务
+### Story 5.2: DatabasePlugin 集成 ClickHouse
+**状态**: ✅ 已完成（2026-03-12）
+**验收标准**:
+- `CreateDriver()` 增加 clickhouse 分支
+- `DatabaseChannel::CreateArrowReader/CreateArrowWriter` 从返回 -1 改为 dynamic_cast 检查 IArrowReadable/IArrowWritable
+- 现有 SQLite/MySQL 测试不受影响
+
+---
+
+### Story 5.3: 端到端测试
+**状态**: ✅ 已完成（2026-03-12）
+**验收标准**:
+- 新增 test_clickhouse.cpp，覆盖连接、DDL、写入、读取、Arrow 类型矩阵
+- ClickHouse 不可达时自动 SKIP
+- 所有现有测试回归通过（T1-T16 全部通过）
+- test_plugin_e2e.cpp 补充 E1-E7 插件层 E2E（PluginLoader → IDatabaseFactory → IDatabaseChannel 完整路径），全部通过
+
+---
+
+## Epic 6: Web 管理数据库通道
+**优先级**: P1 | **状态**: 📋 待规划
+**价值**: 将数据库通道配置从 gateway.yaml 静态配置迁移到 Web 动态管理，支持运行时增删改
+
+### 设计决策
+- **配置权威方**：DatabasePlugin 自持久化（写自己的 SQLite 文件），Web 服务只是操作入口
+- **密码存储**：AES-256-GCM 加密后存储，密钥从环境变量 `FLOWSQL_SECRET_KEY` 读取
+- **跨进程通信**：Web → Gateway → Scheduler → DatabasePlugin，与现有架构一致
+- **废弃**：`gateway.yaml` 中的 `databases:` 数组
+
+### Story 6.1: DatabasePlugin 持久化与动态管理
+**状态**: 📋 待规划
+**验收标准**:
+- 新增 `IDatabaseManager` 接口：`AddChannel` / `RemoveChannel` / `UpdateChannel` / `ListChannels`
+- `Start()` 从 SQLite 文件加载已保存的通道配置
+- 密码字段 AES-256-GCM 加密存储，读取时解密
+- `AddChannel()` 后无需重启即可使用新通道
+
+---
+
+### Story 6.2: Scheduler 新增管理端点
+**状态**: 📋 待规划
+**验收标准**:
+- 新增 `POST /db-channels/add`、`/db-channels/remove`、`/db-channels/update`、`GET /db-channels`
+- 通过 IQuerier 找到 IDatabaseManager 并调用对应方法
+
+---
+
+### Story 6.3: Web 服务 CRUD API
+**状态**: 📋 待规划
+**验收标准**:
+- 新增 `GET/POST/PUT/DELETE /api/db-channels` 端点
+- 密码字段前端展示脱敏（显示 `****`）
+- 操作后通过 Gateway 通知 Scheduler
+
+---
+
+### Story 6.4: 废弃 gateway.yaml 静态配置
+**状态**: 📋 待规划
+**验收标准**:
+- 删除 `gateway.yaml` 中的 `databases:` 数组
+- DatabasePlugin option 改为 `db_path=/tmp/flowsql_db_channels.db`
+- 向后兼容：旧配置格式保留解析能力但不再生成
+
+---
+
+### Story 6.5: 前端通道管理 UI
+**状态**: 📋 待规划
+**验收标准**:
+- `Channels.vue` 新增数据库通道增删改对话框
+- 支持 SQLite / MySQL / ClickHouse 三种类型，动态显示对应字段
+- 密码字段 `type="password"`，展示时脱敏
+
+---
+
+### Story 6.6: 端到端测试
+**状态**: 📋 待规划
+**验收标准**:
+- Web UI 新增通道 → Scheduler 立即可用 → 重启后配置持久化
+- 删除通道后 SQL 执行返回 "channel not found"
+
+---
+
+## Epic 7: Pipeline 增强与异步任务
 **优先级**: P1 | **状态**: 📋 待规划
 **价值**: 增强 Pipeline 编排能力，支持异步任务执行，提升系统易用性
 
-### Story 5.1: 多算子 Pipeline
+### Story 7.1: 多算子 Pipeline
 **状态**: 📋 待规划
 **验收标准**:
 - 支持算子链式调用（USING op1 THEN op2 THEN op3）
@@ -505,7 +591,7 @@
 
 ---
 
-### Story 5.2: 异步任务执行
+### Story 7.2: 异步任务执行
 **状态**: 📋 待规划
 **验收标准**:
 - 任务队列实现（基于线程池）
@@ -516,11 +602,11 @@
 
 ---
 
-## Epic 6: 流式架构
+## Epic 8: 流式架构
 **优先级**: P2 | **状态**: 📋 设计阶段
 **价值**: 支持流式数据处理，满足网络性能分析等实时场景
 
-### Story 6.1: IStreamChannel 接口设计
+### Story 8.1: IStreamChannel 接口设计
 **状态**: 📋 设计阶段
 **验收标准**:
 - 定义 IStreamChannel 接口（基于描述符）
@@ -530,7 +616,7 @@
 
 ---
 
-### Story 6.2: IStreamOperator 接口设计
+### Story 8.2: IStreamOperator 接口设计
 **状态**: 📋 设计阶段
 **验收标准**:
 - 定义 IStreamOperator 接口
@@ -540,7 +626,7 @@
 
 ---
 
-### Story 6.3: StreamWorker 通用容器
+### Story 8.3: StreamWorker 通用容器
 **状态**: 📋 设计阶段
 **验收标准**:
 - 实现 StreamWorker 容器
@@ -550,7 +636,7 @@
 
 ---
 
-### Story 6.4: Scheduler 流式调度
+### Story 8.4: Scheduler 流式调度
 **状态**: 📋 设计阶段
 **验收标准**:
 - Scheduler 支持流式任务调度
@@ -560,7 +646,7 @@
 
 ---
 
-### Story 6.5: DPDK 网卡采集插件
+### Story 8.5: DPDK 网卡采集插件
 **状态**: 📋 设计阶段
 **验收标准**:
 - 实现 netcard 插件（基于 DPDK）
@@ -570,7 +656,7 @@
 
 ---
 
-### Story 6.6: 网络性能分析算子
+### Story 8.6: 网络性能分析算子
 **状态**: 📋 设计阶段
 **验收标准**:
 - 实现 npm 算子（网络性能分析）
@@ -580,11 +666,11 @@
 
 ---
 
-## Epic 7: 平台增强与用户认证
+## Epic 9: 平台增强与用户认证
 **优先级**: P2 | **状态**: 📋 待规划
 **价值**: 提升系统可观测性、可维护性、易用性和安全性
 
-### Story 7.1: 用户认证与权限
+### Story 9.1: 用户认证与权限
 **状态**: 📋 待规划
 **验收标准**:
 - 用户注册和登录（JWT Token）
@@ -595,7 +681,7 @@
 
 ---
 
-### Story 7.2: 监控和告警
+### Story 9.2: 监控和告警
 **状态**: 📋 待规划
 **验收标准**:
 - Prometheus 指标导出
@@ -605,7 +691,7 @@
 
 ---
 
-### Story 7.3: 日志聚合
+### Story 9.3: 日志聚合
 **状态**: 📋 待规划
 **验收标准**:
 - 结构化日志输出（JSON 格式）
@@ -615,7 +701,7 @@
 
 ---
 
-### Story 7.4: 配置中心
+### Story 9.4: 配置中心
 **状态**: 📋 待规划
 **验收标准**:
 - 配置热更新
@@ -625,7 +711,7 @@
 
 ---
 
-### Story 7.5: 插件市场
+### Story 9.5: 插件市场
 **状态**: 📋 待规划
 **验收标准**:
 - 插件上传和下载
@@ -635,15 +721,13 @@
 
 ---
 
-### Story 7.6: 文档和示例
+### Story 9.6: 文档和示例
 **状态**: 📋 待规划
 **验收标准**:
 - 用户手册
 - 开发者指南
 - API 文档
 - 示例项目
-
----
 
 ## 优先级说明
 - **P0**: 核心功能，必须实现

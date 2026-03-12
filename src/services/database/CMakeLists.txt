@@ -7,7 +7,7 @@ add_library(${PROJECT_NAME} SHARED ${DIR_SRCS} ${DRIVER_SRCS})
 
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR})
 
-add_thirddepen(${PROJECT_NAME} arrow rapidjson sqlite)
+add_thirddepen(${PROJECT_NAME} arrow rapidjson sqlite httplib)
 
 # MySQL 客户端库是必需的依赖（产品特性）
 find_path(MYSQL_INCLUDE_DIR mysql/mysql.h
