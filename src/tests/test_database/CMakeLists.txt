@@ -61,3 +61,16 @@ target_compile_options(test_clickhouse PRIVATE -UNDEBUG)
 set_target_properties(test_clickhouse PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
+
+# DatabasePlugin 持久化管理单元测试（直接链接 flowsql_database）
+add_executable(test_database_manager test_database_manager.cpp)
+target_include_directories(test_database_manager PUBLIC ${CMAKE_SOURCE_DIR})
+add_thirddepen(test_database_manager arrow rapidjson yaml-cpp)
+add_dependencies(test_database_manager flowsql_common flowsql_database)
+target_link_libraries(test_database_manager flowsql_common flowsql_database)
+find_package(OpenSSL REQUIRED)
+target_link_libraries(test_database_manager OpenSSL::Crypto)
+target_compile_options(test_database_manager PRIVATE -UNDEBUG)
+set_target_properties(test_database_manager PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
+)

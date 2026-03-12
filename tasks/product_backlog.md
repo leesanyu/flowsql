@@ -515,7 +515,7 @@
 ---
 
 ## Epic 6: Web 管理数据库通道
-**优先级**: P1 | **状态**: 📋 待规划
+**优先级**: P1 | **状态**: ✅ 已完成（2026-03-12）
 **价值**: 将数据库通道配置从 gateway.yaml 静态配置迁移到 Web 动态管理，支持运行时增删改
 
 ### 设计决策
@@ -525,7 +525,7 @@
 - **废弃**：`gateway.yaml` 中的 `databases:` 数组
 
 ### Story 6.1: DatabasePlugin 持久化与动态管理
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（2026-03-12）
 **验收标准**:
 - 新增 `IDatabaseManager` 接口：`AddChannel` / `RemoveChannel` / `UpdateChannel` / `ListChannels`
 - `Start()` 从 SQLite 文件加载已保存的通道配置
@@ -535,7 +535,7 @@
 ---
 
 ### Story 6.2: Scheduler 新增管理端点
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（2026-03-12）
 **验收标准**:
 - 新增 `POST /db-channels/add`、`/db-channels/remove`、`/db-channels/update`、`GET /db-channels`
 - 通过 IQuerier 找到 IDatabaseManager 并调用对应方法
@@ -543,7 +543,7 @@
 ---
 
 ### Story 6.3: Web 服务 CRUD API
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（2026-03-12）
 **验收标准**:
 - 新增 `GET/POST/PUT/DELETE /api/db-channels` 端点
 - 密码字段前端展示脱敏（显示 `****`）
@@ -552,7 +552,7 @@
 ---
 
 ### Story 6.4: 废弃 gateway.yaml 静态配置
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（2026-03-12）
 **验收标准**:
 - 删除 `gateway.yaml` 中的 `databases:` 数组
 - DatabasePlugin option 改为 `db_path=/tmp/flowsql_db_channels.db`
@@ -561,7 +561,7 @@
 ---
 
 ### Story 6.5: 前端通道管理 UI
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（2026-03-12）
 **验收标准**:
 - `Channels.vue` 新增数据库通道增删改对话框
 - 支持 SQLite / MySQL / ClickHouse 三种类型，动态显示对应字段
@@ -570,7 +570,7 @@
 ---
 
 ### Story 6.6: 端到端测试
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（2026-03-12）
 **验收标准**:
 - Web UI 新增通道 → Scheduler 立即可用 → 重启后配置持久化
 - 删除通道后 SQL 执行返回 "channel not found"

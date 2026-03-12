@@ -92,7 +92,7 @@ void test_option_parsing() {
     printf("  factory found via IQuerier\n");
 
     int count = 0;
-    factory->List([&count](const char* type, const char* name) {
+    factory->List([&count](const char* type, const char* name, const char* /*config_json*/) {
         printf("  configured: %s.%s\n", type, name);
         assert(std::string(type) == "mysql");
         assert(std::string(name) == "testdb");
@@ -739,6 +739,71 @@ void test_concurrent_writers() {
 }
 
 // ============================================================
+// P1-P3: Epic 6 插件层 E2E — AddChannel/RemoveChannel 动态管理
+// ============================================================
+
+// P1: AddChannel 后立即 Get() 成功，IsConnected=true
+void test_p1_add_channel_then_get(IDatabaseFactory* factory, const std::string& yml) {
+    printf("[TEST] P1: AddChannel then Get() succeeds immediately...\n");
+
+    // 用 SQLite :memory: 验证"无需重启立即可用"
+    std::string cfg = "type=sqlite;name=p1db;path=:memory:";
+    int rc = factory->AddChannel(cfg.c_str());
+    assert(rc == 0);
+
+    auto* ch = factory->Get("sqlite", "p1db");
+    assert(ch != nullptr);
+    assert(ch->IsConnected());
+    printf("  AddChannel + Get: IsConnected=true\n");
+
+    factory->RemoveChannel("sqlite", "p1db");  // 清理
+    printf("[PASS] P1\n");
+}
+
+// P2: RemoveChannel 后 Get() 返回 nullptr
+void test_p2_remove_channel_then_get(IDatabaseFactory* factory, const std::string& yml) {
+    printf("[TEST] P2: RemoveChannel then Get() returns nullptr...\n");
+
+    assert(factory->AddChannel("type=sqlite;name=p2db;path=:memory:") == 0);
+    assert(factory->Get("sqlite", "p2db") != nullptr);
+
+    assert(factory->RemoveChannel("sqlite", "p2db") == 0);
+
+    auto* ch = factory->Get("sqlite", "p2db");
+    assert(ch == nullptr);
+    printf("  After RemoveChannel, Get() returned nullptr\n");
+
+    printf("[PASS] P2\n");
+}
+
+// P3: AddChannel 后立即执行 SQL 查询，返回正确结果
+void test_p3_add_channel_then_query(IDatabaseFactory* factory, const std::string& yml) {
+    printf("[TEST] P3: AddChannel then query immediately (no restart needed)...\n");
+
+    assert(factory->AddChannel("type=sqlite;name=p3db;path=:memory:") == 0);
+
+    auto* ch = dynamic_cast<IDatabaseChannel*>(factory->Get("sqlite", "p3db"));
+    assert(ch != nullptr);
+
+    // 建表写数据
+    std::string err;
+    assert(ch->ExecuteSql("CREATE TABLE p3_t (id INTEGER, val TEXT)", &err) >= 0);
+    assert(ch->ExecuteSql("INSERT INTO p3_t VALUES (1, 'hello')", &err) >= 0);
+
+    // 查询验证
+    IBatchReader* reader = nullptr;
+    int rc = ch->CreateReader("SELECT * FROM p3_t", &reader);
+    assert(rc == 0 && reader != nullptr);
+    const uint8_t* buf; size_t len;
+    assert(reader->Next(&buf, &len) == 0);
+    reader->Close(); reader->Release();
+    printf("  Query after AddChannel succeeded (no restart needed)\n");
+
+    factory->RemoveChannel("sqlite", "p3db");  // 清理
+    printf("[PASS] P3\n");
+}
+
+// ============================================================
 // ClickHouse E2E 辅助
 // ============================================================
 static std::string g_ch_suffix;
@@ -1171,6 +1236,29 @@ int main(int argc, char* argv[]) {
             }
             printf("  [CLEANUP] MySQL temp tables dropped\n");
         }
+    }
+
+    // P1-P3: Epic 6 插件层 E2E（复用已加载的 factory，需要 config_file 支持）
+    {
+        printf("\n=== Epic 6 Plugin E2E Tests (P1-P3) ===\n\n");
+        auto ts_p = std::chrono::system_clock::now().time_since_epoch().count();
+        std::string p_yml = "/tmp/flowsql_p123_" + std::to_string(ts_p % 1000000) + ".yml";
+
+        // 通过 Option 设置 config_file（factory 已加载，直接调用 Option 追加配置）
+        auto* p_factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
+        // DatabasePlugin 实现了 IPlugin::Option，通过 Traverse 调用
+        loader->Traverse(IID_PLUGIN, [&p_yml](void* p) -> int {
+            auto* plugin = static_cast<IPlugin*>(p);
+            plugin->Option(("config_file=" + p_yml).c_str());
+            return 0;
+        });
+
+        test_p1_add_channel_then_get(p_factory, p_yml);
+        test_p2_remove_channel_then_get(p_factory, p_yml);
+        test_p3_add_channel_then_query(p_factory, p_yml);
+
+        remove(p_yml.c_str());
+        printf("\n=== P1-P3 passed ===\n");
     }
 
     loader->StopAll();

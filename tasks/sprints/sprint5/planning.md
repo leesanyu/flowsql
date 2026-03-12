@@ -106,131 +106,131 @@
 
 ---
 
-### Story 6.1：DatabasePlugin 持久化与动态管理（Epic 6）
+### Story 6.1：DatabasePlugin 持久化与动态管理（Epic 6）✅
 
 **优先级**：P0（Epic 6 基础）
 **工作量估算**：2 天
 **依赖**：无（与 Epic 5 并行可行，但建议串行）
 
 **验收标准**：
-- [ ] `IDatabaseFactory` 扩展管理方法（不新增 `IDatabaseManager` 接口，`plugin_register.cpp` 无需修改）
-- [ ] `Option()` 解析 `config_file=config/flowsql.yml`
-- [ ] `Start()` 加载 `flowsql.yml` 的 `channels.database_channels` 节点
-- [ ] `AddChannel()`：type+name 已存在返回 -1（不覆盖，需用 UpdateChannel）
-- [ ] `RemoveChannel()`：关闭连接 + 从内存移除 + `SaveToYaml()`
-- [ ] `UpdateChannel()`：原子覆盖写 YAML（不走 Remove+Add）
-- [ ] `List()`：扩展签名增加 config_json 参数，密码字段脱敏为 `"****"`
-- [ ] 密码 AES-256-GCM 加密（OpenSSL），密钥从 `FLOWSQL_SECRET_KEY` 环境变量读取
-- [ ] `config_file` 为空时：`Start()` 直接返回 0，`AddChannel` 返回 -1
+- [x] `IDatabaseFactory` 扩展管理方法（不新增 `IDatabaseManager` 接口，`plugin_register.cpp` 无需修改）
+- [x] `Option()` 解析 `config_file=config/flowsql.yml`
+- [x] `Start()` 加载 `flowsql.yml` 的 `channels.database_channels` 节点
+- [x] `AddChannel()`：type+name 已存在返回 -1（不覆盖，需用 UpdateChannel）
+- [x] `RemoveChannel()`：关闭连接 + 从内存移除 + `SaveToYaml()`
+- [x] `UpdateChannel()`：原子覆盖写 YAML（不走 Remove+Add）
+- [x] `List()`：扩展签名增加 config_json 参数，密码字段脱敏为 `"****"`
+- [x] 密码 AES-256-GCM 加密（OpenSSL），密钥从 `FLOWSQL_SECRET_KEY` 环境变量读取
+- [x] `config_file` 为空时：`Start()` 直接返回 0，`AddChannel` 返回 -1
 
 **任务分解**：
 
 #### Task 6.1.1：IDatabaseFactory 接口扩展（0.3 天）
-- [ ] 修改 `src/framework/interfaces/idatabase_factory.h`，合并管理方法，扩展 `List` 签名
+- [x] 修改 `src/framework/interfaces/idatabase_factory.h`，合并管理方法，扩展 `List` 签名
 
 #### Task 6.1.2：DatabasePlugin YAML 持久化（1 天）
-- [ ] 修改 `database_plugin.h`：新增 `config_file_`、`LoadFromYaml()`、`SaveToYaml()`、加解密方法
-- [ ] 修改 `database_plugin.cpp`：`Option()` 解析 `config_file`；`Start()` 加载配置；`Stop()` 无需额外操作
+- [x] 修改 `database_plugin.h`：新增 `config_file_`、`LoadFromYaml()`、`SaveToYaml()`、加解密方法
+- [x] 修改 `database_plugin.cpp`：`Option()` 解析 `config_file`；`Start()` 加载配置；`Stop()` 无需额外操作
 
 #### Task 6.1.3：动态管理方法（0.5 天）
-- [ ] 实现 `AddChannel()`、`RemoveChannel()`、`UpdateChannel()`、`List()`
+- [x] 实现 `AddChannel()`、`RemoveChannel()`、`UpdateChannel()`、`List()`
 
 #### Task 6.1.4：密码加解密（0.2 天）
-- [ ] 实现 `EncryptPassword()` / `DecryptPassword()`（AES-256-GCM，OpenSSL）
-- [ ] 确认 CMakeLists.txt 链接 OpenSSL
+- [x] 实现 `EncryptPassword()` / `DecryptPassword()`（AES-256-GCM，OpenSSL）
+- [x] 确认 CMakeLists.txt 链接 OpenSSL
 
 ---
 
-### Story 6.2：Scheduler 新增通道管理端点（Epic 6）
+### Story 6.2：Scheduler 新增通道管理端点（Epic 6）✅
 
 **优先级**：P1
 **工作量估算**：0.5 天
 **依赖**：Story 6.1
 
 **验收标准**：
-- [ ] 新增 `POST /db-channels/add`：解析 JSON body，调用 `IDatabaseFactory::AddChannel()`
-- [ ] 新增 `POST /db-channels/remove`：调用 `RemoveChannel()`
-- [ ] 新增 `POST /db-channels/update`：调用 `UpdateChannel()`
-- [ ] 新增 `GET /db-channels`：调用 `List()`，返回 JSON（密码脱敏）
-- [ ] 通过 `IQuerier` 查找 `IID_DATABASE_FACTORY`，找不到时返回 503
+- [x] 新增 `POST /db-channels/add`：解析 JSON body，调用 `IDatabaseFactory::AddChannel()`
+- [x] 新增 `POST /db-channels/remove`：调用 `RemoveChannel()`
+- [x] 新增 `POST /db-channels/update`：调用 `UpdateChannel()`
+- [x] 新增 `GET /db-channels`：调用 `List()`，返回 JSON（密码脱敏）
+- [x] 通过 `IQuerier` 查找 `IID_DATABASE_FACTORY`，找不到时返回 503
 
 **任务分解**：
 
 #### Task 6.2.1：Scheduler 端点实现（0.5 天）
-- [ ] 修改 `scheduler_plugin.h`：新增 Handler 声明
-- [ ] 修改 `scheduler_plugin.cpp`：`RegisterRoutes()` 注册新路由，实现 Handler
+- [x] 修改 `scheduler_plugin.h`：新增 Handler 声明
+- [x] 修改 `scheduler_plugin.cpp`：`RegisterRoutes()` 注册新路由，实现 Handler
 
 ---
 
-### Story 6.3：Web 服务 CRUD API（Epic 6）
+### Story 6.3：Web 服务 CRUD API（Epic 6）✅
 
 **优先级**：P1
 **工作量估算**：1 天
 **依赖**：Story 6.2
 
 **验收标准**：
-- [ ] `GET /api/db-channels`：转发到 `GET /scheduler/db-channels`，返回通道列表
-- [ ] `POST /api/db-channels`：验证参数，转发到 `POST /scheduler/db-channels/add`
-- [ ] `PUT /api/db-channels/:id`：转发到 `POST /scheduler/db-channels/update`
-- [ ] `DELETE /api/db-channels/:id`：转发到 `POST /scheduler/db-channels/remove`
-- [ ] 密码字段在返回给前端时脱敏（替换为 `"****"`）
+- [x] `GET /api/db-channels`：转发到 `GET /scheduler/db-channels`，返回通道列表
+- [x] `POST /api/db-channels`：验证参数，转发到 `POST /scheduler/db-channels/add`
+- [x] `PUT /api/db-channels/:id`：转发到 `POST /scheduler/db-channels/update`
+- [x] `DELETE /api/db-channels/:id`：转发到 `POST /scheduler/db-channels/remove`
+- [x] 密码字段在返回给前端时脱敏（替换为 `"****"`）
 
 **任务分解**：
 
 #### Task 6.3.1：Web API 实现（1 天）
-- [ ] 修改 `web_server.h`：新增 Handler 声明，新增 `NotifyDatabasePlugin()` 方法
-- [ ] 修改 `web_server.cpp`：实现 Handler，注册路由
+- [x] 修改 `web_server.h`：新增 Handler 声明，新增 `NotifyDatabasePlugin()` 方法
+- [x] 修改 `web_server.cpp`：实现 Handler，注册路由
 
 ---
 
-### Story 6.4：废弃 gateway.yaml 静态配置（Epic 6）
+### Story 6.4：废弃 gateway.yaml 静态配置（Epic 6）✅
 
 **优先级**：P1
 **工作量估算**：0.5 天
 **依赖**：Story 6.1
 
 **验收标准**：
-- [ ] `config/gateway.yaml` 删除 `databases:` 数组，DatabasePlugin option 改为 `config_file=config/flowsql.yml`
-- [ ] `config/gateway.example.yaml` 同步更新
-- [ ] `src/services/gateway/service_manager.cpp` 不再拼接 `--databases` 参数，改为传递 `option`
-- [ ] `config/flowsql.yml` 新建（初始为空）
-- [ ] `config.h` 中 `ServiceConfig::databases` 字段可保留（向后兼容），但 `service_manager.cpp` 不再使用
+- [x] `config/gateway.yaml` 删除 `databases:` 数组，DatabasePlugin option 改为 `config_file=config/flowsql.yml`
+- [x] `config/gateway.example.yaml` 同步更新
+- [x] `src/services/gateway/service_manager.cpp` 不再拼接 `--databases` 参数，改为传递 `option`
+- [x] `config/flowsql.yml` 新建（初始为空）
+- [x] `config.h` 中 `ServiceConfig::databases` 字段可保留（向后兼容），但 `service_manager.cpp` 不再使用
 
 **任务分解**：
 
 #### Task 6.4.1：配置清理（0.5 天）
-- [ ] 修改上述文件
+- [x] 修改上述文件
 
 ---
 
-### Story 6.5：前端通道管理 UI（Epic 6）
+### Story 6.5：前端通道管理 UI（Epic 6）✅
 
 **优先级**：P1
 **工作量估算**：2 天
 **依赖**：Story 6.3
 
 **验收标准**：
-- [ ] `Channels.vue` 新增"新增数据库通道"按钮
-- [ ] 对话框支持类型选择（SQLite/MySQL/ClickHouse），动态显示对应字段
+- [x] `Channels.vue` 新增"新增数据库通道"按钮
+- [x] 对话框支持类型选择（SQLite/MySQL/ClickHouse），动态显示对应字段
   - SQLite：name, path
   - MySQL：name, host, port(3306), user, password, database, charset(utf8mb4)
   - ClickHouse：name, host, port(8123), user, password, database
-- [ ] 密码字段 `type="password"`，列表展示时显示 `****`
-- [ ] 支持编辑已有通道（点击编辑按钮，密码字段留空表示不修改）
-- [ ] 支持删除通道（二次确认）
-- [ ] 调用 `POST/PUT/DELETE /api/db-channels`
+- [x] 密码字段 `type="password"`，列表展示时显示 `****`
+- [x] 支持编辑已有通道（点击编辑按钮，密码字段留空表示不修改）
+- [x] 支持删除通道（二次确认）
+- [x] 调用 `POST/PUT/DELETE /api/db-channels`
 
 **任务分解**：
 
 #### Task 6.5.1：前端 API 封装（0.3 天）
-- [ ] 修改 `src/frontend/src/api/index.js`，新增 db-channels 相关调用
+- [x] 修改 `src/frontend/src/api/index.js`，新增 db-channels 相关调用
 
 #### Task 6.5.2：Channels.vue 改造（1.5 天）
-- [ ] 修改 `src/frontend/src/views/Channels.vue`
-- [ ] 新增对话框组件，动态表单逻辑
+- [x] 修改 `src/frontend/src/views/Channels.vue`
+- [x] 新增对话框组件，动态表单逻辑
 
 #### Task 6.5.3：联调测试（0.2 天）
-- [ ] 前后端联调，验证增删改流程
+- [x] 前后端联调，验证增删改流程
 
 ---
 
@@ -241,11 +241,11 @@
 **依赖**：Story 6.5
 
 **验收标准**：
-- [ ] 新建 `test_database_manager.cpp`（9 个用例 M1-M9）：持久化、密码加密、重启恢复、并发
-- [ ] `test_plugin_e2e.cpp` 补充（P1-P3）：`AddChannel()` 后 `Get()` 成功；`RemoveChannel()` 后 `Get()` 返回 nullptr；AddChannel 后立即查询成功
-- [ ] Scheduler 端点测试（S1-S7）：HTTP 接口验证，含 503 场景
-- [ ] 手动验证完整流程：Web UI 新增通道 → SQL 立即可用 → 重启后配置持久化
-- [ ] 所有测试回归通过
+- [x] 新建 `test_database_manager.cpp`（9 个用例 M1-M9）：持久化、密码加密、重启恢复、并发
+- [x] `test_plugin_e2e.cpp` 补充（P1-P3）：`AddChannel()` 后 `Get()` 成功；`RemoveChannel()` 后 `Get()` 返回 nullptr；AddChannel 后立即查询成功
+- [x] Scheduler 端点测试（S1-S7）：HTTP 接口验证，含 503 场景
+- [x] 手动验证完整流程：Web UI 新增通道 → SQL 立即可用 → 重启后配置持久化
+- [x] 所有测试回归通过
 
 ---
 
