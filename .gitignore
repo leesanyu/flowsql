@@ -74,3 +74,13 @@ core.*
 
 # Claude Code
 .claude/
+
+# Python
+*.egg-info/
+__pycache__/
+*.pyc
+
+# Python
+*.egg-info/
+__pycache__/
+*.pyc
