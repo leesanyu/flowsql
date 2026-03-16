@@ -16,7 +16,6 @@ namespace flowsql {
 namespace gateway {
 
 // GatewayPlugin — 路由转发 + 路由注册管理 + 过期清理
-// 删除了 ServiceManager（子进程管理）和 HeartbeatThread（心跳检测）
 // 服务自治：各服务通过 RouterAgencyPlugin 的 KeepAlive 线程定期重注册路由
 class GatewayPlugin : public IPlugin {
  public:
