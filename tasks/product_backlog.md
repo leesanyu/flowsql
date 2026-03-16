@@ -578,7 +578,7 @@
 ---
 
 ### Story 6.7: 数据库错误信息透传架构改造
-**状态**: 📋 待规划
+**状态**: ✅ 已完成 (Sprint 6)
 **优先级**: P1
 **背景**: `IBatchReadable::CreateReader` 接口无 `error*` 参数，底层驱动（MySQL/ClickHouse）的错误信息（如 `No database selected`、`Table doesn't exist`）在 `RelationDbSessionBase::CreateReader` 中被捕获后丢弃，调用方只能看到 `CreateReader failed`，调试成本高。
 **验收标准**:
@@ -599,11 +599,171 @@
 
 ---
 
-## Epic 7: Pipeline 增强与异步任务
+## Epic 7: 路由代理与服务对等化架构改造
+**优先级**: P1 | **状态**: ✅ 已完成 (Sprint 6)
+**价值**: 解耦插件路由、实现服务对等、统一 API 设计，为后续扩展奠定架构基础
+**设计文档**: `docs/design_router_agency.md`
+
+### Story 7.1: 基础设施 — IRouterHandle 接口 + 错误码 + PluginLoader 批次调用
+**状态**: ✅ 已完成 (Sprint 6)
+**验收标准**:
+- 定义 `irouter_handle.h`（IRouterHandle + RouteItem + fnRouterHandler）
+- 定义 `error_code.h`（6 个业务错误码 + HttpStatus 映射）
+- 修正 `main.cpp` RunService 为两阶段加载（Load 全部 → StartAll）
+
+<details>
+<summary>任务分解（点击展开）</summary>
+
+- 📋 新增 `src/framework/interfaces/irouter_handle.h`：IRouterHandle 接口 + RouteItem + fnRouterHandler 签名
+- 📋 新增 `src/common/error_code.h`：OK/BAD_REQUEST/NOT_FOUND/CONFLICT/INTERNAL_ERROR/UNAVAILABLE
+- 📋 修正 `src/app/main.cpp` RunService：分离 Load 阶段和 Start 阶段，确保所有插件 Load() 完成后再统一 StartAll()
+- 📋 单元测试：验证两阶段加载顺序正确
+</details>
+
+---
+
+### Story 7.2: RouterAgencyPlugin 实现
+**状态**: ✅ 已完成 (Sprint 6)
+**验收标准**:
+- 实现 libflowsql_router.so（RouteCollector + HttpServer + GatewayRegistrar + ErrorMapper）
+- 路由收集（Traverse IRouterHandle）+ 冲突检测（先到先得 + 日志告警）
+- HTTP Dispatch + CORS 统一处理 + 错误码→HTTP 状态码映射
+- KeepAlive 线程（定期向 Gateway 注册路由前缀，幂等）
+
+<details>
+<summary>任务分解（点击展开）</summary>
+
+- 📋 新增 `src/services/router/` 目录：router_agency_plugin.h/cpp + plugin_register.cpp + CMakeLists.txt
+- 📋 实现 RouteCollector：Traverse(IID_ROUTER_HANDLE) 收集路由 + 冲突检测 + 前缀提取
+- 📋 实现 HttpServer：httplib::Server + catch-all Dispatch + CORS 统一处理
+- 📋 实现 GatewayRegistrar：KeepAlive 线程 + POST /gateway/register
+- 📋 实现 ErrorMapper：业务错误码 → HTTP 状态码映射
+- 📋 集成测试：路由收集、分发、CORS、错误码映射
+</details>
+
+---
+
+### Story 7.3: Gateway 改造 — 字典树路由 + 过期清理 + 瘦身
+**状态**: ✅ 已完成 (Sprint 6)
+**验收标准**:
+- RouteTable 改为字典树（Trie）匹配，废弃 ExtractPrefix/StripPrefix
+- HandleForward 不再剥离前缀，转发完整 URI
+- 增加路由过期清理线程（CleanupThread），移除超过 3 倍 KeepAlive 间隔未更新的路由
+- 删除 ServiceManager、HeartbeatThread、HandleHeartbeat
+- 删除 ServiceClient
+
+<details>
+<summary>任务分解（点击展开）</summary>
+
+- 📋 重写 `route_table.h/cpp`：字典树实现（Insert/Match/RemoveExpired），RouteEntry 增加 last_seen_ms
+- 📋 修改 `gateway_plugin.cpp`：HandleForward 转发完整 URI，不剥离前缀
+- 📋 新增 CleanupThread：定期移除过期路由条目
+- 📋 新增 `/gateway/register`、`/gateway/unregister`、`/gateway/routes` 端点
+- 📋 删除 ServiceManager、HeartbeatThread、HandleHeartbeat、ServiceClient
+- 📋 测试：字典树匹配、路由注册/过期清理、转发完整 URI
+</details>
+
+---
+
+### Story 7.4: 业务插件迁移 — SchedulerPlugin
+**状态**: ✅ 已完成 (Sprint 6)
+**验收标准**:
+- 实现 IRouterHandle，声明 /channels/dataframe/*、/operators/*、/tasks/instant/*
+- 删除内部 httplib::Server 和 RegisterRoutes()
+- 删除 /db-channels/* 相关 Handler（移交 DatabasePlugin）
+
+<details>
+<summary>任务分解（点击展开）</summary>
+
+- 📋 SchedulerPlugin 多继承 IRouterHandle，实现 EnumRoutes()
+- 📋 将现有 Handler 改为 fnRouterHandler 签名（uri, req_json, rsp_json）
+- 📋 删除 httplib::Server server_ 成员和 RegisterRoutes()
+- 📋 删除 /db-channels/* 相关 Handler
+- 📋 plugin_register.cpp 增加 IID_ROUTER_HANDLE 注册
+- 📋 回归测试：所有现有 API 功能不受影响
+</details>
+
+---
+
+### Story 7.5: 业务插件迁移 — DatabasePlugin
+**状态**: ✅ 已完成 (Sprint 6)
+**验收标准**:
+- 实现 IRouterHandle，声明 /channels/database/*
+- Handler 逻辑从 SchedulerPlugin 迁移过来
+
+<details>
+<summary>任务分解（点击展开）</summary>
+
+- 📋 DatabasePlugin 多继承 IRouterHandle，实现 EnumRoutes()
+- 📋 实现 HandleAdd/HandleRemove/HandleModify/HandleQuery
+- 📋 plugin_register.cpp 增加 IID_ROUTER_HANDLE 注册
+- 📋 测试：数据库通道 CRUD 通过 RouterAgencyPlugin 分发正常工作
+</details>
+
+---
+
+### Story 7.6: 业务插件迁移 — WebPlugin
+**状态**: ✅ 已完成 (Sprint 6)
+**验收标准**:
+- 实现 IRouterHandle（管理 API 部分）
+- 保留 Web 服务器（静态文件），管理 API 走 RouterAgencyPlugin 内部端口
+
+<details>
+<summary>任务分解（点击展开）</summary>
+
+- 📋 WebPlugin 多继承 IRouterHandle，实现 EnumRoutes()（管理 API）
+- 📋 保留 httplib::Server 用于静态文件服务
+- 📋 管理 API Handler 改为 fnRouterHandler 签名
+- 📋 测试：Web UI 正常访问，管理 API 通过 RouterAgencyPlugin 正常工作
+</details>
+
+---
+
+### Story 7.7: 进程管理改造 — fork 守护 + docker-compose
+**状态**: ✅ 已完成 (Sprint 6)
+**验收标准**:
+- main.cpp RunGateway → RunGuardian（极简 fork + waitpid + respawn）
+- 编写 Dockerfile + docker-compose.yml + docker-compose.full.yml
+- 更新 gateway.yaml 配置格式（per-plugin option）
+
+<details>
+<summary>任务分解（点击展开）</summary>
+
+- 📋 重写 main.cpp RunGateway 为 RunGuardian：fork + waitpid + respawn，零业务逻辑
+- 📋 编写 Dockerfile（基于 ubuntu:22.04，同一镜像多角色）
+- 📋 编写 docker-compose.yml（gateway + web + scheduler + pyworker）
+- 📋 编写 docker-compose.full.yml（含 MySQL + ClickHouse）
+- 📋 更新 gateway.yaml 配置格式
+- 📋 测试：fork 守护进程管理、docker-compose 部署验证
+</details>
+
+---
+
+### Story 7.8: 端到端验证
+**状态**: ✅ 已完成 (Sprint 6)
+**验收标准**:
+- 路由收集和分发测试
+- KeepAlive + Gateway 故障恢复测试
+- 资源导向 URI 全路由回归测试
+- docker-compose 部署验证
+
+<details>
+<summary>任务分解（点击展开）</summary>
+
+- 📋 路由收集测试：多插件路由收集、冲突检测、前缀提取
+- 📋 路由分发测试：完整 URI 转发、错误码映射、CORS
+- 📋 KeepAlive 测试：正常注册、Gateway 重启恢复、服务崩溃路由过期
+- 📋 全路由回归：channels/database/*、channels/dataframe/*、operators/*、tasks/*
+- 📋 docker-compose 部署：多容器启动、服务发现、故障重启
+</details>
+
+---
+
+## Epic 8: Pipeline 增强与异步任务
 **优先级**: P1 | **状态**: 📋 待规划
 **价值**: 增强 Pipeline 编排能力，支持异步任务执行，提升系统易用性
 
-### Story 7.1: 多算子 Pipeline
+### Story 8.1: 多算子 Pipeline
 **状态**: 📋 待规划
 **验收标准**:
 - 支持算子链式调用（USING op1 THEN op2 THEN op3）
@@ -613,7 +773,7 @@
 
 ---
 
-### Story 7.2: 异步任务执行
+### Story 8.2: 异步任务执行
 **状态**: 📋 待规划
 **验收标准**:
 - 任务队列实现（基于线程池）
@@ -624,11 +784,11 @@
 
 ---
 
-## Epic 8: 流式架构
+## Epic 9: 流式架构
 **优先级**: P2 | **状态**: 📋 设计阶段
 **价值**: 支持流式数据处理，满足网络性能分析等实时场景
 
-### Story 8.1: IStreamChannel 接口设计
+### Story 9.1: IStreamChannel 接口设计
 **状态**: 📋 设计阶段
 **验收标准**:
 - 定义 IStreamChannel 接口（基于描述符）
@@ -638,7 +798,7 @@
 
 ---
 
-### Story 8.2: IStreamOperator 接口设计
+### Story 9.2: IStreamOperator 接口设计
 **状态**: 📋 设计阶段
 **验收标准**:
 - 定义 IStreamOperator 接口
@@ -648,7 +808,7 @@
 
 ---
 
-### Story 8.3: StreamWorker 通用容器
+### Story 9.3: StreamWorker 通用容器
 **状态**: 📋 设计阶段
 **验收标准**:
 - 实现 StreamWorker 容器
@@ -658,7 +818,7 @@
 
 ---
 
-### Story 8.4: Scheduler 流式调度
+### Story 9.4: Scheduler 流式调度
 **状态**: 📋 设计阶段
 **验收标准**:
 - Scheduler 支持流式任务调度
@@ -668,7 +828,7 @@
 
 ---
 
-### Story 8.5: DPDK 网卡采集插件
+### Story 9.5: DPDK 网卡采集插件
 **状态**: 📋 设计阶段
 **验收标准**:
 - 实现 netcard 插件（基于 DPDK）
@@ -678,7 +838,7 @@
 
 ---
 
-### Story 8.6: 网络性能分析算子
+### Story 9.6: 网络性能分析算子
 **状态**: 📋 设计阶段
 **验收标准**:
 - 实现 npm 算子（网络性能分析）
@@ -688,11 +848,11 @@
 
 ---
 
-## Epic 9: 平台增强与用户认证
+## Epic 10: 平台增强与用户认证
 **优先级**: P2 | **状态**: 📋 待规划
 **价值**: 提升系统可观测性、可维护性、易用性和安全性
 
-### Story 9.1: 用户认证与权限
+### Story 10.1: 用户认证与权限
 **状态**: 📋 待规划
 **验收标准**:
 - 用户注册和登录（JWT Token）
@@ -703,7 +863,7 @@
 
 ---
 
-### Story 9.2: 监控和告警
+### Story 10.2: 监控和告警
 **状态**: 📋 待规划
 **验收标准**:
 - Prometheus 指标导出
@@ -713,7 +873,7 @@
 
 ---
 
-### Story 9.3: 日志聚合
+### Story 10.3: 日志聚合
 **状态**: 📋 待规划
 **验收标准**:
 - 结构化日志输出（JSON 格式）
@@ -723,7 +883,7 @@
 
 ---
 
-### Story 9.4: 配置中心
+### Story 10.4: 配置中心
 **状态**: 📋 待规划
 **验收标准**:
 - 配置热更新
@@ -733,7 +893,7 @@
 
 ---
 
-### Story 9.5: 插件市场
+### Story 10.5: 插件市场
 **状态**: 📋 待规划
 **验收标准**:
 - 插件上传和下载
@@ -743,7 +903,7 @@
 
 ---
 
-### Story 9.6: 文档和示例
+### Story 10.6: 文档和示例
 **状态**: 📋 待规划
 **验收标准**:
 - 用户手册

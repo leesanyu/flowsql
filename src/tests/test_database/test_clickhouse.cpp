@@ -80,7 +80,7 @@ static std::string UniqueTable(const char* prefix) {
 // ============================================================
 static void DropTableIfExists(IDbSession* session, const std::string& table) {
     std::string sql = "DROP TABLE IF EXISTS " + table;
-    session->ExecuteSql(sql.c_str(), nullptr);
+    session->ExecuteSql(sql.c_str());
 }
 
 // ============================================================
@@ -209,12 +209,12 @@ void test_ddl() {
     std::string create_sql = "CREATE TABLE " + table +
         " (id Int32, name String) ENGINE = MergeTree() ORDER BY id";
     std::string error;
-    int rc = session->ExecuteSql(create_sql.c_str(), &error);
+    int rc = session->ExecuteSql(create_sql.c_str());
     assert(rc == 0);
     printf("  CREATE TABLE: OK\n");
 
     // 删表
-    rc = session->ExecuteSql(("DROP TABLE " + table).c_str(), &error);
+    rc = session->ExecuteSql(("DROP TABLE " + table).c_str());
     assert(rc == 0);
     printf("  DROP TABLE: OK\n");
 
@@ -239,16 +239,14 @@ void test_execute_query_arrow() {
     // 建表并插入数据
     std::string error;
     assert(session->ExecuteSql(
-        ("CREATE TABLE " + table + " (id Int32, val String) ENGINE = MergeTree() ORDER BY id").c_str(),
-        &error) == 0);
+        ("CREATE TABLE " + table + " (id Int32, val String) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
     assert(session->ExecuteSql(
-        ("INSERT INTO " + table + " VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma')").c_str(),
-        &error) == 0);
+        ("INSERT INTO " + table + " VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma')").c_str()) == 0);
 
     // 查询
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
     int rc = session->ExecuteQueryArrow(("SELECT * FROM " + table + " ORDER BY id").c_str(),
-                                        &batches, &error);
+                                        &batches);
     assert(rc == 0);
     assert(!batches.empty());
 
@@ -282,8 +280,7 @@ void test_write_arrow_batches() {
     std::string error;
     assert(session->ExecuteSql(
         ("CREATE TABLE " + table +
-         " (id Int32, name String) ENGINE = MergeTree() ORDER BY id").c_str(),
-        &error) == 0);
+         " (id Int32, name String) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
 
     // 构造 batch
     auto schema = arrow::schema({
@@ -299,13 +296,13 @@ void test_write_arrow_batches() {
     (void)b_name.Finish(&a_name);
     auto batch = arrow::RecordBatch::Make(schema, 3, {a_id, a_name});
 
-    int rc = session->WriteArrowBatches(table.c_str(), {batch}, &error);
+    int rc = session->WriteArrowBatches(table.c_str(), {batch});
     assert(rc == 0);
     printf("  WriteArrowBatches: OK\n");
 
     // 回读验证行数
     std::vector<std::shared_ptr<arrow::RecordBatch>> read_batches;
-    rc = session->ExecuteQueryArrow(("SELECT * FROM " + table).c_str(), &read_batches, &error);
+    rc = session->ExecuteQueryArrow(("SELECT * FROM " + table).c_str(), &read_batches);
     assert(rc == 0);
     int64_t total = 0;
     for (const auto& b : read_batches) total += b->num_rows();
@@ -337,18 +334,17 @@ void test_arrow_type_matrix() {
         ("CREATE TABLE " + table +
          " (c_int32 Int32, c_int64 Int64, c_float32 Float32,"
          "  c_float64 Float64, c_string String, c_bool Bool)"
-         " ENGINE = MergeTree() ORDER BY c_int32").c_str(),
-        &error) == 0);
+         " ENGINE = MergeTree() ORDER BY c_int32").c_str()) == 0);
 
     auto batch = MakeTypeMatrixBatch();
-    int rc = session->WriteArrowBatches(table.c_str(), {batch}, &error);
+    int rc = session->WriteArrowBatches(table.c_str(), {batch});
     assert(rc == 0);
 
     // 回读并逐列逐行验证
     std::vector<std::shared_ptr<arrow::RecordBatch>> read_batches;
     rc = session->ExecuteQueryArrow(
         ("SELECT * FROM " + table + " ORDER BY c_int32").c_str(),
-        &read_batches, &error);
+        &read_batches);
     assert(rc == 0);
     assert(!read_batches.empty());
 
@@ -440,8 +436,7 @@ void test_large_batch_write() {
     std::string error;
     assert(session->ExecuteSql(
         ("CREATE TABLE " + table +
-         " (id Int32, val Float64) ENGINE = MergeTree() ORDER BY id").c_str(),
-        &error) == 0);
+         " (id Int32, val Float64) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
 
     // 构造 10000 行
     const int N = 10000;
@@ -457,12 +452,12 @@ void test_large_batch_write() {
     auto schema = arrow::schema({arrow::field("id", arrow::int32()), arrow::field("val", arrow::float64())});
     auto batch  = arrow::RecordBatch::Make(schema, N, {a_id, a_val});
 
-    int rc = session->WriteArrowBatches(table.c_str(), {batch}, &error);
+    int rc = session->WriteArrowBatches(table.c_str(), {batch});
     assert(rc == 0);
 
     // 回读验证行数：通过 count() 确认写入了精确的 N 行
     std::vector<std::shared_ptr<arrow::RecordBatch>> read_batches;
-    rc = session->ExecuteQueryArrow(("SELECT count() FROM " + table).c_str(), &read_batches, &error);
+    rc = session->ExecuteQueryArrow(("SELECT count() FROM " + table).c_str(), &read_batches);
     assert(rc == 0);
     assert(!read_batches.empty());
     // count() 返回 UInt64 类型
@@ -488,13 +483,12 @@ void test_transaction_not_supported() {
     assert(session != nullptr);
 
     std::string error;
-    assert(session->BeginTransaction(&error) == -1);
-    assert(!error.empty());
-    printf("  BeginTransaction correctly returned -1: %s\n", error.c_str());
+    assert(session->BeginTransaction() == -1);
+    assert(session->GetLastError()[0] != '\0');
+    printf("  BeginTransaction correctly returned -1: %s\n", session->GetLastError());
 
-    error.clear();
-    assert(session->CommitTransaction(&error) == -1);
-    assert(session->RollbackTransaction(&error) == -1);
+    assert(session->CommitTransaction() == -1);
+    assert(session->RollbackTransaction() == -1);
 
     g_passed++;
     printf("[PASS] T9: transaction not supported\n");
@@ -514,10 +508,10 @@ void test_error_nonexistent_table() {
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
     std::string error;
     int rc = session->ExecuteQueryArrow(
-        "SELECT * FROM ch_nonexistent_table_xyz_12345", &batches, &error);
+        "SELECT * FROM ch_nonexistent_table_xyz_12345", &batches);
     assert(rc != 0);
-    assert(!error.empty());
-    printf("  Correctly failed: %s\n", error.c_str());
+    assert(session->GetLastError()[0] != '\0');
+    printf("  Correctly failed: %s\n", session->GetLastError());
 
     g_passed++;
     printf("[PASS] T10: query nonexistent table\n");
@@ -536,10 +530,10 @@ void test_error_syntax() {
 
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
     std::string error;
-    int rc = session->ExecuteQueryArrow("SELECT FROM WHERE INVALID SYNTAX !!!!", &batches, &error);
+    int rc = session->ExecuteQueryArrow("SELECT FROM WHERE INVALID SYNTAX !!!!", &batches);
     assert(rc != 0);
-    assert(!error.empty());
-    printf("  Correctly failed: %s\n", error.c_str());
+    assert(session->GetLastError()[0] != '\0');
+    printf("  Correctly failed: %s\n", session->GetLastError());
 
     g_passed++;
     printf("[PASS] T11: syntax error SQL\n");
@@ -561,11 +555,9 @@ void test_concurrent_sessions() {
     std::string error;
     DropTableIfExists(setup_session.get(), table);
     assert(setup_session->ExecuteSql(
-        ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str(),
-        &error) == 0);
+        ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
     assert(setup_session->ExecuteSql(
-        ("INSERT INTO " + table + " VALUES (1),(2),(3),(4),(5)").c_str(),
-        &error) == 0);
+        ("INSERT INTO " + table + " VALUES (1),(2),(3),(4),(5)").c_str()) == 0);
 
     const int THREADS = 8;
     std::atomic<int> success_count{0};
@@ -580,7 +572,7 @@ void test_concurrent_sessions() {
             std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
             std::string err;
             int rc = session->ExecuteQueryArrow(
-                ("SELECT * FROM " + table).c_str(), &batches, &err);
+                ("SELECT * FROM " + table).c_str(), &batches);
             if (rc != 0) { fail_count++; return; }
 
             int64_t total = 0;
@@ -622,8 +614,7 @@ void test_concurrent_writers() {
         std::string error;
         DropTableIfExists(setup_session.get(), table);
         assert(setup_session->ExecuteSql(
-            ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str(),
-            &error) == 0);
+            ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
         tables.push_back(table);
     }
 
@@ -643,7 +634,7 @@ void test_concurrent_writers() {
             auto batch  = arrow::RecordBatch::Make(schema, ROWS_PER_THREAD, {a_id});
 
             std::string err;
-            int rc = session->WriteArrowBatches(tables[i].c_str(), {batch}, &err);
+            int rc = session->WriteArrowBatches(tables[i].c_str(), {batch});
             if (rc == 0) success_count++;
         });
     }
@@ -657,7 +648,7 @@ void test_concurrent_writers() {
         auto session = driver.CreateSession();
         std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
         std::string err;
-        session->ExecuteQueryArrow(("SELECT * FROM " + tables[i]).c_str(), &batches, &err);
+        session->ExecuteQueryArrow(("SELECT * FROM " + tables[i]).c_str(), &batches);
         int64_t total = 0;
         for (const auto& b : batches) total += b->num_rows();
         assert(total == ROWS_PER_THREAD);
@@ -691,10 +682,10 @@ void test_quote_identifier_injection() {
     std::string error;
     // 表名含反引号，应被转义为 ``，不产生注入
     const char* malicious_table = "t`; DROP TABLE users; --";
-    int rc = session->WriteArrowBatches(malicious_table, {batch}, &error);
+    int rc = session->WriteArrowBatches(malicious_table, {batch});
     // 预期失败（表不存在），但不应是语法注入导致的意外成功
     // 关键：error 应包含 ClickHouse 的"表不存在"错误，而非语法错误
-    printf("  WriteArrowBatches with injection table name returned %d: %s\n", rc, error.c_str());
+    printf("  WriteArrowBatches with injection table name returned %d: %s\n", rc, session->GetLastError());
     // 只要不 crash 且不产生意外成功即可
     assert(rc != 0);  // 表不存在，应失败
 
@@ -717,13 +708,12 @@ void test_empty_result_set() {
     std::string error;
     DropTableIfExists(session.get(), table);
     assert(session->ExecuteSql(
-        ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str(),
-        &error) == 0);
+        ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
 
     // 查询空表
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
     int rc = session->ExecuteQueryArrow(
-        ("SELECT * FROM " + table + " WHERE 1=0").c_str(), &batches, &error);
+        ("SELECT * FROM " + table + " WHERE 1=0").c_str(), &batches);
     assert(rc == 0);
     assert(batches.empty());
     printf("  Empty result set: batches.size()=%zu\n", batches.size());
@@ -747,7 +737,7 @@ void test_write_empty_batches() {
     std::string error;
     // 空 batches 应直接返回 0，不发 HTTP 请求
     std::vector<std::shared_ptr<arrow::RecordBatch>> empty_batches;
-    int rc = session->WriteArrowBatches("any_table", empty_batches, &error);
+    int rc = session->WriteArrowBatches("any_table", empty_batches);
     assert(rc == 0);
     printf("  WriteArrowBatches with empty batches returned 0 (no HTTP request sent)\n");
 
@@ -771,12 +761,10 @@ void test_concurrent_read_write_mixed() {
     std::string error;
     DropTableIfExists(setup.get(), table);
     assert(setup->ExecuteSql(
-        ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str(),
-        &error) == 0);
+        ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
     // 预写 10 行，保证读线程有数据可读
     assert(setup->ExecuteSql(
-        ("INSERT INTO " + table + " SELECT number FROM numbers(10)").c_str(),
-        &error) == 0);
+        ("INSERT INTO " + table + " SELECT number FROM numbers(10)").c_str()) == 0);
 
     const int READERS = 8, WRITERS = 4;
     std::atomic<int> read_ok{0}, write_ok{0}, read_fail{0};
@@ -788,7 +776,7 @@ void test_concurrent_read_write_mixed() {
             if (!s) { read_fail++; return; }
             std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
             std::string err;
-            int rc = s->ExecuteQueryArrow(("SELECT * FROM " + table).c_str(), &batches, &err);
+            int rc = s->ExecuteQueryArrow(("SELECT * FROM " + table).c_str(), &batches);
             if (rc == 0) read_ok++;
             else read_fail++;
         });
@@ -804,7 +792,7 @@ void test_concurrent_read_write_mixed() {
             auto schema = arrow::schema({arrow::field("id", arrow::int32())});
             auto batch  = arrow::RecordBatch::Make(schema, 5, {a});
             std::string err;
-            if (s->WriteArrowBatches(table.c_str(), {batch}, &err) == 0) write_ok++;
+            if (s->WriteArrowBatches(table.c_str(), {batch}) == 0) write_ok++;
         });
     }
     for (auto& t : threads) t.join();
@@ -874,18 +862,16 @@ void test_nullable_null_handling() {
     assert(session->ExecuteSql(
         ("CREATE TABLE " + table +
          " (id Int32, val Nullable(String))"
-         " ENGINE = MergeTree() ORDER BY id").c_str(),
-        &error) == 0);
+         " ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
 
     // 直接用 SQL 插入含 NULL 的数据
     assert(session->ExecuteSql(
-        ("INSERT INTO " + table + " VALUES (1, 'hello'), (2, NULL), (3, 'world')").c_str(),
-        &error) == 0);
+        ("INSERT INTO " + table + " VALUES (1, 'hello'), (2, NULL), (3, 'world')").c_str()) == 0);
 
     // 回读验证
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
     int rc = session->ExecuteQueryArrow(
-        ("SELECT * FROM " + table + " ORDER BY id").c_str(), &batches, &error);
+        ("SELECT * FROM " + table + " ORDER BY id").c_str(), &batches);
     assert(rc == 0);
     assert(!batches.empty());
 
@@ -923,8 +909,7 @@ void test_multi_batch_write() {
     std::string error;
     DropTableIfExists(session.get(), table);
     assert(session->ExecuteSql(
-        ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str(),
-        &error) == 0);
+        ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
 
     // 构造 3 个 batch，各 100 行
     const int BATCHES = 3, ROWS = 100;
@@ -938,13 +923,13 @@ void test_multi_batch_write() {
         write_batches.push_back(arrow::RecordBatch::Make(schema, ROWS, {arr}));
     }
 
-    int rc = session->WriteArrowBatches(table.c_str(), write_batches, &error);
+    int rc = session->WriteArrowBatches(table.c_str(), write_batches);
     assert(rc == 0);
 
     // 回读验证总行数
     std::vector<std::shared_ptr<arrow::RecordBatch>> read_batches;
     rc = session->ExecuteQueryArrow(
-        ("SELECT count() FROM " + table).c_str(), &read_batches, &error);
+        ("SELECT count() FROM " + table).c_str(), &read_batches);
     assert(rc == 0);
     auto count_col = std::static_pointer_cast<arrow::UInt64Array>(read_batches[0]->column(0));
     int64_t total = static_cast<int64_t>(count_col->Value(0));
@@ -976,31 +961,30 @@ void test_injection_error_distinction() {
     auto batch = arrow::RecordBatch::Make(schema, 1, {a});
 
     // 场景 1：注入表名 — 应失败，错误应包含"不存在"相关信息，而非语法错误
-    std::string error1;
-    int rc1 = session->WriteArrowBatches("t`; DROP TABLE users; --", {batch}, &error1);
+    int rc1 = session->WriteArrowBatches("t`; DROP TABLE users; --", {batch});
     assert(rc1 != 0);
-    assert(!error1.empty());
+    assert(session->GetLastError()[0] != '\0');
     // 错误应来自 ClickHouse 服务端（表不存在），不应是本地语法构造失败
-    printf("  Injection table error: %s\n", error1.c_str());
+    printf("  Injection table error: %s\n", session->GetLastError());
 
     // 场景 2：查询不存在的表 — 错误应包含表名相关信息
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-    std::string error2;
     int rc2 = session->ExecuteQueryArrow(
-        "SELECT * FROM ch_nonexistent_xyz_99999", &batches, &error2);
+        "SELECT * FROM ch_nonexistent_xyz_99999", &batches);
     assert(rc2 != 0);
-    assert(!error2.empty());
-    printf("  Nonexistent table error: %s\n", error2.c_str());
+    assert(session->GetLastError()[0] != '\0');
+    std::string saved_error2 = session->GetLastError();
+    printf("  Nonexistent table error: %s\n", saved_error2.c_str());
 
     // 场景 3：语法错误 — 错误应与场景 2 不同（不同错误类型）
-    std::string error3;
-    int rc3 = session->ExecuteQueryArrow("SELECT FROM WHERE !!!!", &batches, &error3);
+    int rc3 = session->ExecuteQueryArrow("SELECT FROM WHERE !!!!", &batches);
     assert(rc3 != 0);
-    assert(!error3.empty());
-    printf("  Syntax error: %s\n", error3.c_str());
+    assert(session->GetLastError()[0] != '\0');
+    std::string saved_error3 = session->GetLastError();
+    printf("  Syntax error: %s\n", saved_error3.c_str());
 
     // 关键断言：表不存在错误 ≠ 语法错误（两者错误信息不同）
-    assert(error2 != error3);
+    assert(saved_error2 != saved_error3);
     printf("  Table-not-found error differs from syntax error ✓\n");
 
     g_passed++;

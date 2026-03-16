@@ -99,8 +99,8 @@ public:
     ~MysqlSession() override;
 
     // 覆盖基类模板方法，使用简单 API（非 prepared statement）
-    int ExecuteQuery(const char* sql, IResultSet** result, std::string* error) override;
-    int ExecuteSql(const char* sql, std::string* error) override;
+    int ExecuteQuery(const char* sql, IResultSet** result) override;
+    int ExecuteSql(const char* sql) override;
 
 protected:
     // 钩子方法实现

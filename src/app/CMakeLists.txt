@@ -1,8 +1,12 @@
 # --- flowsql 可执行文件（通用入口） ---
-add_executable(flowsql main.cpp ${CMAKE_SOURCE_DIR}/services/gateway/service_client.cpp)
+# Guardian 模式需要解析 gateway.yaml，因此链接 gateway 的 config.cpp 和 yaml-cpp
+add_executable(flowsql
+    main.cpp
+    ${CMAKE_SOURCE_DIR}/services/gateway/config.cpp
+)
 target_include_directories(flowsql PUBLIC ${CMAKE_SOURCE_DIR})
-add_thirddepen(flowsql httplib rapidjson)
-# 主程序不再链接 flowsql_common（PluginLoader 是 header-only）
+add_thirddepen(flowsql httplib yaml-cpp)
+
 set_target_properties(flowsql PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )

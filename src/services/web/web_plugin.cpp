@@ -26,20 +26,16 @@ int WebPlugin::Option(const char* arg) {
         else if (key == "db_path") db_path_ = val;
         else if (key == "worker_host") worker_host_ = val;
         else if (key == "worker_port") worker_port_ = std::stoi(val);
+        else if (key == "gateway") {
+            // 格式：host:port，内部服务转发目标
+            size_t colon = val.find(':');
+            if (colon != std::string::npos) {
+                gateway_host_ = val.substr(0, colon);
+                gateway_port_ = std::stoi(val.substr(colon + 1));
+            }
+        }
 
         pos = (end < opts.size()) ? end + 1 : opts.size();
-    }
-
-    // Gateway 模式下，从环境变量获取 Gateway 地址作为 Worker 转发目标
-    const char* gw = std::getenv("FLOWSQL_GATEWAY_ADDR");
-    if (gw) {
-        // 通过 Gateway 转发到 pyworker，使用 Gateway 地址
-        std::string gw_addr(gw);
-        size_t colon = gw_addr.find(':');
-        if (colon != std::string::npos) {
-            worker_host_ = gw_addr.substr(0, colon);
-            worker_port_ = std::stoi(gw_addr.substr(colon + 1));
-        }
     }
 
     return 0;
@@ -55,11 +51,9 @@ int WebPlugin::Unload() {
 }
 
 int WebPlugin::Start() {
-    // 初始化 WebServer
     server_.SetWorkerAddress(worker_host_, worker_port_);
-
-    // Gateway 模式下，Scheduler 转发地址与 Worker 相同（都通过 Gateway 路由）
-    server_.SetSchedulerAddress(worker_host_, worker_port_);
+    // 内部服务转发走 Gateway，与 worker 地址分开
+    server_.SetSchedulerAddress(gateway_host_, gateway_port_);
 
     if (server_.Init(db_path_) != 0) {
         printf("WebPlugin::Start: failed to init WebServer\n");
@@ -80,6 +74,10 @@ int WebPlugin::Stop() {
     if (server_thread_.joinable()) server_thread_.join();
     printf("WebPlugin::Stop: done\n");
     return 0;
+}
+
+void WebPlugin::EnumRoutes(std::function<void(const RouteItem&)> callback) {
+    server_.EnumApiRoutes(callback);
 }
 
 }  // namespace web

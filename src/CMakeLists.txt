@@ -65,5 +65,11 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_database ${CMAKE_BINARY_DIR}/tes
 # Stage 3: Gateway 服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/gateway ${CMAKE_BINARY_DIR}/gateway)
 
+# Stage 3: Router Agency 插件
+add_subdirectory(${CMAKE_SOURCE_DIR}/services/router ${CMAKE_BINARY_DIR}/router)
+
+# Stage 3: Router 测试
+add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_router ${CMAKE_BINARY_DIR}/test_router)
+
 # 通用入口（flowsql 可执行文件）
 add_subdirectory(${CMAKE_SOURCE_DIR}/app ${CMAKE_BINARY_DIR}/app)

@@ -40,19 +40,18 @@ class DatabaseChannel : public IDatabaseChannel {
     int CreateReader(const char* query, IBatchReader** reader) override;
     int CreateWriter(const char* table, IBatchWriter** writer) override;
     bool IsConnected() override;
+    const char* GetLastError() override { return last_error_.c_str(); }
 
     // IDatabaseChannel 列式接口
     int CreateArrowReader(const char* query, IArrowReader** reader) override;
     int CreateArrowWriter(const char* table, IArrowWriter** writer) override;
     int ExecuteQueryArrow(const char* query,
-                          std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
-                          std::string* error) override;
+                          std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) override;
     int WriteArrowBatches(const char* table,
-                          const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                          std::string* error) override;
+                          const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) override;
 
     // IDatabaseChannel 通用接口
-    int ExecuteSql(const char* sql, std::string* error) override;
+    int ExecuteSql(const char* sql) override;
 
  private:
     std::string type_;
@@ -60,6 +59,7 @@ class DatabaseChannel : public IDatabaseChannel {
     IDbDriver* driver_;  // 弱引用
     SessionFactory session_factory_;
     bool opened_ = false;
+    std::string last_error_;
 };
 
 }  // namespace database

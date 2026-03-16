@@ -108,6 +108,7 @@ tasks/
 3. **控制面 HTTP 统一**：服务间控制面通信全部走 HTTP + URI 路由
 4. **数据面独立通道**：高吞吐数据传输走共享内存 / Arrow IPC，不经过 HTTP
 5. **Interface 思维**：Plugin 通过 interface（纯虚基类）向本进程内的其他 Plugin 暴露能力，调用方通过 IQuerier 按 IID 查找，不直接依赖具体实现类
+6. **IPlugin 生命周期批次调用**：插件加载必须分阶段批次执行——先所有插件 Option()，再所有插件 Load()，最后所有插件 Start()。禁止逐个插件走完整个生命周期（Option→Load→Start 再下一个），因为 Start() 时必须保证所有插件的接口已通过 Load() 注册完毕
 
 ## 核心原则
 

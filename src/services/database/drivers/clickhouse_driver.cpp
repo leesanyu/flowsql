@@ -94,7 +94,8 @@ bool ClickHouseSession::Ping() {
     return res && res->status == 200;
 }
 
-int ClickHouseSession::ExecuteSql(const char* sql, std::string* error) {
+int ClickHouseSession::ExecuteSql(const char* sql) {
+    last_error_.clear();
     httplib::Client client(host_, port_);
     client.set_connection_timeout(10);
     client.set_read_timeout(60);
@@ -108,15 +109,15 @@ int ClickHouseSession::ExecuteSql(const char* sql, std::string* error) {
     auto res = client.Post(path, headers, std::string(sql), "text/plain");
 
     if (!res || res->status != 200) {
-        if (error) *error = res ? res->body : "Connection failed";
+        last_error_ = res ? res->body : "Connection failed";
         return -1;
     }
     return 0;
 }
 
 int ClickHouseSession::ExecuteQueryArrow(const char* sql,
-                                         std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
-                                         std::string* error) {
+                                         std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) {
+    last_error_.clear();
     std::string full_sql = std::string(sql) + " FORMAT ArrowStream";
 
     httplib::Client client(host_, port_);
@@ -132,22 +133,20 @@ int ClickHouseSession::ExecuteQueryArrow(const char* sql,
     auto res = client.Post(path, headers, full_sql, "text/plain");
 
     if (!res || res->status != 200) {
-        if (error) *error = res ? res->body : "Connection failed";
+        last_error_ = res ? res->body : "Connection failed";
         return -1;
     }
 
-    return ParseArrowStream(res->body, batches, error);
+    return ParseArrowStream(res->body, batches);
 }
 
 int ClickHouseSession::WriteArrowBatches(const char* table,
-                                         const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                                         std::string* error) {
-    // 空 batches 提前返回，不发 HTTP 请求
-    // （ClickHouse 收到只有 Schema 的 IPC Stream 行为未定义）
+                                         const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) {
+    last_error_.clear();
     if (batches.empty()) return 0;
 
     std::string body;
-    if (SerializeArrowStream(batches, &body, error) != 0) return -1;
+    if (SerializeArrowStream(batches, &body) != 0) return -1;
 
     std::string query = "INSERT INTO " + QuoteIdentifier(table) + " FORMAT ArrowStream";
     std::string path = "/?database=" + database_ + "&query=" + httplib::detail::encode_url(query);
@@ -163,21 +162,20 @@ int ClickHouseSession::WriteArrowBatches(const char* table,
 
     auto res = client.Post(path, headers, body, "application/octet-stream");
     if (!res || res->status != 200) {
-        if (error) *error = res ? res->body : "Connection failed";
+        last_error_ = res ? res->body : "Connection failed";
         return -1;
     }
     return 0;
 }
 
 int ClickHouseSession::ParseArrowStream(const std::string& body,
-                                        std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
-                                        std::string* error) {
+                                        std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) {
     auto buffer = arrow::Buffer::FromString(body);
     auto buf_reader = std::make_shared<arrow::io::BufferReader>(buffer);
 
     auto reader_result = arrow::ipc::RecordBatchStreamReader::Open(buf_reader);
     if (!reader_result.ok()) {
-        if (error) *error = reader_result.status().ToString();
+        last_error_ = reader_result.status().ToString();
         return -1;
     }
     auto reader = *reader_result;
@@ -186,10 +184,10 @@ int ClickHouseSession::ParseArrowStream(const std::string& body,
         std::shared_ptr<arrow::RecordBatch> batch;
         auto status = reader->ReadNext(&batch);
         if (!status.ok()) {
-            if (error) *error = status.ToString();
+            last_error_ = status.ToString();
             return -1;
         }
-        if (!batch) break;  // EOS
+        if (!batch) break;
         batches->push_back(batch);
     }
     return 0;
@@ -197,46 +195,34 @@ int ClickHouseSession::ParseArrowStream(const std::string& body,
 
 int ClickHouseSession::SerializeArrowStream(
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-    std::string* body, std::string* error) {
-    if (batches.empty()) {
-        *body = "";
-        return 0;
-    }
+    std::string* body) {
+    if (batches.empty()) { *body = ""; return 0; }
 
     auto schema = batches[0]->schema();
     auto buffer_output_result = arrow::io::BufferOutputStream::Create();
     if (!buffer_output_result.ok()) {
-        if (error) *error = buffer_output_result.status().ToString();
+        last_error_ = buffer_output_result.status().ToString();
         return -1;
     }
     auto buffer_output = *buffer_output_result;
 
     auto writer_result = arrow::ipc::MakeStreamWriter(buffer_output, schema);
     if (!writer_result.ok()) {
-        if (error) *error = writer_result.status().ToString();
+        last_error_ = writer_result.status().ToString();
         return -1;
     }
     auto writer = *writer_result;
 
     for (const auto& batch : batches) {
         auto status = writer->WriteRecordBatch(*batch);
-        if (!status.ok()) {
-            if (error) *error = status.ToString();
-            return -1;
-        }
+        if (!status.ok()) { last_error_ = status.ToString(); return -1; }
     }
 
     auto close_status = writer->Close();
-    if (!close_status.ok()) {
-        if (error) *error = close_status.ToString();
-        return -1;
-    }
+    if (!close_status.ok()) { last_error_ = close_status.ToString(); return -1; }
 
     auto buffer_result = buffer_output->Finish();
-    if (!buffer_result.ok()) {
-        if (error) *error = buffer_result.status().ToString();
-        return -1;
-    }
+    if (!buffer_result.ok()) { last_error_ = buffer_result.status().ToString(); return -1; }
 
     auto buf = *buffer_result;
     *body = std::string(reinterpret_cast<const char*>(buf->data()), buf->size());

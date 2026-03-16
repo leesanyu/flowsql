@@ -79,10 +79,8 @@ interface IArrowReader {
     virtual ~IArrowReader() = default;
 
     // 执行查询并直接获取 Arrow RecordBatch 列表
-    // 返回：0=成功，<0=错误
     virtual int ExecuteQueryArrow(const char* query,
-                                  std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
-                                  std::string* error) = 0;
+                                  std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) = 0;
 
     // 获取 Schema
     virtual std::shared_ptr<arrow::Schema> GetSchema() = 0;
@@ -100,10 +98,8 @@ interface IArrowWriter {
     virtual ~IArrowWriter() = default;
 
     // 直接写入 Arrow RecordBatch 列表
-    // 返回：0=成功，<0=错误
     virtual int WriteBatches(const char* table,
-                            const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                            std::string* error) = 0;
+                            const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) = 0;
 
     // 错误信息
     virtual const char* GetLastError() = 0;
@@ -125,27 +121,27 @@ interface IDatabaseChannel : public IChannel {
 
     // ==================== 列式数据库接口（Arrow 原生） ====================
 
-    // 创建列式读取器，执行 query 并直接返回 Arrow RecordBatch 列表
+    // 创建列式读取器
     virtual int CreateArrowReader(const char* query, IArrowReader** reader) = 0;
 
-    // 创建列式写入器，指定目标表
+    // 创建列式写入器
     virtual int CreateArrowWriter(const char* table, IArrowWriter** writer) = 0;
 
-    // 直接执行 Arrow 查询，获取 RecordBatch 列表（便捷方法）
+    // 直接执行 Arrow 查询（便捷方法）
     virtual int ExecuteQueryArrow(const char* query,
-                                  std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
-                                  std::string* error) = 0;
+                                  std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) = 0;
 
     // 直接写入 Arrow RecordBatch 列表（便捷方法）
     virtual int WriteArrowBatches(const char* table,
-                                  const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                                  std::string* error) = 0;
+                                  const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) = 0;
 
     // ==================== 通用接口 ====================
 
     // 执行任意 SQL（DDL/DML），不返回结果集
-    // 适用于 CREATE TABLE / DROP TABLE / INSERT 等无需读取结果的操作
-    virtual int ExecuteSql(const char* sql, std::string* error) = 0;
+    virtual int ExecuteSql(const char* sql) = 0;
+
+    // 获取最近一次操作的错误信息
+    virtual const char* GetLastError() = 0;
 
     // 测试连接是否可用
     virtual bool IsConnected() = 0;

@@ -225,23 +225,25 @@ IResultSet* MysqlSession::CreateResultSet(MYSQL_RES* result,
 // 设计说明：MySQL 的简单 API（mysql_query）对于动态 SQL 已足够，
 // 且避免了 prepared statement 的额外往返开销。
 // 写入路径（InsertBatch）通过 ExecuteSql 同样走简单 API，保持一致。
-int MysqlSession::ExecuteQuery(const char* sql, IResultSet** result, std::string* error) {
+int MysqlSession::ExecuteQuery(const char* sql, IResultSet** result) {
+    last_error_.clear();
     if (mysql_query(conn_, sql) != 0) {
-        if (error) *error = mysql_error(conn_);
+        last_error_ = mysql_error(conn_);
         return -1;
     }
     MYSQL_RES* res = mysql_store_result(conn_);
     if (!res) {
-        if (error) *error = mysql_error(conn_);
+        last_error_ = mysql_error(conn_);
         return -1;
     }
     *result = new MysqlResultSet(res, [](MYSQL_RES* r) { mysql_free_result(r); });
     return 0;
 }
 
-int MysqlSession::ExecuteSql(const char* sql, std::string* error) {
+int MysqlSession::ExecuteSql(const char* sql) {
+    last_error_.clear();
     if (mysql_query(conn_, sql) != 0) {
-        if (error) *error = mysql_error(conn_);
+        last_error_ = mysql_error(conn_);
         return -1;
     }
     return static_cast<int>(mysql_affected_rows(conn_));
@@ -314,9 +316,8 @@ protected:
             else ddl += "TEXT";
         }
         ddl += ")";
-        std::string error;
-        if (session_->ExecuteSql(ddl.c_str(), &error) < 0) {
-            last_error_ = "CREATE TABLE failed: " + error;
+        if (session_->ExecuteSql(ddl.c_str()) < 0) {
+            last_error_ = std::string("CREATE TABLE failed: ") + session_->GetLastError();
             return -1;
         }
         return 0;
@@ -349,9 +350,8 @@ protected:
                 if (row > start) sql += ", ";
                 sql += BuildRowValues(batch, row, quote_string);
             }
-            std::string error;
-            if (session_->ExecuteSql(sql.c_str(), &error) < 0) {
-                last_error_ = "INSERT failed: " + error;
+            if (session_->ExecuteSql(sql.c_str()) < 0) {
+                last_error_ = std::string("INSERT failed: ") + session_->GetLastError();
                 return -1;
             }
             rows_written_ += (end - start);

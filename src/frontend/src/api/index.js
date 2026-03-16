@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 const api = axios.create({
-  baseURL: 'http://localhost:8081/api',
+  baseURL: 'http://localhost:8081',  // WebPlugin 对外端口，统一入口
   timeout: 30000
 })
 
@@ -15,32 +15,20 @@ api.interceptors.response.use(
 )
 
 export default {
-  // 健康检查
-  health: () => api.get('/health'),
+  // WebPlugin 直接处理的路由
+  health: () => api.get('/api/health'),
+  getChannels: () => api.get('/api/channels'),
+  getOperators: () => api.get('/api/operators'),
+  uploadOperator: (filename, content) => api.post('/api/operators/upload', { filename, content }),
+  activateOperator: (name) => api.post('/api/operators/activate', { name }),
+  deactivateOperator: (name) => api.post('/api/operators/deactivate', { name }),
+  getTasks: () => api.get('/api/tasks'),
+  createTask: (sql) => api.post('/api/tasks', { sql }),
+  getTaskResult: (id) => api.post('/api/tasks/result', { task_id: id }),
 
-  // 通道
-  getChannels: () => api.get('/channels'),
-
-  // 算子
-  getOperators: () => api.get('/operators'),
-  uploadOperator: (file) => {
-    const formData = new FormData()
-    formData.append('file', file)
-    return api.post('/operators/upload', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    })
-  },
-  activateOperator: (name) => api.post(`/operators/${name}/activate`),
-  deactivateOperator: (name) => api.post(`/operators/${name}/deactivate`),
-
-  // 任务
-  getTasks: () => api.get('/tasks'),
-  createTask: (sql) => api.post('/tasks', { sql }),
-  getTaskResult: (id) => api.get(`/tasks/${id}/result`),
-
-  // 数据库通道动态管理（Epic 6）
-  listDbChannels: () => api.get('/db-channels'),
-  addDbChannel: (config) => api.post('/db-channels/add', { config }),
-  removeDbChannel: (type, name) => api.post('/db-channels/remove', { type, name }),
-  updateDbChannel: (config) => api.post('/db-channels/update', { config })
+  // 数据库通道管理（WebPlugin 内部转发给 DatabasePlugin）
+  listDbChannels: () => api.post('/api/channels/database/query', {}),
+  addDbChannel: (config) => api.post('/api/channels/database/add', { config }),
+  removeDbChannel: (type, name) => api.post('/api/channels/database/remove', { type, name }),
+  updateDbChannel: (config) => api.post('/api/channels/database/modify', { config })
 }

@@ -235,9 +235,8 @@ protected:
                 ddl += "TEXT";
         }
         ddl += ")";
-        std::string error;
-        if (session_->ExecuteSql(ddl.c_str(), &error) < 0) {
-            last_error_ = "CREATE TABLE failed: " + error;
+        if (session_->ExecuteSql(ddl.c_str()) < 0) {
+            last_error_ = std::string("CREATE TABLE failed: ") + session_->GetLastError();
             return -1;
         }
         return 0;
@@ -295,9 +294,9 @@ protected:
                 }
             }
             values += ")";
-            std::string error;
-            if (session_->ExecuteSql((prefix + values).c_str(), &error) < 0) {
-                last_error_ = "INSERT failed: " + error;
+            std::string sql_str = prefix + values;
+            if (session_->ExecuteSql(sql_str.c_str()) < 0) {
+                last_error_ = std::string("INSERT failed: ") + session_->GetLastError();
                 return -1;
             }
             ++rows_written_;

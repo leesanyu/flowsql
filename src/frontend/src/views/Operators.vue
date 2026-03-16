@@ -11,19 +11,17 @@
               <el-icon><Edit /></el-icon>
               新建算子
             </el-button>
-            <el-upload
-              :action="uploadUrl"
-              :on-success="handleUploadSuccess"
-              :on-error="handleUploadError"
-              :before-upload="beforeUpload"
-              :show-file-list="false"
-              accept=".py"
-            >
-              <el-button type="success">
+            <el-button type="success" @click="triggerFileInput">
                 <el-icon><Upload /></el-icon>
                 上传文件
               </el-button>
-            </el-upload>
+              <input
+                ref="fileInputRef"
+                type="file"
+                accept=".py"
+                style="display:none"
+                @change="handleFileChange"
+              />
           </div>
         </div>
       </template>
@@ -155,7 +153,7 @@ import { ElMessage } from 'element-plus'
 
 const operators = ref([])
 const loading = ref(false)
-const uploadUrl = 'http://localhost:8081/api/operators/upload'
+const fileInputRef = ref(null)
 const createDialogVisible = ref(false)
 const uploading = ref(false)
 
@@ -211,7 +209,30 @@ const beforeUpload = (file) => {
   return isPython
 }
 
-const handleUploadSuccess = (response) => {
+const triggerFileInput = () => {
+  fileInputRef.value.click()
+}
+
+const handleFileChange = async (event) => {
+  const file = event.target.files[0]
+  if (!file) return
+  if (!file.name.endsWith('.py')) {
+    ElMessage.error('只能上传 .py 文件')
+    return
+  }
+  try {
+    const content = await file.text()
+    await api.uploadOperator(file.name, content)
+    ElMessage.success('算子上传成功')
+    loadOperators()
+  } catch (error) {
+    ElMessage.error('上传失败: ' + (error.response?.data?.error || error.message))
+  } finally {
+    event.target.value = ''
+  }
+}
+
+const handleUploadSuccess = () => {
   ElMessage.success('算子上传成功')
   loadOperators()
 }
@@ -343,16 +364,8 @@ const saveOperator = async (autoActivate) => {
     // 生成文件名
     const fileName = `${operatorForm.value.catelog}_${operatorForm.value.name}.py`
 
-    // 将代码转为 Blob
-    const blob = new Blob([finalCode], { type: 'text/plain' })
-    const file = new File([blob], fileName, { type: 'text/plain' })
-
-    // 创建 FormData
-    const formData = new FormData()
-    formData.append('file', file)
-
-    // 上传
-    const res = await api.uploadOperator(file)
+    // 上传（JSON base64）
+    const res = await api.uploadOperator(fileName, finalCode)
     ElMessage.success('算子上传成功')
 
     // 如果需要自动激活

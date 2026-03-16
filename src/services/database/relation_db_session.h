@@ -28,25 +28,26 @@ public:
 
     virtual ~RelationDbSessionBase() = default;
 
-    // IDbSession 实现
-    int ExecuteQuery(const char* sql, IResultSet** result, std::string* error) override {
-        auto stmt = PrepareStatement(conn_, sql, error);
-        if (!stmt) {
-            return -1;
-        }
+    // 单一 override 同时满足 IDbSession + IBatchReadable + IBatchWritable 的 GetLastError()
+    const char* GetLastError() override { return last_error_.c_str(); }
 
-        if (ExecuteStatement(stmt, error) != 0) {
+    // IDbSession 实现
+    int ExecuteQuery(const char* sql, IResultSet** result) override {
+        last_error_.clear();
+        auto stmt = PrepareStatement(conn_, sql, &last_error_);
+        if (!stmt) return -1;
+
+        if (ExecuteStatement(stmt, &last_error_) != 0) {
             FreeStatement(stmt);
             return -1;
         }
 
-        auto res = GetResultMetadata(stmt, error);
+        auto res = GetResultMetadata(stmt, &last_error_);
         if (!res) {
             FreeStatement(stmt);
             return -1;
         }
 
-        // 创建结果集（由子类实现具体的 CreateResultSet）
         *result = CreateResultSet(res, [this](typename Traits::ResultType r) {
             FreeResult(r);
         });
@@ -55,56 +56,41 @@ public:
             FreeStatement(stmt);
             return -1;
         }
-
         return 0;
     }
 
-    int ExecuteSql(const char* sql, std::string* error) override {
-        auto stmt = PrepareStatement(conn_, sql, error);
-        if (!stmt) {
-            return -1;
-        }
+    int ExecuteSql(const char* sql) override {
+        last_error_.clear();
+        auto stmt = PrepareStatement(conn_, sql, &last_error_);
+        if (!stmt) return -1;
 
-        int ret = ExecuteStatement(stmt, error);
+        int ret = ExecuteStatement(stmt, &last_error_);
         int affected_rows = GetAffectedRows(stmt);
-
         FreeStatement(stmt);
         return (ret == 0) ? affected_rows : -1;
     }
 
-    int BeginTransaction(std::string* error) override {
-        if (in_transaction_) {
-            if (error) *error = "Transaction already in progress";
-            return -1;
-        }
-        int ret = ExecuteSql("BEGIN", error);
-        if (ret != -1) {
-            in_transaction_ = true;
-        }
+    int BeginTransaction() override {
+        last_error_.clear();
+        if (in_transaction_) { last_error_ = "Transaction already in progress"; return -1; }
+        int ret = ExecuteSql("BEGIN");
+        if (ret != -1) in_transaction_ = true;
         return (ret != -1) ? 0 : -1;
     }
 
-    int CommitTransaction(std::string* error) override {
-        if (!in_transaction_) {
-            if (error) *error = "No transaction in progress";
-            return -1;
-        }
-        int ret = ExecuteSql("COMMIT", error);
-        if (ret != -1) {
-            in_transaction_ = false;
-        }
+    int CommitTransaction() override {
+        last_error_.clear();
+        if (!in_transaction_) { last_error_ = "No transaction in progress"; return -1; }
+        int ret = ExecuteSql("COMMIT");
+        if (ret != -1) in_transaction_ = false;
         return (ret != -1) ? 0 : -1;
     }
 
-    int RollbackTransaction(std::string* error) override {
-        if (!in_transaction_) {
-            if (error) *error = "No transaction in progress";
-            return -1;
-        }
-        int ret = ExecuteSql("ROLLBACK", error);
-        if (ret != -1) {
-            in_transaction_ = false;
-        }
+    int RollbackTransaction() override {
+        last_error_.clear();
+        if (!in_transaction_) { last_error_ = "No transaction in progress"; return -1; }
+        int ret = ExecuteSql("ROLLBACK");
+        if (ret != -1) in_transaction_ = false;
         return (ret != -1) ? 0 : -1;
     }
 
@@ -114,31 +100,22 @@ public:
 
     // IBatchReadable 实现
     int CreateReader(const char* query, IBatchReader** reader) override {
-        std::string error;
+        last_error_.clear();
         IResultSet* raw_result = nullptr;
-        if (ExecuteQuery(query, &raw_result, &error) != 0) {
-            return -1;
-        }
-        // RAII 包装，确保异常或提前返回时不泄漏
+        if (ExecuteQuery(query, &raw_result) != 0) return -1;
         std::unique_ptr<IResultSet> result(raw_result);
 
-        // 推断 Schema
-        auto schema = InferSchema(result.get(), &error);
-        if (!schema) {
-            return -1;
-        }
+        auto schema = InferSchema(result.get(), &last_error_);
+        if (!schema) return -1;
 
-        // 创建批量读取器（Reader 接管 result 所有权）
         *reader = CreateBatchReader(result.release(), schema);
         return (*reader) ? 0 : -1;
     }
 
     // IBatchWritable 实现
     int CreateWriter(const char* table, IBatchWriter** writer) override {
-        if (!table || table[0] == '\0') {
-            *writer = nullptr;
-            return -1;
-        }
+        last_error_.clear();
+        if (!table || table[0] == '\0') { *writer = nullptr; return -1; }
         *writer = CreateBatchWriter(table);
         return (*writer) ? 0 : -1;
     }

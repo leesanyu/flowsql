@@ -95,7 +95,7 @@ static std::shared_ptr<arrow::RecordBatch> DeserializeFirstBatch(
 // ============================================================
 static void DropTableIfExists(IDbSession* session, const char* table) {
     std::string sql = std::string("DROP TABLE IF EXISTS ") + table;
-    session->ExecuteSql(sql.c_str(), nullptr);
+    session->ExecuteSql(sql.c_str());
 }
 
 // ============================================================
@@ -166,23 +166,23 @@ void test_ddl() {
         "  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
         "  name VARCHAR(64) NOT NULL,"
         "  val DOUBLE"
-        ")", &error);
+        ")");
     assert(rc == 0);
     printf("  CREATE TABLE: OK\n");
 
     // 重复建表应失败
-    rc = session->ExecuteSql("CREATE TABLE mysql_test_ddl (id INT)", &error);
+    rc = session->ExecuteSql("CREATE TABLE mysql_test_ddl (id INT)");
     assert(rc != 0);
-    assert(!error.empty());
+    assert(session->GetLastError()[0] != '\0');
     printf("  Duplicate CREATE TABLE: correctly failed\n");
 
     // IF NOT EXISTS 不报错
-    rc = session->ExecuteSql("CREATE TABLE IF NOT EXISTS mysql_test_ddl (id INT)", &error);
+    rc = session->ExecuteSql("CREATE TABLE IF NOT EXISTS mysql_test_ddl (id INT)");
     assert(rc == 0);
     printf("  CREATE TABLE IF NOT EXISTS: OK\n");
 
     // 删表
-    rc = session->ExecuteSql("DROP TABLE mysql_test_ddl", &error);
+    rc = session->ExecuteSql("DROP TABLE mysql_test_ddl");
     assert(rc == 0);
     printf("  DROP TABLE: OK\n");
 
@@ -206,17 +206,17 @@ void test_basic_crud() {
     session->ExecuteSql(
         "CREATE TABLE mysql_test_crud ("
         "  id BIGINT, name VARCHAR(64), price DOUBLE, stock INT"
-        ")", &error);
+        ")");
 
     // INSERT
     session->ExecuteSql(
         "INSERT INTO mysql_test_crud VALUES "
-        "(1,'Apple',1.50,100),(2,'Banana',0.75,200),(3,'Orange',2.00,50)", &error);
+        "(1,'Apple',1.50,100),(2,'Banana',0.75,200),(3,'Orange',2.00,50)");
 
     // SELECT 全量
     IResultSet* rs = nullptr;
     int rc = session->ExecuteQuery(
-        "SELECT * FROM mysql_test_crud ORDER BY id", &rs, &error);
+        "SELECT * FROM mysql_test_crud ORDER BY id", &rs);
     assert(rc == 0 && rs != nullptr);
     assert(rs->FieldCount() == 4);
 
@@ -237,11 +237,11 @@ void test_basic_crud() {
 
     // UPDATE
     rc = session->ExecuteSql(
-        "UPDATE mysql_test_crud SET price=1.80 WHERE id=1", &error);
+        "UPDATE mysql_test_crud SET price=1.80 WHERE id=1");
     assert(rc >= 0);  // 返回受影响行数，-1 才是失败
     rs = nullptr;
     session->ExecuteQuery(
-        "SELECT price FROM mysql_test_crud WHERE id=1", &rs, &error);
+        "SELECT price FROM mysql_test_crud WHERE id=1", &rs);
     assert(rs != nullptr && rs->Next());
     double price;
     rs->GetDouble(0, &price);
@@ -251,11 +251,11 @@ void test_basic_crud() {
 
     // DELETE
     rc = session->ExecuteSql(
-        "DELETE FROM mysql_test_crud WHERE id=3", &error);
+        "DELETE FROM mysql_test_crud WHERE id=3");
     assert(rc >= 0);  // 返回受影响行数，-1 才是失败
     rs = nullptr;
     session->ExecuteQuery(
-        "SELECT COUNT(*) FROM mysql_test_crud", &rs, &error);
+        "SELECT COUNT(*) FROM mysql_test_crud", &rs);
     assert(rs != nullptr && rs->Next());
     int64_t cnt;
     rs->GetInt64(0, &cnt);
@@ -282,18 +282,16 @@ void test_where_query() {
 
     DropTableIfExists(session.get(), "mysql_test_where");
     session->ExecuteSql(
-        "CREATE TABLE mysql_test_where (id BIGINT, name VARCHAR(64), score DOUBLE)",
-        &error);
+        "CREATE TABLE mysql_test_where (id BIGINT, name VARCHAR(64), score DOUBLE)");
     session->ExecuteSql(
         "INSERT INTO mysql_test_where VALUES "
-        "(1,'Alice',95.5),(2,'Bob',72.0),(3,'Charlie',88.3),(4,'Dave',60.0)",
-        &error);
+        "(1,'Alice',95.5),(2,'Bob',72.0),(3,'Charlie',88.3),(4,'Dave',60.0)");
 
     // score > 80，按 score 降序
     IResultSet* rs = nullptr;
     session->ExecuteQuery(
         "SELECT name FROM mysql_test_where WHERE score>80 ORDER BY score DESC",
-        &rs, &error);
+        &rs);
     assert(rs != nullptr);
 
     std::vector<std::string> names;
@@ -327,28 +325,24 @@ void test_transaction_commit() {
 
     DropTableIfExists(session.get(), "mysql_test_txn_commit");
     session->ExecuteSql(
-        "CREATE TABLE mysql_test_txn_commit (id BIGINT, balance BIGINT)",
-        &error);
+        "CREATE TABLE mysql_test_txn_commit (id BIGINT, balance BIGINT)");
     session->ExecuteSql(
-        "INSERT INTO mysql_test_txn_commit VALUES (1,1000),(2,500)",
-        &error);
+        "INSERT INTO mysql_test_txn_commit VALUES (1,1000),(2,500)");
 
     // 开始事务，转账 200
-    assert(session->BeginTransaction(&error) == 0);
+    assert(session->BeginTransaction() == 0);
     session->ExecuteSql(
-        "UPDATE mysql_test_txn_commit SET balance=balance-200 WHERE id=1",
-        &error);
+        "UPDATE mysql_test_txn_commit SET balance=balance-200 WHERE id=1");
     session->ExecuteSql(
-        "UPDATE mysql_test_txn_commit SET balance=balance+200 WHERE id=2",
-        &error);
-    assert(session->CommitTransaction(&error) == 0);
+        "UPDATE mysql_test_txn_commit SET balance=balance+200 WHERE id=2");
+    assert(session->CommitTransaction() == 0);
     printf("  COMMIT: OK\n");
 
     // 验证结果
     IResultSet* rs = nullptr;
     session->ExecuteQuery(
         "SELECT id,balance FROM mysql_test_txn_commit ORDER BY id",
-        &rs, &error);
+        &rs);
     assert(rs != nullptr);
     assert(rs->Next()); int64_t b1; rs->GetInt64(1, &b1); assert(b1 == 800);
     assert(rs->Next()); int64_t b2; rs->GetInt64(1, &b2); assert(b2 == 700);
@@ -378,32 +372,30 @@ void test_transaction_rollback() {
     session->ExecuteSql(
         "CREATE TABLE mysql_test_txn_rollback ("
         "  id BIGINT, balance BIGINT"
-        ") ENGINE=InnoDB",
-        &error);
+        ") ENGINE=InnoDB");
     session->ExecuteSql(
-        "INSERT INTO mysql_test_txn_rollback VALUES (1,1000),(2,500)",
-        &error);
+        "INSERT INTO mysql_test_txn_rollback VALUES (1,1000),(2,500)");
 
     // 开始事务，删除所有数据，然后回滚
-    assert(session->BeginTransaction(&error) == 0);
-    session->ExecuteSql("DELETE FROM mysql_test_txn_rollback", &error);
+    assert(session->BeginTransaction() == 0);
+    session->ExecuteSql("DELETE FROM mysql_test_txn_rollback");
 
     // 事务内验证：数据已删除
     IResultSet* rs = nullptr;
     session->ExecuteQuery(
-        "SELECT COUNT(*) FROM mysql_test_txn_rollback", &rs, &error);
+        "SELECT COUNT(*) FROM mysql_test_txn_rollback", &rs);
     assert(rs != nullptr && rs->Next());
     int64_t cnt; rs->GetInt64(0, &cnt); assert(cnt == 0);
     delete rs;
     printf("  In-transaction DELETE: count=%lld\n", cnt);
 
     // 回滚
-    assert(session->RollbackTransaction(&error) == 0);
+    assert(session->RollbackTransaction() == 0);
 
     // 验证数据恢复
     rs = nullptr;
     session->ExecuteQuery(
-        "SELECT COUNT(*) FROM mysql_test_txn_rollback", &rs, &error);
+        "SELECT COUNT(*) FROM mysql_test_txn_rollback", &rs);
     assert(rs != nullptr && rs->Next());
     rs->GetInt64(0, &cnt); assert(cnt == 2);
     delete rs;
@@ -413,7 +405,7 @@ void test_transaction_rollback() {
     rs = nullptr;
     session->ExecuteQuery(
         "SELECT id,balance FROM mysql_test_txn_rollback ORDER BY id",
-        &rs, &error);
+        &rs);
     assert(rs != nullptr);
     assert(rs->Next()); int64_t b1; rs->GetInt64(1, &b1); assert(b1 == 1000);
     assert(rs->Next()); int64_t b2; rs->GetInt64(1, &b2); assert(b2 == 500);
@@ -441,13 +433,12 @@ void test_batch_reader() {
     session->ExecuteSql(
         "CREATE TABLE mysql_test_batch_read ("
         "  ts BIGINT, device VARCHAR(32), temp DOUBLE, humidity DOUBLE"
-        ")", &error);
+        ")");
     session->ExecuteSql(
         "INSERT INTO mysql_test_batch_read VALUES "
         "(1000,'dev-A',23.5,60.1),(1001,'dev-B',24.0,58.3),"
         "(1002,'dev-A',23.8,61.0),(1003,'dev-C',22.1,65.5),"
-        "(1004,'dev-B',24.5,57.9)",
-        &error);
+        "(1004,'dev-B',24.5,57.9)");
 
     auto* readable = dynamic_cast<IBatchReadable*>(session.get());
     assert(readable != nullptr);
@@ -550,7 +541,7 @@ void test_batch_writer() {
     // 验证数据
     IResultSet* rs = nullptr;
     session->ExecuteQuery(
-        "SELECT COUNT(*) FROM mysql_test_batch_write", &rs, &error);
+        "SELECT COUNT(*) FROM mysql_test_batch_write", &rs);
     assert(rs != nullptr && rs->Next());
     int64_t cnt; rs->GetInt64(0, &cnt);
     assert(cnt == 5);
@@ -576,11 +567,9 @@ void test_batch_writer_append() {
 
     DropTableIfExists(session.get(), "mysql_test_batch_append");
     session->ExecuteSql(
-        "CREATE TABLE mysql_test_batch_append (id BIGINT, msg VARCHAR(64))",
-        &error);
+        "CREATE TABLE mysql_test_batch_append (id BIGINT, msg VARCHAR(64))");
     session->ExecuteSql(
-        "INSERT INTO mysql_test_batch_append VALUES (1,'first'),(2,'second'),(3,'third')",
-        &error);
+        "INSERT INTO mysql_test_batch_append VALUES (1,'first'),(2,'second'),(3,'third')");
 
     auto* writable = dynamic_cast<IBatchWritable*>(session.get());
 
@@ -609,7 +598,7 @@ void test_batch_writer_append() {
     // 验证总行数 = 3 + 2 = 5
     IResultSet* rs = nullptr;
     session->ExecuteQuery(
-        "SELECT COUNT(*) FROM mysql_test_batch_append", &rs, &error);
+        "SELECT COUNT(*) FROM mysql_test_batch_append", &rs);
     assert(rs != nullptr && rs->Next());
     int64_t cnt; rs->GetInt64(0, &cnt);
     assert(cnt == 5);
@@ -674,7 +663,7 @@ void test_batch_large_write() {
     // 验证行数
     IResultSet* rs = nullptr;
     session->ExecuteQuery(
-        "SELECT COUNT(*) FROM mysql_test_large_batch", &rs, &error);
+        "SELECT COUNT(*) FROM mysql_test_large_batch", &rs);
     assert(rs != nullptr && rs->Next());
     int64_t cnt; rs->GetInt64(0, &cnt);
     assert(cnt == N);
@@ -712,7 +701,7 @@ void test_connection_pool_reuse() {
 
     // s3 可以正常执行查询
     IResultSet* rs = nullptr;
-    int rc = s3->ExecuteQuery("SELECT 1+1", &rs, nullptr);
+    int rc = s3->ExecuteQuery("SELECT 1+1", &rs);
     assert(rc == 0 && rs != nullptr && rs->Next());
     int64_t val; rs->GetInt64(0, &val);
     assert(val == 2);
@@ -737,15 +726,13 @@ void test_resultset_exhausted_state() {
 
     DropTableIfExists(session.get(), "mysql_test_rs_state");
     session->ExecuteSql(
-        "CREATE TABLE mysql_test_rs_state (id BIGINT, v VARCHAR(8))",
-        &error);
+        "CREATE TABLE mysql_test_rs_state (id BIGINT, v VARCHAR(8))");
     session->ExecuteSql(
-        "INSERT INTO mysql_test_rs_state VALUES (1,'a'),(2,'b')",
-        &error);
+        "INSERT INTO mysql_test_rs_state VALUES (1,'a'),(2,'b')");
 
     IResultSet* rs = nullptr;
     session->ExecuteQuery(
-        "SELECT * FROM mysql_test_rs_state ORDER BY id", &rs, &error);
+        "SELECT * FROM mysql_test_rs_state ORDER BY id", &rs);
     assert(rs != nullptr);
 
     assert(rs->Next() == true);
@@ -779,11 +766,11 @@ void test_error_nonexistent_table() {
 
     IResultSet* rs = nullptr;
     int rc = session->ExecuteQuery(
-        "SELECT * FROM mysql_no_such_table_xyz", &rs, &error);
+        "SELECT * FROM mysql_no_such_table_xyz", &rs);
     assert(rc != 0);
-    assert(!error.empty());
+    assert(session->GetLastError()[0] != '\0');
     assert(rs == nullptr);
-    printf("  Error: %s\n", error.c_str());
+    printf("  Error: %s\n", session->GetLastError());
 
     // BatchReader 也应失败
     auto* readable = dynamic_cast<IBatchReadable*>(session.get());
@@ -810,10 +797,10 @@ void test_error_syntax() {
     auto session = driver.CreateSession();
     std::string error;
 
-    int rc = session->ExecuteSql("THIS IS NOT SQL", &error);
+    int rc = session->ExecuteSql("THIS IS NOT SQL");
     assert(rc != 0);
-    assert(!error.empty());
-    printf("  Syntax error: %s\n", error.c_str());
+    assert(session->GetLastError()[0] != '\0');
+    printf("  Syntax error: %s\n", session->GetLastError());
 
     driver.Disconnect();
     g_passed++;
@@ -835,13 +822,12 @@ void test_data_types() {
     session->ExecuteSql(
         "CREATE TABLE mysql_test_types ("
         "  i BIGINT, r DOUBLE, t VARCHAR(64), n VARCHAR(64)"
-        ")", &error);
+        ")");
     session->ExecuteSql(
-        "INSERT INTO mysql_test_types VALUES (42, 3.14, 'hello', NULL)",
-        &error);
+        "INSERT INTO mysql_test_types VALUES (42, 3.14, 'hello', NULL)");
 
     IResultSet* rs = nullptr;
-    session->ExecuteQuery("SELECT * FROM mysql_test_types", &rs, &error);
+    session->ExecuteQuery("SELECT * FROM mysql_test_types", &rs);
     assert(rs != nullptr && rs->Next());
 
     int64_t i; double r; const char* t; size_t tl;
@@ -894,7 +880,7 @@ void test_quote_identifier() {
         BatchWriteStats stats; w->Close(&stats); assert(stats.rows_written == 1);
         w->Release();
         IResultSet* rs = nullptr;
-        assert(session->ExecuteQuery("SELECT * FROM `mysql_test_quote_id`", &rs, &error) == 0);
+        assert(session->ExecuteQuery("SELECT * FROM `mysql_test_quote_id`", &rs) == 0);
         assert(rs != nullptr && rs->Next());
         int64_t v; rs->GetInt64(0, &v); assert(v == 99);
         delete rs;
@@ -914,7 +900,7 @@ void test_quote_identifier() {
             w->Release();
             // 验证可读（反引号被正确转义）
             IResultSet* rs = nullptr;
-            rc = session->ExecuteQuery("SELECT id FROM `tab``le`", &rs, nullptr);
+            rc = session->ExecuteQuery("SELECT id FROM `tab``le`", &rs);
             assert(rc == 0 && rs != nullptr && rs->Next());
             delete rs;
             DropTableIfExists(session.get(), "tab`le");
@@ -970,11 +956,11 @@ void test_concurrent_sessions() {
         assert(session);
         DropTableIfExists(session.get(), TABLE);
         session->ExecuteSql(
-            "CREATE TABLE mt_sessions_test (id INT, val INT)", nullptr);
+            "CREATE TABLE mt_sessions_test (id INT, val INT)");
         for (int i = 0; i < 10; ++i) {
             std::string sql = "INSERT INTO mt_sessions_test VALUES (" +
                               std::to_string(i) + ", " + std::to_string(i * 10) + ")";
-            session->ExecuteSql(sql.c_str(), nullptr);
+            session->ExecuteSql(sql.c_str());
         }
         driver.Disconnect();
     }

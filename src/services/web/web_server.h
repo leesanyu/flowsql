@@ -6,27 +6,32 @@
 #include <memory>
 #include <string>
 
+#include <common/error_code.h>
+#include <framework/interfaces/irouter_handle.h>
+
 #include "db/database.h"
 
 namespace flowsql {
 namespace web {
 
 // Web 管理系统主服务器
+// 静态文件服务（/）保留 httplib::Server
+// 管理 API（/api/*）通过 IRouterHandle 声明，由 RouterAgencyPlugin 分发
 class WebServer {
  public:
     WebServer();
     ~WebServer() = default;
 
-    // 初始化：打开数据库、注册路由
+    // 初始化：打开数据库、注册静态文件路由
     int Init(const std::string& db_path);
 
-    // 设置 Python Worker 地址（用于算子激活/停用时通知 Worker 重载）
+    // 设置 Python Worker 地址
     void SetWorkerAddress(const std::string& host, int port);
 
-    // 设置 Scheduler 转发地址（通过 Gateway 转发 SQL 执行请求）
+    // 设置 Scheduler 转发地址
     void SetSchedulerAddress(const std::string& host, int port);
 
-    // 启动监听（阻塞）
+    // 启动静态文件服务监听（阻塞）
     int Start(const std::string& host, int port);
 
     // 停止
@@ -34,39 +39,33 @@ class WebServer {
 
     Database& GetDatabase() { return db_; }
 
+    // 声明管理 API 路由（供 WebPlugin::EnumRoutes 调用）
+    void EnumApiRoutes(std::function<void(const RouteItem&)> callback);
+
  private:
-    // 注册所有 API 路由
-    void RegisterRoutes();
-
-    // API 处理函数
-    void HandleHealth(const httplib::Request& req, httplib::Response& res);
-    void HandleGetChannels(const httplib::Request& req, httplib::Response& res);
-    void HandleGetOperators(const httplib::Request& req, httplib::Response& res);
-    void HandleUploadOperator(const httplib::Request& req, httplib::Response& res);
-    void HandleActivateOperator(const httplib::Request& req, httplib::Response& res);
-    void HandleDeactivateOperator(const httplib::Request& req, httplib::Response& res);
-    void HandleGetTasks(const httplib::Request& req, httplib::Response& res);
-    void HandleCreateTask(const httplib::Request& req, httplib::Response& res);
-    void HandleGetTaskResult(const httplib::Request& req, httplib::Response& res);
-
-    // 数据库通道动态管理（Epic 6）
-    void HandleListDbChannels(const httplib::Request& req, httplib::Response& res);
-    void HandleAddDbChannel(const httplib::Request& req, httplib::Response& res);
-    void HandleRemoveDbChannel(const httplib::Request& req, httplib::Response& res);
-    void HandleUpdateDbChannel(const httplib::Request& req, httplib::Response& res);
+    // 管理 API handler（fnRouterHandler 签名）
+    int32_t HandleHealth(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleGetChannels(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleGetOperators(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleUploadOperator(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleActivateOperator(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleDeactivateOperator(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleGetTasks(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleCreateTask(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleGetTaskResult(const std::string& uri, const std::string& req, std::string& rsp);
 
     // 通知 Python Worker 重新加载算子
     void NotifyWorkerReload();
 
-    // 通知 Scheduler 刷新算子列表（Worker reload 完成后调用）
+    // 通知 Scheduler 刷新算子列表
     void NotifySchedulerRefresh();
 
-    httplib::Server server_;
+    httplib::Server server_;  // 仅用于静态文件服务
     Database db_;
     std::string worker_host_ = "127.0.0.1";
     int worker_port_ = 18900;
     std::string scheduler_host_ = "127.0.0.1";
-    int scheduler_port_ = 18800;  // 默认指向 Gateway
+    int scheduler_port_ = 18800;
 };
 
 }  // namespace web

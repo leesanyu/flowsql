@@ -1,12 +1,16 @@
 #include "database_plugin.h"
 
 #include <cstdio>
+#include <common/error_code.h>
 #include <common/log.h>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <unistd.h>
 
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <yaml-cpp/yaml.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -623,6 +627,109 @@ std::string DatabasePlugin::DecryptPassword(const std::string& cipher) {
 
     if (ok <= 0) return "";  // 认证失败（密钥错误或数据篡改）
     return std::string(reinterpret_cast<char*>(plain.data()), out_len + final_len);
+}
+
+// ==================== IRouterHandle — /channels/database/* ====================
+
+void DatabasePlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
+    cb({"POST", "/channels/database/add",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleAdd(u, req, rsp);
+        }});
+    cb({"POST", "/channels/database/remove",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleRemove(u, req, rsp);
+        }});
+    cb({"POST", "/channels/database/modify",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleModify(u, req, rsp);
+        }});
+    cb({"POST", "/channels/database/query",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleQuery(u, req, rsp);
+        }});
+}
+
+// POST /channels/database/add — 新增数据库通道
+// Body: {"config":"type=mysql;name=mydb;host=..."}
+int32_t DatabasePlugin::HandleAdd(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document doc;
+    doc.Parse(req.c_str());
+    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("config")) {
+        rsp = R"({"error":"invalid request, expected {\"config\":\"...\"}"})" ;
+        return error::BAD_REQUEST;
+    }
+    std::string config = doc["config"].GetString();
+    if (AddChannel(config.c_str()) != 0) {
+        rsp = "{\"error\":\"" + std::string(LastError()) + "\"}";
+        return error::BAD_REQUEST;
+    }
+    rsp = R"({"ok":true})";
+    return error::OK;
+}
+
+// POST /channels/database/remove — 删除数据库通道
+// Body: {"type":"mysql","name":"mydb"}
+int32_t DatabasePlugin::HandleRemove(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document doc;
+    doc.Parse(req.c_str());
+    if (doc.HasParseError() || !doc.IsObject() ||
+        !doc.HasMember("type") || !doc.HasMember("name")) {
+        rsp = R"({"error":"invalid request, expected {\"type\":\"...\",\"name\":\"...\"}"})" ;
+        return error::BAD_REQUEST;
+    }
+    std::string type = doc["type"].GetString();
+    std::string name = doc["name"].GetString();
+    if (RemoveChannel(type.c_str(), name.c_str()) != 0) {
+        rsp = "{\"error\":\"" + std::string(LastError()) + "\"}";
+        return error::BAD_REQUEST;
+    }
+    rsp = R"({"ok":true})";
+    return error::OK;
+}
+
+// POST /channels/database/modify — 修改数据库通道配置
+// Body: {"config":"type=mysql;name=mydb;host=..."}
+int32_t DatabasePlugin::HandleModify(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document doc;
+    doc.Parse(req.c_str());
+    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("config")) {
+        rsp = R"({"error":"invalid request, expected {\"config\":\"...\"}"})" ;
+        return error::BAD_REQUEST;
+    }
+    std::string config = doc["config"].GetString();
+    if (UpdateChannel(config.c_str()) != 0) {
+        rsp = "{\"error\":\"" + std::string(LastError()) + "\"}";
+        return error::BAD_REQUEST;
+    }
+    rsp = R"({"ok":true})";
+    return error::OK;
+}
+
+// POST /channels/database/query — 查询数据库通道列表
+// Body: {} 全部 / {"type":"mysql","name":"mydb"} 单个
+int32_t DatabasePlugin::HandleQuery(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document doc;
+    doc.Parse(req.c_str());
+    // 允许空 body 或空对象
+    std::string filter_type, filter_name;
+    if (!doc.HasParseError() && doc.IsObject()) {
+        if (doc.HasMember("type") && doc["type"].IsString()) filter_type = doc["type"].GetString();
+        if (doc.HasMember("name") && doc["name"].IsString()) filter_name = doc["name"].GetString();
+    }
+
+    std::string body = "[";
+    bool first = true;
+    List([&](const char* type, const char* name, const char* config_json) {
+        if (!filter_type.empty() && filter_type != type) return;
+        if (!filter_name.empty() && filter_name != name) return;
+        if (!first) body += ",";
+        body += config_json ? config_json : "{}";
+        first = false;
+    });
+    body += "]";
+    rsp = body;
+    return error::OK;
 }
 
 }  // namespace database

@@ -514,9 +514,8 @@ void test_password_restart_decrypt_mysql() {
 
         // 执行一条 SQL 验证连接真实可用（不只是 IsConnected 标志）
         // ExecuteSql 对 SELECT 返回结果集行数（>=0），对 DDL/DML 返回受影响行数
-        std::string err;
-        int rc = ch->ExecuteSql("SELECT 1", &err);
-        printf("  ExecuteSql('SELECT 1') rc=%d err=%s\n", rc, err.c_str());
+        int rc = ch->ExecuteSql("SELECT 1");
+        printf("  ExecuteSql('SELECT 1') rc=%d err=%s\n", rc, ch->GetLastError());
         assert(rc >= 0);
         printf("  Get() + ExecuteSql('SELECT 1') succeeded after restart\n");
     }
@@ -578,9 +577,8 @@ void test_password_restart_decrypt_clickhouse() {
 
         // ClickHouse 通道走 Arrow 路径，用 Ping 验证连接真实可用
         // DatabaseChannel::IsConnected() 已调用 Ping，此处再验证 ExecuteSql
-        std::string err;
-        int rc = ch->ExecuteSql("SELECT 1", &err);
-        printf("  ExecuteSql('SELECT 1') rc=%d err=%s\n", rc, err.c_str());
+        int rc = ch->ExecuteSql("SELECT 1");
+        printf("  ExecuteSql('SELECT 1') rc=%d err=%s\n", rc, ch->GetLastError());
         assert(rc >= 0);
         printf("  Get() + ExecuteSql('SELECT 1') succeeded after restart\n");
     }

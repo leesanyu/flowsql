@@ -1,0 +1,78 @@
+# docker-compose.full.yml — 包含 MySQL + ClickHouse 外部数据库
+# 使用方式: docker compose -f docker-compose.yml -f docker-compose.full.yml up
+#
+# 此文件仅覆盖/扩展 docker-compose.yml 中的差异部分
+
+version: '3.8'
+
+services:
+
+  # ---- MySQL ----
+  mysql:
+    image: mysql:8.0
+    container_name: flowsql-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: "flowSQL@mysql"
+      MYSQL_DATABASE: flowsql_db
+      MYSQL_USER: flowsql_user
+      MYSQL_PASSWORD: "flowSQL@user"
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command:
+      - --default-authentication-plugin=caching_sha2_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    networks:
+      - flowsql-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pflowSQL@mysql"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---- ClickHouse ----
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: flowsql-clickhouse
+    restart: always
+    environment:
+      CLICKHOUSE_DB: flowsql_db
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+      - ./config/clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
+      - ./config/clickhouse/users.xml:/etc/clickhouse-server/users.d/custom.xml:ro
+      - ./config/clickhouse/default-user.xml:/etc/clickhouse-server/users.d/default-user.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - flowsql-net
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---- Scheduler：等待数据库就绪后再启动 ----
+  scheduler:
+    depends_on:
+      gateway:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  clickhouse_data:
+  clickhouse_logs:

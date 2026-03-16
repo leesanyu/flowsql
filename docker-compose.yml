@@ -1,0 +1,79 @@
+version: '3.8'
+
+# FlowSQL 服务编排
+# 所有 C++ 服务共用同一镜像，通过启动参数区分角色
+# 路由注册和故障恢复由各服务内的 RouterAgencyPlugin KeepAlive 线程自治处理
+
+services:
+
+  # ---- Gateway：统一入口，路由转发 ----
+  gateway:
+    image: flowsql:latest
+    command: >
+      flowsql --role gateway --port 18800
+      --plugins libflowsql_gateway.so:../config/gateway.yaml
+    ports:
+      - "18800:18800"
+    networks:
+      - flowsql-net
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18800/gateway/routes"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # ---- Web：前端静态资源 + 管理 API ----
+  web:
+    image: flowsql:latest
+    command: >
+      flowsql --role web --port 18802
+      --plugins libflowsql_web.so,libflowsql_router.so
+      --option "host=0.0.0.0;port=8081;gateway=gateway:18800;router_host=0.0.0.0;router_port=18802"
+    ports:
+      - "8081:8081"
+    expose:
+      - "18802"
+    networks:
+      - flowsql-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: always
+
+  # ---- Scheduler：SQL 执行 + 通道管理 + 算子 ----
+  scheduler:
+    image: flowsql:latest
+    command: >
+      flowsql --role scheduler --port 18803
+      --plugins libflowsql_router.so,libflowsql_scheduler.so,libflowsql_bridge.so,libflowsql_example.so,libflowsql_database.so
+      --option "host=0.0.0.0;port=18803;gateway=gateway:18800;config_file=../config/flowsql.yml"
+    expose:
+      - "18803"
+    volumes:
+      - ./config:/opt/flowsql/config
+    networks:
+      - flowsql-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: always
+
+  # ---- Python Worker：Python 算子执行 ----
+  pyworker:
+    image: flowsql:latest
+    command: >
+      python3 -m flowsql.worker --port 18900
+    expose:
+      - "18900"
+    networks:
+      - flowsql-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: always
+
+networks:
+  flowsql-net:
+    driver: bridge

@@ -165,8 +165,7 @@ public:
 
     ~RelationBatchWriterBase() override {
         if (transaction_started_ && !committed_) {
-            std::string error;
-            session_->RollbackTransaction(&error);
+            session_->RollbackTransaction();
         }
     }
 
@@ -181,9 +180,8 @@ public:
         if (!reader->ReadNext(&batch).ok() || !batch) return -1;
 
         if (!transaction_started_) {
-            std::string error;
-            if (session_->BeginTransaction(&error) != 0) {
-                last_error_ = "BeginTransaction failed: " + error;
+            if (session_->BeginTransaction() != 0) {
+                last_error_ = std::string("BeginTransaction failed: ") + session_->GetLastError();
                 return -1;
             }
             transaction_started_ = true;
@@ -197,9 +195,8 @@ public:
 
     void Close(BatchWriteStats* stats) override {
         if (transaction_started_ && !committed_) {
-            std::string error;
-            if (session_->CommitTransaction(&error) != 0) {
-                last_error_ = "CommitTransaction failed: " + error;
+            if (session_->CommitTransaction() != 0) {
+                last_error_ = std::string("CommitTransaction failed: ") + session_->GetLastError();
             } else {
                 committed_ = true;
             }

@@ -1,8 +1,10 @@
 #ifndef _FLOWSQL_SERVICES_DATABASE_DATABASE_PLUGIN_H_
 #define _FLOWSQL_SERVICES_DATABASE_DATABASE_PLUGIN_H_
 
+#include <common/error_code.h>
 #include <common/iplugin.h>
 #include <framework/interfaces/idatabase_factory.h>
+#include <framework/interfaces/irouter_handle.h>
 
 #include <memory>
 #include <mutex>
@@ -15,8 +17,9 @@ namespace flowsql {
 namespace database {
 
 // DatabasePlugin — 数据库通道工厂插件
-// 同时实现 IPlugin（生命周期）和 IDatabaseFactory（通道工厂）
-class __attribute__((visibility("default"))) DatabasePlugin : public IPlugin, public IDatabaseFactory {
+// 同时实现 IPlugin（生命周期）、IDatabaseFactory（通道工厂）、IRouterHandle（路由声明）
+class __attribute__((visibility("default"))) DatabasePlugin
+    : public IPlugin, public IDatabaseFactory, public IRouterHandle {
  public:
     DatabasePlugin() = default;
     ~DatabasePlugin() override = default;
@@ -40,38 +43,36 @@ class __attribute__((visibility("default"))) DatabasePlugin : public IPlugin, pu
     int RemoveChannel(const char* type, const char* name) override;
     int UpdateChannel(const char* config_str) override;
 
+    // IRouterHandle — 声明 /channels/database/* 路由
+    void EnumRoutes(std::function<void(const RouteItem&)> callback) override;
+
  private:
-    // 创建指定类型的数据库驱动
+    // 路由处理（fnRouterHandler 签名）
+    int32_t HandleAdd(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleRemove(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleModify(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleQuery(const std::string& uri, const std::string& req, std::string& rsp);
+
+    // 内部辅助
     std::unique_ptr<IDbDriver> CreateDriver(const std::string& type);
-
-    // 解析单个数据库配置（不加锁，调用方负责加锁）
     int ParseSingleConfig(const char* arg);
-
-    // YAML 持久化
-    int LoadFromYaml();   // Start() 时调用，加载 flowsql.yml
-    int SaveToYaml();     // Add/Remove/Update 后调用，写回 flowsql.yml
-
-    // 密码 AES-256-GCM 加解密
+    int LoadFromYaml();
+    int SaveToYaml();
     std::string EncryptPassword(const std::string& plain);
     std::string DecryptPassword(const std::string& cipher);
 
     // 通道池：key = "type.name"
     std::unordered_map<std::string, std::shared_ptr<DatabaseChannel>> channels_;
-
-    // 驱动存储：key = "type.name"（持有所有权）
+    // 驱动存储：key = "type.name"
     std::unordered_map<std::string, std::unique_ptr<IDbDriver>> driver_storage_;
-
-    // 配置表：key = "type.name", value = 连接参数（明文）
+    // 配置表：key = "type.name"
     std::unordered_map<std::string, std::unordered_map<std::string, std::string>> configs_;
 
     std::mutex mutex_;
-    std::mutex save_mutex_;  // 保证 SaveToYaml 串行写入，防止并发写覆盖
+    std::mutex save_mutex_;
     IQuerier* querier_ = nullptr;
-
-    // flowsql.yml 路径，从 Option("config_file=...") 解析
     std::string config_file_;
 
-    // 线程安全的错误信息存储
     static thread_local std::string last_error_;
 };
 

@@ -18,36 +18,39 @@ namespace database {
 interface IBatchReadable {
     virtual ~IBatchReadable() = default;
     virtual int CreateReader(const char* query, IBatchReader** reader) = 0;
+    virtual const char* GetLastError() = 0;
 };
 
 // 批量写入能力（行式数据库）
 interface IBatchWritable {
     virtual ~IBatchWritable() = default;
     virtual int CreateWriter(const char* table, IBatchWriter** writer) = 0;
+    virtual const char* GetLastError() = 0;
 };
 
-// Arrow 原生读取能力（列式数据库 - 未来扩展）
+// Arrow 原生读取能力（列式数据库）
 interface IArrowReadable {
     virtual ~IArrowReadable() = default;
     virtual int ExecuteQueryArrow(const char* sql,
-                                  std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
-                                  std::string* error) = 0;
+                                  std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) = 0;
+    virtual const char* GetLastError() = 0;
 };
 
-// Arrow 原生写入能力（列式数据库 - 未来扩展）
+// Arrow 原生写入能力（列式数据库）
 interface IArrowWritable {
     virtual ~IArrowWritable() = default;
     virtual int WriteArrowBatches(const char* table,
-                                  const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                                  std::string* error) = 0;
+                                  const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) = 0;
+    virtual const char* GetLastError() = 0;
 };
 
 // 事务支持能力
 interface ITransactional {
     virtual ~ITransactional() = default;
-    virtual int BeginTransaction(std::string* error) = 0;
-    virtual int CommitTransaction(std::string* error) = 0;
-    virtual int RollbackTransaction(std::string* error) = 0;
+    virtual int BeginTransaction() = 0;
+    virtual int CommitTransaction() = 0;
+    virtual int RollbackTransaction() = 0;
+    virtual const char* GetLastError() = 0;
 };
 
 }  // namespace database

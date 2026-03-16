@@ -86,23 +86,23 @@ void test_ddl() {
 
     // 建表
     int rc = session->ExecuteSql(
-        "CREATE TABLE t1 (id INTEGER PRIMARY KEY, name TEXT NOT NULL, val REAL)", &error);
+        "CREATE TABLE t1 (id INTEGER PRIMARY KEY, name TEXT NOT NULL, val REAL)");
     assert(rc == 0);
     printf("  CREATE TABLE: OK\n");
 
     // 重复建表应失败
-    rc = session->ExecuteSql("CREATE TABLE t1 (id INTEGER)", &error);
+    rc = session->ExecuteSql("CREATE TABLE t1 (id INTEGER)");
     assert(rc != 0);
-    assert(!error.empty());
-    printf("  Duplicate CREATE TABLE: correctly failed (%s)\n", error.c_str());
+    assert(session->GetLastError()[0] != '\0');
+    printf("  Duplicate CREATE TABLE: correctly failed (%s)\n", session->GetLastError());
 
     // IF NOT EXISTS 不报错
-    rc = session->ExecuteSql("CREATE TABLE IF NOT EXISTS t1 (id INTEGER)", &error);
+    rc = session->ExecuteSql("CREATE TABLE IF NOT EXISTS t1 (id INTEGER)");
     assert(rc == 0);
     printf("  CREATE TABLE IF NOT EXISTS: OK\n");
 
     // 删表
-    rc = session->ExecuteSql("DROP TABLE t1", &error);
+    rc = session->ExecuteSql("DROP TABLE t1");
     assert(rc == 0);
     printf("  DROP TABLE: OK\n");
 
@@ -125,16 +125,16 @@ void test_basic_crud() {
     std::string error;
 
     session->ExecuteSql(
-        "CREATE TABLE products (id INTEGER, name TEXT, price REAL, stock INTEGER)", &error);
+        "CREATE TABLE products (id INTEGER, name TEXT, price REAL, stock INTEGER)");
 
     // INSERT
     session->ExecuteSql(
         "INSERT INTO products VALUES "
-        "(1,'Apple',1.50,100),(2,'Banana',0.75,200),(3,'Orange',2.00,50)", &error);
+        "(1,'Apple',1.50,100),(2,'Banana',0.75,200),(3,'Orange',2.00,50)");
 
     // SELECT 全量
     IResultSet* rs = nullptr;
-    int rc = session->ExecuteQuery("SELECT * FROM products ORDER BY id", &rs, &error);
+    int rc = session->ExecuteQuery("SELECT * FROM products ORDER BY id", &rs);
     assert(rc == 0 && rs != nullptr);
     assert(rs->FieldCount() == 4);
 
@@ -154,10 +154,10 @@ void test_basic_crud() {
     delete rs;
 
     // UPDATE
-    rc = session->ExecuteSql("UPDATE products SET price=1.80 WHERE id=1", &error);
+    rc = session->ExecuteSql("UPDATE products SET price=1.80 WHERE id=1");
     assert(rc >= 0);  // 返回受影响行数，-1 才是失败
     rs = nullptr;
-    session->ExecuteQuery("SELECT price FROM products WHERE id=1", &rs, &error);
+    session->ExecuteQuery("SELECT price FROM products WHERE id=1", &rs);
     assert(rs->Next());
     double price;
     rs->GetDouble(0, &price);
@@ -166,10 +166,10 @@ void test_basic_crud() {
     printf("  UPDATE: OK (price=%.2f)\n", price);
 
     // DELETE
-    rc = session->ExecuteSql("DELETE FROM products WHERE id=3", &error);
+    rc = session->ExecuteSql("DELETE FROM products WHERE id=3");
     assert(rc >= 0);  // 返回受影响行数，-1 才是失败
     rs = nullptr;
-    session->ExecuteQuery("SELECT COUNT(*) FROM products", &rs, &error);
+    session->ExecuteQuery("SELECT COUNT(*) FROM products", &rs);
     assert(rs->Next());
     int64_t cnt;
     rs->GetInt64(0, &cnt);
@@ -195,14 +195,14 @@ void test_where_query() {
     auto session = driver.CreateSession();
     std::string error;
 
-    session->ExecuteSql("CREATE TABLE scores (id INTEGER, name TEXT, score REAL)", &error);
+    session->ExecuteSql("CREATE TABLE scores (id INTEGER, name TEXT, score REAL)");
     session->ExecuteSql(
         "INSERT INTO scores VALUES "
-        "(1,'Alice',95.5),(2,'Bob',72.0),(3,'Charlie',88.3),(4,'Dave',60.0)", &error);
+        "(1,'Alice',95.5),(2,'Bob',72.0),(3,'Charlie',88.3),(4,'Dave',60.0)");
 
     // score > 80
     IResultSet* rs = nullptr;
-    session->ExecuteQuery("SELECT name FROM scores WHERE score>80 ORDER BY score DESC", &rs, &error);
+    session->ExecuteQuery("SELECT name FROM scores WHERE score>80 ORDER BY score DESC", &rs);
     assert(rs != nullptr);
     std::vector<std::string> names;
     while (rs->Next()) {
@@ -234,19 +234,19 @@ void test_transaction_commit() {
     auto session = driver.CreateSession();
     std::string error;
 
-    session->ExecuteSql("CREATE TABLE accounts (id INTEGER, balance INTEGER)", &error);
-    session->ExecuteSql("INSERT INTO accounts VALUES (1,1000),(2,500)", &error);
+    session->ExecuteSql("CREATE TABLE accounts (id INTEGER, balance INTEGER)");
+    session->ExecuteSql("INSERT INTO accounts VALUES (1,1000),(2,500)");
 
     // 开始事务，转账 200
-    assert(session->BeginTransaction(&error) == 0);
-    session->ExecuteSql("UPDATE accounts SET balance=balance-200 WHERE id=1", &error);
-    session->ExecuteSql("UPDATE accounts SET balance=balance+200 WHERE id=2", &error);
-    assert(session->CommitTransaction(&error) == 0);
+    assert(session->BeginTransaction() == 0);
+    session->ExecuteSql("UPDATE accounts SET balance=balance-200 WHERE id=1");
+    session->ExecuteSql("UPDATE accounts SET balance=balance+200 WHERE id=2");
+    assert(session->CommitTransaction() == 0);
     printf("  COMMIT: OK\n");
 
     // 验证结果
     IResultSet* rs = nullptr;
-    session->ExecuteQuery("SELECT id,balance FROM accounts ORDER BY id", &rs, &error);
+    session->ExecuteQuery("SELECT id,balance FROM accounts ORDER BY id", &rs);
     assert(rs->Next()); int64_t b1; rs->GetInt64(1, &b1); assert(b1 == 800);
     assert(rs->Next()); int64_t b2; rs->GetInt64(1, &b2); assert(b2 == 700);
     assert(!rs->Next());
@@ -271,26 +271,26 @@ void test_transaction_rollback() {
     auto session = driver.CreateSession();
     std::string error;
 
-    session->ExecuteSql("CREATE TABLE items (id INTEGER, qty INTEGER)", &error);
-    session->ExecuteSql("INSERT INTO items VALUES (1,100),(2,200)", &error);
+    session->ExecuteSql("CREATE TABLE items (id INTEGER, qty INTEGER)");
+    session->ExecuteSql("INSERT INTO items VALUES (1,100),(2,200)");
 
     // 开始事务，删除所有数据，然后回滚
-    assert(session->BeginTransaction(&error) == 0);
-    session->ExecuteSql("DELETE FROM items", &error);
+    assert(session->BeginTransaction() == 0);
+    session->ExecuteSql("DELETE FROM items");
 
     // 事务内验证：数据已删除
     IResultSet* rs = nullptr;
-    session->ExecuteQuery("SELECT COUNT(*) FROM items", &rs, &error);
+    session->ExecuteQuery("SELECT COUNT(*) FROM items", &rs);
     assert(rs->Next()); int64_t cnt; rs->GetInt64(0, &cnt); assert(cnt == 0);
     delete rs;
     printf("  In-transaction DELETE: count=%lld\n", cnt);
 
     // 回滚
-    assert(session->RollbackTransaction(&error) == 0);
+    assert(session->RollbackTransaction() == 0);
 
     // 验证数据恢复
     rs = nullptr;
-    session->ExecuteQuery("SELECT COUNT(*) FROM items", &rs, &error);
+    session->ExecuteQuery("SELECT COUNT(*) FROM items", &rs);
     assert(rs->Next()); rs->GetInt64(0, &cnt); assert(cnt == 2);
     delete rs;
     printf("  After ROLLBACK: count=%lld (restored)\n", cnt);
@@ -314,12 +314,12 @@ void test_batch_reader() {
     std::string error;
 
     session->ExecuteSql(
-        "CREATE TABLE sensor (ts INTEGER, device TEXT, temp REAL, humidity REAL)", &error);
+        "CREATE TABLE sensor (ts INTEGER, device TEXT, temp REAL, humidity REAL)");
     session->ExecuteSql(
         "INSERT INTO sensor VALUES "
         "(1000,'dev-A',23.5,60.1),(1001,'dev-B',24.0,58.3),"
         "(1002,'dev-A',23.8,61.0),(1003,'dev-C',22.1,65.5),"
-        "(1004,'dev-B',24.5,57.9)", &error);
+        "(1004,'dev-B',24.5,57.9)");
 
     auto* readable = dynamic_cast<IBatchReadable*>(session.get());
     assert(readable != nullptr);
@@ -419,7 +419,7 @@ void test_batch_writer() {
     // 验证数据
     std::string error;
     IResultSet* rs = nullptr;
-    session->ExecuteQuery("SELECT COUNT(*) FROM test_users_w", &rs, &error);
+    session->ExecuteQuery("SELECT COUNT(*) FROM test_users_w", &rs);
     assert(rs != nullptr && rs->Next());
     int64_t cnt; rs->GetInt64(0, &cnt);
     assert(cnt == 5);
@@ -446,9 +446,9 @@ void test_batch_writer_append() {
 
     // 预建表并插入 3 行
     session->ExecuteSql(
-        "CREATE TABLE logs (id INTEGER, msg TEXT)", &error);
+        "CREATE TABLE logs (id INTEGER, msg TEXT)");
     session->ExecuteSql(
-        "INSERT INTO logs VALUES (1,'first'),(2,'second'),(3,'third')", &error);
+        "INSERT INTO logs VALUES (1,'first'),(2,'second'),(3,'third')");
 
     auto* writable = dynamic_cast<IBatchWritable*>(session.get());
 
@@ -476,7 +476,7 @@ void test_batch_writer_append() {
 
     // 验证总行数 = 3 + 2 = 5
     IResultSet* rs = nullptr;
-    session->ExecuteQuery("SELECT COUNT(*) FROM logs", &rs, &error);
+    session->ExecuteQuery("SELECT COUNT(*) FROM logs", &rs);
     assert(rs->Next());
     int64_t cnt; rs->GetInt64(0, &cnt);
     assert(cnt == 5);
@@ -530,11 +530,11 @@ void test_resultset_exhausted_state() {
     auto session = driver.CreateSession();
     std::string error;
 
-    session->ExecuteSql("CREATE TABLE t (id INTEGER, v TEXT)", &error);
-    session->ExecuteSql("INSERT INTO t VALUES (1,'a'),(2,'b')", &error);
+    session->ExecuteSql("CREATE TABLE t (id INTEGER, v TEXT)");
+    session->ExecuteSql("INSERT INTO t VALUES (1,'a'),(2,'b')");
 
     IResultSet* rs = nullptr;
-    session->ExecuteQuery("SELECT * FROM t", &rs, &error);
+    session->ExecuteQuery("SELECT * FROM t", &rs);
     assert(rs != nullptr);
 
     assert(rs->Next() == true);
@@ -567,11 +567,11 @@ void test_error_nonexistent_table() {
     std::string error;
 
     IResultSet* rs = nullptr;
-    int rc = session->ExecuteQuery("SELECT * FROM no_such_table", &rs, &error);
+    int rc = session->ExecuteQuery("SELECT * FROM no_such_table", &rs);
     assert(rc != 0);
-    assert(!error.empty());
+    assert(session->GetLastError()[0] != '\0');
     assert(rs == nullptr);
-    printf("  Error: %s\n", error.c_str());
+    printf("  Error: %s\n", session->GetLastError());
 
     // BatchReader 也应失败
     auto* readable = dynamic_cast<IBatchReadable*>(session.get());
@@ -599,10 +599,10 @@ void test_error_syntax() {
     auto session = driver.CreateSession();
     std::string error;
 
-    int rc = session->ExecuteSql("THIS IS NOT SQL", &error);
+    int rc = session->ExecuteSql("THIS IS NOT SQL");
     assert(rc != 0);
-    assert(!error.empty());
-    printf("  Syntax error: %s\n", error.c_str());
+    assert(session->GetLastError()[0] != '\0');
+    printf("  Syntax error: %s\n", session->GetLastError());
 
     driver.Disconnect();
     printf("[PASS] SQLite: error - SQL syntax\n");
@@ -623,12 +623,12 @@ void test_data_types() {
     std::string error;
 
     session->ExecuteSql(
-        "CREATE TABLE types_test (i INTEGER, r REAL, t TEXT, n TEXT)", &error);
+        "CREATE TABLE types_test (i INTEGER, r REAL, t TEXT, n TEXT)");
     session->ExecuteSql(
-        "INSERT INTO types_test VALUES (42, 3.14, 'hello', NULL)", &error);
+        "INSERT INTO types_test VALUES (42, 3.14, 'hello', NULL)");
 
     IResultSet* rs = nullptr;
-    session->ExecuteQuery("SELECT * FROM types_test", &rs, &error);
+    session->ExecuteQuery("SELECT * FROM types_test", &rs);
     assert(rs != nullptr && rs->Next());
 
     int64_t i; double r; const char* t; size_t tl;
@@ -685,7 +685,7 @@ void test_quote_identifier_injection() {
         w->Release();
         // 验证数据可读（表名被正确引用）
         IResultSet* rs = nullptr;
-        rc = session->ExecuteQuery("SELECT id FROM \"tab\"\"le\"", &rs, nullptr);
+        rc = session->ExecuteQuery("SELECT id FROM \"tab\"\"le\"", &rs);
         assert(rc == 0 && rs != nullptr && rs->Next());
         int64_t v; rs->GetInt64(0, &v); assert(v == 1);
         delete rs;

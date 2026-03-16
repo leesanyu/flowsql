@@ -1,25 +1,34 @@
 // FlowSQL 通用入口
-// Gateway 模式: flowsql --config gateway.yaml
-// Service 模式: flowsql --role web --gateway 127.0.0.1:18800 --port 18802 --plugins libflowsql_web.so
+// Guardian 模式: flowsql --config gateway.yaml   （fork 守护，拉起所有服务）
+// Gateway 模式:  flowsql --role gateway --port 18800 --plugins libflowsql_gateway.so:...
+// Service 模式:  flowsql --role web --port 18802 --plugins libflowsql_web.so,libflowsql_router.so
 
 #include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
+#include <map>
+#include <chrono>
+#include <thread>
+
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <common/loader.hpp>
-#include "services/gateway/service_client.h"
+
+// 仅 Guardian 模式需要解析 YAML 配置
+#include "services/gateway/config.h"
 
 using namespace flowsql;
 
 // 解析命令行参数
 struct Args {
-    std::string config;       // Gateway 模式：配置文件路径
-    std::string role;         // Service 模式：角色名
-    std::string gateway_addr; // Service 模式：Gateway 地址
-    int port = 0;             // Service 模式：监听端口
-    std::string plugins;      // Service 模式：插件列表（逗号分隔）
+    std::string config;       // Guardian 模式：配置文件路径
+    std::string role;         // Service/Gateway 模式：角色名（仅用于日志）
+    int port = 0;             // 监听端口（注入插件 option）
+    std::string plugins;      // 插件列表（逗号分隔）
     std::string option;       // 传给插件的 Option 参数
 };
 
@@ -30,8 +39,6 @@ static Args ParseArgs(int argc, char* argv[]) {
             args.config = argv[++i];
         } else if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
             args.role = argv[++i];
-        } else if (strcmp(argv[i], "--gateway") == 0 && i + 1 < argc) {
-            args.gateway_addr = argv[++i];
         } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             args.port = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--plugins") == 0 && i + 1 < argc) {
@@ -66,11 +73,10 @@ static void WaitForSignal() {
     sigwait(&waitset, &sig);
 }
 
-// 加载单个插件（封装 PluginLoader 调用）
-static int LoadPlugin(PluginLoader* loader, const std::string& path, const char* option) {
-    std::string app_path = get_absolute_process_path();
+// 仅加载单个插件（pluginregist → Option → Load），不调用 Start
+static int LoadPluginOnly(PluginLoader* loader, const std::string& path, const char* option) {
+    std::string app_path = std::string(get_absolute_process_path());
 
-    // 支持 "libxxx.so:key=val;..." 格式：冒号前为文件名，冒号后为插件 option
     std::string lib_path = path;
     std::string plugin_option;
     auto colon = path.find(':');
@@ -78,40 +84,18 @@ static int LoadPlugin(PluginLoader* loader, const std::string& path, const char*
         lib_path = path.substr(0, colon);
         plugin_option = path.substr(colon + 1);
     }
-    // 命令行 option 与内嵌 option 合并（内嵌优先）
     if (plugin_option.empty() && option) plugin_option = option;
 
     const char* relapath[] = {lib_path.c_str()};
     const char* opt_ptr = plugin_option.empty() ? nullptr : plugin_option.c_str();
     const char* options[] = {opt_ptr};
-    int ret = loader->Load(app_path.c_str(), relapath, options, 1);
-    if (ret != 0) return ret;
-    return loader->StartAll();
+    return loader->Load(app_path.c_str(), relapath, options, 1);
 }
 
-// --- Gateway 模式 ---
-static int RunGateway(const std::string& config_path) {
-    printf("========================================\n");
-    printf("  FlowSQL Gateway\n");
-    printf("========================================\n\n");
+// ============================================================
+// --- Service / Gateway 模式（子进程执行）---
+// ============================================================
 
-    auto* loader = PluginLoader::Single();
-
-    if (LoadPlugin(loader, "libflowsql_gateway.so", config_path.c_str()) != 0) {
-        printf("Failed to load gateway plugin\n");
-        return 1;
-    }
-
-    printf("Gateway started. Press Ctrl+C to stop.\n");
-    WaitForSignal();
-
-    printf("\nShutting down gateway...\n");
-    loader->StopAll();
-    loader->Unload();
-    return 0;
-}
-
-// --- Service 模式 ---
 static int RunService(const Args& args) {
     printf("========================================\n");
     printf("  FlowSQL Service: %s\n", args.role.c_str());
@@ -119,7 +103,6 @@ static int RunService(const Args& args) {
 
     auto* loader = PluginLoader::Single();
 
-    // 加载指定的插件（自动将 port 注入 option）
     auto plugin_list = Split(args.plugins, ',');
     std::string auto_option;
     if (args.port > 0) {
@@ -129,56 +112,237 @@ static int RunService(const Args& args) {
         auto_option = args.option;
     }
 
+    // Phase 1：所有插件 Load()
     for (const auto& plugin : plugin_list) {
         const char* opt = auto_option.empty() ? nullptr : auto_option.c_str();
-        if (LoadPlugin(loader, plugin, opt) != 0) {
+        if (LoadPluginOnly(loader, plugin, opt) != 0) {
             printf("Failed to load plugin: %s\n", plugin.c_str());
         } else {
             printf("Loaded plugin: %s\n", plugin.c_str());
         }
     }
 
-    // 向 Gateway 注册路由并启动心跳
-    gateway::ServiceClient client;
-
-    if (!args.gateway_addr.empty()) {
-        std::string gw_host = "127.0.0.1";
-        int gw_port = 18800;
-        size_t colon = args.gateway_addr.find(':');
-        if (colon != std::string::npos) {
-            gw_host = args.gateway_addr.substr(0, colon);
-            gw_port = std::stoi(args.gateway_addr.substr(colon + 1));
-        }
-        client.SetGateway(gw_host, gw_port);
-
-        std::string local_addr = "127.0.0.1:" + std::to_string(args.port);
-        std::string prefix = "/" + args.role;
-        client.RegisterRoute(prefix, local_addr);
-
-        client.StartHeartbeat(args.role, 5);
+    // Phase 2：统一 StartAll()
+    if (loader->StartAll() != 0) {
+        printf("Failed to start plugins\n");
+        loader->StopAll();
+        loader->Unload();
+        return 1;
     }
 
     printf("Service %s running on port %d. Press Ctrl+C to stop.\n", args.role.c_str(), args.port);
     WaitForSignal();
 
     printf("\nShutting down service %s...\n", args.role.c_str());
-    client.StopHeartbeat();
     loader->StopAll();
     loader->Unload();
     return 0;
 }
 
+// ============================================================
+// --- Guardian 模式（守护进程，fork 所有服务）---
+// ============================================================
+
+// 全局 running 标志，信号处理器设置
+static volatile sig_atomic_t g_running = 1;
+
+static void OnSignal(int) {
+    g_running = 0;
+}
+
+// 将 ServiceConfig 转换为 argv 数组，fork 后 execv 执行
+// 返回子进程 pid，失败返回 -1
+static pid_t SpawnService(const std::string& exe_path,
+                           const gateway::ServiceConfig& svc,
+                           const std::string& config_path) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return -1;
+    }
+    if (pid > 0) {
+        // 父进程：返回子进程 pid
+        return pid;
+    }
+
+    // 子进程：构造 argv 并 execv
+    // 对于 python 类型服务，直接执行 command
+    if (svc.type == "python") {
+        if (svc.command.empty()) {
+            fprintf(stderr, "Guardian: python service '%s' has no command\n", svc.name.c_str());
+            _exit(1);
+        }
+        // 简单 shell 执行
+        execl("/bin/sh", "sh", "-c", svc.command.c_str(), nullptr);
+        perror("execl");
+        _exit(1);
+    }
+
+    // C++ 服务：构造 flowsql --role <name> --port <port> --plugins <...> [--option <...>]
+    std::vector<std::string> argv_strs;
+    argv_strs.push_back(exe_path);
+    argv_strs.push_back("--role");
+    argv_strs.push_back(svc.name);
+
+    if (svc.port > 0) {
+        argv_strs.push_back("--port");
+        argv_strs.push_back(std::to_string(svc.port));
+    }
+
+    if (!svc.plugins.empty()) {
+        // 拼接插件列表（逗号分隔）
+        std::string plugins_str;
+        for (size_t i = 0; i < svc.plugins.size(); ++i) {
+            if (i > 0) plugins_str += ",";
+            plugins_str += svc.plugins[i];
+        }
+        argv_strs.push_back("--plugins");
+        argv_strs.push_back(plugins_str);
+    }
+
+    if (!svc.option.empty()) {
+        argv_strs.push_back("--option");
+        argv_strs.push_back(svc.option);
+    }
+
+    // 构造 C 风格 argv
+    std::vector<char*> argv_ptrs;
+    for (auto& s : argv_strs) argv_ptrs.push_back(const_cast<char*>(s.c_str()));
+    argv_ptrs.push_back(nullptr);
+
+    execv(exe_path.c_str(), argv_ptrs.data());
+    perror("execv");
+    _exit(1);
+}
+
+static int RunGuardian(const std::string& config_path) {
+    printf("========================================\n");
+    printf("  FlowSQL Guardian\n");
+    printf("========================================\n\n");
+
+    // 解析配置，获取服务列表
+    gateway::GatewayConfig config;
+    if (gateway::LoadConfig(config_path, &config) != 0) {
+        printf("Guardian: failed to load config: %s\n", config_path.c_str());
+        return 1;
+    }
+
+    // 注册信号处理（不使用 sigwait，因为需要 waitpid 响应子进程退出）
+    signal(SIGTERM, OnSignal);
+    signal(SIGINT,  OnSignal);
+    // 忽略 SIGPIPE，防止子进程管道断开导致守护进程退出
+    signal(SIGPIPE, SIG_IGN);
+
+    // 获取当前可执行文件路径
+    std::string exe_path = std::string(get_absolute_process_path()) + "/flowsql";
+
+    // 构造 Gateway 服务配置（作为第一个子进程）
+    gateway::ServiceConfig gw_svc;
+    gw_svc.name = "gateway";
+    gw_svc.type = "cpp";
+    gw_svc.port = config.port;
+    gw_svc.plugins.push_back("libflowsql_gateway.so:" + config_path);
+
+    // fork 所有服务（Gateway + 业务服务）
+    std::map<pid_t, gateway::ServiceConfig> children;
+
+    auto spawn_all = [&]() {
+        // 先启动 Gateway
+        pid_t gw_pid = SpawnService(exe_path, gw_svc, config_path);
+        if (gw_pid > 0) {
+            children[gw_pid] = gw_svc;
+            printf("Guardian: spawned gateway (pid=%d)\n", gw_pid);
+            // 等待 Gateway 就绪（简单延迟）
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+
+        // 再启动业务服务
+        for (const auto& svc : config.services) {
+            pid_t pid = SpawnService(exe_path, svc, config_path);
+            if (pid > 0) {
+                children[pid] = svc;
+                printf("Guardian: spawned %s (pid=%d)\n", svc.name.c_str(), pid);
+            }
+        }
+    };
+
+    spawn_all();
+
+    printf("Guardian: all services started. Watching...\n");
+
+    // 守护循环：子进程退出就重启
+    while (g_running) {
+        int status;
+        pid_t died = waitpid(-1, &status, WNOHANG);
+        if (died > 0) {
+            auto it = children.find(died);
+            if (it != children.end()) {
+                gateway::ServiceConfig dead_svc = it->second;
+                children.erase(it);
+
+                if (WIFEXITED(status)) {
+                    printf("Guardian: %s (pid=%d) exited with code %d\n",
+                           dead_svc.name.c_str(), died, WEXITSTATUS(status));
+                } else if (WIFSIGNALED(status)) {
+                    printf("Guardian: %s (pid=%d) killed by signal %d\n",
+                           dead_svc.name.c_str(), died, WTERMSIG(status));
+                }
+
+                if (g_running) {
+                    // 短暂延迟后重启，避免崩溃循环
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    pid_t new_pid = SpawnService(exe_path, dead_svc, config_path);
+                    if (new_pid > 0) {
+                        children[new_pid] = dead_svc;
+                        printf("Guardian: restarted %s (new pid=%d)\n",
+                               dead_svc.name.c_str(), new_pid);
+                    }
+                }
+            }
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
+    printf("\nGuardian: shutting down all services...\n");
+
+    // 优雅关闭：SIGTERM 所有子进程
+    for (auto& [pid, svc] : children) {
+        printf("Guardian: sending SIGTERM to %s (pid=%d)\n", svc.name.c_str(), pid);
+        kill(pid, SIGTERM);
+    }
+
+    // 等待所有子进程退出（最多 5 秒）
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    for (auto& [pid, svc] : children) {
+        while (std::chrono::steady_clock::now() < deadline) {
+            int st;
+            if (waitpid(pid, &st, WNOHANG) > 0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
+    printf("Guardian: done\n");
+    return 0;
+}
+
+// ============================================================
+// --- main ---
+// ============================================================
+
 int main(int argc, char* argv[]) {
     Args args = ParseArgs(argc, argv);
 
     if (!args.config.empty()) {
-        return RunGateway(args.config);
+        // Guardian 模式：fork 守护，拉起所有服务
+        return RunGuardian(args.config);
     } else if (!args.role.empty()) {
+        // Service/Gateway 模式：加载插件并运行
         return RunService(args);
     } else {
         printf("Usage:\n");
-        printf("  Gateway mode: %s --config gateway.yaml\n", argv[0]);
-        printf("  Service mode: %s --role <name> --gateway <host:port> --port <port> --plugins <plugin1,plugin2>\n",
+        printf("  Guardian mode: %s --config gateway.yaml\n", argv[0]);
+        printf("  Service mode:  %s --role <name> --port <port> --plugins <plugin1,plugin2> [--option <opts>]\n",
                argv[0]);
         return 1;
     }

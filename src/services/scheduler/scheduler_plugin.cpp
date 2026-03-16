@@ -5,6 +5,7 @@
 #include <rapidjson/writer.h>
 
 #include <cstdio>
+#include <common/error_code.h>
 #include <common/log.h>
 #include <cstdlib>
 #include <cstring>
@@ -25,10 +26,6 @@ namespace flowsql {
 namespace scheduler {
 
 // --- JSON 辅助 ---
-static void SetCorsHeaders(httplib::Response& res) {
-    res.set_header("Access-Control-Allow-Origin", "*");
-}
-
 static std::string MakeErrorJson(const std::string& error) {
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
@@ -104,64 +101,38 @@ int SchedulerPlugin::Start() {
     ch->Write(&df);
     RegisterChannel("test.data", ch);
 
-    RegisterRoutes();
-
-    server_thread_ = std::thread([this]() {
-        LOG_INFO("SchedulerPlugin: listening on %s:%d", host_.c_str(), port_);
-        if (!server_.listen(host_, port_)) {
-            LOG_ERROR("SchedulerPlugin: failed to start HTTP server");
-        }
-    });
-
+    LOG_INFO("SchedulerPlugin::Start: ready, %zu channels loaded", channels_.size());
     return 0;
 }
 
 int SchedulerPlugin::Stop() {
-    server_.stop();
-    if (server_thread_.joinable()) server_thread_.join();
     channels_.clear();
     LOG_INFO("SchedulerPlugin::Stop: done");
     return 0;
 }
 
-// --- 路由注册 ---
-void SchedulerPlugin::RegisterRoutes() {
-    server_.Options(R"(/.*)", [](const httplib::Request&, httplib::Response& res) {
-        res.set_header("Access-Control-Allow-Origin", "*");
-        res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-        res.set_header("Access-Control-Allow-Headers", "Content-Type");
-        res.status = 204;
-    });
-
-    server_.Post("/execute", [this](const httplib::Request& req, httplib::Response& res) {
-        HandleExecute(req, res);
-    });
-
-    server_.Get("/channels", [this](const httplib::Request& req, httplib::Response& res) {
-        HandleGetChannels(req, res);
-    });
-
-    server_.Get("/operators", [this](const httplib::Request& req, httplib::Response& res) {
-        HandleGetOperators(req, res);
-    });
-
-    server_.Post("/refresh-operators", [this](const httplib::Request&, httplib::Response& res) {
-        HandleRefreshOperators(res);
-    });
-
-    // 数据库通道动态管理（Epic 6）
-    server_.Get("/db-channels", [this](const httplib::Request& req, httplib::Response& res) {
-        HandleListDbChannels(req, res);
-    });
-    server_.Post("/db-channels/add", [this](const httplib::Request& req, httplib::Response& res) {
-        HandleAddDbChannel(req, res);
-    });
-    server_.Post("/db-channels/remove", [this](const httplib::Request& req, httplib::Response& res) {
-        HandleRemoveDbChannel(req, res);
-    });
-    server_.Post("/db-channels/update", [this](const httplib::Request& req, httplib::Response& res) {
-        HandleUpdateDbChannel(req, res);
-    });
+// --- IRouterHandle ---
+void SchedulerPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
+    // 任务执行
+    cb({"POST", "/tasks/instant/execute",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleExecute(u, req, rsp);
+        }});
+    // 内存通道查询
+    cb({"POST", "/channels/dataframe/query",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleGetChannels(u, req, rsp);
+        }});
+    // 算子查询
+    cb({"POST", "/operators/native/query",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleGetOperators(u, req, rsp);
+        }});
+    // Python 算子刷新
+    cb({"POST", "/operators/python/refresh",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleRefreshOperators(u, req, rsp);
+        }});
 }
 
 // --- 通道查找辅助 ---
@@ -429,50 +400,41 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
 }
 
 // --- HandleExecute ---
-void SchedulerPlugin::HandleExecute(const httplib::Request& req, httplib::Response& res) {
-    SetCorsHeaders(res);
-
+int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& req_body, std::string& rsp) {
     rapidjson::Document doc;
-    doc.Parse(req.body.c_str());
+    doc.Parse(req_body.c_str());
     if (doc.HasParseError() || !doc.HasMember("sql") || !doc["sql"].IsString()) {
-        res.status = 400;
-        res.set_content(MakeErrorJson("invalid request, expected {\"sql\":\"...\"}"), "application/json");
-        return;
+        rsp = MakeErrorJson("invalid request, expected {\"sql\":\"...\"}");
+        return error::BAD_REQUEST;
     }
     std::string sql_text = doc["sql"].GetString();
 
-    // 限制 SQL 长度，防止超大请求导致 DoS
-    static constexpr size_t kMaxSqlLength = 64 * 1024;  // 64KB
+    static constexpr size_t kMaxSqlLength = 64 * 1024;
     if (sql_text.size() > kMaxSqlLength) {
-        res.status = 400;
-        res.set_content(MakeErrorJson("SQL too long (max 64KB)"), "application/json");
-        return;
+        rsp = MakeErrorJson("SQL too long (max 64KB)");
+        return error::BAD_REQUEST;
     }
 
     SqlParser parser;
     auto stmt = parser.Parse(sql_text);
     if (!stmt.error.empty()) {
-        res.status = 400;
-        res.set_content(MakeErrorJson(stmt.error), "application/json");
-        return;
+        rsp = MakeErrorJson(stmt.error);
+        return error::BAD_REQUEST;
     }
 
     IChannel* source = FindChannel(stmt.source);
     if (!source) {
-        res.status = 400;
-        res.set_content(MakeErrorJson("source channel not found: " + stmt.source), "application/json");
-        return;
+        rsp = MakeErrorJson("source channel not found: " + stmt.source);
+        return error::BAD_REQUEST;
     }
 
     IOperator* op = nullptr;
-    std::shared_ptr<IOperator> op_holder;  // 持有 shared_ptr 保证算子生命周期
+    std::shared_ptr<IOperator> op_holder;
     if (stmt.HasOperator()) {
         op_holder = FindOperator(stmt.op_catelog, stmt.op_name);
         if (!op_holder) {
-            res.status = 400;
-            res.set_content(MakeErrorJson("operator not found: " + stmt.op_catelog + "." + stmt.op_name),
-                            "application/json");
-            return;
+            rsp = MakeErrorJson("operator not found: " + stmt.op_catelog + "." + stmt.op_name);
+            return error::BAD_REQUEST;
         }
         op = op_holder.get();
     }
@@ -490,7 +452,6 @@ void SchedulerPlugin::HandleExecute(const httplib::Request& req, httplib::Respon
         if (!stmt.dest.empty()) {
             sink = FindChannel(stmt.dest);
             if (!sink) {
-                // 临时通道仅由局部 shared_ptr 持有，不注册到 channels_ 避免累积
                 temp_sink = std::make_shared<DataFrameChannel>("result", stmt.dest);
                 temp_sink->Open();
                 sink = temp_sink.get();
@@ -518,9 +479,8 @@ void SchedulerPlugin::HandleExecute(const httplib::Request& req, httplib::Respon
             std::string err = exec_error;
             if (err.empty() && op) err = op->LastError();
             if (err.empty()) err = "execution failed";
-            res.status = 500;
-            res.set_content(MakeErrorJson(err), "application/json");
-            return;
+            rsp = MakeErrorJson(err);
+            return error::INTERNAL_ERROR;
         }
 
         auto* df_sink = dynamic_cast<IDataFrameChannel*>(sink);
@@ -531,38 +491,33 @@ void SchedulerPlugin::HandleExecute(const httplib::Request& req, httplib::Respon
             result_json = result.ToJson();
             row_count = result.RowCount();
         } else if (sink_type == ChannelType::kDatabase) {
-            // 写入数据库时，使用 ExecuteTransfer 返回的行数
             row_count = affected_rows;
         }
 
         rapidjson::StringBuffer buf;
         rapidjson::Writer<rapidjson::StringBuffer> w(buf);
         w.StartObject();
-        w.Key("status");
-        w.String("completed");
-        w.Key("rows");
-        w.Int64(row_count);
-        w.Key("data");
-        w.RawValue(result_json.c_str(), result_json.size(), rapidjson::kArrayType);
+        w.Key("status"); w.String("completed");
+        w.Key("rows"); w.Int64(row_count);
+        w.Key("data"); w.RawValue(result_json.c_str(), result_json.size(), rapidjson::kArrayType);
         w.EndObject();
-        res.set_content(buf.GetString(), "application/json");
+        rsp = buf.GetString();
+        return error::OK;
 
     } catch (const std::exception& e) {
         std::string err = std::string("internal error: ") + e.what();
         LOG_ERROR("SchedulerPlugin::HandleExecute: exception: %s", err.c_str());
-        res.status = 500;
-        res.set_content(MakeErrorJson(err), "application/json");
+        rsp = MakeErrorJson(err);
+        return error::INTERNAL_ERROR;
     } catch (...) {
         LOG_ERROR("SchedulerPlugin::HandleExecute: unknown exception");
-        res.status = 500;
-        res.set_content(MakeErrorJson("internal error: unknown exception"), "application/json");
+        rsp = MakeErrorJson("internal error: unknown exception");
+        return error::INTERNAL_ERROR;
     }
 }
 
 // --- HandleGetChannels ---
-void SchedulerPlugin::HandleGetChannels(const httplib::Request&, httplib::Response& res) {
-    SetCorsHeaders(res);
-
+int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string&, std::string& rsp) {
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
     w.StartArray();
@@ -606,13 +561,12 @@ void SchedulerPlugin::HandleGetChannels(const httplib::Request&, httplib::Respon
     }
 
     w.EndArray();
-    res.set_content(buf.GetString(), "application/json");
+    rsp = buf.GetString();
+    return error::OK;
 }
 
 // --- HandleGetOperators ---
-void SchedulerPlugin::HandleGetOperators(const httplib::Request&, httplib::Response& res) {
-    SetCorsHeaders(res);
-
+int32_t SchedulerPlugin::HandleGetOperators(const std::string&, const std::string&, std::string& rsp) {
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
     w.StartArray();
@@ -647,154 +601,34 @@ void SchedulerPlugin::HandleGetOperators(const httplib::Request&, httplib::Respo
     }
 
     w.EndArray();
-    res.set_content(buf.GetString(), "application/json");
+    rsp = buf.GetString();
+    return error::OK;
 }
 
 // --- HandleRefreshOperators ---
-void SchedulerPlugin::HandleRefreshOperators(httplib::Response& res) {
-    SetCorsHeaders(res);
+int32_t SchedulerPlugin::HandleRefreshOperators(const std::string&, const std::string&, std::string& rsp) {
     if (!querier_) {
-        res.status = 500;
-        res.set_content(R"({"error":"querier not initialized"})", "application/json");
-        return;
+        rsp = R"({"error":"querier not initialized"})";
+        return error::INTERNAL_ERROR;
     }
     auto* bridge = static_cast<IBridge*>(querier_->First(IID_BRIDGE));
     if (bridge) {
         int rc = bridge->Refresh();
         if (rc == 0) {
-            res.set_content(R"({"status":"refreshed"})", "application/json");
+            rsp = R"({"status":"refreshed"})";
+            return error::OK;
         } else {
-            res.status = 500;
-            res.set_content(R"({"error":"refresh failed"})", "application/json");
+            rsp = R"({"error":"refresh failed"})";
+            return error::INTERNAL_ERROR;
         }
     } else {
-        res.status = 404;
-        res.set_content(R"({"error":"bridge not available"})", "application/json");
+        rsp = R"({"error":"bridge not available"})";
+        return error::NOT_FOUND;
     }
 }
 
 // ==================== 数据库通道动态管理端点（Epic 6）====================
-
-// 辅助：从 IQuerier 获取 IDatabaseFactory
-static IDatabaseFactory* GetDbFactory(IQuerier* querier) {
-    if (!querier) return nullptr;
-    return static_cast<IDatabaseFactory*>(querier->First(IID_DATABASE_FACTORY));
-}
-
-// GET /db-channels — 列出所有已配置的数据库通道（含脱敏配置）
-void SchedulerPlugin::HandleListDbChannels(const httplib::Request&, httplib::Response& res) {
-    SetCorsHeaders(res);
-    auto* factory = GetDbFactory(querier_);
-    if (!factory) {
-        res.status = 503;
-        res.body = R"({"error":"DatabasePlugin not available"})";
-        return;
-    }
-
-    std::string body = "[";
-    bool first = true;
-    factory->List([&](const char* type, const char* name, const char* config_json) {
-        if (!first) body += ",";
-        body += config_json ? config_json : "{}";
-        first = false;
-    });
-    body += "]";
-    res.status = 200;
-    res.body = body;
-}
-
-// POST /db-channels/add — 新增数据库通道
-// Body: {"config":"type=mysql;name=mydb;host=...;..."}
-void SchedulerPlugin::HandleAddDbChannel(const httplib::Request& req, httplib::Response& res) {
-    SetCorsHeaders(res);
-    auto* factory = GetDbFactory(querier_);
-    if (!factory) {
-        res.status = 503;
-        res.body = R"({"error":"DatabasePlugin not available"})";
-        return;
-    }
-
-    // 解析 JSON body
-    rapidjson::Document doc;
-    doc.Parse(req.body.c_str());
-    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("config")) {
-        res.status = 400;
-        res.body = R"({"error":"invalid request body, expected {\"config\":\"...\"}"})" ;
-        return;
-    }
-    std::string config = doc["config"].GetString();
-
-    if (factory->AddChannel(config.c_str()) != 0) {
-        res.status = 400;
-        std::string err = factory->LastError();
-        res.body = "{\"error\":\"" + err + "\"}";
-        return;
-    }
-    res.status = 200;
-    res.body = R"({"ok":true})";
-}
-
-// POST /db-channels/remove — 删除数据库通道
-// Body: {"type":"mysql","name":"mydb"}
-void SchedulerPlugin::HandleRemoveDbChannel(const httplib::Request& req, httplib::Response& res) {
-    SetCorsHeaders(res);
-    auto* factory = GetDbFactory(querier_);
-    if (!factory) {
-        res.status = 503;
-        res.body = R"({"error":"DatabasePlugin not available"})";
-        return;
-    }
-
-    rapidjson::Document doc;
-    doc.Parse(req.body.c_str());
-    if (doc.HasParseError() || !doc.IsObject() ||
-        !doc.HasMember("type") || !doc.HasMember("name")) {
-        res.status = 400;
-        res.body = R"({"error":"invalid request body, expected {\"type\":\"...\",\"name\":\"...\"}"})" ;
-        return;
-    }
-    std::string type = doc["type"].GetString();
-    std::string name = doc["name"].GetString();
-
-    if (factory->RemoveChannel(type.c_str(), name.c_str()) != 0) {
-        res.status = 400;
-        std::string err = factory->LastError();
-        res.body = "{\"error\":\"" + err + "\"}";
-        return;
-    }
-    res.status = 200;
-    res.body = R"({"ok":true})";
-}
-
-// POST /db-channels/update — 更新数据库通道配置
-// Body: {"config":"type=mysql;name=mydb;host=...;..."}
-void SchedulerPlugin::HandleUpdateDbChannel(const httplib::Request& req, httplib::Response& res) {
-    SetCorsHeaders(res);
-    auto* factory = GetDbFactory(querier_);
-    if (!factory) {
-        res.status = 503;
-        res.body = R"({"error":"DatabasePlugin not available"})";
-        return;
-    }
-
-    rapidjson::Document doc;
-    doc.Parse(req.body.c_str());
-    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("config")) {
-        res.status = 400;
-        res.body = R"({"error":"invalid request body, expected {\"config\":\"...\"}"})" ;
-        return;
-    }
-    std::string config = doc["config"].GetString();
-
-    if (factory->UpdateChannel(config.c_str()) != 0) {
-        res.status = 400;
-        std::string err = factory->LastError();
-        res.body = "{\"error\":\"" + err + "\"}";
-        return;
-    }
-    res.status = 200;
-    res.body = R"({"ok":true})";
-}
+// 已移交 DatabasePlugin 处理，此处删除
 
 }  // namespace scheduler
 }  // namespace flowsql

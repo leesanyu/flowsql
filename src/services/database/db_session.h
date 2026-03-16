@@ -69,70 +69,52 @@ class IDbSession : public std::enable_shared_from_this<IDbSession> {
 public:
     virtual ~IDbSession() = default;
 
+    // 获取最近一次操作的错误信息
+    virtual const char* GetLastError() { return last_error_.c_str(); }
+
     // ==================== 行式数据库接口 ====================
 
-    // 执行查询，返回结果集
-    // 返回 0 表示成功，-1 表示失败（error 会包含错误信息）
-    virtual int ExecuteQuery(const char* sql, IResultSet** result, std::string* error) {
-        // 默认返回 -1，表示不支持
-        if (error) *error = "ExecuteQuery not supported";
+    // 执行查询，返回结果集（返回 0 成功，-1 失败）
+    virtual int ExecuteQuery(const char* sql, IResultSet** result) {
+        last_error_ = "ExecuteQuery not supported";
         return -1;
     }
 
-    // 执行 SQL（INSERT/UPDATE/DELETE 等），返回受影响的行数
-    // 返回 -1 表示失败
-    virtual int ExecuteSql(const char* sql, std::string* error) {
-        // 默认返回 -1，表示不支持
-        if (error) *error = "ExecuteSql not supported";
+    // 执行 SQL（INSERT/UPDATE/DELETE 等），返回受影响行数，-1 失败
+    virtual int ExecuteSql(const char* sql) {
+        last_error_ = "ExecuteSql not supported";
         return -1;
     }
 
-    // ==================== 列式数据库接口（未来扩展） ====================
+    // ==================== 列式数据库接口 ====================
 
     // 执行 Arrow 查询，返回 RecordBatch 列表
     virtual int ExecuteQueryArrow(const char* sql,
-                                  std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
-                                  std::string* error) {
-        // 默认返回 -1，表示不支持
-        if (error) *error = "ExecuteQueryArrow not supported";
+                                  std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) {
+        last_error_ = "ExecuteQueryArrow not supported";
         return -1;
     }
 
     // 写入 Arrow RecordBatches
     virtual int WriteArrowBatches(const char* table,
-                                  const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                                  std::string* error) {
-        // 默认返回 -1，表示不支持
-        if (error) *error = "WriteArrowBatches not supported";
+                                  const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) {
+        last_error_ = "WriteArrowBatches not supported";
         return -1;
     }
 
     // ==================== 事务控制 ====================
-    // 返回值语义统一：0 = 成功，-1 = 失败（error 包含原因）
-    // 注意：某些列式数据库（如 ClickHouse）不支持事务，默认实现直接返回 0（空操作）
+    // 某些列式数据库（如 ClickHouse）不支持事务，默认实现为空操作
 
-    // 开始事务
-    virtual int BeginTransaction(std::string* error) {
-        (void)error;
-        return 0;  // 默认空实现（不支持事务的数据库）
-    }
-
-    // 提交事务
-    virtual int CommitTransaction(std::string* error) {
-        (void)error;
-        return 0;  // 默认空实现
-    }
-
-    // 回滚事务
-    virtual int RollbackTransaction(std::string* error) {
-        (void)error;
-        return 0;  // 默认空实现
-    }
+    virtual int BeginTransaction() { return 0; }
+    virtual int CommitTransaction() { return 0; }
+    virtual int RollbackTransaction() { return 0; }
 
     // ==================== 健康检查 ====================
 
-    // Ping 数据库连接，检查连接是否有效
     virtual bool Ping() = 0;
+
+protected:
+    std::string last_error_;  // 所有子类共享的错误存储
 };
 
 // 工厂函数类型：创建 Session

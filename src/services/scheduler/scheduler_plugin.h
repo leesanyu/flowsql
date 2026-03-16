@@ -1,17 +1,15 @@
 #ifndef _FLOWSQL_SCHEDULER_SCHEDULER_PLUGIN_H_
 #define _FLOWSQL_SCHEDULER_SCHEDULER_PLUGIN_H_
 
-#include <httplib.h>
-
 #include <atomic>
 #include <memory>
 #include <string>
-#include <thread>
 #include <unordered_map>
 
+#include <common/error_code.h>
 #include <common/iplugin.h>
-
-#include "framework/interfaces/ibridge.h"
+#include <framework/interfaces/irouter_handle.h>
+#include <framework/interfaces/ibridge.h>
 
 namespace flowsql {
 
@@ -22,8 +20,8 @@ struct SqlStatement;
 namespace scheduler {
 
 // SchedulerPlugin — SQL 执行调度插件
-// 内部维护通道表和算子查找，通过 IQuerier 遍历插件接口
-class SchedulerPlugin : public IPlugin {
+// 通过 IRouterHandle 声明路由，对 HTTP 完全无感知
+class SchedulerPlugin : public IPlugin, public IRouterHandle {
  public:
     SchedulerPlugin() = default;
     ~SchedulerPlugin() override = default;
@@ -35,53 +33,43 @@ class SchedulerPlugin : public IPlugin {
     int Start() override;
     int Stop() override;
 
+    // IRouterHandle — 声明路由
+    void EnumRoutes(std::function<void(const RouteItem&)> callback) override;
+
  private:
-    // 注册 HTTP 路由
-    void RegisterRoutes();
+    // 路由处理（fnRouterHandler 签名）
+    int32_t HandleExecute(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleGetChannels(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleGetOperators(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleRefreshOperators(const std::string& uri, const std::string& req, std::string& rsp);
 
-    // HTTP 端点处理
-    void HandleExecute(const httplib::Request& req, httplib::Response& res);
-    void HandleGetChannels(const httplib::Request& req, httplib::Response& res);
-    void HandleGetOperators(const httplib::Request& req, httplib::Response& res);
-    void HandleRefreshOperators(httplib::Response& res);
-
-    // 数据库通道动态管理端点（Epic 6）
-    void HandleListDbChannels(const httplib::Request& req, httplib::Response& res);
-    void HandleAddDbChannel(const httplib::Request& req, httplib::Response& res);
-    void HandleRemoveDbChannel(const httplib::Request& req, httplib::Response& res);
-    void HandleUpdateDbChannel(const httplib::Request& req, httplib::Response& res);
-
-    // 通道管理（原来在 PluginRegistry 里，现在内部维护）
+    // 通道管理
     IChannel* FindChannel(const std::string& name);
     void RegisterChannel(const std::string& key, std::shared_ptr<IChannel> ch);
 
-    // 算子查找（先查 C++ 静态算子，再查 IBridge Python 算子）
+    // 算子查找
     std::shared_ptr<IOperator> FindOperator(const std::string& catelog, const std::string& name);
 
-    // 执行路径：无算子的纯数据搬运
-    // rows_affected: 可选的输出参数，返回受影响的行数（写入/读取的行数）
+    // 执行路径
     int ExecuteTransfer(IChannel* source, IChannel* sink,
                         const std::string& source_type, const std::string& sink_type,
                         const SqlStatement& stmt, int64_t* rows_affected = nullptr,
                         std::string* error = nullptr);
 
-    // 执行路径：有算子，自动适配通道类型
     int ExecuteWithOperator(IChannel* source, IChannel* sink, IOperator* op,
                             const std::string& source_type, const std::string& sink_type,
                             const SqlStatement& stmt, int64_t* rows_affected = nullptr,
                             std::string* error = nullptr);
 
-    IQuerier* querier_ = nullptr;  // Load 时传入，用于查询算子等插件接口
-    httplib::Server server_;
-    std::thread server_thread_;
+    IQuerier* querier_ = nullptr;
 
-    // 通道表（Scheduler 内部管理，替代 PluginRegistry 的动态注册）
+    // 通道表
     std::unordered_map<std::string, std::shared_ptr<IChannel>> channels_;
 
     std::string host_ = "127.0.0.1";
     int port_ = 18803;
 
-    // 用于生成唯一临时通道名，避免并发请求冲突
+    // 用于生成唯一临时通道名
     std::atomic<uint64_t> tmp_channel_seq_{0};
 };
 

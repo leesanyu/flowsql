@@ -1,26 +1,37 @@
+# FlowSQL Gateway 配置
+# 用途：
+#   1. Gateway 插件配置（host/port/heartbeat）
+#   2. Guardian 模式（flowsql --config gateway.yaml）读取 services 段来 fork 子进程
+#
+# 路由注册和故障恢复由各服务内的 RouterAgencyPlugin KeepAlive 线程自治处理
+
 gateway:
   host: 127.0.0.1
   port: 18800
-  heartbeat_interval_s: 5
-  heartbeat_timeout_count: 3
+  heartbeat_interval_s: 100    # KeepAlive 间隔（秒）
+  heartbeat_timeout_count: 3  # 路由 TTL = interval * count（默认 30s）
 
 services:
+  # ---- Web 服务：前端静态资源 + 管理 API ----
   - name: web
     plugins:
-      - libflowsql_web.so
-    port: 8081
+      - name: libflowsql_web.so
+        option: "host=127.0.0.1;port=8081;gateway=127.0.0.1:18800"  # 监听 8081
+      - name: libflowsql_router.so
+        option: "host=127.0.0.1;port=18802;gateway=127.0.0.1:18800"  # 监听 18802
 
+  # ---- Scheduler 服务：SQL 执行 + 通道管理 + 算子 ----
   - name: scheduler
     plugins:
+      - name: libflowsql_router.so
+        option: "host=127.0.0.1;port=18803;gateway=127.0.0.1:18800"  # 监听 18803
       - libflowsql_scheduler.so
       - libflowsql_bridge.so
       - libflowsql_example.so
-      # 数据库通道配置由 flowsql.yml 动态管理（Epic 6）
       - name: libflowsql_database.so
         option: "config_file=config/flowsql.yml"
-    port: 18803
 
+  # ---- Python Worker：Python 算子执行 ----
   - name: pyworker
     type: python
-    command: "python3 -m flowsql.worker"
-    port: 18900
+    command: "python3 -m flowsql.worker --port 18900"  # 监听 18900

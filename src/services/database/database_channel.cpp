@@ -34,26 +34,25 @@ int DatabaseChannel::Close() {
 }
 
 int DatabaseChannel::CreateReader(const char* query, IBatchReader** reader) {
+    last_error_.clear();
     if (!opened_) {
-        LOG_ERROR("DatabaseChannel::CreateReader: channel not opened (%s.%s)", type_.c_str(), name_.c_str());
+        last_error_ = std::string("channel not opened (") + type_ + "." + name_ + ")";
         return -1;
     }
     if (!session_factory_) {
-        LOG_ERROR("DatabaseChannel::CreateReader: session factory not set (%s.%s)", type_.c_str(), name_.c_str());
+        last_error_ = std::string("session factory not set (") + type_ + "." + name_ + ")";
         return -1;
     }
 
-    // 使用 Session 创建 Reader
     auto session = session_factory_();
     if (!session) {
-        LOG_ERROR("DatabaseChannel::CreateReader: failed to create session (%s.%s)", type_.c_str(), name_.c_str());
+        last_error_ = std::string("failed to create session (") + type_ + "." + name_ + ")";
         return -1;
     }
 
-    // 检查 Session 是否支持 IBatchReadable
     auto* batch_readable = dynamic_cast<IBatchReadable*>(session.get());
     if (!batch_readable) {
-        LOG_ERROR("DatabaseChannel: session does not support batch reading");
+        last_error_ = std::string("session does not support batch reading (") + type_ + "." + name_ + ")";
         return -1;
     }
 
@@ -61,28 +60,28 @@ int DatabaseChannel::CreateReader(const char* query, IBatchReader** reader) {
            type_.c_str(), name_.c_str(), query);
     int ret = batch_readable->CreateReader(query, reader);
     if (ret != 0) {
-        LOG_ERROR("DatabaseChannel::CreateReader: CreateReader failed with code %d", ret);
+        // session 是局部变量，必须在销毁前拷贝错误
+        last_error_ = batch_readable->GetLastError();
     }
     return ret;
 }
 
 int DatabaseChannel::CreateWriter(const char* table, IBatchWriter** writer) {
-    if (!opened_ || !session_factory_) return -1;
+    last_error_.clear();
+    if (!opened_ || !session_factory_) { last_error_ = "channel not opened"; return -1; }
 
-    // 使用 Session 创建 Writer
     auto session = session_factory_();
-    if (!session) {
-        return -1;
-    }
+    if (!session) { last_error_ = "failed to create session"; return -1; }
 
-    // 检查 Session 是否支持 IBatchWritable
     auto* batch_writable = dynamic_cast<IBatchWritable*>(session.get());
     if (!batch_writable) {
-        LOG_ERROR("DatabaseChannel: session does not support batch writing");
+        last_error_ = std::string("session does not support batch writing (") + type_ + "." + name_ + ")";
         return -1;
     }
 
-    return batch_writable->CreateWriter(table, writer);
+    int ret = batch_writable->CreateWriter(table, writer);
+    if (ret != 0) last_error_ = batch_writable->GetLastError();
+    return ret;
 }
 
 bool DatabaseChannel::IsConnected() {
@@ -115,52 +114,44 @@ int DatabaseChannel::CreateArrowWriter(const char* table, IArrowWriter** writer)
 }
 
 int DatabaseChannel::ExecuteQueryArrow(const char* query,
-                                       std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
-                                       std::string* error) {
+                                       std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) {
+    last_error_.clear();
     if (!opened_ || !session_factory_) {
-        if (error) *error = "Channel not opened or session factory not set";
+        last_error_ = "channel not opened or session factory not set";
         return -1;
     }
-
     auto session = session_factory_();
-    if (!session) {
-        if (error) *error = "Failed to create session";
-        return -1;
-    }
-
-    // 直接调用 Session 的 ExecuteQueryArrow
-    return session->ExecuteQueryArrow(query, batches, error);
+    if (!session) { last_error_ = "failed to create session"; return -1; }
+    int ret = session->ExecuteQueryArrow(query, batches);
+    if (ret != 0) last_error_ = session->GetLastError();
+    return ret;
 }
 
 int DatabaseChannel::WriteArrowBatches(const char* table,
-                                       const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                                       std::string* error) {
+                                       const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) {
+    last_error_.clear();
     if (!opened_ || !session_factory_) {
-        if (error) *error = "Channel not opened or session factory not set";
+        last_error_ = "channel not opened or session factory not set";
         return -1;
     }
-
     auto session = session_factory_();
-    if (!session) {
-        if (error) *error = "Failed to create session";
-        return -1;
-    }
-
-    // 直接调用 Session 的 WriteArrowBatches
-    return session->WriteArrowBatches(table, batches, error);
+    if (!session) { last_error_ = "failed to create session"; return -1; }
+    int ret = session->WriteArrowBatches(table, batches);
+    if (ret != 0) last_error_ = session->GetLastError();
+    return ret;
 }
 
-int DatabaseChannel::ExecuteSql(const char* sql, std::string* error) {
+int DatabaseChannel::ExecuteSql(const char* sql) {
+    last_error_.clear();
     if (!opened_ || !session_factory_) {
-        if (error) *error = "Channel not opened or session factory not set";
+        last_error_ = "channel not opened or session factory not set";
         return -1;
     }
     auto session = session_factory_();
-    if (!session) {
-        if (error) *error = "Failed to create session";
-        return -1;
-    }
-    return session->ExecuteSql(sql, error);
+    if (!session) { last_error_ = "failed to create session"; return -1; }
+    int ret = session->ExecuteSql(sql);
+    if (ret < 0) last_error_ = session->GetLastError();
+    return ret;
 }
 
 }  // namespace database

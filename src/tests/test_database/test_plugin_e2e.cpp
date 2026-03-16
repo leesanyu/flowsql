@@ -787,8 +787,8 @@ void test_p3_add_channel_then_query(IDatabaseFactory* factory, const std::string
 
     // 建表写数据
     std::string err;
-    assert(ch->ExecuteSql("CREATE TABLE p3_t (id INTEGER, val TEXT)", &err) >= 0);
-    assert(ch->ExecuteSql("INSERT INTO p3_t VALUES (1, 'hello')", &err) >= 0);
+    assert(ch->ExecuteSql("CREATE TABLE p3_t (id INTEGER, val TEXT)") >= 0);
+    assert(ch->ExecuteSql("INSERT INTO p3_t VALUES (1, 'hello')") >= 0);
 
     // 查询验证
     IBatchReader* reader = nullptr;
@@ -909,10 +909,10 @@ void test_clickhouse_create_arrow_reader(IDatabaseFactory* factory) {
     std::string error;
     {
         std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
-        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
         ch->ExecuteQueryArrow(
             ("CREATE TABLE " + table + " (id Int32, val String)"
-             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy, &error);
+             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy);
     }
     auto schema = arrow::schema({arrow::field("id", arrow::int32()),
                                   arrow::field("val", arrow::utf8())});
@@ -922,7 +922,7 @@ void test_clickhouse_create_arrow_reader(IDatabaseFactory* factory) {
     std::shared_ptr<arrow::Array> a_id, a_val;
     (void)b_id.Finish(&a_id); (void)b_val.Finish(&a_val);
     auto batch = arrow::RecordBatch::Make(schema, 3, {a_id, a_val});
-    ch->WriteArrowBatches(table.c_str(), {batch}, &error);
+    ch->WriteArrowBatches(table.c_str(), {batch});
 
     // 通过 CreateArrowReader 读取
     IArrowReader* reader = nullptr;
@@ -930,7 +930,7 @@ void test_clickhouse_create_arrow_reader(IDatabaseFactory* factory) {
     assert(rc == 0 && reader != nullptr);
 
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-    rc = reader->ExecuteQueryArrow(nullptr, &batches, &error);
+    rc = reader->ExecuteQueryArrow(nullptr, &batches);
     assert(rc == 0);
     assert(!batches.empty());
     int64_t total = 0;
@@ -943,7 +943,7 @@ void test_clickhouse_create_arrow_reader(IDatabaseFactory* factory) {
 
     // 清理
     std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
-    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
     printf("[PASS] E2: ClickHouse CreateArrowReader\n");
 }
 
@@ -960,10 +960,10 @@ void test_clickhouse_create_arrow_writer(IDatabaseFactory* factory) {
     std::string error;
     {
         std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
-        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
         ch->ExecuteQueryArrow(
             ("CREATE TABLE " + table + " (id Int32)"
-             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy, &error);
+             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy);
     }
 
     // 通过 CreateArrowWriter 写入
@@ -978,13 +978,13 @@ void test_clickhouse_create_arrow_writer(IDatabaseFactory* factory) {
     (void)b.Finish(&a);
     auto batch = arrow::RecordBatch::Make(schema, 5, {a});
 
-    rc = writer->WriteBatches(table.c_str(), {batch}, &error);
+    rc = writer->WriteBatches(table.c_str(), {batch});
     assert(rc == 0);
     writer->Release();
 
     // 回读验证行数
     std::vector<std::shared_ptr<arrow::RecordBatch>> read_batches;
-    rc = ch->ExecuteQueryArrow(("SELECT * FROM " + table).c_str(), &read_batches, &error);
+    rc = ch->ExecuteQueryArrow(("SELECT * FROM " + table).c_str(), &read_batches);
     assert(rc == 0);
     int64_t total = 0;
     for (const auto& b2 : read_batches) total += b2->num_rows();
@@ -992,7 +992,7 @@ void test_clickhouse_create_arrow_writer(IDatabaseFactory* factory) {
     printf("  CreateArrowWriter: wrote and read back %lld rows\n", (long long)total);
 
     std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
-    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
     printf("[PASS] E3: ClickHouse CreateArrowWriter\n");
 }
 
@@ -1009,21 +1009,21 @@ void test_clickhouse_arrow_type_matrix(IDatabaseFactory* factory) {
     std::string error;
     {
         std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
-        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
         ch->ExecuteQueryArrow(
             ("CREATE TABLE " + table +
              " (c_int32 Int32, c_int64 Int64, c_float32 Float32,"
              "  c_float64 Float64, c_string String, c_bool Bool)"
-             " ENGINE = MergeTree() ORDER BY c_int32").c_str(), &dummy, &error);
+             " ENGINE = MergeTree() ORDER BY c_int32").c_str(), &dummy);
     }
 
     auto batch = MakeChTypeMatrixBatch();
-    int rc = ch->WriteArrowBatches(table.c_str(), {batch}, &error);
+    int rc = ch->WriteArrowBatches(table.c_str(), {batch});
     assert(rc == 0);
 
     std::vector<std::shared_ptr<arrow::RecordBatch>> read_batches;
     rc = ch->ExecuteQueryArrow(
-        ("SELECT * FROM " + table + " ORDER BY c_int32").c_str(), &read_batches, &error);
+        ("SELECT * FROM " + table + " ORDER BY c_int32").c_str(), &read_batches);
     assert(rc == 0);
     assert(!read_batches.empty());
     int64_t total = 0;
@@ -1039,7 +1039,7 @@ void test_clickhouse_arrow_type_matrix(IDatabaseFactory* factory) {
     printf("  type matrix: %lld rows, 6 columns, values verified\n", (long long)total);
 
     std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
-    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
     printf("[PASS] E4: ClickHouse Arrow type matrix\n");
 }
 
@@ -1102,16 +1102,16 @@ void test_concurrent_arrow_readers(IDatabaseFactory* factory) {
     std::string error;
     {
         std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
-        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
         ch->ExecuteQueryArrow(
             ("CREATE TABLE " + table + " (id Int32)"
-             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy, &error);
+             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy);
         auto schema = arrow::schema({arrow::field("id", arrow::int32())});
         arrow::Int32Builder b;
         for (int i = 0; i < 10; ++i) (void)b.Append(i);
         std::shared_ptr<arrow::Array> a; (void)b.Finish(&a);
         auto batch = arrow::RecordBatch::Make(schema, 10, {a});
-        ch->WriteArrowBatches(table.c_str(), {batch}, &error);
+        ch->WriteArrowBatches(table.c_str(), {batch});
     }
 
     const int N = 8;
@@ -1124,7 +1124,7 @@ void test_concurrent_arrow_readers(IDatabaseFactory* factory) {
             int rc = ch->CreateArrowReader(("SELECT * FROM " + table).c_str(), &reader);
             if (rc != 0 || !reader) { fail++; return; }
             std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-            rc = reader->ExecuteQueryArrow(nullptr, &batches, &err);
+            rc = reader->ExecuteQueryArrow(nullptr, &batches);
             reader->Release();
             if (rc != 0) { fail++; return; }
             int64_t total = 0;
@@ -1140,7 +1140,7 @@ void test_concurrent_arrow_readers(IDatabaseFactory* factory) {
     assert(success == N);
 
     std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
-    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy, &error);
+    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
     printf("[PASS] E6: Concurrent CreateArrowReader\n");
 }
 
@@ -1163,10 +1163,10 @@ void test_concurrent_arrow_writers(IDatabaseFactory* factory) {
         std::string t = "e2e_ch_conc_w_" + g_ch_suffix + "_" + std::to_string(i);
         tables.push_back(t);
         std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
-        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + t).c_str(), &dummy, &error);
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + t).c_str(), &dummy);
         ch->ExecuteQueryArrow(
             ("CREATE TABLE " + t + " (id Int32)"
-             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy, &error);
+             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy);
     }
 
     std::atomic<int> success{0}, fail{0};
@@ -1184,7 +1184,7 @@ void test_concurrent_arrow_writers(IDatabaseFactory* factory) {
             std::shared_ptr<arrow::Array> a; (void)b.Finish(&a);
             auto batch = arrow::RecordBatch::Make(schema, ROWS, {a});
 
-            rc = writer->WriteBatches(tables[i].c_str(), {batch}, &err);
+            rc = writer->WriteBatches(tables[i].c_str(), {batch});
             writer->Release();
             if (rc == 0) success++;
             else fail++;
@@ -1199,12 +1199,12 @@ void test_concurrent_arrow_writers(IDatabaseFactory* factory) {
     // 验证每张表行数
     for (int i = 0; i < N; ++i) {
         std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-        ch->ExecuteQueryArrow(("SELECT * FROM " + tables[i]).c_str(), &batches, &error);
+        ch->ExecuteQueryArrow(("SELECT * FROM " + tables[i]).c_str(), &batches);
         int64_t total = 0;
         for (const auto& b : batches) total += b->num_rows();
         assert(total == ROWS);
         std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
-        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + tables[i]).c_str(), &dummy, &error);
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + tables[i]).c_str(), &dummy);
     }
     printf("  all %d tables verified (%d rows each)\n", N, ROWS);
     printf("[PASS] E7: Concurrent CreateArrowWriter\n");
@@ -1285,14 +1285,14 @@ int main(int argc, char* argv[]) {
             std::string err;
             // 全局表
             for (const auto& t : {TABLE_USERS, TABLE_AUTO, TABLE_CITIES, TABLE_COPY, TABLE_ADULTS}) {
-                db_ch->ExecuteSql(("DROP TABLE IF EXISTS " + t).c_str(), &err);
+                db_ch->ExecuteSql(("DROP TABLE IF EXISTS " + t).c_str());
             }
             // 并发读测试表
-            db_ch->ExecuteSql(("DROP TABLE IF EXISTS mt_readers_" + g_suffix).c_str(), &err);
+            db_ch->ExecuteSql(("DROP TABLE IF EXISTS mt_readers_" + g_suffix).c_str());
             // 并发写测试表（6 张）
             for (int i = 0; i < 6; ++i) {
                 db_ch->ExecuteSql(
-                    ("DROP TABLE IF EXISTS mt_writers_" + g_suffix + "_" + std::to_string(i)).c_str(), &err);
+                    ("DROP TABLE IF EXISTS mt_writers_" + g_suffix + "_" + std::to_string(i)).c_str());
             }
             printf("  [CLEANUP] MySQL temp tables dropped\n");
         }

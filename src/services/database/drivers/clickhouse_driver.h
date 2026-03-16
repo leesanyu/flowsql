@@ -59,46 +59,45 @@ public:
 
     // 执行 Arrow 查询：构造 "{sql} FORMAT ArrowStream"，POST，解析响应体
     int ExecuteQueryArrow(const char* sql,
-                          std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
-                          std::string* error) override;
+                          std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) override;
 
     // 写入 Arrow batches：序列化为 Arrow IPC Stream，POST INSERT
     int WriteArrowBatches(const char* table,
-                          const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                          std::string* error) override;
+                          const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) override;
 
     // ==================== 行式接口（DDL 等）====================
 
     // 执行 SQL（DDL/DML），走普通 HTTP 文本响应
-    int ExecuteSql(const char* sql, std::string* error) override;
+    int ExecuteSql(const char* sql) override;
 
     // 健康检查：GET /?query=SELECT+1
     bool Ping() override;
 
+    // 单一 override 满足 IDbSession + IArrowReadable + IArrowWritable 的 GetLastError()
+    const char* GetLastError() override { return last_error_.c_str(); }
+
     // 事务：ClickHouse 不支持，显式覆盖返回 -1
-    // 基类默认实现返回 0（空操作），会误导调用方认为事务已成功开启
-    int BeginTransaction(std::string* error) override {
-        if (error) *error = "ClickHouse does not support transactions";
+    int BeginTransaction() override {
+        last_error_ = "ClickHouse does not support transactions";
         return -1;
     }
-    int CommitTransaction(std::string* error) override {
-        if (error) *error = "ClickHouse does not support transactions";
+    int CommitTransaction() override {
+        last_error_ = "ClickHouse does not support transactions";
         return -1;
     }
-    int RollbackTransaction(std::string* error) override {
-        if (error) *error = "ClickHouse does not support transactions";
+    int RollbackTransaction() override {
+        last_error_ = "ClickHouse does not support transactions";
         return -1;
     }
 
 private:
     // 解析 Arrow IPC Stream 响应体
     int ParseArrowStream(const std::string& body,
-                         std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
-                         std::string* error);
+                         std::vector<std::shared_ptr<arrow::RecordBatch>>* batches);
 
     // 序列化 batches 为 Arrow IPC Stream
     int SerializeArrowStream(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                             std::string* body, std::string* error);
+                             std::string* body);
 
     std::string host_;
     int port_;

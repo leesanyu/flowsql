@@ -20,12 +20,15 @@ int GatewayPlugin::Option(const char* arg) {
     if (LoadConfig(arg, &config_) != 0) {
         return -1;
     }
+    // 路由 TTL = heartbeat_interval_s * heartbeat_timeout_count（默认 5*3=15s）
+    route_ttl_s_ = config_.heartbeat_interval_s * config_.heartbeat_timeout_count;
+    if (route_ttl_s_ <= 0) route_ttl_s_ = 30;
     return 0;
 }
 
 int GatewayPlugin::Load(IQuerier* /* querier */) {
-    printf("GatewayPlugin::Load: gateway=%s:%d, %zu services\n", config_.host.c_str(), config_.port,
-           config_.services.size());
+    printf("GatewayPlugin::Load: gateway=%s:%d, route_ttl=%ds\n",
+           config_.host.c_str(), config_.port, route_ttl_s_);
     return 0;
 }
 
@@ -35,32 +38,24 @@ int GatewayPlugin::Unload() {
 
 int GatewayPlugin::Start() {
     running_ = true;
-    std::string gateway_addr = config_.host + ":" + std::to_string(config_.port);
 
-    // 1. 启动 HTTP 服务线程
+    // 启动 HTTP 服务线程
     http_thread_ = std::thread(&GatewayPlugin::HttpThread, this);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-    // 2. 启动所有子服务
-    service_manager_.StartAll(config_, gateway_addr);
+    // 启动过期路由清理线程
+    cleanup_thread_ = std::thread(&GatewayPlugin::CleanupThread, this);
 
-    // 3. 启动心跳检测线程
-    heartbeat_thread_ = std::thread(&GatewayPlugin::HeartbeatThread, this);
-
-    printf("GatewayPlugin::Start: gateway running on %s\n", gateway_addr.c_str());
+    printf("GatewayPlugin::Start: gateway running on %s:%d\n",
+           config_.host.c_str(), config_.port);
     return 0;
 }
 
 int GatewayPlugin::Stop() {
     running_ = false;
-
-    // 停止子服务
-    service_manager_.StopAll();
-
-    // 停止 HTTP 服务
     server_.stop();
 
-    if (heartbeat_thread_.joinable()) heartbeat_thread_.join();
+    if (cleanup_thread_.joinable()) cleanup_thread_.join();
     if (http_thread_.joinable()) http_thread_.join();
 
     printf("GatewayPlugin::Stop: done\n");
@@ -68,7 +63,7 @@ int GatewayPlugin::Stop() {
 }
 
 void GatewayPlugin::HttpThread() {
-    // Gateway 管理 API
+    // Gateway 管理 API（精确路由，优先于通配符）
     server_.Post("/gateway/register", [this](const httplib::Request& req, httplib::Response& res) {
         HandleRegister(req, res);
     });
@@ -78,18 +73,8 @@ void GatewayPlugin::HttpThread() {
     server_.Get("/gateway/routes", [this](const httplib::Request& req, httplib::Response& res) {
         HandleRoutes(req, res);
     });
-    server_.Post("/gateway/heartbeat", [this](const httplib::Request& req, httplib::Response& res) {
-        HandleHeartbeat(req, res);
-    });
 
-    // 通配符路由 — 转发到子服务
-    auto forward = [this](const httplib::Request& req, httplib::Response& res) {
-        HandleForward(req, res);
-    };
-    server_.Get(R"(/.*)", forward);
-    server_.Post(R"(/.*)", forward);
-    server_.Put(R"(/.*)", forward);
-    server_.Delete(R"(/.*)", forward);
+    // CORS 预检
     server_.Options(R"(/.*)", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -97,51 +82,66 @@ void GatewayPlugin::HttpThread() {
         res.status = 204;
     });
 
+    // 通配符路由 — 转发到后端服务（转发完整 URI，不剥离前缀）
+    auto forward = [this](const httplib::Request& req, httplib::Response& res) {
+        HandleForward(req, res);
+    };
+    server_.Get(R"(/.*)", forward);
+    server_.Post(R"(/.*)", forward);
+    server_.Put(R"(/.*)", forward);
+    server_.Delete(R"(/.*)", forward);
+
     printf("GatewayPlugin: HTTP listening on %s:%d\n", config_.host.c_str(), config_.port);
     server_.listen(config_.host, config_.port);
 }
 
-void GatewayPlugin::HeartbeatThread() {
-    std::string gateway_addr = config_.host + ":" + std::to_string(config_.port);
-    int timeout_s = config_.heartbeat_interval_s * config_.heartbeat_timeout_count;
+void GatewayPlugin::CleanupThread() {
+    // 每隔 route_ttl_s_ / 2 秒检查一次过期路由
+    int check_interval_ms = (route_ttl_s_ * 1000) / 2;
+    if (check_interval_ms < 1000) check_interval_ms = 1000;
 
     while (running_) {
-        // 分段 sleep
-        for (int i = 0; i < config_.heartbeat_interval_s * 10 && running_; ++i) {
+        // 分段 sleep，便于快速响应 Stop()
+        for (int i = 0; i < check_interval_ms / 100 && running_; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         if (!running_) break;
-        service_manager_.CheckAndRestart(timeout_s, gateway_addr);
+
+        int64_t expire_before = NowMs() - (int64_t)route_ttl_s_ * 1000;
+        route_table_.RemoveExpired(expire_before);
     }
 }
 
-// --- Gateway API 处理 ---
+// --- Gateway 管理 API ---
 
 void GatewayPlugin::HandleRegister(const httplib::Request& req, httplib::Response& res) {
     rapidjson::Document doc;
     doc.Parse(req.body.c_str());
-    if (doc.HasParseError() || !doc.HasMember("prefix") || !doc.HasMember("address")) {
+    if (doc.HasParseError() || !doc.IsObject() ||
+        !doc.HasMember("prefix") || !doc.HasMember("address")) {
         res.status = 400;
-        res.set_content(R"({"error":"invalid request"})", "application/json");
+        res.set_content(R"({"error":"invalid request, expected {\"prefix\":\"...\",\"address\":\"...\"}"})",
+                        "application/json");
         return;
     }
 
     std::string prefix = doc["prefix"].GetString();
     std::string address = doc["address"].GetString();
-    std::string service = doc.HasMember("service") ? doc["service"].GetString() : "";
 
-    if (route_table_.Register(prefix, address, service) != 0) {
-        res.status = 409;
-        res.set_content(R"({"error":"prefix already registered"})", "application/json");
+    if (prefix.empty() || prefix[0] != '/') {
+        res.status = 400;
+        res.set_content(R"({"error":"prefix must start with /"})", "application/json");
         return;
     }
+
+    route_table_.Register(prefix, address);
     res.set_content(R"({"status":"ok"})", "application/json");
 }
 
 void GatewayPlugin::HandleUnregister(const httplib::Request& req, httplib::Response& res) {
     rapidjson::Document doc;
     doc.Parse(req.body.c_str());
-    if (doc.HasParseError() || !doc.HasMember("prefix")) {
+    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("prefix")) {
         res.status = 400;
         res.set_content(R"({"error":"invalid request"})", "application/json");
         return;
@@ -157,54 +157,50 @@ void GatewayPlugin::HandleRoutes(const httplib::Request&, httplib::Response& res
     w.StartArray();
     for (const auto& r : routes) {
         w.StartObject();
-        w.Key("prefix"); w.String(r.prefix.c_str());
-        w.Key("address"); w.String(r.address.c_str());
-        w.Key("service"); w.String(r.service.c_str());
+        w.Key("prefix");   w.String(r.prefix.c_str());
+        w.Key("address");  w.String(r.address.c_str());
+        w.Key("last_seen_ms"); w.Int64(r.last_seen_ms);
         w.EndObject();
     }
     w.EndArray();
     res.set_content(buf.GetString(), "application/json");
 }
 
-void GatewayPlugin::HandleHeartbeat(const httplib::Request& req, httplib::Response& res) {
-    rapidjson::Document doc;
-    doc.Parse(req.body.c_str());
-    if (doc.HasParseError() || !doc.HasMember("service")) {
-        res.status = 400;
-        res.set_content(R"({"error":"invalid request"})", "application/json");
-        return;
-    }
-    service_manager_.UpdateHeartbeat(doc["service"].GetString());
-    res.set_content(R"({"status":"ok"})", "application/json");
-}
-
-// --- 路由转发 ---
+// --- 路由转发（转发完整 URI，不剥离前缀）---
 
 void GatewayPlugin::HandleForward(const httplib::Request& req, httplib::Response& res) {
-    const RouteEntry* route = route_table_.Match(req.path);
-    if (!route) {
+    RouteEntry route;
+    if (!route_table_.Match(req.path, &route)) {
         res.status = 404;
-        res.set_content(R"({"error":"no route matched","path":")" + req.path + R"("})", "application/json");
+        res.set_content(
+            R"({"error":"no route matched","path":")" + req.path + R"("})",
+            "application/json");
         return;
     }
 
-    // 剥离前缀，构造目标路径
-    std::string target_path = RouteTable::StripPrefix(req.path, route->prefix);
-
     // 解析目标地址
-    std::string addr = route->address;
     std::string host;
-    int port;
-    size_t colon = addr.find(':');
+    int port = 80;
+    size_t colon = route.address.find(':');
     if (colon != std::string::npos) {
-        host = addr.substr(0, colon);
-        port = std::stoi(addr.substr(colon + 1));
+        host = route.address.substr(0, colon);
+        port = std::stoi(route.address.substr(colon + 1));
     } else {
-        host = addr;
-        port = 80;
+        host = route.address;
     }
 
-    // 转发请求
+    // 转发完整 URI（含查询参数）
+    std::string target = req.path;
+    if (!req.params.empty()) {
+        // 重建 query string
+        bool first = true;
+        for (const auto& [k, v] : req.params) {
+            target += (first ? "?" : "&");
+            target += k + "=" + v;
+            first = false;
+        }
+    }
+
     httplib::Client client(host, port);
     client.set_connection_timeout(5);
     client.set_read_timeout(30);
@@ -213,23 +209,23 @@ void GatewayPlugin::HandleForward(const httplib::Request& req, httplib::Response
     httplib::Result result(nullptr, httplib::Error::Unknown);
 
     if (req.method == "GET") {
-        result = client.Get(target_path);
+        result = client.Get(target);
     } else if (req.method == "POST") {
-        result = client.Post(target_path, req.body, content_type);
+        result = client.Post(target, req.body, content_type.empty() ? "application/json" : content_type);
     } else if (req.method == "DELETE") {
-        result = client.Delete(target_path);
+        result = client.Delete(target);
     } else if (req.method == "PUT") {
-        result = client.Put(target_path, req.body, content_type);
+        result = client.Put(target, req.body, content_type.empty() ? "application/json" : content_type);
     }
 
     if (!result) {
         res.status = 502;
-        res.set_content(R"({"error":"upstream unreachable","service":")" + route->service + R"("})",
-                        "application/json");
+        res.set_content(
+            R"({"error":"upstream unreachable","address":")" + route.address + R"("})",
+            "application/json");
         return;
     }
 
-    // 回写响应
     res.status = result->status;
     res.body = result->body;
     for (const auto& [key, val] : result->headers) {

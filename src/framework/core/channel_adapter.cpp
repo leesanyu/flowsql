@@ -29,7 +29,11 @@ int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query,
 
     IBatchReader* reader = nullptr;
     if (db->CreateReader(query, &reader) != 0 || !reader) {
-        if (error) *error = "CreateReader failed for query: " + std::string(query ? query : "");
+        if (error) {
+            const char* detail = db->GetLastError();
+            *error = (detail && detail[0]) ? detail
+                   : "CreateReader failed for query: " + std::string(query ? query : "");
+        }
         return -1;
     }
 
@@ -100,7 +104,11 @@ int64_t ChannelAdapter::WriteFromDataFrame(IDataFrameChannel* df_in,
     // 创建写入器
     IBatchWriter* writer = nullptr;
     if (db->CreateWriter(table, &writer) != 0 || !writer) {
-        if (error) *error = "CreateWriter failed for table: " + std::string(table);
+        if (error) {
+            const char* detail = db->GetLastError();
+            *error = (detail && detail[0]) ? detail
+                   : "CreateWriter failed for table: " + std::string(table);
+        }
         return -1;
     }
 

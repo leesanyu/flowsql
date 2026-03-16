@@ -19,9 +19,10 @@ public:
         : session_(std::move(session)), query_(query) {}
 
     int ExecuteQueryArrow(const char* query,
-                          std::vector<std::shared_ptr<arrow::RecordBatch>>* batches,
-                          std::string* error) override {
-        return session_->ExecuteQueryArrow(query ? query : query_.c_str(), batches, error);
+                          std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) override {
+        int ret = session_->ExecuteQueryArrow(query ? query : query_.c_str(), batches);
+        if (ret != 0) last_error_ = session_->GetLastError();
+        return ret;
     }
 
     // Schema 懒加载，暂不实现
@@ -45,9 +46,10 @@ public:
         : session_(std::move(session)), table_(table) {}
 
     int WriteBatches(const char* table,
-                     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                     std::string* error) override {
-        return session_->WriteArrowBatches(table ? table : table_.c_str(), batches, error);
+                     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) override {
+        int ret = session_->WriteArrowBatches(table ? table : table_.c_str(), batches);
+        if (ret != 0) last_error_ = session_->GetLastError();
+        return ret;
     }
 
     const char* GetLastError() override { return last_error_.c_str(); }
