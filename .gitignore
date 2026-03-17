@@ -79,8 +79,3 @@ core.*
 *.egg-info/
 __pycache__/
 *.pyc
-
-# Python
-*.egg-info/
-__pycache__/
-*.pyc
