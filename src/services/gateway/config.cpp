@@ -22,7 +22,6 @@ int LoadConfig(const std::string& path, GatewayConfig* config) {
         if (gw["port"]) config->port = gw["port"].as<int>();
         if (gw["heartbeat_interval_s"]) config->heartbeat_interval_s = gw["heartbeat_interval_s"].as<int>();
         if (gw["heartbeat_timeout_count"]) config->heartbeat_timeout_count = gw["heartbeat_timeout_count"].as<int>();
-        if (gw["mode"]) config->mode = gw["mode"].as<std::string>();
     }
 
     // services 段

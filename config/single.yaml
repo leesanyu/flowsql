@@ -1,24 +1,11 @@
-# FlowSQL 单进程配置
-# 用途：所有插件在同一进程内加载，适合开发调试
+# FlowSQL 单进程配置（所有 C++ 插件在同一进程，pyworker 独立 fork）
 # 启动：flowsql --config config/single.yaml
-#
-# 端口分配：
-#   8081  — libflowsql_web.so     （前端静态文件 + API 代理入口）
-#   18800 — libflowsql_gateway.so （路由转发）
-#   18803 — libflowsql_router.so  （业务路由分发，收集全部插件路由）
-
-gateway:
-  host: 127.0.0.1
-  port: 18800
-  heartbeat_interval_s: 10
-  heartbeat_timeout_count: 3
-  mode: single                    # 单进程模式，不 fork 子进程
 
 services:
   - name: all
     plugins:
       - name: libflowsql_gateway.so
-        option: "config/single.yaml"    # Gateway 插件从同一配置文件读取 gateway 段
+        option: "host=127.0.0.1;port=18800;heartbeat_interval_s=10;heartbeat_timeout_count=3"
       - name: libflowsql_web.so
         option: "host=127.0.0.1;port=8081;gateway=127.0.0.1:18800"
       - name: libflowsql_router.so
@@ -28,3 +15,7 @@ services:
       - libflowsql_example.so
       - name: libflowsql_database.so
         option: "config_file=config/flowsql.yml"
+
+  - name: pyworker
+    type: python
+    command: "python3 -m flowsql.worker --port 18900"
