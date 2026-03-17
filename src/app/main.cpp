@@ -157,15 +157,7 @@ static int RunSingle(const std::string& config_path) {
 
     auto* loader = PluginLoader::Single();
 
-    // Phase 1：Load 所有插件
-    // 先加载 GatewayPlugin
-    std::string gw_plugin = "libflowsql_gateway.so:" + config_path;
-    if (LoadPluginOnly(loader, gw_plugin, nullptr) != 0) {
-        printf("RunSingle: failed to load gateway plugin\n");
-        return 1;
-    }
-
-    // 再加载各服务的插件（跳过 python 类型服务）
+    // Phase 1：按 services 顺序 Load 所有插件（跳过 python 类型服务）
     for (const auto& svc : config.services) {
         if (svc.type == "python") continue;
         for (const auto& plugin : svc.plugins) {
@@ -292,32 +284,21 @@ static int RunGuardian(const std::string& config_path) {
     // 获取当前可执行文件路径
     std::string exe_path = std::string(get_absolute_process_path()) + "/flowsql";
 
-    // 构造 Gateway 服务配置（作为第一个子进程）
-    gateway::ServiceConfig gw_svc;
-    gw_svc.name = "gateway";
-    gw_svc.type = "cpp";
-    gw_svc.port = config.port;
-    gw_svc.plugins.push_back("libflowsql_gateway.so:" + config_path);
-
-    // fork 所有服务（Gateway + 业务服务）
+    // fork 所有服务（按 services 顺序，第一个服务启动后等待就绪）
     std::map<pid_t, gateway::ServiceConfig> children;
 
     auto spawn_all = [&]() {
-        // 先启动 Gateway
-        pid_t gw_pid = SpawnService(exe_path, gw_svc, config_path);
-        if (gw_pid > 0) {
-            children[gw_pid] = gw_svc;
-            printf("Guardian: spawned gateway (pid=%d)\n", gw_pid);
-            // 等待 Gateway 就绪（简单延迟）
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-
-        // 再启动业务服务
+        bool first = true;
         for (const auto& svc : config.services) {
             pid_t pid = SpawnService(exe_path, svc, config_path);
             if (pid > 0) {
                 children[pid] = svc;
                 printf("Guardian: spawned %s (pid=%d)\n", svc.name.c_str(), pid);
+                if (first) {
+                    // 等待第一个服务（Gateway）就绪后再启动其他服务
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    first = false;
+                }
             }
         }
     };

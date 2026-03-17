@@ -12,6 +12,12 @@ gateway:
   heartbeat_timeout_count: 3  # 路由 TTL = interval * count（默认 30s）
 
 services:
+  # ---- Gateway：路由转发（必须第一个启动）----
+  - name: gateway
+    plugins:
+      - name: libflowsql_gateway.so
+        option: "config/gateway.yaml"   # Gateway 插件从同一配置文件读取 gateway 段
+
   # ---- Web 服务：前端静态资源 + 管理 API ----
   - name: web
     plugins:

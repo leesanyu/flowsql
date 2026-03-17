@@ -17,6 +17,8 @@ gateway:
 services:
   - name: all
     plugins:
+      - name: libflowsql_gateway.so
+        option: "config/single.yaml"    # Gateway 插件从同一配置文件读取 gateway 段
       - name: libflowsql_web.so
         option: "host=127.0.0.1;port=8081;gateway=127.0.0.1:18800"
       - name: libflowsql_router.so
