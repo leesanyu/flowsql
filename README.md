@@ -134,7 +134,7 @@ IPlugin（生命周期）
 
 ### URI 设计约束
 
-详见 [URI 设计规范](docs/uri_design.md)。
+详见 [架构设计](docs/framework.md)。
 
 **概要：**
 
@@ -191,8 +191,8 @@ flowSQL/
 
 ## 文档
 
+- [项目愿景](docs/vision.md)
 - [架构设计](docs/framework.md)
-- [URI 设计规范](docs/uri_design.md)
 
 ## 许可证
 
