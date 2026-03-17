@@ -85,7 +85,7 @@ int BridgePlugin::Load(IQuerier* querier) {
                 if (!doc.HasParseError() && doc.IsArray()) {
                     for (auto& item : doc.GetArray()) {
                         std::string prefix = item["prefix"].GetString();
-                        if (prefix.find("/pyworker") == 0) {
+                        if (prefix.find("/operators/python") == 0) {
                             std::string addr = item["address"].GetString();
                             size_t c = addr.find(':');
                             if (c != std::string::npos) {
@@ -139,7 +139,7 @@ int BridgePlugin::DiscoverOperators() {
     client.set_connection_timeout(2);
     client.set_read_timeout(5);
 
-    auto res = client.Get("/operators");
+    auto res = client.Get("/operators/python/list");
     if (!res || res->status != 200) {
         return -1;
     }

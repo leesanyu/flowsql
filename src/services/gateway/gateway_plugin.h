@@ -9,7 +9,6 @@
 
 #include <common/iplugin.h>
 
-#include "config.h"
 #include "route_table.h"
 
 namespace flowsql {
@@ -44,9 +43,13 @@ class GatewayPlugin : public IPlugin {
     void HandleUnregister(const httplib::Request& req, httplib::Response& res);
     void HandleRoutes(const httplib::Request& req, httplib::Response& res);
 
-    GatewayConfig config_;
     RouteTable route_table_;
     httplib::Server server_;
+
+    std::string host_ = "127.0.0.1";
+    int port_ = 18800;
+    int heartbeat_interval_s_ = 10;
+    int heartbeat_timeout_count_ = 3;
 
     std::thread http_thread_;
     std::thread cleanup_thread_;

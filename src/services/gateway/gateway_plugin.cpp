@@ -13,22 +13,35 @@ namespace flowsql {
 namespace gateway {
 
 int GatewayPlugin::Option(const char* arg) {
-    if (!arg || strlen(arg) == 0) {
-        printf("GatewayPlugin: no config file specified\n");
-        return -1;
+    if (!arg || !*arg) return 0;
+
+    std::string opts(arg);
+    size_t pos = 0;
+    while (pos < opts.size()) {
+        size_t eq = opts.find('=', pos);
+        if (eq == std::string::npos) break;
+        size_t end = opts.find(';', eq);
+        if (end == std::string::npos) end = opts.size();
+
+        std::string key = opts.substr(pos, eq - pos);
+        std::string val = opts.substr(eq + 1, end - eq - 1);
+
+        if (key == "host") host_ = val;
+        else if (key == "port") port_ = std::stoi(val);
+        else if (key == "heartbeat_interval_s") heartbeat_interval_s_ = std::stoi(val);
+        else if (key == "heartbeat_timeout_count") heartbeat_timeout_count_ = std::stoi(val);
+
+        pos = (end < opts.size()) ? end + 1 : opts.size();
     }
-    if (LoadConfig(arg, &config_) != 0) {
-        return -1;
-    }
-    // 路由 TTL = heartbeat_interval_s * heartbeat_timeout_count（默认 5*3=15s）
-    route_ttl_s_ = config_.heartbeat_interval_s * config_.heartbeat_timeout_count;
+
+    route_ttl_s_ = heartbeat_interval_s_ * heartbeat_timeout_count_;
     if (route_ttl_s_ <= 0) route_ttl_s_ = 30;
     return 0;
 }
 
 int GatewayPlugin::Load(IQuerier* /* querier */) {
     printf("GatewayPlugin::Load: gateway=%s:%d, route_ttl=%ds\n",
-           config_.host.c_str(), config_.port, route_ttl_s_);
+           host_.c_str(), port_, route_ttl_s_);
     return 0;
 }
 
@@ -47,7 +60,7 @@ int GatewayPlugin::Start() {
     cleanup_thread_ = std::thread(&GatewayPlugin::CleanupThread, this);
 
     printf("GatewayPlugin::Start: gateway running on %s:%d\n",
-           config_.host.c_str(), config_.port);
+           host_.c_str(), port_);
     return 0;
 }
 
@@ -91,8 +104,8 @@ void GatewayPlugin::HttpThread() {
     server_.Put(R"(/.*)", forward);
     server_.Delete(R"(/.*)", forward);
 
-    printf("GatewayPlugin: HTTP listening on %s:%d\n", config_.host.c_str(), config_.port);
-    server_.listen(config_.host, config_.port);
+    printf("GatewayPlugin: HTTP listening on %s:%d\n", host_.c_str(), port_);
+    server_.listen(host_, port_);
 }
 
 void GatewayPlugin::CleanupThread() {

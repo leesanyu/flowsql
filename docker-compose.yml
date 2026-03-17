@@ -11,7 +11,7 @@ services:
     image: flowsql:latest
     command: >
       flowsql --role gateway --port 18800
-      --plugins libflowsql_gateway.so:../config/gateway.yaml
+      --plugins libflowsql_gateway.so:../config/deploy-multi.yaml
     ports:
       - "18800:18800"
     networks:

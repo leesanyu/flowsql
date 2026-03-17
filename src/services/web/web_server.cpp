@@ -67,7 +67,7 @@ void WebServer::NotifyWorkerReload() {
     httplib::Client client(worker_host_, worker_port_);
     client.set_connection_timeout(2);
     client.set_read_timeout(5);
-    auto result = client.Post("/pyworker/reload", "", "application/json");
+    auto result = client.Post("/operators/python/reload", "", "application/json");
     if (result && result->status == 200) {
         printf("WebServer: Worker reload OK\n");
     } else {

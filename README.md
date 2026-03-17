@@ -6,31 +6,25 @@
 
 FlowSQL 是一个全栈式网络流量分析平台，通过扩展的 SQL 语法提供从数据采集、流量分析到数据探索的完整能力。用户无需深入了解底层技术（如 DPDK、Hyperscan），只需使用熟悉的 SQL 语句即可构建自己的流量分析系统。
 
-平台采用 Gateway + 多服务插件架构，C++ 服务共享同一个框架程序（加载不同 .so），Python Worker 作为独立 FastAPI 进程运行。控制面统一走 HTTP + URI 路由，数据面通过共享内存 / Arrow IPC 实现零拷贝传输。
+平台采用 Gateway + RouterAgency 插件架构：所有 C++ 服务共享同一个框架程序（加载不同 .so），业务插件通过 IRouterHandle 声明路由，RouterAgencyPlugin 统一收集并向 Gateway 注册，Python Worker 作为独立 FastAPI 进程运行。控制面统一走 HTTP + URI 路由，数据面通过共享内存 / Arrow IPC 实现零拷贝传输。
 
 ## 核心特性
 
 - **插件化架构**：所有功能模块以 .so 插件形式加载，统一框架程序驱动
-- **Gateway 路由**：星型服务拓扑，URI 路由注册/发现/转发，心跳监控与自动重启
+- **RouterAgency 路由**：业务插件实现 IRouterHandle 声明路由，RouterAgencyPlugin 收集后向 Gateway 注册，插件对 HTTP 完全无感知
+- **Gateway 转发**：Trie 最长前缀匹配，KeepAlive 自动续期，服务故障自动重启
 - **C++ ↔ Python 桥接**：共享内存 + Arrow IPC 零拷贝数据传输，HTTP 仅传控制指令
 - **SQL 驱动**：扩展 SQL 语法统一数据采集、分析、探索操作
-- **Web 管理**：Vue.js 前端 + REST API，支持通道/算子/任务管理和在线编写 Python 算子
-- **流式处理（设计中）**：DPDK 大页内存零拷贝、IStreamChannel/IStreamOperator 接口
+- **Web 管理**：Vue.js 前端 + REST API，支持通道/算子/任务管理
 
 ## 快速开始
 
 ### 开发依赖服务
 
-使用 Docker Compose 启动 MySQL 和 ClickHouse（配置文件在 `config/` 目录）。
-
 **MySQL**
 
 ```bash
-# 启动
 docker compose -f config/docker-compose-mysql.yml up -d
-
-# 停止
-docker compose -f config/docker-compose-mysql.yml down
 ```
 
 连接参数：`127.0.0.1:3306`，用户 `flowsql_user`，密码 `flowSQL@user`，库 `flowsql_db`
@@ -38,31 +32,19 @@ docker compose -f config/docker-compose-mysql.yml down
 **ClickHouse**
 
 ```bash
-# 启动
 docker compose -f config/docker-compose-clickhouse.yml up -d
-
-# 停止
-docker compose -f config/docker-compose-clickhouse.yml down
-
-# 验证
-curl http://localhost:8123/ping
 ```
 
 连接参数：HTTP `127.0.0.1:8123`，TCP `127.0.0.1:9000`，用户 `flowsql_user`，密码 `flowSQL@user`，库 `flowsql_db`
 
-**同时启动两个服务**
-
-```bash
-docker compose -f config/docker-compose-mysql.yml \
-               -f config/docker-compose-clickhouse.yml up -d
-```
-
 ### 环境要求
 
-- CMake 3.12+
-- C++17 编译器（GCC 7+ / Clang 5+）
-- Linux 系统
+- CMake 3.12+，C++17 编译器（GCC 7+），Linux
 - Python 3.8+（Python 算子运行时）
+
+```bash
+pip3 install -e src/python/ --break-system-packages
+```
 
 ### 编译
 
@@ -72,56 +54,42 @@ cmake -B build src && cmake --build build -j$(nproc)
 
 ### 运行
 
+**单进程模式（开发调试）**
+
 ```bash
 cd build/output
-LD_LIBRARY_PATH=. ./flowsql --config ../../config/gateway.yaml
+LD_LIBRARY_PATH=. ./flowsql --config ../../config/deploy-single.yaml
 ```
 
-启动后 Gateway(18800) 自动 spawn Web(8081) + Scheduler(18803) + PyWorker(18900)，浏览器访问 `http://127.0.0.1:8081` 进入管理界面。
+**多进程模式（生产部署）**
+
+```bash
+cd build/output
+LD_LIBRARY_PATH=. ./flowsql --config ../../config/deploy-multi.yaml
+```
+
+启动后浏览器访问 `http://127.0.0.1:8081` 进入管理界面。
 
 ### 前端构建
 
-前端修改后需重新构建，构建产物由 C++ Web 服务器静态托管：
-
 ```bash
-cd src/frontend
-
-# 首次安装依赖
-npm install
-
-# 构建生产包（输出到 src/frontend/dist/）
-npm run build
+cd src/frontend && npm install && npm run build
+# 构建产物由 CMake 自动同步到 build/output/static/
+# 或手动：rm -rf build/output/static/assets && cp -r src/frontend/dist/* build/output/static/
 ```
-
-构建完成后重启 flowsql 进程，新页面即生效。
 
 ### 测试
 
 ```bash
 cd build/output
-
-# 框架 / 桥接基础测试
-./test_framework
-./test_bridge
-
-# SQLite 驱动测试（无需外部依赖）
+./test_framework && ./test_bridge
 ./test_sqlite
-
-# 连接池单元测试
 ./test_connection_pool
-
-# DatabasePlugin 持久化管理测试（需设置密钥环境变量）
 export FLOWSQL_SECRET_KEY="your-32-byte-secret-key-here!!"
 ./test_database_manager
-
-# MySQL 驱动测试（需运行中的 MySQL）
-./test_mysql
-
-# ClickHouse 驱动测试（需运行中的 ClickHouse）
-./test_clickhouse
-
-# 插件层端到端测试（通过 PluginLoader 动态加载 .so）
-./test_database
+./test_mysql        # 需运行中的 MySQL
+./test_clickhouse   # 需运行中的 ClickHouse
+./test_router       # 路由表单元测试
 ```
 
 ## 架构
@@ -129,56 +97,54 @@ export FLOWSQL_SECRET_KEY="your-32-byte-secret-key-here!!"
 ### 服务拓扑
 
 ```
-                    ┌─────────────────────┐
-                    │   Gateway/Manager   │
-                    │ (框架 + gateway.so)  │
-                    │  - 路由表（URI→地址） │
-                    │  - 服务注册/发现     │
-                    │  - 生命周期管理       │
-                    └──────┬──────────────┘
-                           │
-              ┌────────────┼────────────┐
-              │            │            │
-     ┌────────▼───┐  ┌────▼─────┐  ┌───▼──────────┐
-     │ Web 服务   │  │Scheduler │  │ Python Worker │
-     │(框架+web.so)│  │(框架+    │  │  (FastAPI)    │
-     │ 前端+API   │  │sched.so+ │  │  算子执行     │
-     └────────────┘  │算子插件) │  └───────────────┘
-                     │SQL+执行  │
-                     └──────────┘
+浏览器
+  │
+  ▼
+WebPlugin (8081) ── 静态文件 / API 代理入口
+  │  去掉 /api 前缀
+  ▼
+GatewayPlugin (18800) ── Trie 最长前缀匹配转发
+  ├── /api      → RouterAgencyPlugin (18802) → WebPlugin 路由
+  ├── /channels → RouterAgencyPlugin (18803) → DatabasePlugin / SchedulerPlugin 路由
+  ├── /tasks    → RouterAgencyPlugin (18803) → SchedulerPlugin 路由
+  └── /operators→ RouterAgencyPlugin (18803) → SchedulerPlugin 路由
+                                             → PyWorker (18900) 直连
+```
+
+### 请求链路
+
+```
+前端 → POST /api/channels/database/add (8081)
+  → WebPlugin 去掉 /api → POST /channels/database/add → Gateway (18800)
+  → Trie 匹配 /channels → RouterAgencyPlugin (18803)
+  → DatabasePlugin::HandleAdd
 ```
 
 ### 核心接口
 
 ```
-IPlugin（生命周期 + 启停控制）
-├── IChannel（数据通道描述符）
-│   ├── IDataFrameChannel（批处理：快照 Read / 替换 Write）
-│   ├── IDatabaseChannel（数据库：Reader/Writer 工厂）
+IPlugin（生命周期）
+├── IRouterHandle（声明 HTTP 路由，对 HTTP 无感知）
+├── IChannel（数据通道）
+│   ├── IDataFrameChannel（批处理）
+│   ├── IDatabaseChannel（数据库 Reader/Writer 工厂）
 │   └── IStreamChannel（流式，设计中）
-├── IOperator（数据算子：Work(IChannel*, IChannel*)）
-└── ...（可扩展）
+└── IOperator（数据算子：Work(in, out)）
 ```
 
-- **IPlugin**（`common/loader.hpp`）— 所有可加载组件的根接口，三阶段加载：`pluginregist()` 注册 → `Load()` 初始化 → `Start()` 启动
-- **IChannel**（`framework/interfaces/ichannel.h`）— 数据源/汇描述符，`Catelog()` + `Name()` 构成唯一标识，算子通过 `dynamic_cast` 获取具体子类型操作数据
-- **IOperator**（`framework/interfaces/ioperator.h`）— 数据处理单元，`Work(IChannel* in, IChannel* out)` 核心计算方法
-- **IDataFrame**（`framework/interfaces/idataframe.h`）— 列式数据集，Apache Arrow RecordBatch 后端
+### URI 设计约束
 
-### 数据面
+详见 [URI 设计规范](docs/uri_design.md)。
 
-```
-C++ 算子路径（进程内，零开销）：
-  Pipeline → operator->Work(source_channel, sink_channel)
+**概要：**
 
-Python 算子路径（跨进程，共享内存零拷贝）：
-  Pipeline → PythonOperatorBridge->Work(source, sink)
-    → Arrow IPC memcpy 写入 /dev/shm/flowsql_<uuid>_in
-    → HTTP 控制指令（仅传文件路径）
-    → Python Worker: memory_map → Polars DataFrame → 算子处理
-    → 结果写入 /dev/shm/flowsql_<uuid>_out
-    → Bridge 读取结果 → 写入 sink IChannel
-```
+| 层 | 格式 | 示例 |
+|---|---|---|
+| 前端对外（WebPlugin 8081） | `/api/{资源}[/{动作}]` | `/api/channels`, `/api/tasks/result` |
+| 内部服务间（RouterAgencyPlugin） | `/{资源类型}/{子类型}/{动作}` | `/channels/database/add`, `/tasks/instant/execute` |
+| Gateway 管理（内部专用） | `/gateway/{动作}` | `/gateway/register`, `/gateway/routes` |
+
+动作词汇：`query` / `add` / `remove` / `modify` / `execute` / `refresh` / `reload`
 
 ## SQL 语法示例
 
@@ -198,52 +164,36 @@ WHERE time = '[2024/07/14 00:00:00 - 2024/07/14 23:59:59]'
 
 ```
 flowSQL/
-├── thirdparts/                 # 第三方依赖构建配置（非源码）
-├── build/                      # cmake 构建产物（可随时 rm -rf）
-│   └── output/                 # 编译产物（.so、可执行文件）
-├── .thirdparts_installed/      # 第三方依赖安装缓存（独立于 build）
-├── .thirdparts_prefix/         # 第三方依赖编译缓存（独立于 build）
-│
+├── build/output/           # 编译产物（.so、可执行文件、static/）
+├── config/
+│   ├── deploy-single.yaml  # 单进程部署配置（开发调试）
+│   ├── deploy-multi.yaml   # 多进程部署配置（生产）
+│   └── flowsql.yml         # 数据库通道持久化配置
 ├── src/
-│   ├── common/                 # 公共头文件（define.h、loader.hpp 等）
-│   ├── framework/              # 框架核心（IPlugin、PluginRegistry、Pipeline 等）
-│   │
-│   ├── services/               # 服务插件
-│   │   ├── bridge/             # C++ ↔ Python 桥接（libflowsql_bridge.so）
-│   │   ├── scheduler/          # 调度服务（libflowsql_scheduler.so）
-│   │   ├── gateway/            # 网关服务（libflowsql_gateway.so）
-│   │   └── web/                # Web 管理系统（libflowsql_web.so + flowsql 可执行文件）
-│   │
+│   ├── common/             # 公共头文件（define.h、loader.hpp、error_code.h）
+│   ├── framework/          # 框架核心（IPlugin、Pipeline、IRouterHandle 等）
+│   ├── services/
+│   │   ├── gateway/        # GatewayPlugin（Trie 路由转发）
+│   │   ├── router/         # RouterAgencyPlugin（路由收集 + HTTP 分发）
+│   │   ├── web/            # WebPlugin（静态文件 + API 代理）
+│   │   ├── scheduler/      # SchedulerPlugin（SQL 执行 + 通道管理）
+│   │   ├── database/       # DatabasePlugin（MySQL/SQLite/ClickHouse）
+│   │   └── bridge/         # BridgePlugin（C++ ↔ Python 桥接）
 │   ├── plugins/
-│   │   ├── example/            # 示例插件（MemoryChannel + PassthroughOperator）
-│   │   └── npi/                # NPI 协议识别插件（Hyperscan 正则 + 位图 + 枚举匹配）
-│   │
-│   ├── python/                 # Python Worker（FastAPI + 算子运行时）
-│   ├── frontend/               # Vue.js 前端项目
-│   │
+│   │   ├── example/        # 示例插件（MemoryChannel）
+│   │   └── npi/            # NPI 协议识别
+│   ├── python/             # Python Worker（FastAPI）
+│   ├── frontend/           # Vue.js 前端
 │   └── tests/
-│       ├── test_framework/
-│       ├── test_bridge/
-│       ├── test_npi/
-│       └── data/               # 测试数据（NPI pcap 文件等）
-│
-├── config/                     # 运行配置（gateway.yaml）
-└── docs/                       # 设计文档
+├── docs/                   # 设计文档
+└── tasks/                  # Sprint 任务管理
 ```
 
 ## 文档
 
-- [愿景](docs/vision.md) — 项目愿景
-- [架构演进方案](docs/framework.md) — 整体架构设计与实现状态
+- [架构设计](docs/framework.md)
+- [URI 设计规范](docs/uri_design.md)
 
 ## 许可证
 
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request
-
-## 联系方式
-
-项目地址：https://github.com/lealiang/flowsql
+MIT License

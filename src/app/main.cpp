@@ -1,5 +1,5 @@
 // FlowSQL 通用入口
-// Guardian 模式: flowsql --config gateway.yaml  （fork 守护，拉起所有服务）
+// Guardian 模式: flowsql --config deploy-multi.yaml  （fork 守护，拉起所有服务）
 // Gateway 模式:  flowsql --role gateway --port 18800 --plugins libflowsql_gateway.so:...
 // Service 模式:  flowsql --role web --port 18802 --plugins libflowsql_web.so,libflowsql_router.so
 
@@ -330,7 +330,7 @@ int main(int argc, char* argv[]) {
         return RunService(args);
     } else {
         printf("Usage:\n");
-        printf("  Guardian mode: %s --config gateway.yaml\n", argv[0]);
+        printf("  Guardian mode: %s --config deploy-multi.yaml\n", argv[0]);
         printf("  Service mode:  %s --role <name> --port <port> --plugins <plugin1,plugin2> [--option <opts>]\n",
                argv[0]);
         return 1;

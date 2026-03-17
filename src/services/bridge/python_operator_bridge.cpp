@@ -105,7 +105,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     }
 
     // 4. HTTP POST JSON 路径到 Python Worker
-    std::string path = "/work/" + meta_.catelog + "/" + meta_.name;
+    std::string path = "/operators/python/work/" + meta_.catelog + "/" + meta_.name;
 
     rapidjson::StringBuffer sb;
     rapidjson::Writer<rapidjson::StringBuffer> json_writer(sb);
@@ -175,7 +175,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
 int PythonOperatorBridge::Configure(const char* key, const char* value) {
     if (!key || !value) return -1;
 
-    std::string path = "/configure/" + meta_.catelog + "/" + meta_.name;
+    std::string path = "/operators/python/configure/" + meta_.catelog + "/" + meta_.name;
     std::string body = std::string("{\"key\":\"") + key + "\",\"value\":\"" + value + "\"}";
     auto res = client_->Post(path, body, "application/json");
 

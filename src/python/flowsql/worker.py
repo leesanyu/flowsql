@@ -30,17 +30,17 @@ def _do_reload():
     return added, removed
 
 
-@app.get("/health")
+@app.get("/operators/python/health")
 async def health():
     return {"status": "ok"}
 
 
-@app.get("/operators")
+@app.get("/operators/python/list")
 async def list_operators():
     return registry.list_operators()
 
 
-@app.post("/reload")
+@app.post("/operators/python/reload")
 async def reload_operators():
     """重新扫描算子目录"""
     loop = asyncio.get_event_loop()
@@ -48,7 +48,7 @@ async def reload_operators():
     return {"added": list(added), "removed": list(removed)}
 
 
-@app.post("/work/{catelog}/{name}")
+@app.post("/operators/python/work/{catelog}/{name}")
 async def work(catelog: str, name: str, request: Request):
     op = registry.get(catelog, name)
     if not op:
@@ -79,7 +79,7 @@ async def work(catelog: str, name: str, request: Request):
     return JSONResponse(content={"output": output_path})
 
 
-@app.post("/configure/{catelog}/{name}")
+@app.post("/operators/python/configure/{catelog}/{name}")
 async def configure(catelog: str, name: str, request: Request):
     body = await request.json()
     key = body.get("key", "")
@@ -137,8 +137,9 @@ def main():
     gateway_addr = os.environ.get("FLOWSQL_GATEWAY_ADDR")
     if gateway_addr:
         local_addr = f"{config.host}:{config.port}"
-        prefixes = ["/pyworker/health", "/pyworker/operators", "/pyworker/work",
-                    "/pyworker/reload", "/pyworker/configure"]
+        prefixes = ["/operators/python/health", "/operators/python/list",
+                    "/operators/python/reload", "/operators/python/work",
+                    "/operators/python/configure"]
         _register_with_gateway(gateway_addr, "pyworker", local_addr, prefixes)
 
         # 启动心跳线程
