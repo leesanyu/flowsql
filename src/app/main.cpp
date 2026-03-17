@@ -1,5 +1,6 @@
 // FlowSQL 通用入口
-// Guardian 模式: flowsql --config gateway.yaml   （fork 守护，拉起所有服务）
+// Guardian 模式: flowsql --config gateway.yaml          （fork 守护，拉起所有服务）
+// Single   模式: flowsql --config single.yaml           （单进程，所有插件同进程加载）
 // Gateway 模式:  flowsql --role gateway --port 18800 --plugins libflowsql_gateway.so:...
 // Service 模式:  flowsql --role web --port 18802 --plugins libflowsql_web.so,libflowsql_router.so
 
@@ -140,6 +141,58 @@ static int RunService(const Args& args) {
 }
 
 // ============================================================
+// --- Single 模式（单进程，所有插件同进程加载）---
+// ============================================================
+
+static int RunSingle(const std::string& config_path) {
+    printf("========================================\n");
+    printf("  FlowSQL Single Process\n");
+    printf("========================================\n\n");
+
+    gateway::GatewayConfig config;
+    if (gateway::LoadConfig(config_path, &config) != 0) {
+        printf("RunSingle: failed to load config: %s\n", config_path.c_str());
+        return 1;
+    }
+
+    auto* loader = PluginLoader::Single();
+
+    // Phase 1：Load 所有插件
+    // 先加载 GatewayPlugin
+    std::string gw_plugin = "libflowsql_gateway.so:" + config_path;
+    if (LoadPluginOnly(loader, gw_plugin, nullptr) != 0) {
+        printf("RunSingle: failed to load gateway plugin\n");
+        return 1;
+    }
+
+    // 再加载各服务的插件（跳过 python 类型服务）
+    for (const auto& svc : config.services) {
+        if (svc.type == "python") continue;
+        for (const auto& plugin : svc.plugins) {
+            if (LoadPluginOnly(loader, plugin, nullptr) != 0) {
+                printf("RunSingle: failed to load plugin: %s\n", plugin.c_str());
+            }
+        }
+    }
+
+    // Phase 2：统一 StartAll
+    if (loader->StartAll() != 0) {
+        printf("RunSingle: failed to start plugins\n");
+        loader->StopAll();
+        loader->Unload();
+        return 1;
+    }
+
+    printf("RunSingle: all plugins started. Press Ctrl+C to stop.\n");
+    WaitForSignal();
+
+    printf("\nRunSingle: shutting down...\n");
+    loader->StopAll();
+    loader->Unload();
+    return 0;
+}
+
+// ============================================================
 // --- Guardian 模式（守护进程，fork 所有服务）---
 // ============================================================
 
@@ -216,16 +269,19 @@ static pid_t SpawnService(const std::string& exe_path,
 }
 
 static int RunGuardian(const std::string& config_path) {
-    printf("========================================\n");
-    printf("  FlowSQL Guardian\n");
-    printf("========================================\n\n");
-
-    // 解析配置，获取服务列表
+    // 先解析配置，根据 mode 决定走单进程还是多进程
     gateway::GatewayConfig config;
     if (gateway::LoadConfig(config_path, &config) != 0) {
         printf("Guardian: failed to load config: %s\n", config_path.c_str());
         return 1;
     }
+    if (config.mode == "single") {
+        return RunSingle(config_path);
+    }
+
+    printf("========================================\n");
+    printf("  FlowSQL Guardian\n");
+    printf("========================================\n\n");
 
     // 注册信号处理（不使用 sigwait，因为需要 waitpid 响应子进程退出）
     signal(SIGTERM, OnSignal);

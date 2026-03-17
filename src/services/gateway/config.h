@@ -43,6 +43,7 @@ struct GatewayConfig {
     int port = 18800;
     int heartbeat_interval_s = 5;
     int heartbeat_timeout_count = 3;
+    std::string mode = "guardian";   // "guardian"（多进程）| "single"（单进程）
     std::vector<ServiceConfig> services;
 };
 
