@@ -1,0 +1,37 @@
+# FlowSQL Gateway 配置
+# 启动：flowsql --config config/deploy-multi.yaml
+#
+# 路由注册和故障恢复由各服务内的 RouterAgencyPlugin KeepAlive 线程自治处理
+
+mode: guardian   # 多进程模式，fork 子进程
+
+services:
+  # ---- Gateway：路由转发（第一个启动，其他服务依赖它）----
+  - name: gateway
+    plugins:
+      - name: libflowsql_gateway.so
+        option: "host=127.0.0.1;port=18800;heartbeat_interval_s=10;heartbeat_timeout_count=3"
+
+  # ---- Web 服务：前端静态资源 + 管理 API ----
+  - name: web
+    plugins:
+      - name: libflowsql_web.so
+        option: "host=127.0.0.1;port=8081;gateway=127.0.0.1:18800"
+      - name: libflowsql_router.so
+        option: "host=127.0.0.1;port=18802;gateway=127.0.0.1:18800"
+
+  # ---- Scheduler 服务：SQL 执行 + 通道管理 + 算子 ----
+  - name: scheduler
+    plugins:
+      - name: libflowsql_router.so
+        option: "host=127.0.0.1;port=18803;gateway=127.0.0.1:18800"
+      - libflowsql_scheduler.so
+      - libflowsql_bridge.so
+      - libflowsql_example.so
+      - name: libflowsql_database.so
+        option: "config_file=config/flowsql.yml"
+
+  # ---- Python Worker：Python 算子执行 ----
+  - name: pyworker
+    type: python
+    command: "python3 -m flowsql.worker --port 18900"

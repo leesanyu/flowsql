@@ -1,5 +1,5 @@
 # FlowSQL 单进程配置（所有 C++ 插件在同一进程，pyworker 独立 fork）
-# 启动：flowsql --config config/single.yaml
+# 启动：flowsql --config config/deploy-single.yaml
 
 services:
   - name: all
