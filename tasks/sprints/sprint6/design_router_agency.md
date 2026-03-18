@@ -318,17 +318,73 @@ WebPlugin 有两个职责，应分开处理：
 ```
 外部用户
   ├── 直接访问 → WebPlugin (0.0.0.0:8081) → 静态文件/Web UI
-  └── Gateway (18800) → RouterAgencyPlugin (127.0.0.1:18802) → /api/* 管理路由
+  └── API 请求 → Gateway (18800) → RouterAgencyPlugin (127.0.0.1:18802) → /api/* 管理路由
+                                                                          └── /api/channels/database/* → 代理 → Scheduler (127.0.0.1:18803)
 ```
+
+#### 路由注册流程
+
+WebPlugin 进程启动时，两套路由分别注册：
+
+**① 外部 Web Server（8081 端口，WebServer::Init() 中注册）**
+
+直接绑定到 `httplib::Server`，供浏览器直接访问：
+
+| 方法 | URI | 说明 |
+|------|-----|------|
+| GET | `/api/health` | 健康检查 |
+| GET | `/api/channels` | 查询通道列表（从 Scheduler 获取，回退本地 DB） |
+| GET | `/api/operators` | 查询算子列表（从 Scheduler 获取，回退本地 DB） |
+| POST | `/api/operators/upload` | 上传 Python 算子文件 |
+| POST | `/api/operators/activate` | 激活算子 |
+| POST | `/api/operators/deactivate` | 禁用算子 |
+| GET | `/api/tasks` | 查询任务列表 |
+| POST | `/api/tasks` | 创建并执行任务（转发到 Scheduler） |
+| POST | `/api/tasks/result` | 查询任务结果 |
+| POST | `/api/channels/database/add` | 代理 → Scheduler `/channels/database/add` |
+| POST | `/api/channels/database/remove` | 代理 → Scheduler `/channels/database/remove` |
+| POST | `/api/channels/database/modify` | 代理 → Scheduler `/channels/database/modify` |
+| POST | `/api/channels/database/query` | 代理 → Scheduler `/channels/database/query` |
+
+**② 内部 RouterAgencyPlugin（18802 端口，WebPlugin::EnumRoutes() 声明）**
+
+通过 IRouterHandle 声明，由 RouterAgencyPlugin 在 Start() 时收集并注册到 Gateway，供 Gateway 转发：
+
+| 方法 | URI | 说明 |
+|------|-----|------|
+| GET | `/api/health` | 健康检查 |
+| GET | `/api/channels` | 查询通道列表 |
+| GET | `/api/operators` | 查询算子列表 |
+| POST | `/api/operators/upload` | 上传 Python 算子文件 |
+| POST | `/api/operators/activate` | 激活算子 |
+| POST | `/api/operators/deactivate` | 禁用算子 |
+| GET | `/api/tasks` | 查询任务列表 |
+| POST | `/api/tasks` | 创建并执行任务 |
+| POST | `/api/tasks/result` | 查询任务结果 |
+| POST | `/api/channels/database/add` | 代理 → Scheduler `/channels/database/add` |
+| POST | `/api/channels/database/remove` | 代理 → Scheduler `/channels/database/remove` |
+| POST | `/api/channels/database/modify` | 代理 → Scheduler `/channels/database/modify` |
+| POST | `/api/channels/database/query` | 代理 → Scheduler `/channels/database/query` |
+
+> **说明**：两套路由注册的 handler 逻辑完全相同（共用 WebServer 的 handler 方法），区别仅在于入口：① 是浏览器直连 8081，② 是经 Gateway 转发到 18802。
+
+#### 服务间转发配置
+
+WebPlugin 内部需要调用两个下游服务，配置项如下：
+
+| 转发目标 | 配置项 | 默认值 | 用途 |
+|---------|--------|--------|------|
+| Scheduler | `scheduler` | `127.0.0.1:18803` | `/api/channels/database/*` 代理、`/api/tasks` 执行转发、`/api/channels` 和 `/api/operators` 实时查询 |
+| PyWorker | `worker` | `127.0.0.1:18900` | 算子激活/禁用后通知 Worker 重新加载 |
 
 YAML 配置：
 ```yaml
 - name: web
   plugins:
     - name: libflowsql_web.so
-      option: "host=0.0.0.0;port=8081"        # web 服务，对外
+      option: "host=0.0.0.0;port=8081;scheduler=127.0.0.1:18803;worker=127.0.0.1:18900"
     - name: libflowsql_router.so
-      option: "host=127.0.0.1;port=18802"     # 管理 API，仅内部
+      option: "host=127.0.0.1;port=18802;gateway=127.0.0.1:18800"
 ```
 
 ### 2.7 IPlugin 生命周期批次调用 ✅

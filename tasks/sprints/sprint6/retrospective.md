@@ -35,32 +35,58 @@
 
 **改进**：下个 Sprint 开始时清理。
 
-### P4: WebPlugin 内部转发地址配置混乱（代码编写问题 + 设计缺口）
+### P3: GatewayPlugin 仍然特殊处理，与"服务对等"目标表面矛盾
 
-**问题**：前端添加数据库通道持续返回 404，排查耗时远超预期。
+**问题**：设计目标是"服务进程对等"，但 GatewayPlugin 不实现 IRouterHandle，不通过 RouterAgencyPlugin 分发请求，没有 KeepAlive 机制，看起来仍然是"特权插件"。
 
 **根因分析**：
 
-这是**代码编写问题**和**设计缺口**叠加导致的：
+**这是设计的合理边界，不是设计不到位，也不是代码编写问题。**
 
-1. **设计缺口**：Sprint 6 设计文档（design_router_agency.md）明确了"前端 → Gateway → RouterAgencyPlugin → 业务插件"的链路，但**没有明确 WebPlugin 作为前端入口时如何做内部转发**。WebPlugin 既是静态文件服务器，又是 API 代理，这个双重角色的转发配置没有在设计阶段写清楚。
+Gateway 天然是路由基础设施层：RouterAgencyPlugin 向 Gateway 注册前缀，如果 Gateway 自己也要向上游注册，会形成无限递归。设计文档 §3.3 明确保留了 GatewayPlugin 的四个职责，这是有意为之。
 
-2. **代码编写问题（三处）**：
-   - `web_plugin.cpp` 把 `SetSchedulerAddress` 设成了 `worker_host_:worker_port_`（pyworker 18900），注释写的是"Gateway 模式下两者相同"，但这个假设依赖未文档化的环境变量 `FLOWSQL_GATEWAY_ADDR`，实际运行时该变量未设置，导致转发打到 pyworker
-   - `web_server.cpp` Init() 里注册了 `/api/*` httplib 路由，但**漏掉了** `/api/channels/database/*` 的代理路由，这是纯粹的遗漏
+真正的问题是**"服务进程对等"表述有歧义**：
+- **原意**：进程管理权对等——废除 ServiceManager，Gateway 不再 fork 其他进程（✅ 已实现）
+- **误解**：所有插件都应该走同一套 IRouterHandle + RouterAgencyPlugin 机制
+
+Gateway 在"进程管理权"上已经对等，但在"路由机制"上它是基础设施层，不适用业务插件的路由机制。
+
+**改进措施**：在架构文档中明确区分两个层次的"对等"，避免歧义：
+- 进程管理对等（✅ 已实现：Guardian 替代 ServiceManager）
+- 路由机制对等（⚠️ 不适用于 Gateway 本身，Gateway 是路由基础设施，不是业务服务）
+
+### P4: WebPlugin 双 HTTP 通道混淆（设计缺口为主因）
+
+**问题**：前端添加数据库通道持续返回 404，排查耗时远超预期，先后出现：1. 对外 web 服务不可用；2. web 服务的 URI 转内部管理面 URI 不正确导致 404。
+
+**根因分析**：
+
+**设计缺口是主因，代码编写错误是次因，两者叠加放大了排查难度。**
+
+1. **设计缺口（主因）**：设计文档（§2.6）描述了 WebPlugin 的双重身份，但没有回答三个关键问题：
+   - WebPlugin 内部转发的目标是谁？`/api/channels/database/*` 需要转发到 Scheduler，但设计文档只说"通过 RouterAgencyPlugin 分发"，没有说 WebPlugin 应该直连 Scheduler 还是经过 Gateway，也没有给出配置项名称
+   - 两个 httplib::Server 的路由注册策略是什么？`/api/*` 路由在 Init() 里直接绑定了一遍，EnumApiRoutes() 又通过 IRouterHandle 声明了一遍，这个重复注册是有意为之还是遗漏，设计文档没有说清楚
+   - `db_proxy` 的配置项叫什么？设计文档 YAML 示例里没有 `scheduler` 配置项的说明
+
+2. **代码编写问题（次因，三处）**：
+   - `web_plugin.cpp` 把 `SetSchedulerAddress` 设成了 `worker_host_:worker_port_`（pyworker 18900），注释写的是"Gateway 模式下两者相同"，但这个假设依赖未文档化的环境变量，实际运行时未设置，导致转发打到 pyworker
+   - `web_server.cpp` Init() 里注册了 `/api/*` httplib 路由，但**漏掉了** `/api/channels/database/*` 的代理路由，纯粹的遗漏
    - `api/index.js` baseURL 带了 `/api` 后缀，db channel 路径又加了 `/channels/database/*`，路径拼接错误
 
 3. **排查困难的原因**：三个错误分布在三个不同层（C++ 后端配置、C++ 路由注册、前端 JS），每次修一处都还有另一处在报错，且 404 的来源（WebPlugin 本身 vs 内部服务）不直观，缺乏日志辅助定位。
 
 **改进措施**：
 
-- **设计层**：凡是涉及"服务间转发"的插件，设计文档必须明确写出转发目标地址的来源（配置项名称、默认值、是否依赖环境变量）
-- **代码层**：内部转发地址必须有独立的配置项（`gateway`），不能复用 worker 地址，不能依赖隐式环境变量
+- **设计层**：凡是涉及"服务间转发"的插件，设计文档必须包含"转发配置表"（转发目标、配置项名称、默认值），不能只描述架构拓扑图
+- **设计层**：双 server 架构必须明确说明路由注册策略（哪些路由只在外部 server 注册，哪些只通过 IRouterHandle 声明，哪些两者都有及原因）
+- **代码层**：内部转发地址必须有独立的配置项（`scheduler`），不能复用 worker 地址，不能依赖隐式环境变量
 - **调试层**：WebPlugin 的 db_proxy 转发失败时应打印日志（目标地址、HTTP 状态码），而不是静默返回 503/404
 
-**经验教训**：见 L19、L20
+**经验教训**：见 L18、L19
 
-**问题**：Story 7.8 的集成测试（KeepAlive 故障恢复、docker-compose 部署）未完成，记录为技术债务。
+### P5: Story 7.8 集成测试未完成
+
+**问题**：KeepAlive 故障恢复、docker-compose 部署的集成测试未完成，记录为技术债务。
 
 **根因**：需要真实运行环境，单元测试框架无法覆盖。
 
@@ -106,3 +132,40 @@
 **来源**：Sprint 6 Phase 4 — RunGuardian 设计
 
 **原则**：守护进程（Guardian）只做 fork + waitpid + respawn，不加载任何插件，不开任何端口，不包含任何业务逻辑。业务逻辑全部在子进程中。这样守护进程可以被任何外部工具（docker-compose、systemd）完全替代，零代码改动。
+
+### L18: "服务对等"的表述必须区分两个层次
+
+**来源**：Sprint 6 回顾 — GatewayPlugin 特殊处理问题
+
+**原则**：架构文档中"服务对等"必须明确区分：
+- **进程管理对等**：没有特权进程负责 fork/管理其他进程（Gateway 不再是 ServiceManager）
+- **路由机制对等**：业务服务都通过 IRouterHandle + RouterAgencyPlugin 暴露路由
+
+Gateway 是路由基础设施，不是业务服务，不适用路由机制对等。混淆这两个层次会导致对架构目标的误解。
+
+### L19: 涉及服务间转发的插件，设计文档必须包含"转发配置表"
+
+**来源**：Sprint 6 回顾 — WebPlugin 双通道混淆问题
+
+**原则**：凡是插件内部需要调用其他服务的，设计文档必须明确写出：
+
+| 转发目标 | 配置项名称 | 默认值 | 说明 |
+|---------|-----------|--------|------|
+| Scheduler | `scheduler` | `127.0.0.1:18803` | 内部 API 转发 |
+| PyWorker | `worker` | `127.0.0.1:18900` | 算子执行通知 |
+
+不能只描述架构拓扑图，不能依赖隐式环境变量，不能复用其他服务的地址配置项。
+
+### L20: 双 server 架构必须明确路由注册策略
+
+**来源**：Sprint 6 回顾 — WebPlugin 双通道混淆问题
+
+**原则**：当一个进程内有多个 httplib::Server（如 WebPlugin 的 8081 外部 server + RouterAgencyPlugin 的 18802 内部 server），设计文档必须明确每条路由的注册位置：
+
+| 路由 | 外部 server (8081) | 内部 server (18802) | 说明 |
+|------|-------------------|---------------------|------|
+| 静态文件 | ✅ | ❌ | 只对外 |
+| `/api/*` | ✅ | ✅ | 两者都注册（外部直接访问 + Gateway 转发） |
+| `/api/channels/database/*` | ✅（代理） | ✅（代理） | 代理到 Scheduler |
+
+不明确这个策略，容易出现"漏注册"或"重复注册语义不一致"的问题。
