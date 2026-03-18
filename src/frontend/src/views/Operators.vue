@@ -392,14 +392,13 @@ onMounted(() => {
 
 <style scoped>
 .operators {
-  max-width: 1400px;
 }
 
 .page-title {
   font-size: 24px;
   font-weight: 600;
   margin-bottom: 20px;
-  color: #303133;
+  color: var(--text-primary);
 }
 
 .card-header {

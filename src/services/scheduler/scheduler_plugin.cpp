@@ -76,32 +76,7 @@ void SchedulerPlugin::RegisterChannel(const std::string& key, std::shared_ptr<IC
 
 // --- IPlugin::Start ---
 int SchedulerPlugin::Start() {
-    // 创建预填测试数据
-    auto ch = std::make_shared<DataFrameChannel>("test", "data");
-    ch->Open();
-
-    DataFrame df;
-    df.SetSchema({
-        {"src_ip", DataType::STRING, 0, "源IP"},
-        {"dst_ip", DataType::STRING, 0, "目的IP"},
-        {"src_port", DataType::UINT32, 0, "源端口"},
-        {"dst_port", DataType::UINT32, 0, "目的端口"},
-        {"protocol", DataType::STRING, 0, "协议"},
-        {"bytes_sent", DataType::UINT64, 0, "发送字节"},
-        {"bytes_recv", DataType::UINT64, 0, "接收字节"},
-    });
-
-    df.AppendRow({std::string("192.168.1.10"), std::string("10.0.0.1"), uint32_t(52341), uint32_t(80),
-                  std::string("HTTP"), uint64_t(1024), uint64_t(4096)});
-    df.AppendRow({std::string("192.168.1.10"), std::string("8.8.8.8"), uint32_t(53421), uint32_t(53),
-                  std::string("DNS"), uint64_t(64), uint64_t(128)});
-    df.AppendRow({std::string("192.168.1.20"), std::string("172.16.0.5"), uint32_t(44312), uint32_t(443),
-                  std::string("HTTPS"), uint64_t(2048), uint64_t(8192)});
-
-    ch->Write(&df);
-    RegisterChannel("test.data", ch);
-
-    LOG_INFO("SchedulerPlugin::Start: ready, %zu channels loaded", channels_.size());
+    LOG_INFO("SchedulerPlugin::Start: ready");
     return 0;
 }
 
@@ -122,6 +97,11 @@ void SchedulerPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
     cb({"POST", "/channels/dataframe/query",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleGetChannels(u, req, rsp);
+        }});
+    // 内存通道数据预览
+    cb({"POST", "/channels/dataframe/preview",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandlePreviewDataframe(u, req, rsp);
         }});
     // 算子查询
     cb({"POST", "/operators/native/query",
@@ -549,12 +529,25 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
         // 数据库通道（通过 IDatabaseFactory）
         auto* factory = static_cast<IDatabaseFactory*>(querier_->First(IID_DATABASE_FACTORY));
         if (factory) {
-            factory->List([&w](const char* type, const char* name, const char* /*config_json*/) {
+            factory->List([&w](const char* type, const char* name, const char* config_json) {
                 w.StartObject();
                 w.Key("catelog"); w.String(type);
                 w.Key("name"); w.String(name);
                 w.Key("type"); w.String(ChannelType::kDatabase);
-                w.Key("schema"); w.String("[]");
+                // 从 config_json 提取 database 字段作为 schema 展示
+                std::string db_label;
+                if (config_json) {
+                    rapidjson::Document cfg;
+                    cfg.Parse(config_json);
+                    if (!cfg.HasParseError() && cfg.IsObject()) {
+                        if (cfg.HasMember("database") && cfg["database"].IsString()) {
+                            db_label = cfg["database"].GetString();
+                        } else if (cfg.HasMember("path") && cfg["path"].IsString()) {
+                            db_label = cfg["path"].GetString();
+                        }
+                    }
+                }
+                w.Key("schema"); w.String(db_label.c_str());
                 w.EndObject();
             });
         }
@@ -565,7 +558,59 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
     return error::OK;
 }
 
-// --- HandleGetOperators ---
+// --- HandlePreviewDataframe ---
+// POST /channels/dataframe/preview — Body: {"catelog":"...","name":"..."}
+int32_t SchedulerPlugin::HandlePreviewDataframe(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document doc;
+    doc.Parse(req.c_str());
+    if (doc.HasParseError() || !doc.IsObject() ||
+        !doc.HasMember("catelog") || !doc.HasMember("name")) {
+        rsp = R"({"error":"missing 'catelog' or 'name'"})";
+        return error::BAD_REQUEST;
+    }
+    std::string catelog = doc["catelog"].GetString();
+    std::string name    = doc["name"].GetString();
+    std::string key     = catelog + "." + name;
+
+    // 先在内部通道表查找
+    IChannel* raw_ch = nullptr;
+    auto it = channels_.find(key);
+    if (it != channels_.end()) {
+        raw_ch = it->second.get();
+    }
+
+    // 再去 IQuerier 静态注册通道查找
+    if (!raw_ch && querier_) {
+        querier_->Traverse(IID_CHANNEL, [&](void* p) -> int {
+            auto* ch = static_cast<IChannel*>(p);
+            if (std::string(ch->Catelog()) == catelog && std::string(ch->Name()) == name) {
+                raw_ch = ch;
+                return 1;  // 找到，停止遍历
+            }
+            return 0;
+        });
+    }
+
+    if (!raw_ch) {
+        rsp = "{\"error\":\"channel not found: " + key + "\"}";
+        return error::NOT_FOUND;
+    }
+
+    auto* df_ch = dynamic_cast<IDataFrameChannel*>(raw_ch);
+    if (!df_ch) {
+        rsp = R"({"error":"not a dataframe channel"})";
+        return error::BAD_REQUEST;
+    }
+
+    DataFrame data;
+    if (df_ch->Read(&data) != 0 || data.RowCount() == 0) {
+        rsp = R"({"columns":[],"types":[],"data":[],"rows":0})";
+        return error::OK;
+    }
+
+    rsp = data.ToJson();
+    return error::OK;
+}
 int32_t SchedulerPlugin::HandleGetOperators(const std::string&, const std::string&, std::string& rsp) {
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);

@@ -759,11 +759,76 @@
 
 ---
 
-## Epic 8: Pipeline 增强与异步任务
+## Epic 8: Web UI 专业化改造
+**优先级**: P1 | **状态**: 🚧 进行中（Sprint 7）
+**价值**: 提升产品专业感，全屏自适应布局，支持深色/浅色主题切换
+**设计文档**: `tasks/sprints/sprint7/design_frontend_ui.md`
+
+### Story 8.1: 全屏布局 + 主题切换
+**状态**: ✅ 已完成 (Sprint 7)
+**验收标准**:
+- 页面铺满全屏，移除 Vite 默认模板的居中限制
+- 固定深色侧边栏（VS Code / Grafana 风格），不随主题切换
+- 顶部 Header 右侧提供深色/浅色主题切换按钮
+- 主题状态通过 `localStorage` 持久化，刷新后保持
+- 所有 Element Plus 组件随主题自动响应
+
+<details>
+<summary>任务分解（点击展开）</summary>
+
+- 📋 重写 `style.css`：移除居中样式，定义 CSS 变量体系（`:root` 浅色 + `.dark` 深色）
+- 📋 `main.js` 引入 `element-plus/theme-chalk/dark/css-vars.css`
+- 📋 重写 `App.vue`：三层结构（侧边栏 + Header + 内容区），主题切换逻辑
+- 📋 重写 `Sidebar.vue`：CSS 变量替换硬编码颜色，active 状态左侧高亮条
+- 📋 各 View 文件：移除硬编码颜色和 `max-width` 限制
+</details>
+
+---
+
+### Story 8.2: 侧边栏底部状态栏
+**状态**: ✅ 已完成 (Sprint 7)（迁移至顶部导航栏右侧状态区）
+**验收标准**:
+- 侧边栏底部显示：当前用户（暂时固定 admin）、Gateway 连接状态（在线/离线）、版本号
+- Gateway 状态每 30 秒轮询 `GET /api/health`，绿点/红点显示
+
+<details>
+<summary>任务分解（点击展开）</summary>
+
+- 📋 `Sidebar.vue` 底部区域：用户名 + 状态指示点 + 版本号
+- 📋 轮询 `/api/health`，30s 间隔，绿点/红点显示
+- 📋 版本号从 `package.json` 的 `version` 字段读取
+</details>
+
+---
+
+### Story 8.3: 数据库通道浏览器
+**状态**: 📋 待规划（Sprint 7 下一个）
+**验收标准**:
+- 通道列表页数据库通道行新增"浏览"按钮
+- 点击后从右侧滑出 Drawer，左侧显示表列表，右侧 Tab 切换表结构/数据预览
+- 表结构显示列名、类型、是否可空、是否主键
+- 数据预览固定返回前 100 条，以表格形式展示
+- 支持 SQLite / MySQL / ClickHouse 三种数据库
+**设计文档**: `tasks/design_db_browser.md`
+
+<details>
+<summary>任务分解（点击展开）</summary>
+
+- 📋 `database_plugin.cpp` 新增 `HandleTables`：按数据库类型执行元数据 SQL，返回表名列表
+- 📋 `database_plugin.cpp` 新增 `HandleDescribe`：执行 `PRAGMA table_info` / `DESCRIBE`，返回列定义
+- 📋 `database_plugin.cpp` 新增 `HandlePreview`：执行 `SELECT * FROM <table> LIMIT 100`，返回数据
+- 📋 `database_plugin.h` 新增 3 个 Handler 声明，`EnumRoutes` 注册 3 条路由
+- 📋 `api/index.js` 新增 `listDbTables` / `describeDbTable` / `previewDbTable`
+- 📋 `Channels.vue` 新增"浏览"按钮 + `el-drawer` 组件（左侧表列表 + 右侧 Tab）
+</details>
+
+---
+
+## Epic 9: Pipeline 增强与异步任务
 **优先级**: P1 | **状态**: 📋 待规划
 **价值**: 增强 Pipeline 编排能力，支持异步任务执行，提升系统易用性
 
-### Story 8.1: 多算子 Pipeline
+### Story 9.1: 多算子 Pipeline
 **状态**: 📋 待规划
 **验收标准**:
 - 支持算子链式调用（USING op1 THEN op2 THEN op3）
@@ -773,7 +838,7 @@
 
 ---
 
-### Story 8.2: 异步任务执行
+### Story 9.2: 异步任务执行
 **状态**: 📋 待规划
 **验收标准**:
 - 任务队列实现（基于线程池）
@@ -784,11 +849,11 @@
 
 ---
 
-## Epic 9: 流式架构
+## Epic 10: 流式架构
 **优先级**: P2 | **状态**: 📋 设计阶段
 **价值**: 支持流式数据处理，满足网络性能分析等实时场景
 
-### Story 9.1: IStreamChannel 接口设计
+### Story 10.1: IStreamChannel 接口设计
 **状态**: 📋 设计阶段
 **验收标准**:
 - 定义 IStreamChannel 接口（基于描述符）
@@ -798,7 +863,7 @@
 
 ---
 
-### Story 9.2: IStreamOperator 接口设计
+### Story 10.2: IStreamOperator 接口设计
 **状态**: 📋 设计阶段
 **验收标准**:
 - 定义 IStreamOperator 接口
@@ -808,7 +873,7 @@
 
 ---
 
-### Story 9.3: StreamWorker 通用容器
+### Story 10.3: StreamWorker 通用容器
 **状态**: 📋 设计阶段
 **验收标准**:
 - 实现 StreamWorker 容器
@@ -818,7 +883,7 @@
 
 ---
 
-### Story 9.4: Scheduler 流式调度
+### Story 10.4: Scheduler 流式调度
 **状态**: 📋 设计阶段
 **验收标准**:
 - Scheduler 支持流式任务调度
@@ -828,7 +893,7 @@
 
 ---
 
-### Story 9.5: DPDK 网卡采集插件
+### Story 10.5: DPDK 网卡采集插件
 **状态**: 📋 设计阶段
 **验收标准**:
 - 实现 netcard 插件（基于 DPDK）
@@ -838,7 +903,7 @@
 
 ---
 
-### Story 9.6: 网络性能分析算子
+### Story 10.6: 网络性能分析算子
 **状态**: 📋 设计阶段
 **验收标准**:
 - 实现 npm 算子（网络性能分析）
@@ -848,11 +913,11 @@
 
 ---
 
-## Epic 10: 平台增强与用户认证
+## Epic 11: 平台增强与用户认证
 **优先级**: P2 | **状态**: 📋 待规划
 **价值**: 提升系统可观测性、可维护性、易用性和安全性
 
-### Story 10.1: 用户认证与权限
+### Story 11.1: 用户认证与权限
 **状态**: 📋 待规划
 **验收标准**:
 - 用户注册和登录（JWT Token）
@@ -863,7 +928,7 @@
 
 ---
 
-### Story 10.2: 监控和告警
+### Story 11.2: 监控和告警
 **状态**: 📋 待规划
 **验收标准**:
 - Prometheus 指标导出
@@ -873,7 +938,7 @@
 
 ---
 
-### Story 10.3: 日志聚合
+### Story 11.3: 日志聚合
 **状态**: 📋 待规划
 **验收标准**:
 - 结构化日志输出（JSON 格式）
@@ -883,7 +948,7 @@
 
 ---
 
-### Story 10.4: 配置中心
+### Story 11.4: 配置中心
 **状态**: 📋 待规划
 **验收标准**:
 - 配置热更新
@@ -893,7 +958,7 @@
 
 ---
 
-### Story 10.5: 插件市场
+### Story 11.5: 插件市场
 **状态**: 📋 待规划
 **验收标准**:
 - 插件上传和下载
@@ -903,7 +968,7 @@
 
 ---
 
-### Story 10.6: 文档和示例
+### Story 11.6: 文档和示例
 **状态**: 📋 待规划
 **验收标准**:
 - 用户手册

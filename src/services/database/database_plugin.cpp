@@ -8,6 +8,11 @@
 #include <fstream>
 #include <unistd.h>
 
+#include <arrow/api.h>
+#include <arrow/io/memory.h>
+#include <arrow/ipc/reader.h>
+#include <arrow/compute/api.h>
+
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -648,6 +653,18 @@ void DatabasePlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleQuery(u, req, rsp);
         }});
+    cb({"POST", "/channels/database/tables",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleTables(u, req, rsp);
+        }});
+    cb({"POST", "/channels/database/describe",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleDescribe(u, req, rsp);
+        }});
+    cb({"POST", "/channels/database/preview",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandlePreview(u, req, rsp);
+        }});
 }
 
 // POST /channels/database/add — 新增数据库通道
@@ -729,6 +746,372 @@ int32_t DatabasePlugin::HandleQuery(const std::string&, const std::string& req, 
     });
     body += "]";
     rsp = body;
+    return error::OK;
+}
+
+// ==================== 浏览器端点 ====================
+
+// 将 IBatchReader 读取的所有行转为 JSON
+// 格式：{"columns":[...],"types":[...],"data":[[...],...],"rows":N}
+static std::string BatchReaderToJson(IBatchReader* reader) {
+    // 通过 IPC 反序列化收集所有 RecordBatch
+    std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+    std::shared_ptr<arrow::Schema> schema;
+    const uint8_t* buf = nullptr;
+    size_t len = 0;
+
+    while (true) {
+        int rc = reader->Next(&buf, &len);
+        if (rc == 1) break;   // 已读完
+        if (rc < 0) break;    // 错误
+
+        auto arrow_buf = arrow::Buffer::Wrap(buf, static_cast<int64_t>(len));
+        auto input = std::make_shared<arrow::io::BufferReader>(arrow_buf);
+        auto stream_result = arrow::ipc::RecordBatchStreamReader::Open(input);
+        if (!stream_result.ok()) break;
+        auto stream_reader = *stream_result;
+        if (!schema) schema = stream_reader->schema();
+
+        std::shared_ptr<arrow::RecordBatch> batch;
+        while (stream_reader->ReadNext(&batch).ok() && batch) {
+            batches.push_back(batch);
+        }
+    }
+
+    if (batches.empty() || !schema) {
+        return R"({"columns":[],"types":[],"data":[],"rows":0})";
+    }
+
+    rapidjson::StringBuffer buf_json;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf_json);
+    w.StartObject();
+
+    // columns
+    w.Key("columns"); w.StartArray();
+    for (int i = 0; i < schema->num_fields(); ++i) {
+        w.String(schema->field(i)->name().c_str());
+    }
+    w.EndArray();
+
+    // types
+    w.Key("types"); w.StartArray();
+    for (int i = 0; i < schema->num_fields(); ++i) {
+        w.String(schema->field(i)->type()->ToString().c_str());
+    }
+    w.EndArray();
+
+    // data
+    int64_t total_rows = 0;
+    w.Key("data"); w.StartArray();
+    for (const auto& batch : batches) {
+        for (int64_t r = 0; r < batch->num_rows(); ++r) {
+            w.StartArray();
+            for (int c = 0; c < batch->num_columns(); ++c) {
+                auto scalar_result = batch->column(c)->GetScalar(r);
+                if (!scalar_result.ok()) { w.Null(); continue; }
+                auto scalar = scalar_result.ValueOrDie();
+                if (!scalar->is_valid) { w.Null(); continue; }
+                auto type_id = scalar->type->id();
+                if (type_id == arrow::Type::BOOL) {
+                    w.Bool(std::static_pointer_cast<arrow::BooleanScalar>(scalar)->value);
+                } else if (type_id == arrow::Type::INT8  || type_id == arrow::Type::INT16 ||
+                           type_id == arrow::Type::INT32 || type_id == arrow::Type::INT64 ||
+                           type_id == arrow::Type::UINT8 || type_id == arrow::Type::UINT16 ||
+                           type_id == arrow::Type::UINT32|| type_id == arrow::Type::UINT64) {
+                    auto cast = arrow::compute::Cast(scalar, arrow::int64());
+                    if (cast.ok()) {
+                        w.Int64(cast.ValueOrDie().scalar_as<arrow::Int64Scalar>().value);
+                    } else {
+                        w.String(scalar->ToString().c_str());
+                    }
+                } else if (type_id == arrow::Type::FLOAT || type_id == arrow::Type::DOUBLE) {
+                    auto cast = arrow::compute::Cast(scalar, arrow::float64());
+                    if (cast.ok()) {
+                        w.Double(cast.ValueOrDie().scalar_as<arrow::DoubleScalar>().value);
+                    } else {
+                        w.String(scalar->ToString().c_str());
+                    }
+                } else {
+                    w.String(scalar->ToString().c_str());
+                }
+            }
+            w.EndArray();
+            ++total_rows;
+        }
+    }
+    w.EndArray();
+
+    w.Key("rows"); w.Int64(total_rows);
+    w.EndObject();
+    return buf_json.GetString();
+}
+
+// 按数据库类型对表名加引号转义（防止 SQL 注入）
+// SQLite 用双引号，MySQL/ClickHouse 用反引号
+static std::string QuoteTableName(const std::string& table, const std::string& db_type) {
+    if (table.empty()) return "";
+    if (db_type == "sqlite") {
+        // 双引号转义：将内部双引号替换为两个双引号
+        std::string result = "\"";
+        for (char c : table) {
+            if (c == '"') result += "\"\"";
+            else result += c;
+        }
+        result += "\"";
+        return result;
+    } else {
+        // MySQL / ClickHouse：反引号转义
+        std::string result = "`";
+        for (char c : table) {
+            if (c == '`') result += "``";
+            else result += c;
+        }
+        result += "`";
+        return result;
+    }
+}
+
+// 将 RecordBatch 列表转为 JSON（供 ClickHouse Arrow 路径使用）
+static std::string BatchesToJson(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) {
+    if (batches.empty()) {
+        return R"({"columns":[],"types":[],"data":[],"rows":0})";
+    }
+    auto schema = batches[0]->schema();
+    rapidjson::StringBuffer buf_json;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf_json);
+    w.StartObject();
+    w.Key("columns"); w.StartArray();
+    for (int i = 0; i < schema->num_fields(); ++i) w.String(schema->field(i)->name().c_str());
+    w.EndArray();
+    w.Key("types"); w.StartArray();
+    for (int i = 0; i < schema->num_fields(); ++i) w.String(schema->field(i)->type()->ToString().c_str());
+    w.EndArray();
+    int64_t total_rows = 0;
+    w.Key("data"); w.StartArray();
+    for (const auto& batch : batches) {
+        for (int64_t r = 0; r < batch->num_rows(); ++r) {
+            w.StartArray();
+            for (int c = 0; c < batch->num_columns(); ++c) {
+                auto scalar_result = batch->column(c)->GetScalar(r);
+                if (!scalar_result.ok()) { w.Null(); continue; }
+                auto scalar = scalar_result.ValueOrDie();
+                if (!scalar->is_valid) { w.Null(); continue; }
+                auto type_id = scalar->type->id();
+                if (type_id == arrow::Type::BOOL) {
+                    w.Bool(std::static_pointer_cast<arrow::BooleanScalar>(scalar)->value);
+                } else if (type_id == arrow::Type::INT8  || type_id == arrow::Type::INT16 ||
+                           type_id == arrow::Type::INT32 || type_id == arrow::Type::INT64 ||
+                           type_id == arrow::Type::UINT8 || type_id == arrow::Type::UINT16 ||
+                           type_id == arrow::Type::UINT32|| type_id == arrow::Type::UINT64) {
+                    auto cast = arrow::compute::Cast(scalar, arrow::int64());
+                    if (cast.ok()) w.Int64(cast.ValueOrDie().scalar_as<arrow::Int64Scalar>().value);
+                    else w.String(scalar->ToString().c_str());
+                } else if (type_id == arrow::Type::FLOAT || type_id == arrow::Type::DOUBLE) {
+                    auto cast = arrow::compute::Cast(scalar, arrow::float64());
+                    if (cast.ok()) w.Double(cast.ValueOrDie().scalar_as<arrow::DoubleScalar>().value);
+                    else w.String(scalar->ToString().c_str());
+                } else {
+                    w.String(scalar->ToString().c_str());
+                }
+            }
+            w.EndArray();
+            ++total_rows;
+        }
+    }
+    w.EndArray();
+    w.Key("rows"); w.Int64(total_rows);
+    w.EndObject();
+    return buf_json.GetString();
+}
+
+// 解析请求中的 type/name/table 字段
+static bool ParseBrowseRequest(const std::string& req,
+                                std::string& type, std::string& name, std::string& table,
+                                std::string& err) {
+    rapidjson::Document doc;
+    doc.Parse(req.c_str());
+    if (doc.HasParseError() || !doc.IsObject()) {
+        err = "invalid JSON"; return false;
+    }
+    if (!doc.HasMember("type") || !doc["type"].IsString() ||
+        !doc.HasMember("name") || !doc["name"].IsString()) {
+        err = "missing 'type' or 'name'"; return false;
+    }
+    type  = doc["type"].GetString();
+    name  = doc["name"].GetString();
+    if (doc.HasMember("table") && doc["table"].IsString()) {
+        table = doc["table"].GetString();
+    }
+    return true;
+}
+
+// POST /channels/database/tables — 列出所有表
+int32_t DatabasePlugin::HandleTables(const std::string&, const std::string& req, std::string& rsp) {
+    std::string type, name, table, err;
+    if (!ParseBrowseRequest(req, type, name, table, err)) {
+        rsp = "{\"error\":\"" + err + "\"}";
+        return error::BAD_REQUEST;
+    }
+
+    IDatabaseChannel* ch = Get(type.c_str(), name.c_str());
+    if (!ch) {
+        rsp = "{\"error\":\"channel not found: " + type + "." + name + "\"}";
+        return error::NOT_FOUND;
+    }
+
+    std::string sql;
+    if (type == "sqlite") {
+        sql = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name";
+    } else {
+        sql = "SHOW TABLES";
+    }
+
+    std::vector<std::string> tables;
+
+    if (type == "clickhouse") {
+        // ClickHouse 走 Arrow 路径
+        std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+        if (ch->ExecuteQueryArrow(sql.c_str(), &batches) != 0) {
+            rsp = "{\"error\":\"" + std::string(ch->GetLastError()) + "\"}";
+            return error::INTERNAL_ERROR;
+        }
+        for (const auto& batch : batches) {
+            if (batch->num_columns() == 0) continue;
+            auto col = batch->column(0);
+            for (int64_t i = 0; i < col->length(); ++i) {
+                auto s = col->GetScalar(i);
+                if (s.ok() && s.ValueOrDie()->is_valid) tables.push_back(s.ValueOrDie()->ToString());
+            }
+        }
+    } else {
+        // SQLite / MySQL 走 IBatchReader 路径
+        IBatchReader* reader = nullptr;
+        if (ch->CreateReader(sql.c_str(), &reader) != 0) {
+            rsp = "{\"error\":\"" + std::string(ch->GetLastError()) + "\"}";
+            return error::INTERNAL_ERROR;
+        }
+        std::unique_ptr<IBatchReader, std::function<void(IBatchReader*)>> guard(
+            reader, [](IBatchReader* r) { r->Close(); r->Release(); });
+
+        const uint8_t* ibuf = nullptr;
+        size_t ilen = 0;
+        while (true) {
+            int rc = reader->Next(&ibuf, &ilen);
+            if (rc == 1) break;
+            if (rc < 0) break;
+            auto arrow_buf = arrow::Buffer::Wrap(ibuf, static_cast<int64_t>(ilen));
+            auto input = std::make_shared<arrow::io::BufferReader>(arrow_buf);
+            auto stream_result = arrow::ipc::RecordBatchStreamReader::Open(input);
+            if (!stream_result.ok()) break;
+            std::shared_ptr<arrow::RecordBatch> batch;
+            while ((*stream_result)->ReadNext(&batch).ok() && batch) {
+                if (batch->num_columns() == 0) continue;
+                auto col = batch->column(0);
+                for (int64_t i = 0; i < col->length(); ++i) {
+                    auto s = col->GetScalar(i);
+                    if (s.ok() && s.ValueOrDie()->is_valid) tables.push_back(s.ValueOrDie()->ToString());
+                }
+            }
+        }
+    }
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    w.StartObject();
+    w.Key("tables"); w.StartArray();
+    for (const auto& t : tables) w.String(t.c_str());
+    w.EndArray();
+    w.EndObject();
+    rsp = buf.GetString();
+    return error::OK;
+}
+
+// POST /channels/database/describe — 获取表结构
+int32_t DatabasePlugin::HandleDescribe(const std::string&, const std::string& req, std::string& rsp) {
+    std::string type, name, table, err;
+    if (!ParseBrowseRequest(req, type, name, table, err)) {
+        rsp = "{\"error\":\"" + err + "\"}";
+        return error::BAD_REQUEST;
+    }
+    if (table.empty()) {
+        rsp = R"({"error":"missing 'table' parameter"})";
+        return error::BAD_REQUEST;
+    }
+
+    IDatabaseChannel* ch = Get(type.c_str(), name.c_str());
+    if (!ch) {
+        rsp = "{\"error\":\"channel not found: " + type + "." + name + "\"}";
+        return error::NOT_FOUND;
+    }
+
+    std::string quoted = QuoteTableName(table, type);
+    std::string sql;
+    if (type == "sqlite") {
+        // PRAGMA 不支持引号，但 SQLite 表名不含特殊字符时可直接用；
+        // 含特殊字符的表名用双引号包裹
+        sql = "PRAGMA table_info(" + quoted + ")";
+    } else {
+        sql = "DESCRIBE " + quoted;
+    }
+
+    if (type == "clickhouse") {
+        std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+        if (ch->ExecuteQueryArrow(sql.c_str(), &batches) != 0) {
+            rsp = "{\"error\":\"" + std::string(ch->GetLastError()) + "\"}";
+            return error::INTERNAL_ERROR;
+        }
+        rsp = BatchesToJson(batches);
+    } else {
+        IBatchReader* reader = nullptr;
+        if (ch->CreateReader(sql.c_str(), &reader) != 0) {
+            rsp = "{\"error\":\"" + std::string(ch->GetLastError()) + "\"}";
+            return error::INTERNAL_ERROR;
+        }
+        std::unique_ptr<IBatchReader, std::function<void(IBatchReader*)>> guard(
+            reader, [](IBatchReader* r) { r->Close(); r->Release(); });
+        rsp = BatchReaderToJson(reader);
+    }
+    return error::OK;
+}
+
+// POST /channels/database/preview — 预览前 100 条数据
+int32_t DatabasePlugin::HandlePreview(const std::string&, const std::string& req, std::string& rsp) {
+    std::string type, name, table, err;
+    if (!ParseBrowseRequest(req, type, name, table, err)) {
+        rsp = "{\"error\":\"" + err + "\"}";
+        return error::BAD_REQUEST;
+    }
+    if (table.empty()) {
+        rsp = R"({"error":"missing 'table' parameter"})";
+        return error::BAD_REQUEST;
+    }
+
+    IDatabaseChannel* ch = Get(type.c_str(), name.c_str());
+    if (!ch) {
+        rsp = "{\"error\":\"channel not found: " + type + "." + name + "\"}";
+        return error::NOT_FOUND;
+    }
+
+    std::string quoted = QuoteTableName(table, type);
+    std::string sql = "SELECT * FROM " + quoted + " LIMIT 100";
+
+    if (type == "clickhouse") {
+        std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+        if (ch->ExecuteQueryArrow(sql.c_str(), &batches) != 0) {
+            rsp = "{\"error\":\"" + std::string(ch->GetLastError()) + "\"}";
+            return error::INTERNAL_ERROR;
+        }
+        rsp = BatchesToJson(batches);
+    } else {
+        IBatchReader* reader = nullptr;
+        if (ch->CreateReader(sql.c_str(), &reader) != 0) {
+            rsp = "{\"error\":\"" + std::string(ch->GetLastError()) + "\"}";
+            return error::INTERNAL_ERROR;
+        }
+        std::unique_ptr<IBatchReader, std::function<void(IBatchReader*)>> guard(
+            reader, [](IBatchReader* r) { r->Close(); r->Release(); });
+        rsp = BatchReaderToJson(reader);
+    }
     return error::OK;
 }
 

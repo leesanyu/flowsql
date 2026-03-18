@@ -3,10 +3,10 @@
     <h1 class="page-title">仪表盘</h1>
 
     <el-row :gutter="20" class="stats-row">
-      <el-col :span="8">
-        <el-card class="stat-card">
+      <el-col :span="8" :style="{ height: '100%' }">
+        <el-card class="stat-card" style="height: 100%" @click="router.push('/channels')">
           <div class="stat-content">
-            <el-icon class="stat-icon" color="#409eff"><Connection /></el-icon>
+            <el-icon class="stat-icon"><Connection /></el-icon>
             <div class="stat-info">
               <div class="stat-value">{{ stats.channels }}</div>
               <div class="stat-label">通道总数</div>
@@ -14,10 +14,10 @@
           </div>
         </el-card>
       </el-col>
-      <el-col :span="8">
-        <el-card class="stat-card">
+      <el-col :span="8" :style="{ height: '100%' }">
+        <el-card class="stat-card" style="height: 100%" @click="router.push('/operators')">
           <div class="stat-content">
-            <el-icon class="stat-icon" color="#67c23a"><Operation /></el-icon>
+            <el-icon class="stat-icon"><Operation /></el-icon>
             <div class="stat-info">
               <div class="stat-value">{{ stats.activeOperators }} / {{ stats.totalOperators }}</div>
               <div class="stat-label">活跃算子 / 总数</div>
@@ -25,10 +25,10 @@
           </div>
         </el-card>
       </el-col>
-      <el-col :span="8">
-        <el-card class="stat-card">
+      <el-col :span="8" :style="{ height: '100%' }">
+        <el-card class="stat-card" style="height: 100%" @click="router.push('/tasks')">
           <div class="stat-content">
-            <el-icon class="stat-icon" color="#e6a23c"><Document /></el-icon>
+            <el-icon class="stat-icon"><Document /></el-icon>
             <div class="stat-info">
               <div class="stat-value">{{ stats.successTasks }} / {{ stats.totalTasks }}</div>
               <div class="stat-label">成功任务 / 总数</div>
@@ -62,10 +62,12 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { Connection, Operation, Document } from '@element-plus/icons-vue'
 import api from '../api'
 import { ElMessage } from 'element-plus'
 
+const router = useRouter()
 const stats = ref({
   channels: 0,
   activeOperators: 0,
@@ -107,15 +109,11 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.dashboard {
-  max-width: 1400px;
-}
-
 .page-title {
   font-size: 24px;
   font-weight: 600;
   margin-bottom: 20px;
-  color: #303133;
+  color: var(--text-primary);
 }
 
 .stats-row {
@@ -140,6 +138,7 @@ onMounted(() => {
 .stat-icon {
   font-size: 48px;
   margin-right: 20px;
+  color: var(--accent);
 }
 
 .stat-info {
@@ -149,13 +148,13 @@ onMounted(() => {
 .stat-value {
   font-size: 28px;
   font-weight: 600;
-  color: #303133;
+  color: var(--text-primary);
   margin-bottom: 5px;
 }
 
 .stat-label {
   font-size: 14px;
-  color: #909399;
+  color: var(--text-secondary);
 }
 
 .recent-tasks {

@@ -30,5 +30,13 @@ export default {
   listDbChannels: () => api.post('/api/channels/database/query', {}),
   addDbChannel: (config) => api.post('/api/channels/database/add', { config }),
   removeDbChannel: (type, name) => api.post('/api/channels/database/remove', { type, name }),
-  updateDbChannel: (config) => api.post('/api/channels/database/modify', { config })
+  updateDbChannel: (config) => api.post('/api/channels/database/modify', { config }),
+
+  // 数据库通道浏览器
+  listDbTables:    (type, name)        => api.post('/api/channels/database/tables',   { type, name }),
+  describeDbTable: (type, name, table) => api.post('/api/channels/database/describe', { type, name, table }),
+  previewDbTable:  (type, name, table) => api.post('/api/channels/database/preview',  { type, name, table }),
+
+  // dataframe 通道预览
+  previewDataframe: (catelog, name) => api.post('/api/channels/dataframe/preview', { catelog, name }),
 }

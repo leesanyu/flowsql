@@ -192,6 +192,25 @@ int WebServer::Init(const std::string& db_path) {
     server_.Post("/api/channels/database/modify", [db_proxy](const httplib::Request& req, httplib::Response& res) {
         db_proxy("/channels/database/modify", req.body, res);
     });
+    server_.Post("/api/channels/database/tables", [db_proxy](const httplib::Request& req, httplib::Response& res) {
+        db_proxy("/channels/database/tables", req.body, res);
+    });
+    server_.Post("/api/channels/database/describe", [db_proxy](const httplib::Request& req, httplib::Response& res) {
+        db_proxy("/channels/database/describe", req.body, res);
+    });
+    server_.Post("/api/channels/database/preview", [db_proxy](const httplib::Request& req, httplib::Response& res) {
+        db_proxy("/channels/database/preview", req.body, res);
+    });
+    // dataframe 通道预览（转发给 Scheduler）
+    server_.Post("/api/channels/dataframe/preview", [this](const httplib::Request& req, httplib::Response& res) {
+        httplib::Client client(scheduler_host_, scheduler_port_);
+        client.set_connection_timeout(5);
+        client.set_read_timeout(10);
+        auto result = client.Post("/channels/dataframe/preview", req.body, "application/json");
+        if (!result) { res.status = 503; res.set_content(R"({"error":"service unreachable"})", "application/json"); return; }
+        res.status = result->status;
+        res.set_content(result->body, "application/json");
+    });
 
     printf("WebServer::Init: OK (db=%s)\n", db_path.c_str());
     return 0;
@@ -278,6 +297,28 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
     cb({"POST", "/api/channels/database/modify",
         [proxy](const std::string&, const std::string& req, std::string& rsp) {
             return proxy("/channels/database/modify", req, rsp);
+        }});
+    cb({"POST", "/api/channels/database/tables",
+        [proxy](const std::string&, const std::string& req, std::string& rsp) {
+            return proxy("/channels/database/tables", req, rsp);
+        }});
+    cb({"POST", "/api/channels/database/describe",
+        [proxy](const std::string&, const std::string& req, std::string& rsp) {
+            return proxy("/channels/database/describe", req, rsp);
+        }});
+    cb({"POST", "/api/channels/database/preview",
+        [proxy](const std::string&, const std::string& req, std::string& rsp) {
+            return proxy("/channels/database/preview", req, rsp);
+        }});
+    cb({"POST", "/api/channels/dataframe/preview",
+        [this](const std::string&, const std::string& req, std::string& rsp) -> int32_t {
+            httplib::Client client(scheduler_host_, scheduler_port_);
+            client.set_connection_timeout(5);
+            client.set_read_timeout(10);
+            auto result = client.Post("/channels/dataframe/preview", req, "application/json");
+            if (!result) { rsp = R"({"error":"service unreachable"})"; return error::UNAVAILABLE; }
+            rsp = result->body;
+            return (result->status == 200) ? error::OK : error::INTERNAL_ERROR;
         }});
 }
 

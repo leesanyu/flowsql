@@ -25,9 +25,14 @@
         <el-table-column prop="name" label="名称" width="200" />
         <el-table-column prop="catelog" label="类别" width="150" />
         <el-table-column prop="type" label="类型" width="150" />
-        <el-table-column label="Schema" min-width="300">
+        <el-table-column label="Schema" min-width="200">
           <template #default="scope">
-            <el-popover placement="top" :width="400" trigger="hover">
+            <!-- 数据库通道：显示数据库名 -->
+            <span v-if="isDbChannel(scope.row)" class="db-label">
+              {{ scope.row.schema || '—' }}
+            </span>
+            <!-- dataframe 通道：显示字段数，悬停展开 -->
+            <el-popover v-else placement="top" :width="400" trigger="hover">
               <template #reference>
                 <el-tag>{{ scope.row.schema.length }} 字段</el-tag>
               </template>
@@ -45,10 +50,14 @@
             <el-tag type="success">{{ scope.row.status }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="120" v-if="hasDbChannels">
+        <el-table-column label="操作" width="160">
           <template #default="scope">
             <el-button
-              v-if="scope.row.catelog && ['sqlite','mysql','clickhouse'].includes(scope.row.catelog)"
+              type="primary" size="small" text
+              @click="openBrowser(scope.row)"
+            >浏览</el-button>
+            <el-button
+              v-if="isDbChannel(scope.row)"
               type="danger" size="small" text
               @click="handleRemove(scope.row)"
             >删除</el-button>
@@ -56,6 +65,102 @@
         </el-table-column>
       </el-table>
     </el-card>
+
+    <!-- 数据库浏览器 Drawer -->
+    <el-drawer
+      v-model="drawerVisible"
+      :title="`浏览：${browserChannel.catelog}.${browserChannel.name}`"
+      size="60%"
+      direction="rtl"
+    >
+      <!-- dataframe 通道：直接展示数据 -->
+      <div v-if="!isDbChannel(browserChannel)" class="browser-content" style="padding: 0">
+        <el-table
+          v-if="previewData.rows && previewData.rows.length > 0"
+          :data="previewData.rows"
+          size="small"
+          border
+          style="width: 100%"
+          max-height="600"
+          v-loading="previewLoading"
+        >
+          <el-table-column
+            v-for="col in previewData.columns"
+            :key="col"
+            :prop="col"
+            :label="col"
+            min-width="100"
+            show-overflow-tooltip
+          />
+        </el-table>
+        <div v-else-if="previewLoading" v-loading="true" style="height: 100px" />
+        <div v-else class="browser-empty">暂无数据</div>
+      </div>
+
+      <!-- 数据库通道：左侧表列表 + 右侧 Tab -->
+      <div v-else class="browser-layout">
+        <div class="browser-tables">
+          <div v-if="tablesLoading" class="browser-loading">
+            <el-icon class="is-loading"><Loading /></el-icon>
+          </div>
+          <div v-else-if="tableList.length === 0" class="browser-empty">暂无表</div>
+          <div
+            v-for="t in tableList"
+            :key="t"
+            class="browser-table-item"
+            :class="{ active: t === selectedTable }"
+            @click="selectTable(t)"
+          >{{ t }}</div>
+        </div>
+
+        <div class="browser-content">
+          <el-tabs v-model="activeTab" v-if="selectedTable">
+            <el-tab-pane label="表结构" name="describe">
+              <el-table
+                v-if="describeData.rows && describeData.rows.length > 0"
+                :data="describeData.rows"
+                size="small"
+                border
+                style="width: 100%"
+                v-loading="describeLoading"
+              >
+                <el-table-column
+                  v-for="col in describeData.columns"
+                  :key="col"
+                  :prop="col"
+                  :label="col"
+                  min-width="100"
+                  show-overflow-tooltip
+                />
+              </el-table>
+              <div v-else-if="describeLoading" v-loading="true" style="height: 100px" />
+            </el-tab-pane>
+            <el-tab-pane label="数据预览" name="preview">
+              <el-table
+                v-if="previewData.rows && previewData.rows.length > 0"
+                :data="previewData.rows"
+                size="small"
+                border
+                style="width: 100%"
+                max-height="500"
+                v-loading="previewLoading"
+              >
+                <el-table-column
+                  v-for="col in previewData.columns"
+                  :key="col"
+                  :prop="col"
+                  :label="col"
+                  min-width="100"
+                  show-overflow-tooltip
+                />
+              </el-table>
+              <div v-else-if="previewLoading" v-loading="true" style="height: 100px" />
+            </el-tab-pane>
+          </el-tabs>
+          <div v-else class="browser-empty">请选择左侧表</div>
+        </div>
+      </div>
+    </el-drawer>
 
     <!-- 新增数据库通道对话框 -->
     <el-dialog v-model="showAddDialog" title="新增数据库通道" width="500px" @close="resetForm">
@@ -107,7 +212,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { Search, Plus } from '@element-plus/icons-vue'
+import { Search, Plus, Loading } from '@element-plus/icons-vue'
 import api from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -127,6 +232,9 @@ const hasDbChannels = computed(() =>
   channels.value.some(ch => ['sqlite','mysql','clickhouse'].includes(ch.catelog))
 )
 
+const isDbChannel = (row) =>
+  row && ['sqlite','mysql','clickhouse'].includes(row.catelog)
+
 const filteredChannels = computed(() => {
   if (!searchText.value) return channels.value
   const search = searchText.value.toLowerCase()
@@ -141,13 +249,19 @@ const loadChannels = async () => {
   loading.value = true
   try {
     const res = await api.getChannels()
-    channels.value = res.data.map(ch => ({
-      ...ch,
-      schema: JSON.parse(ch.schema_json || '[]').map(field => ({
-        name: field.name,
-        type: getTypeName(field.type)
-      }))
-    }))
+    channels.value = res.data.map(ch => {
+      const isDb = ['sqlite','mysql','clickhouse'].includes(ch.catelog)
+      return {
+        ...ch,
+        // 数据库通道 schema 是字符串（数据库名），dataframe 通道是字段数组
+        schema: isDb
+          ? (ch.schema || '')
+          : JSON.parse(ch.schema_json || ch.schema || '[]').map(field => ({
+              name: field.name,
+              type: getTypeName(field.type)
+            }))
+      }
+    })
   } catch (error) {
     ElMessage.error('加载通道列表失败: ' + error.message)
   } finally {
@@ -214,16 +328,155 @@ const resetForm = () => {
   form.value = { type: 'mysql', name: '', host: '127.0.0.1', port: '', user: '', password: '', database: '', path: '' }
 }
 
+// ==================== 数据库浏览器 ====================
+const drawerVisible = ref(false)
+const browserChannel = ref({ catelog: '', name: '' })
+const tableList = ref([])
+const tablesLoading = ref(false)
+const selectedTable = ref('')
+const activeTab = ref('describe')
+
+const describeData = ref({ columns: [], rows: [] })
+const describeLoading = ref(false)
+const previewData = ref({ columns: [], rows: [] })
+const previewLoading = ref(false)
+
+// 将 {columns, data} 转为 el-table 需要的对象数组
+const toRows = (res) => {
+  if (!res || !res.columns || !res.data) return []
+  return res.data.map(row => {
+    const obj = {}
+    res.columns.forEach((col, i) => { obj[col] = row[i] })
+    return obj
+  })
+}
+
+const openBrowser = async (row) => {
+  browserChannel.value = { catelog: row.catelog, name: row.name }
+  tableList.value = []
+  selectedTable.value = ''
+  describeData.value = { columns: [], rows: [] }
+  previewData.value = { columns: [], rows: [] }
+  drawerVisible.value = true
+
+  if (!isDbChannel(row)) {
+    // dataframe 通道：直接预览
+    previewLoading.value = true
+    try {
+      const res = await api.previewDataframe(row.catelog, row.name)
+      previewData.value = { columns: res.data.columns || [], rows: toRows(res.data) }
+    } catch (e) {
+      ElMessage.error('获取数据失败: ' + (e.response?.data?.error || e.message))
+    } finally {
+      previewLoading.value = false
+    }
+    return
+  }
+
+  // 数据库通道：加载表列表
+  tablesLoading.value = true
+  try {
+    const res = await api.listDbTables(row.catelog, row.name)
+    tableList.value = res.data.tables || []
+    if (tableList.value.length > 0) {
+      selectTable(tableList.value[0])
+    }
+  } catch (e) {
+    ElMessage.error('获取表列表失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    tablesLoading.value = false
+  }
+}
+
+const selectTable = async (table) => {
+  selectedTable.value = table
+  activeTab.value = 'describe'
+  describeData.value = { columns: [], rows: [] }
+  previewData.value = { columns: [], rows: [] }
+
+  const { catelog, name } = browserChannel.value
+
+  describeLoading.value = true
+  previewLoading.value = true
+
+  try {
+    const res = await api.describeDbTable(catelog, name, table)
+    describeData.value = { columns: res.data.columns || [], rows: toRows(res.data) }
+  } catch (e) {
+    ElMessage.error('获取表结构失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    describeLoading.value = false
+  }
+
+  try {
+    const res = await api.previewDbTable(catelog, name, table)
+    previewData.value = { columns: res.data.columns || [], rows: toRows(res.data) }
+  } catch (e) {
+    ElMessage.error('获取数据预览失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    previewLoading.value = false
+  }
+}
+
 onMounted(() => { loadChannels() })
 </script>
 
 <style scoped>
-.channels { max-width: 1400px; }
-.page-title { font-size: 24px; font-weight: 600; margin-bottom: 20px; color: #303133; }
+.channels { }
+.page-title { font-size: 24px; font-weight: 600; margin-bottom: 20px; color: var(--text-primary); }
 .card-header { display: flex; justify-content: space-between; align-items: center; }
 .schema-popup { max-height: 300px; overflow-y: auto; }
 .schema-field { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #eee; }
 .schema-field:last-child { border-bottom: none; }
-.field-name { font-weight: 600; color: #303133; }
-.field-type { color: #909399; font-family: monospace; }
+.field-name { font-weight: 600; color: var(--text-primary); }
+.field-type { color: var(--text-secondary); font-family: monospace; }
+.db-label { font-size: 13px; color: var(--text-secondary); font-family: monospace; }
+
+/* 浏览器 Drawer */
+.browser-layout {
+  display: flex;
+  height: calc(100vh - 120px);
+}
+
+.browser-tables {
+  width: 180px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border-color);
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.browser-table-item {
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-primary);
+  border-radius: 4px;
+  margin: 2px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.browser-table-item:hover { background-color: var(--bg-secondary); }
+
+.browser-table-item.active {
+  background-color: var(--sidebar-active-bg, #dbeafe);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.browser-content {
+  flex: 1;
+  overflow: auto;
+  padding: 0 16px;
+}
+
+.browser-loading,
+.browser-empty {
+  padding: 20px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-align: center;
+}
 </style>

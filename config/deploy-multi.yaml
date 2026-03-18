@@ -28,6 +28,7 @@ services:
       - libflowsql_scheduler.so
       - libflowsql_bridge.so
       - libflowsql_example.so
+      - libflowsql_testdata.so
       - name: libflowsql_database.so
         option: "config_file=config/flowsql.yml"
 

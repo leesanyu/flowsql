@@ -52,6 +52,10 @@ class __attribute__((visibility("default"))) DatabasePlugin
     int32_t HandleRemove(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleModify(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleQuery(const std::string& uri, const std::string& req, std::string& rsp);
+    // 浏览器端点
+    int32_t HandleTables(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleDescribe(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandlePreview(const std::string& uri, const std::string& req, std::string& rsp);
 
     // 内部辅助
     std::unique_ptr<IDbDriver> CreateDriver(const std::string& type);

@@ -42,6 +42,7 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle {
     int32_t HandleGetChannels(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleGetOperators(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleRefreshOperators(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandlePreviewDataframe(const std::string& uri, const std::string& req, std::string& rsp);
 
     // 通道管理
     IChannel* FindChannel(const std::string& name);
