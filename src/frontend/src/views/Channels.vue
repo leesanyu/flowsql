@@ -5,76 +5,97 @@
     <el-card>
       <template #header>
         <div class="card-header">
-          <el-input
-            v-model="searchText"
-            placeholder="搜索通道名称或类型"
-            style="width: 300px"
-            clearable
-          >
-            <template #prefix>
-              <el-icon><Search /></el-icon>
-            </template>
-          </el-input>
-          <el-button type="primary" @click="showAddDialog = true">
-            <el-icon><Plus /></el-icon> 新增数据库通道
-          </el-button>
+          <div class="header-left">
+            <el-input
+              v-model="searchText"
+              placeholder="搜索通道名称"
+              style="width: 300px"
+              clearable
+            >
+              <template #prefix>
+                <el-icon><Search /></el-icon>
+              </template>
+            </el-input>
+          </div>
+          <div class="header-actions">
+            <input ref="csvInput" type="file" accept=".csv" style="display:none" @change="handleCsvSelected" />
+            <el-button v-if="activeChannelType === 'dataframe'" type="success" @click="triggerCsvUpload">导入 CSV</el-button>
+            <el-button v-if="activeChannelType === 'database'" type="primary" @click="showAddDialog = true">新增数据库通道</el-button>
+          </div>
         </div>
       </template>
+      <div class="channel-layout">
+        <div class="channel-sidebar">
+          <div
+            class="channel-type-item"
+            :class="{ active: activeChannelType === 'dataframe' }"
+            @click="activeChannelType = 'dataframe'"
+          >
+            <span>DataFrame 通道</span>
+            <el-tag size="small" effect="plain">{{ dfChannels.length }}</el-tag>
+          </div>
+          <div
+            class="channel-type-item"
+            :class="{ active: activeChannelType === 'database' }"
+            @click="activeChannelType = 'database'"
+          >
+            <span>数据库通道</span>
+            <el-tag size="small" effect="plain">{{ dbChannels.length }}</el-tag>
+          </div>
+        </div>
 
-      <el-table :data="filteredChannels" style="width: 100%" v-loading="loading">
-        <el-table-column prop="name" label="名称" width="200" />
-        <el-table-column prop="catelog" label="类别" width="150" />
-        <el-table-column prop="type" label="类型" width="150" />
-        <el-table-column label="Schema" min-width="200">
-          <template #default="scope">
-            <!-- 数据库通道：显示数据库名 -->
-            <span v-if="isDbChannel(scope.row)" class="db-label">
-              {{ scope.row.schema || '—' }}
-            </span>
-            <!-- dataframe 通道：显示字段数，悬停展开 -->
-            <el-popover v-else placement="top" :width="400" trigger="hover">
-              <template #reference>
-                <el-tag>{{ scope.row.schema.length }} 字段</el-tag>
+        <div class="channel-main">
+          <div class="section-title">{{ activeChannelType === 'dataframe' ? 'DataFrame 通道' : '数据库通道' }}</div>
+
+          <el-table v-if="activeChannelType === 'dataframe'" :data="filteredDfChannels" style="width: 100%" v-loading="loadingDf">
+            <el-table-column prop="name" label="名称" min-width="220" />
+            <el-table-column prop="rows" label="行数" width="120" />
+            <el-table-column label="Schema" min-width="260">
+              <template #default="scope">
+                <el-popover placement="top" :width="420" trigger="hover">
+                  <template #reference>
+                    <el-tag>{{ scope.row.schema.length }} 字段</el-tag>
+                  </template>
+                  <div class="schema-popup">
+                    <div v-for="field in scope.row.schema" :key="field.name" class="schema-field">
+                      <span class="field-name">{{ field.name }}</span>
+                      <span class="field-type">{{ getTypeName(field.type) }}</span>
+                    </div>
+                  </div>
+                </el-popover>
               </template>
-              <div class="schema-popup">
-                <div v-for="field in scope.row.schema" :key="field.name" class="schema-field">
-                  <span class="field-name">{{ field.name }}</span>
-                  <span class="field-type">{{ field.type }}</span>
-                </div>
-              </div>
-            </el-popover>
-          </template>
-        </el-table-column>
-        <el-table-column prop="status" label="状态" width="100">
-          <template #default="scope">
-            <el-tag type="success">{{ scope.row.status }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="160">
-          <template #default="scope">
-            <el-button
-              type="primary" size="small" text
-              @click="openBrowser(scope.row)"
-            >浏览</el-button>
-            <el-button
-              v-if="isDbChannel(scope.row)"
-              type="danger" size="small" text
-              @click="handleRemove(scope.row)"
-            >删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+            </el-table-column>
+            <el-table-column label="操作" width="260">
+              <template #default="scope">
+                <el-button type="primary" size="small" text @click="previewDf(scope.row)">预览</el-button>
+                <el-button type="warning" size="small" text @click="renameDf(scope.row)">重命名</el-button>
+                <el-button type="danger" size="small" text @click="removeDf(scope.row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <el-table v-else :data="filteredDbChannels" style="width: 100%" v-loading="loadingDb">
+            <el-table-column prop="name" label="名称" width="180" />
+            <el-table-column prop="type" label="类型" width="140" />
+            <el-table-column prop="schema" label="Schema" min-width="200" />
+            <el-table-column label="操作" width="160">
+              <template #default="scope">
+                <el-button type="primary" size="small" text @click="openDbBrowser(scope.row)">浏览</el-button>
+                <el-button type="danger" size="small" text @click="handleRemoveDb(scope.row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
     </el-card>
 
-    <!-- 数据库浏览器 Drawer -->
     <el-drawer
       v-model="drawerVisible"
-      :title="`浏览：${browserChannel.catelog}.${browserChannel.name}`"
+      :title="drawerTitle"
       size="60%"
       direction="rtl"
     >
-      <!-- dataframe 通道：直接展示数据 -->
-      <div v-if="!isDbChannel(browserChannel)" class="browser-content" style="padding: 0">
+      <div v-if="drawerMode === 'df'" class="browser-content" style="padding: 0">
         <el-table
           v-if="previewData.rows && previewData.rows.length > 0"
           :data="previewData.rows"
@@ -95,9 +116,20 @@
         </el-table>
         <div v-else-if="previewLoading" v-loading="true" style="height: 100px" />
         <div v-else class="browser-empty">暂无数据</div>
+        <div v-if="dfPreviewTotal > 0" class="df-pagination">
+          <el-pagination
+            background
+            layout="total, sizes, prev, pager, next"
+            :current-page="dfPreviewPage"
+            :page-size="dfPreviewPageSize"
+            :page-sizes="[10, 20, 50, 100]"
+            :total="dfPreviewTotal"
+            @current-change="onDfPageChange"
+            @size-change="onDfPageSizeChange"
+          />
+        </div>
       </div>
 
-      <!-- 数据库通道：左侧表列表 + 右侧 Tab -->
       <div v-else class="browser-layout">
         <div class="browser-tables">
           <div v-if="tablesLoading" class="browser-loading">
@@ -162,7 +194,6 @@
       </div>
     </el-drawer>
 
-    <!-- 新增数据库通道对话框 -->
     <el-dialog v-model="showAddDialog" title="新增数据库通道" width="500px" @close="resetForm">
       <el-form :model="form" label-width="100px" ref="formRef">
         <el-form-item label="类型" prop="type" required>
@@ -176,14 +207,12 @@
           <el-input v-model="form.name" placeholder="通道名称，如 mydb" />
         </el-form-item>
 
-        <!-- SQLite 专属字段 -->
         <template v-if="form.type === 'sqlite'">
           <el-form-item label="文件路径">
             <el-input v-model="form.path" placeholder=":memory: 或 /data/test.db" />
           </el-form-item>
         </template>
 
-        <!-- MySQL / ClickHouse 公共字段 -->
         <template v-if="form.type === 'mysql' || form.type === 'clickhouse'">
           <el-form-item label="主机">
             <el-input v-model="form.host" placeholder="127.0.0.1" />
@@ -212,78 +241,139 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { Search, Plus, Loading } from '@element-plus/icons-vue'
+import { Search, Loading } from '@element-plus/icons-vue'
 import api from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-const channels = ref([])
 const searchText = ref('')
-const loading = ref(false)
+const activeChannelType = ref('dataframe')
 const showAddDialog = ref(false)
 const submitting = ref(false)
 const formRef = ref(null)
+const csvInput = ref(null)
+
+const dbChannels = ref([])
+const dfChannels = ref([])
+const loadingDb = ref(false)
+const loadingDf = ref(false)
 
 const form = ref({
   type: 'mysql', name: '', host: '127.0.0.1', port: '',
   user: '', password: '', database: '', path: ''
 })
 
-const hasDbChannels = computed(() =>
-  channels.value.some(ch => ['sqlite','mysql','clickhouse'].includes(ch.catelog))
-)
-
-const isDbChannel = (row) =>
-  row && ['sqlite','mysql','clickhouse'].includes(row.catelog)
-
-const filteredChannels = computed(() => {
-  if (!searchText.value) return channels.value
-  const search = searchText.value.toLowerCase()
-  return channels.value.filter(ch =>
-    ch.name.toLowerCase().includes(search) ||
-    ch.type.toLowerCase().includes(search) ||
-    ch.catelog.toLowerCase().includes(search)
+const filteredDbChannels = computed(() => {
+  const s = searchText.value.trim().toLowerCase()
+  if (!s) return dbChannels.value
+  return dbChannels.value.filter(ch =>
+    (ch.name || '').toLowerCase().includes(s) ||
+    (ch.type || '').toLowerCase().includes(s)
   )
 })
 
-const loadChannels = async () => {
-  loading.value = true
-  try {
-    const res = await api.getChannels()
-    channels.value = res.data.map(ch => {
-      const isDb = ['sqlite','mysql','clickhouse'].includes(ch.catelog)
-      return {
-        ...ch,
-        // 数据库通道 schema 是字符串（数据库名），dataframe 通道是字段数组
-        schema: isDb
-          ? (ch.schema || '')
-          : JSON.parse(ch.schema_json || ch.schema || '[]').map(field => ({
-              name: field.name,
-              type: getTypeName(field.type)
-            }))
-      }
-    })
-  } catch (error) {
-    ElMessage.error('加载通道列表失败: ' + error.message)
-  } finally {
-    loading.value = false
-  }
-}
+const filteredDfChannels = computed(() => {
+  const s = searchText.value.trim().toLowerCase()
+  if (!s) return dfChannels.value
+  return dfChannels.value.filter(ch => (ch.name || '').toLowerCase().includes(s))
+})
 
 const getTypeName = (typeId) => {
-  const typeMap = { 0:'BOOL',1:'INT8',2:'UINT32',3:'UINT64',4:'INT32',5:'INT64',6:'STRING',7:'DOUBLE' }
+  const typeMap = {
+    0: 'INT32', 1: 'INT64', 2: 'UINT32', 3: 'UINT64', 4: 'FLOAT',
+    5: 'DOUBLE', 6: 'STRING', 7: 'BYTES', 8: 'TIMESTAMP', 9: 'BOOLEAN'
+  }
   return typeMap[typeId] || 'UNKNOWN'
 }
 
-// 将表单转为 config_str 格式
+const loadDbChannels = async () => {
+  loadingDb.value = true
+  try {
+    const res = await api.listDbChannels()
+    dbChannels.value = (res.data || []).map(ch => ({
+      ...ch,
+      schema: ch.database || ch.path || ''
+    }))
+  } catch (error) {
+    ElMessage.error('加载数据库通道失败: ' + (error.response?.data?.error || error.message))
+  } finally {
+    loadingDb.value = false
+  }
+}
+
+const loadDfChannels = async () => {
+  loadingDf.value = true
+  try {
+    const res = await api.listDfChannels()
+    dfChannels.value = (res.data.channels || []).map(ch => ({
+      name: ch.name,
+      rows: ch.rows || 0,
+      schema: ch.schema || []
+    }))
+  } catch (error) {
+    ElMessage.error('加载 DataFrame 通道失败: ' + (error.response?.data?.error || error.message))
+  } finally {
+    loadingDf.value = false
+  }
+}
+
+const reloadAll = async () => {
+  await Promise.all([loadDbChannels(), loadDfChannels()])
+}
+
+const triggerCsvUpload = () => {
+  if (csvInput.value) csvInput.value.click()
+}
+
+const handleCsvSelected = async (e) => {
+  const file = e.target.files?.[0]
+  e.target.value = ''
+  if (!file) return
+  try {
+    await api.importCsv(file)
+    ElMessage.success('CSV 导入成功')
+    await loadDfChannels()
+  } catch (error) {
+    ElMessage.error('CSV 导入失败: ' + (error.response?.data?.error || error.message))
+  }
+}
+
+const renameDf = async (row) => {
+  try {
+    const { value } = await ElMessageBox.prompt('输入新通道名', `重命名 ${row.name}`, {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      inputValue: row.name,
+      inputValidator: (v) => !!v || '名称不能为空'
+    })
+    if (!value || value === row.name) return
+    await api.renameDfChannel(row.name, value)
+    ElMessage.success('重命名成功')
+    await loadDfChannels()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('重命名失败: ' + (e.response?.data?.error || e.message))
+  }
+}
+
+const removeDf = async (row) => {
+  try {
+    await ElMessageBox.confirm(`确认删除 DataFrame 通道 ${row.name}？`, '删除确认', { type: 'warning' })
+    await api.deleteDfChannel(row.name)
+    ElMessage.success('删除成功')
+    await loadDfChannels()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败: ' + (e.response?.data?.error || e.message))
+  }
+}
+
 const buildConfigStr = () => {
   const f = form.value
   let s = `type=${f.type};name=${f.name}`
   if (f.type === 'sqlite') {
     if (f.path) s += `;path=${f.path}`
   } else {
-    if (f.host)     s += `;host=${f.host}`
-    if (f.port)     s += `;port=${f.port}`
-    if (f.user)     s += `;user=${f.user}`
+    if (f.host) s += `;host=${f.host}`
+    if (f.port) s += `;port=${f.port}`
+    if (f.user) s += `;user=${f.user}`
     if (f.password) s += `;password=${f.password}`
     if (f.database) s += `;database=${f.database}`
   }
@@ -304,21 +394,20 @@ const handleAdd = async () => {
     await api.addDbChannel(buildConfigStr())
     ElMessage.success('数据库通道添加成功')
     showAddDialog.value = false
-    loadChannels()
+    await loadDbChannels()
   } catch (error) {
-    const msg = error.response?.data?.error || error.message
-    ElMessage.error('添加失败: ' + msg)
+    ElMessage.error('添加失败: ' + (error.response?.data?.error || error.message))
   } finally {
     submitting.value = false
   }
 }
 
-const handleRemove = async (row) => {
+const handleRemoveDb = async (row) => {
   try {
-    await ElMessageBox.confirm(`确认删除通道 ${row.catelog}.${row.name}？`, '删除确认', { type: 'warning' })
-    await api.removeDbChannel(row.catelog, row.name)
+    await ElMessageBox.confirm(`确认删除通道 ${row.type}.${row.name}？`, '删除确认', { type: 'warning' })
+    await api.removeDbChannel(row.type, row.name)
     ElMessage.success('删除成功')
-    loadChannels()
+    await loadDbChannels()
   } catch (e) {
     if (e !== 'cancel') ElMessage.error('删除失败: ' + (e.response?.data?.error || e.message))
   }
@@ -328,20 +417,23 @@ const resetForm = () => {
   form.value = { type: 'mysql', name: '', host: '127.0.0.1', port: '', user: '', password: '', database: '', path: '' }
 }
 
-// ==================== 数据库浏览器 ====================
 const drawerVisible = ref(false)
-const browserChannel = ref({ catelog: '', name: '' })
+const drawerMode = ref('db')
+const drawerTitle = ref('')
+const browserChannel = ref({ type: '', name: '' })
 const tableList = ref([])
 const tablesLoading = ref(false)
 const selectedTable = ref('')
 const activeTab = ref('describe')
-
 const describeData = ref({ columns: [], rows: [] })
 const describeLoading = ref(false)
 const previewData = ref({ columns: [], rows: [] })
 const previewLoading = ref(false)
+const dfPreviewName = ref('')
+const dfPreviewPage = ref(1)
+const dfPreviewPageSize = ref(20)
+const dfPreviewTotal = ref(0)
 
-// 将 {columns, data} 转为 el-table 需要的对象数组
 const toRows = (res) => {
   if (!res || !res.columns || !res.data) return []
   return res.data.map(row => {
@@ -351,36 +443,58 @@ const toRows = (res) => {
   })
 }
 
-const openBrowser = async (row) => {
-  browserChannel.value = { catelog: row.catelog, name: row.name }
+const loadDfPreview = async () => {
+  if (!dfPreviewName.value) return
+  previewLoading.value = true
+  try {
+    const res = await api.previewDfChannel(dfPreviewName.value, dfPreviewPage.value, dfPreviewPageSize.value)
+    previewData.value = { columns: res.data.columns || [], rows: toRows(res.data) }
+    dfPreviewTotal.value = Number(res.data.rows || 0)
+  } catch (e) {
+    ElMessage.error('获取预览失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+const previewDf = async (row) => {
+  drawerMode.value = 'df'
+  drawerTitle.value = `预览：dataframe.${row.name}`
+  previewData.value = { columns: [], rows: [] }
+  dfPreviewName.value = row.name
+  dfPreviewPage.value = 1
+  dfPreviewPageSize.value = 20
+  dfPreviewTotal.value = 0
+  drawerVisible.value = true
+  await loadDfPreview()
+}
+
+const onDfPageChange = async (p) => {
+  dfPreviewPage.value = p
+  await loadDfPreview()
+}
+
+const onDfPageSizeChange = async (s) => {
+  dfPreviewPageSize.value = s
+  dfPreviewPage.value = 1
+  await loadDfPreview()
+}
+
+const openDbBrowser = async (row) => {
+  drawerMode.value = 'db'
+  browserChannel.value = { type: row.type, name: row.name }
+  drawerTitle.value = `浏览：${row.type}.${row.name}`
   tableList.value = []
   selectedTable.value = ''
   describeData.value = { columns: [], rows: [] }
   previewData.value = { columns: [], rows: [] }
   drawerVisible.value = true
 
-  if (!isDbChannel(row)) {
-    // dataframe 通道：直接预览
-    previewLoading.value = true
-    try {
-      const res = await api.previewDataframe(row.catelog, row.name)
-      previewData.value = { columns: res.data.columns || [], rows: toRows(res.data) }
-    } catch (e) {
-      ElMessage.error('获取数据失败: ' + (e.response?.data?.error || e.message))
-    } finally {
-      previewLoading.value = false
-    }
-    return
-  }
-
-  // 数据库通道：加载表列表
   tablesLoading.value = true
   try {
-    const res = await api.listDbTables(row.catelog, row.name)
+    const res = await api.listDbTables(row.type, row.name)
     tableList.value = res.data.tables || []
-    if (tableList.value.length > 0) {
-      selectTable(tableList.value[0])
-    }
+    if (tableList.value.length > 0) await selectTable(tableList.value[0])
   } catch (e) {
     ElMessage.error('获取表列表失败: ' + (e.response?.data?.error || e.message))
   } finally {
@@ -394,13 +508,13 @@ const selectTable = async (table) => {
   describeData.value = { columns: [], rows: [] }
   previewData.value = { columns: [], rows: [] }
 
-  const { catelog, name } = browserChannel.value
+  const { type, name } = browserChannel.value
 
   describeLoading.value = true
   previewLoading.value = true
 
   try {
-    const res = await api.describeDbTable(catelog, name, table)
+    const res = await api.describeDbTable(type, name, table)
     describeData.value = { columns: res.data.columns || [], rows: toRows(res.data) }
   } catch (e) {
     ElMessage.error('获取表结构失败: ' + (e.response?.data?.error || e.message))
@@ -409,7 +523,7 @@ const selectTable = async (table) => {
   }
 
   try {
-    const res = await api.previewDbTable(catelog, name, table)
+    const res = await api.previewDbTable(type, name, table)
     previewData.value = { columns: res.data.columns || [], rows: toRows(res.data) }
   } catch (e) {
     ElMessage.error('获取数据预览失败: ' + (e.response?.data?.error || e.message))
@@ -418,21 +532,54 @@ const selectTable = async (table) => {
   }
 }
 
-onMounted(() => { loadChannels() })
+onMounted(() => { reloadAll() })
 </script>
 
 <style scoped>
 .channels { }
 .page-title { font-size: 24px; font-weight: 600; margin-bottom: 20px; color: var(--text-primary); }
 .card-header { display: flex; justify-content: space-between; align-items: center; }
+.header-actions { display: flex; gap: 10px; }
+.channel-layout {
+  display: flex;
+  gap: 16px;
+}
+.channel-sidebar {
+  width: 180px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border-color);
+  padding-right: 12px;
+}
+.channel-type-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+.channel-type-item:hover {
+  background: var(--bg-secondary);
+}
+.channel-type-item.active {
+  background: var(--sidebar-active-bg, #dbeafe);
+  color: var(--accent);
+  font-weight: 600;
+}
+.channel-main {
+  flex: 1;
+  min-width: 0;
+}
+.section-title { margin: 10px 0; font-weight: 600; color: var(--text-primary); }
 .schema-popup { max-height: 300px; overflow-y: auto; }
 .schema-field { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #eee; }
 .schema-field:last-child { border-bottom: none; }
 .field-name { font-weight: 600; color: var(--text-primary); }
 .field-type { color: var(--text-secondary); font-family: monospace; }
-.db-label { font-size: 13px; color: var(--text-secondary); font-family: monospace; }
 
-/* 浏览器 Drawer */
 .browser-layout {
   display: flex;
   height: calc(100vh - 120px);
@@ -478,5 +625,26 @@ onMounted(() => { loadChannels() })
   font-size: 13px;
   color: var(--text-secondary);
   text-align: center;
+}
+
+.df-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 6px 0 6px;
+}
+
+@media (max-width: 900px) {
+  .channel-layout {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .channel-sidebar {
+    width: 100%;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-color);
+    padding-right: 0;
+    padding-bottom: 8px;
+  }
 }
 </style>

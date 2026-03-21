@@ -6,10 +6,11 @@
 #include <vector>
 #include <regex>
 
-#include <common/loader.hpp>
 #include <framework/core/channel_adapter.h>
 #include <framework/core/dataframe.h>
 #include <framework/core/dataframe_channel.h>
+#include <framework/core/memory_channel.h>
+#include <framework/core/passthrough_operator.h>
 #include <framework/core/pipeline.h>
 #include <framework/core/sql_parser.h>
 #include <framework/interfaces/ichannel.h>
@@ -28,7 +29,7 @@ void test_sql_parser();
 void test_normalize_from_table_name();
 void test_channel_adapter_copy();
 void test_channel_type_constants();
-void test_pipeline(const std::string& plugin_dir);
+void test_pipeline();
 
 // ============================================================
 // Test 1: DataFrame 基本操作
@@ -123,49 +124,14 @@ void test_dataframe_json() {
 }
 
 // ============================================================
-// Test 4: 插件加载 + Pipeline 数据流通（使用 PluginLoader）
+// Test 4: Pipeline 数据流通（直接构造 core 组件）
 // ============================================================
-void test_pipeline(const std::string& plugin_dir) {
-    printf("[TEST] Plugin loading + Pipeline (PluginLoader)...\n");
+void test_pipeline() {
+    printf("[TEST] Pipeline run with MemoryChannel + PassthroughOperator...\n");
 
-    PluginLoader* loader = PluginLoader::Single();
-
-    std::string plugin_name = "libflowsql_example.so";
-    const char* relapath[] = {plugin_name.c_str()};
-    const char* options[] = {nullptr};
-    int ret = loader->Load(plugin_dir.c_str(), relapath, options, 1);
-    if (ret != 0) {
-        printf("[SKIP] Plugin not found: %s, skipping pipeline test\n", plugin_name.c_str());
-        return;
-    }
-    loader->StartAll();
-
-    // 查询插件（通过 IQuerier 接口）
-    IChannel* source_ch = nullptr;
-    loader->Traverse(IID_CHANNEL, [&](void* p) -> int {
-        auto* ch = static_cast<IChannel*>(p);
-        if (std::string(ch->Catelog()) == "example" && std::string(ch->Name()) == "memory") {
-            source_ch = ch;
-            return -1;
-        }
-        return 0;
-    });
-
-    IOperator* op = nullptr;
-    loader->Traverse(IID_OPERATOR, [&](void* p) -> int {
-        auto* o = static_cast<IOperator*>(p);
-        if (o->Catelog() == "example" && o->Name() == "passthrough") {
-            op = o;
-            return -1;
-        }
-        return 0;
-    });
-
-    assert(source_ch != nullptr);
-    assert(op != nullptr);
-
-    auto* df_source = dynamic_cast<IDataFrameChannel*>(source_ch);
-    assert(df_source != nullptr);
+    MemoryChannel source;
+    source.SetIdentity("test", "memory");
+    PassthroughOperator op;
 
     DataFrame df_input;
     std::vector<Field> schema = {
@@ -176,15 +142,15 @@ void test_pipeline(const std::string& plugin_dir) {
     df_input.AppendRow({std::string("alpha"), int32_t(10)});
     df_input.AppendRow({std::string("beta"), int32_t(20)});
 
-    df_source->Open();
-    df_source->Write(&df_input);
+    source.Open();
+    source.Write(&df_input);
 
     DataFrameChannel sink("test", "sink");
     sink.Open();
 
     auto pipeline = PipelineBuilder()
-        .SetSource(df_source)
-        .SetOperator(op)
+        .SetSource(&source)
+        .SetOperator(&op)
         .SetSink(&sink)
         .Build();
     pipeline->Run();
@@ -202,12 +168,10 @@ void test_pipeline(const std::string& plugin_dir) {
     assert(std::get<std::string>(row1[0]) == "beta");
     assert(std::get<int32_t>(row1[1]) == 20);
 
-    df_source->Close();
+    source.Close();
     sink.Close();
-    loader->StopAll();
-    loader->Unload();
 
-    printf("[PASS] Plugin loading + Pipeline (PluginLoader)\n");
+    printf("[PASS] Pipeline run with MemoryChannel + PassthroughOperator\n");
 }
 
 // ============================================================
@@ -537,9 +501,7 @@ int main(int argc, char* argv[]) {
     test_channel_adapter_copy();
     test_channel_type_constants();
 
-    // Pipeline 测试需要插件 .so
-    std::string plugin_dir = get_absolute_process_path();
-    test_pipeline(plugin_dir);
+    test_pipeline();
 
     printf("\n=== All tests passed ===\n");
     return 0;

@@ -26,6 +26,7 @@ int WebPlugin::Option(const char* arg) {
         else if (key == "db_path") db_path_ = val;
         else if (key == "worker_host") worker_host_ = val;
         else if (key == "worker_port") worker_port_ = std::stoi(val);
+        else if (key == "upload_dir") upload_dir_ = val;
         else if (key == "gateway") {
             // 格式：host:port，内部服务转发目标
             size_t colon = val.find(':');
@@ -54,6 +55,7 @@ int WebPlugin::Start() {
     server_.SetWorkerAddress(worker_host_, worker_port_);
     // 内部服务转发走 Gateway，与 worker 地址分开
     server_.SetSchedulerAddress(gateway_host_, gateway_port_);
+    server_.SetUploadDir(upload_dir_);
 
     if (server_.Init(db_path_) != 0) {
         printf("WebPlugin::Start: failed to init WebServer\n");

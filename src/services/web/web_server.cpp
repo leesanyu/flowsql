@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <chrono>
+#include <filesystem>
 #include <thread>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -96,6 +97,8 @@ int WebServer::Init(const std::string& db_path) {
         printf("WebServer::Init: failed to init schema\n");
         return -1;
     }
+    std::error_code ec;
+    std::filesystem::create_directories(upload_dir_, ec);
 
     // 静态文件服务（基于可执行文件位置定位 static 目录）
     std::string static_dir = "static";
@@ -201,12 +204,86 @@ int WebServer::Init(const std::string& db_path) {
     server_.Post("/api/channels/database/preview", [db_proxy](const httplib::Request& req, httplib::Response& res) {
         db_proxy("/channels/database/preview", req.body, res);
     });
-    // dataframe 通道预览（转发给 Scheduler）
+    // dataframe 管理（转发给 CatalogPlugin，经由 Gateway）
+    server_.Get("/api/channels/dataframe", [this](const httplib::Request&, httplib::Response& res) {
+        httplib::Client client(scheduler_host_, scheduler_port_);
+        client.set_connection_timeout(5);
+        client.set_read_timeout(10);
+        auto result = client.Get("/channels/dataframe");
+        if (!result) { res.status = 503; res.set_content(R"({"error":"service unreachable"})", "application/json"); return; }
+        res.status = result->status;
+        res.set_content(result->body, "application/json");
+    });
+    server_.Post("/api/channels/dataframe/import", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_file("file")) {
+            res.status = 400;
+            res.set_content(R"({"error":"missing multipart field 'file'"})", "application/json");
+            return;
+        }
+        const auto file = req.get_file_value("file");
+        if (file.content.size() > 10 * 1024 * 1024) {
+            res.status = 400;
+            res.set_content("{\"error\":\"file too large (max 10MB)\"}", "application/json");
+            return;
+        }
+
+        std::filesystem::path tmp_path = std::filesystem::path(upload_dir_) /
+                                         (std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".csv");
+        FILE* fp = fopen(tmp_path.string().c_str(), "wb");
+        if (!fp) {
+            res.status = 500;
+            res.set_content(R"({"error":"failed to persist upload temp file"})", "application/json");
+            return;
+        }
+        fwrite(file.content.data(), 1, file.content.size(), fp);
+        fclose(fp);
+
+        rapidjson::StringBuffer buf;
+        rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+        w.StartObject();
+        w.Key("filename"); w.String(file.filename.c_str());
+        w.Key("tmp_path"); w.String(tmp_path.string().c_str());
+        w.EndObject();
+
+        httplib::Client client(scheduler_host_, scheduler_port_);
+        client.set_connection_timeout(5);
+        client.set_read_timeout(30);
+        auto result = client.Post("/channels/dataframe/import", buf.GetString(), "application/json");
+        if (!result) {
+            std::filesystem::remove(tmp_path);
+            res.status = 503;
+            res.set_content(R"({"error":"service unreachable"})", "application/json");
+            return;
+        }
+        if (result->status != 200) {
+            std::filesystem::remove(tmp_path);
+        }
+        res.status = result->status;
+        res.set_content(result->body, "application/json");
+    });
     server_.Post("/api/channels/dataframe/preview", [this](const httplib::Request& req, httplib::Response& res) {
         httplib::Client client(scheduler_host_, scheduler_port_);
         client.set_connection_timeout(5);
         client.set_read_timeout(10);
         auto result = client.Post("/channels/dataframe/preview", req.body, "application/json");
+        if (!result) { res.status = 503; res.set_content(R"({"error":"service unreachable"})", "application/json"); return; }
+        res.status = result->status;
+        res.set_content(result->body, "application/json");
+    });
+    server_.Post("/api/channels/dataframe/rename", [this](const httplib::Request& req, httplib::Response& res) {
+        httplib::Client client(scheduler_host_, scheduler_port_);
+        client.set_connection_timeout(5);
+        client.set_read_timeout(10);
+        auto result = client.Post("/channels/dataframe/rename", req.body, "application/json");
+        if (!result) { res.status = 503; res.set_content(R"({"error":"service unreachable"})", "application/json"); return; }
+        res.status = result->status;
+        res.set_content(result->body, "application/json");
+    });
+    server_.Post("/api/channels/dataframe/delete", [this](const httplib::Request& req, httplib::Response& res) {
+        httplib::Client client(scheduler_host_, scheduler_port_);
+        client.set_connection_timeout(5);
+        client.set_read_timeout(10);
+        auto result = client.Post("/channels/dataframe/delete", req.body, "application/json");
         if (!result) { res.status = 503; res.set_content(R"({"error":"service unreachable"})", "application/json"); return; }
         res.status = result->status;
         res.set_content(result->body, "application/json");
@@ -318,7 +395,50 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
             auto result = client.Post("/channels/dataframe/preview", req, "application/json");
             if (!result) { rsp = R"({"error":"service unreachable"})"; return error::UNAVAILABLE; }
             rsp = result->body;
-            return (result->status == 200) ? error::OK : error::INTERNAL_ERROR;
+            if (result->status == 200) return error::OK;
+            if (result->status == 404) return error::NOT_FOUND;
+            if (result->status == 409) return error::CONFLICT;
+            if (result->status == 400) return error::BAD_REQUEST;
+            return error::INTERNAL_ERROR;
+        }});
+    cb({"GET", "/api/channels/dataframe",
+        [this](const std::string&, const std::string&, std::string& rsp) -> int32_t {
+            httplib::Client client(scheduler_host_, scheduler_port_);
+            client.set_connection_timeout(5);
+            client.set_read_timeout(10);
+            auto result = client.Get("/channels/dataframe");
+            if (!result) { rsp = R"({"error":"service unreachable"})"; return error::UNAVAILABLE; }
+            rsp = result->body;
+            if (result->status == 200) return error::OK;
+            if (result->status == 404) return error::NOT_FOUND;
+            return error::INTERNAL_ERROR;
+        }});
+    cb({"POST", "/api/channels/dataframe/rename",
+        [this](const std::string&, const std::string& req, std::string& rsp) -> int32_t {
+            httplib::Client client(scheduler_host_, scheduler_port_);
+            client.set_connection_timeout(5);
+            client.set_read_timeout(10);
+            auto result = client.Post("/channels/dataframe/rename", req, "application/json");
+            if (!result) { rsp = R"({"error":"service unreachable"})"; return error::UNAVAILABLE; }
+            rsp = result->body;
+            if (result->status == 200) return error::OK;
+            if (result->status == 404) return error::NOT_FOUND;
+            if (result->status == 409) return error::CONFLICT;
+            if (result->status == 400) return error::BAD_REQUEST;
+            return error::INTERNAL_ERROR;
+        }});
+    cb({"POST", "/api/channels/dataframe/delete",
+        [this](const std::string&, const std::string& req, std::string& rsp) -> int32_t {
+            httplib::Client client(scheduler_host_, scheduler_port_);
+            client.set_connection_timeout(5);
+            client.set_read_timeout(10);
+            auto result = client.Post("/channels/dataframe/delete", req, "application/json");
+            if (!result) { rsp = R"({"error":"service unreachable"})"; return error::UNAVAILABLE; }
+            rsp = result->body;
+            if (result->status == 200) return error::OK;
+            if (result->status == 404) return error::NOT_FOUND;
+            if (result->status == 400) return error::BAD_REQUEST;
+            return error::INTERNAL_ERROR;
         }});
 }
 

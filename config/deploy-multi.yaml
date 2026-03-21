@@ -16,7 +16,7 @@ services:
   - name: web
     plugins:
       - name: libflowsql_web.so
-        option: "host=127.0.0.1;port=8081;gateway=127.0.0.1:18800"
+        option: "host=127.0.0.1;port=8081;gateway=127.0.0.1:18800;upload_dir=./uploads"
       - name: libflowsql_router.so
         option: "host=127.0.0.1;port=18802;gateway=127.0.0.1:18800"
 
@@ -27,8 +27,8 @@ services:
         option: "host=127.0.0.1;port=18803;gateway=127.0.0.1:18800"
       - libflowsql_scheduler.so
       - libflowsql_bridge.so
-      - libflowsql_example.so
-      - libflowsql_testdata.so
+      - name: libflowsql_catalog.so
+        option: "data_dir=./dataframes"
       - name: libflowsql_database.so
         option: "config_file=config/flowsql.yml"
 

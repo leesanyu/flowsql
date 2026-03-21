@@ -1,35 +1,33 @@
-#ifndef _FLOWSQL_PLUGINS_EXAMPLE_PASSTHROUGH_OPERATOR_H_
-#define _FLOWSQL_PLUGINS_EXAMPLE_PASSTHROUGH_OPERATOR_H_
+#ifndef _FLOWSQL_FRAMEWORK_CORE_PASSTHROUGH_OPERATOR_H_
+#define _FLOWSQL_FRAMEWORK_CORE_PASSTHROUGH_OPERATOR_H_
 
 #include <framework/interfaces/ioperator.h>
-#include <common/iplugin.h>
 
 #include <string>
 
 namespace flowsql {
 
-class PassthroughOperator : public IOperator, public IPlugin {
+// PassthroughOperator — 无状态直通算子
+// 从 in 通道读取 DataFrame，原样写入 out 通道
+// 不继承 IPlugin，作为公共类直接构造使用
+class PassthroughOperator : public IOperator {
  public:
     PassthroughOperator() = default;
     ~PassthroughOperator() override = default;
 
-    // IPlugin
-    int Load(IQuerier* /* querier */) override { return 0; }
-    int Unload() override { return 0; }
-
     // IOperator 元数据
-    std::string Catelog() override { return "example"; }
+    std::string Catelog() override { return "builtin"; }
     std::string Name() override { return "passthrough"; }
-    std::string Description() override { return "Passthrough operator for testing"; }
+    std::string Description() override { return "Passthrough operator, copies data as-is"; }
     OperatorPosition Position() override { return OperatorPosition::DATA; }
 
     // 核心处理：从 in 通道读取 DataFrame，原样写入 out 通道
     int Work(IChannel* in, IChannel* out) override;
 
-    // 配置
+    // 配置（无参数）
     int Configure(const char*, const char*) override { return 0; }
 };
 
 }  // namespace flowsql
 
-#endif  // _FLOWSQL_PLUGINS_EXAMPLE_PASSTHROUGH_OPERATOR_H_
+#endif  // _FLOWSQL_FRAMEWORK_CORE_PASSTHROUGH_OPERATOR_H_

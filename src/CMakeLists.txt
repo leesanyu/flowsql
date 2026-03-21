@@ -45,8 +45,6 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_npi ${CMAKE_BINARY_DIR}/test_npi
 
 # Stage 1: 框架核心
 add_subdirectory(${CMAKE_SOURCE_DIR}/framework ${CMAKE_BINARY_DIR}/framework)
-add_subdirectory(${CMAKE_SOURCE_DIR}/plugins/example ${CMAKE_BINARY_DIR}/example_plugin)
-add_subdirectory(${CMAKE_SOURCE_DIR}/plugins/testdata ${CMAKE_BINARY_DIR}/testdata_plugin)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_framework ${CMAKE_BINARY_DIR}/test_framework)
 
 # Stage 2: C++ ↔ Python 桥接
@@ -58,10 +56,15 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/services/web ${CMAKE_BINARY_DIR}/web)
 
 # Stage 2: Scheduler 调度服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/scheduler ${CMAKE_BINARY_DIR}/scheduler)
+add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_scheduler_e2e ${CMAKE_BINARY_DIR}/test_scheduler_e2e)
 
 # Stage 3: Database 数据库通道服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/database ${CMAKE_BINARY_DIR}/database)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_database ${CMAKE_BINARY_DIR}/test_database)
+
+# Stage 8: Catalog 目录服务
+add_subdirectory(${CMAKE_SOURCE_DIR}/services/catalog ${CMAKE_BINARY_DIR}/catalog)
+add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_builtin ${CMAKE_BINARY_DIR}/test_builtin)
 
 # Stage 3: Gateway 服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/gateway ${CMAKE_BINARY_DIR}/gateway)

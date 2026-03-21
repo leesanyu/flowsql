@@ -30,6 +30,7 @@ class WebServer {
 
     // 设置 Scheduler 转发地址
     void SetSchedulerAddress(const std::string& host, int port);
+    void SetUploadDir(const std::string& dir) { upload_dir_ = dir; }
 
     // 启动静态文件服务监听（阻塞）
     int Start(const std::string& host, int port);
@@ -66,6 +67,7 @@ class WebServer {
     int worker_port_ = 18900;
     std::string scheduler_host_ = "127.0.0.1";
     int scheduler_port_ = 18800;
+    std::string upload_dir_ = "./uploads";
 };
 
 }  // namespace web

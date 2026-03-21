@@ -40,6 +40,7 @@ class WebPlugin : public IPlugin, public IRouterHandle {
     int worker_port_ = 18900;
     std::string gateway_host_ = "127.0.0.1";
     int gateway_port_ = 18800;  // 内部服务转发目标（Gateway）
+    std::string upload_dir_ = "./uploads";
 };
 
 }  // namespace web

@@ -37,6 +37,17 @@ export default {
   describeDbTable: (type, name, table) => api.post('/api/channels/database/describe', { type, name, table }),
   previewDbTable:  (type, name, table) => api.post('/api/channels/database/preview',  { type, name, table }),
 
-  // dataframe 通道预览
-  previewDataframe: (catelog, name) => api.post('/api/channels/dataframe/preview', { catelog, name }),
+  // dataframe 通道管理
+  listDfChannels: () => api.get('/api/channels/dataframe'),
+  importCsv: (file) => {
+    const form = new FormData()
+    form.append('file', file)
+    return api.post('/api/channels/dataframe/import', form, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+  previewDfChannel: (name, page = 1, pageSize = 20) =>
+    api.post('/api/channels/dataframe/preview', { catelog: 'dataframe', name, page, page_size: pageSize }),
+  renameDfChannel: (name, newName) => api.post('/api/channels/dataframe/rename', { name, new_name: newName }),
+  deleteDfChannel: (name) => api.post('/api/channels/dataframe/delete', { name }),
 }

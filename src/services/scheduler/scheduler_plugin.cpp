@@ -7,9 +7,12 @@
 #include <cstdio>
 #include <common/error_code.h>
 #include <common/log.h>
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <regex>
+#include <type_traits>
 
 #include "framework/core/channel_adapter.h"
 #include "framework/core/dataframe.h"
@@ -17,13 +20,46 @@
 #include "framework/core/pipeline.h"
 #include "framework/core/sql_parser.h"
 #include "framework/interfaces/ichannel.h"
+#include "framework/interfaces/ichannel_registry.h"
 #include "framework/interfaces/idatabase_channel.h"
 #include "framework/interfaces/idatabase_factory.h"
 #include "framework/interfaces/idataframe_channel.h"
 #include "framework/interfaces/ioperator.h"
+#include "framework/interfaces/ioperator_registry.h"
 
 namespace flowsql {
 namespace scheduler {
+
+static std::string ToLowerAscii(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return s;
+}
+
+static bool IEquals(const std::string& a, const std::string& b) {
+    return ToLowerAscii(a) == ToLowerAscii(b);
+}
+
+static bool StartsWithIgnoreCase(const std::string& s, const std::string& prefix) {
+    if (s.size() < prefix.size()) return false;
+    for (size_t i = 0; i < prefix.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(s[i])) !=
+            std::tolower(static_cast<unsigned char>(prefix[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool IsDataFrameRef(const std::string& name) {
+    return StartsWithIgnoreCase(name, "dataframe.") && name.size() > strlen("dataframe.");
+}
+
+static std::string DataFrameNamePart(const std::string& name) {
+    if (!IsDataFrameRef(name)) return "";
+    return name.substr(strlen("dataframe."));
+}
 
 // --- JSON 辅助 ---
 static std::string MakeErrorJson(const std::string& error) {
@@ -34,6 +70,22 @@ static std::string MakeErrorJson(const std::string& error) {
     w.String(error.c_str());
     w.EndObject();
     return buf.GetString();
+}
+
+static const char* DataTypeName(DataType t) {
+    switch (t) {
+        case DataType::INT32: return "INT32";
+        case DataType::INT64: return "INT64";
+        case DataType::UINT32: return "UINT32";
+        case DataType::UINT64: return "UINT64";
+        case DataType::FLOAT: return "FLOAT";
+        case DataType::DOUBLE: return "DOUBLE";
+        case DataType::STRING: return "STRING";
+        case DataType::BYTES: return "BYTES";
+        case DataType::TIMESTAMP: return "TIMESTAMP";
+        case DataType::BOOLEAN: return "BOOLEAN";
+        default: return "UNKNOWN";
+    }
 }
 
 // --- IPlugin ---
@@ -117,6 +169,13 @@ void SchedulerPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
 
 // --- 通道查找辅助 ---
 IChannel* SchedulerPlugin::FindChannel(const std::string& name) {
+    auto* ch_registry = querier_ ? static_cast<IChannelRegistry*>(querier_->First(IID_CHANNEL_REGISTRY)) : nullptr;
+    if (IsDataFrameRef(name) && ch_registry) {
+        auto ch = ch_registry->Get(DataFrameNamePart(name).c_str());
+        auto* df = dynamic_cast<IDataFrameChannel*>(ch.get());
+        if (df) return df;
+    }
+
     // 先在内部通道表中查找
     auto it = channels_.find(name);
     if (it != channels_.end()) return it->second.get();
@@ -134,8 +193,14 @@ IChannel* SchedulerPlugin::FindChannel(const std::string& name) {
     if (querier_) {
         querier_->Traverse(IID_CHANNEL, [&](void* p) -> int {
             auto* c = static_cast<IChannel*>(p);
-            std::string full_name = std::string(c->Catelog()) + "." + c->Name();
-            if (full_name == name || std::string(c->Name()) == name) {
+            auto dot = name.find('.');
+            bool catelog_and_name_match = false;
+            if (dot != std::string::npos) {
+                const std::string req_catelog = name.substr(0, dot);
+                const std::string req_name = name.substr(dot + 1);
+                catelog_and_name_match = IEquals(c->Catelog(), req_catelog) && std::string(c->Name()) == req_name;
+            }
+            if (catelog_and_name_match || std::string(c->Name()) == name) {
                 found = c;
                 return -1;  // 找到了，停止遍历
             }
@@ -154,7 +219,7 @@ IChannel* SchedulerPlugin::FindChannel(const std::string& name) {
                 // 尝试解析 type.name 格式
                 auto pos = name.find('.');
                 if (pos != std::string::npos) {
-                    std::string type = name.substr(0, pos);
+                    std::string type = ToLowerAscii(name.substr(0, pos));
                     std::string rest = name.substr(pos + 1);
                     // 对于三段式 type.name.table，取前两段作为 type.name
                     auto pos2 = rest.find('.');
@@ -174,12 +239,13 @@ IChannel* SchedulerPlugin::FindChannel(const std::string& name) {
 // 先查 C++ 静态算子（IQuerier），再查 Python 算子（IBridge）
 std::shared_ptr<IOperator> SchedulerPlugin::FindOperator(const std::string& catelog, const std::string& name) {
     if (!querier_) return nullptr;
+    auto* op_registry = static_cast<IOperatorRegistry*>(querier_->First(IID_OPERATOR_REGISTRY));
 
     // 1. 先查 C++ 静态算子
     IOperator* found = nullptr;
     querier_->Traverse(IID_OPERATOR, [&](void* p) -> int {
         auto* op = static_cast<IOperator*>(p);
-        if (op->Catelog() == catelog && op->Name() == name) {
+        if (IEquals(op->Catelog(), catelog) && op->Name() == name) {
             found = op;
             return -1;
         }
@@ -190,7 +256,16 @@ std::shared_ptr<IOperator> SchedulerPlugin::FindOperator(const std::string& cate
 
     // 2. 再查 Python 算子（通过 IBridge）
     auto* bridge = static_cast<IBridge*>(querier_->First(IID_BRIDGE));
-    if (bridge) return bridge->FindOperator(catelog, name);
+    if (bridge) {
+        auto py_op = bridge->FindOperator(catelog, name);
+        if (py_op) return py_op;
+    }
+
+    // 3. 再查内置算子注册表（CatalogPlugin）
+    if (IEquals(catelog, "builtin") && op_registry) {
+        IOperator* op = op_registry->Create(name.c_str());
+        if (op) return std::shared_ptr<IOperator>(op, [](IOperator* p) { delete p; });
+    }
     return nullptr;
 }
 
@@ -217,7 +292,8 @@ static std::string BuildQuery(const std::string& source_name, const SqlStatement
     std::string table = ExtractTableName(source_name);
 
     // 匹配第一个 FROM 子句（支持多段式表名如 catalog.db.table）
-    std::regex FROM_PATTERN(R"((\bFROM\s+)((?:[\w]+\.)*[\w]+))");
+    // 使用不区分大小写，兼容 "from" / "From" 等写法。
+    std::regex FROM_PATTERN(R"((\bFROM\s+)((?:[\w-]+\.)*[\w-]+))", std::regex_constants::icase);
     std::smatch m;
     if (std::regex_search(sql, m, FROM_PATTERN)) {
         // 只替换第一个匹配（主查询的 FROM），子查询不受影响
@@ -381,6 +457,7 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
 
 // --- HandleExecute ---
 int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& req_body, std::string& rsp) {
+    auto* ch_registry = querier_ ? static_cast<IChannelRegistry*>(querier_->First(IID_CHANNEL_REGISTRY)) : nullptr;
     rapidjson::Document doc;
     doc.Parse(req_body.c_str());
     if (doc.HasParseError() || !doc.HasMember("sql") || !doc["sql"].IsString()) {
@@ -405,7 +482,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
     IChannel* source = FindChannel(stmt.source);
     if (!source) {
         rsp = MakeErrorJson("source channel not found: " + stmt.source);
-        return error::BAD_REQUEST;
+        return IsDataFrameRef(stmt.source) ? error::NOT_FOUND : error::BAD_REQUEST;
     }
 
     IOperator* op = nullptr;
@@ -427,14 +504,27 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         }
 
         std::shared_ptr<DataFrameChannel> temp_sink;
+        std::shared_ptr<IDataFrameChannel> named_df_sink;
         IChannel* sink = nullptr;
 
         if (!stmt.dest.empty()) {
-            sink = FindChannel(stmt.dest);
-            if (!sink) {
-                temp_sink = std::make_shared<DataFrameChannel>("result", stmt.dest);
-                temp_sink->Open();
-                sink = temp_sink.get();
+            if (IsDataFrameRef(stmt.dest)) {
+                if (!ch_registry) {
+                    rsp = MakeErrorJson("channel registry unavailable");
+                    return error::INTERNAL_ERROR;
+                }
+                std::string df_name = DataFrameNamePart(stmt.dest);
+                auto ch = std::make_shared<DataFrameChannel>("dataframe", df_name);
+                ch->Open();
+                named_df_sink = ch;
+                sink = ch.get();
+            } else {
+                sink = FindChannel(stmt.dest);
+                if (!sink) {
+                    temp_sink = std::make_shared<DataFrameChannel>("result", stmt.dest);
+                    temp_sink->Open();
+                    sink = temp_sink.get();
+                }
             }
         } else {
             temp_sink = std::make_shared<DataFrameChannel>("_temp", "sink");
@@ -461,6 +551,30 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             if (err.empty()) err = "execution failed";
             rsp = MakeErrorJson(err);
             return error::INTERNAL_ERROR;
+        }
+
+        // INTO dataframe.<name>：覆盖语义（已存在则先注销，再注册新结果）
+        if (!stmt.dest.empty() && IsDataFrameRef(stmt.dest) && named_df_sink) {
+            std::string df_name = DataFrameNamePart(stmt.dest);
+            if (ch_registry->Get(df_name.c_str())) {
+                (void)ch_registry->Unregister(df_name.c_str());
+            }
+            if (ch_registry->Register(df_name.c_str(), std::static_pointer_cast<IChannel>(named_df_sink)) != 0) {
+                rsp = MakeErrorJson("failed to register dataframe channel: " + df_name);
+                return error::INTERNAL_ERROR;
+            }
+            auto registered = ch_registry->Get(df_name.c_str());
+            if (!registered) {
+                rsp = MakeErrorJson("failed to fetch registered dataframe channel: " + df_name);
+                return error::INTERNAL_ERROR;
+            }
+            auto* registered_df = dynamic_cast<IDataFrameChannel*>(registered.get());
+            if (!registered_df) {
+                rsp = MakeErrorJson("registered channel is not dataframe: " + df_name);
+                return error::INTERNAL_ERROR;
+            }
+            sink = registered_df;
+            sink_type = sink->Type();
         }
 
         auto* df_sink = dynamic_cast<IDataFrameChannel*>(sink);
@@ -498,6 +612,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
 
 // --- HandleGetChannels ---
 int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string&, std::string& rsp) {
+    auto* ch_registry = querier_ ? static_cast<IChannelRegistry*>(querier_->First(IID_CHANNEL_REGISTRY)) : nullptr;
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
     w.StartArray();
@@ -511,6 +626,19 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
         w.Key("type"); w.String(ch->Type());
         w.Key("schema"); w.String(ch->Schema());
         w.EndObject();
+    }
+
+    // 具名 DataFrame 通道（CatalogPlugin 注册中心）
+    if (ch_registry) {
+        ch_registry->List([&w](const char* name, std::shared_ptr<IChannel> ch) {
+            if (!name || !ch) return;
+            w.StartObject();
+            w.Key("catelog"); w.String(ch->Catelog());
+            w.Key("name"); w.String(name);
+            w.Key("type"); w.String(ch->Type());
+            w.Key("schema"); w.String(ch->Schema());
+            w.EndObject();
+        });
     }
 
     // 静态注册的通道（通过 IQuerier）
@@ -559,17 +687,27 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
 }
 
 // --- HandlePreviewDataframe ---
-// POST /channels/dataframe/preview — Body: {"catelog":"...","name":"..."}
+// POST /channels/dataframe/preview — Body: {"catelog":"...","name":"..."} 或 {"name":"..."}
 int32_t SchedulerPlugin::HandlePreviewDataframe(const std::string&, const std::string& req, std::string& rsp) {
+    auto* ch_registry = querier_ ? static_cast<IChannelRegistry*>(querier_->First(IID_CHANNEL_REGISTRY)) : nullptr;
     rapidjson::Document doc;
     doc.Parse(req.c_str());
-    if (doc.HasParseError() || !doc.IsObject() ||
-        !doc.HasMember("catelog") || !doc.HasMember("name")) {
-        rsp = R"({"error":"missing 'catelog' or 'name'"})";
+    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("name") || !doc["name"].IsString()) {
+        rsp = R"({"error":"missing 'name'"})";
         return error::BAD_REQUEST;
     }
-    std::string catelog = doc["catelog"].GetString();
-    std::string name    = doc["name"].GetString();
+    std::string catelog = "dataframe";
+    if (doc.HasMember("catelog") && doc["catelog"].IsString()) {
+        catelog = doc["catelog"].GetString();
+    }
+    std::string name = doc["name"].GetString();
+    int page = 1;
+    int page_size = 20;
+    if (doc.HasMember("page") && doc["page"].IsInt()) page = doc["page"].GetInt();
+    if (doc.HasMember("page_size") && doc["page_size"].IsInt()) page_size = doc["page_size"].GetInt();
+    if (page < 1) page = 1;
+    if (page_size < 1) page_size = 20;
+    if (page_size > 100) page_size = 100;
     std::string key     = catelog + "." + name;
 
     // 先在内部通道表查找
@@ -583,12 +721,20 @@ int32_t SchedulerPlugin::HandlePreviewDataframe(const std::string&, const std::s
     if (!raw_ch && querier_) {
         querier_->Traverse(IID_CHANNEL, [&](void* p) -> int {
             auto* ch = static_cast<IChannel*>(p);
-            if (std::string(ch->Catelog()) == catelog && std::string(ch->Name()) == name) {
+            if (IEquals(ch->Catelog(), catelog) && std::string(ch->Name()) == name) {
                 raw_ch = ch;
                 return 1;  // 找到，停止遍历
             }
             return 0;
         });
+    }
+
+    if (!raw_ch) {
+        if (IEquals(catelog, "dataframe") && ch_registry) {
+            auto named = ch_registry->Get(name.c_str());
+            auto* named_df = dynamic_cast<IDataFrameChannel*>(named.get());
+            if (named_df) raw_ch = named_df;
+        }
     }
 
     if (!raw_ch) {
@@ -607,8 +753,55 @@ int32_t SchedulerPlugin::HandlePreviewDataframe(const std::string&, const std::s
         rsp = R"({"columns":[],"types":[],"data":[],"rows":0})";
         return error::OK;
     }
+    const auto schema = data.GetSchema();
+    const int rows = data.RowCount();
+    const int start = (page - 1) * page_size;
+    const int end = std::min(rows, start + page_size);
 
-    rsp = data.ToJson();
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    w.StartObject();
+    w.Key("columns");
+    w.StartArray();
+    for (const auto& f : schema) w.String(f.name.c_str());
+    w.EndArray();
+    w.Key("types");
+    w.StartArray();
+    for (const auto& f : schema) w.String(DataTypeName(f.type));
+    w.EndArray();
+    w.Key("data");
+    w.StartArray();
+    for (int r = start; r < end; ++r) {
+        const auto row = data.GetRow(r);
+        w.StartArray();
+        for (const auto& v : row) {
+            std::visit(
+                [&](auto&& val) {
+                    using T = std::decay_t<decltype(val)>;
+                    if constexpr (std::is_same_v<T, int32_t>) w.Int(val);
+                    else if constexpr (std::is_same_v<T, int64_t>) w.Int64(val);
+                    else if constexpr (std::is_same_v<T, uint32_t>) w.Uint(val);
+                    else if constexpr (std::is_same_v<T, uint64_t>) w.Uint64(val);
+                    else if constexpr (std::is_same_v<T, float>) w.Double(val);
+                    else if constexpr (std::is_same_v<T, double>) w.Double(val);
+                    else if constexpr (std::is_same_v<T, std::string>) w.String(val.c_str());
+                    else if constexpr (std::is_same_v<T, std::vector<uint8_t>>)
+                        w.String(reinterpret_cast<const char*>(val.data()), val.size());
+                    else if constexpr (std::is_same_v<T, bool>) w.Bool(val);
+                },
+                v);
+        }
+        w.EndArray();
+    }
+    w.EndArray();
+    w.Key("rows");
+    w.Int(rows);
+    w.Key("page");
+    w.Int(page);
+    w.Key("page_size");
+    w.Int(page_size);
+    w.EndObject();
+    rsp = buf.GetString();
     return error::OK;
 }
 int32_t SchedulerPlugin::HandleGetOperators(const std::string&, const std::string&, std::string& rsp) {
@@ -677,4 +870,3 @@ int32_t SchedulerPlugin::HandleRefreshOperators(const std::string&, const std::s
 
 }  // namespace scheduler
 }  // namespace flowsql
-

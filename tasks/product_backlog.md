@@ -760,7 +760,7 @@
 ---
 
 ## Epic 8: Web UI 专业化改造
-**优先级**: P1 | **状态**: 🚧 进行中（Sprint 7）
+**优先级**: P1 | **状态**: ✅ 已完成（Sprint 7，2026-03-19）
 **价值**: 提升产品专业感，全屏自适应布局，支持深色/浅色主题切换
 **设计文档**: `tasks/sprints/sprint7/design_frontend_ui.md`
 
@@ -802,7 +802,7 @@
 ---
 
 ### Story 8.3: 数据库通道浏览器
-**状态**: 📋 待规划（Sprint 7 下一个）
+**状态**: ✅ 已完成 (Sprint 7)
 **验收标准**:
 - 通道列表页数据库通道行新增"浏览"按钮
 - 点击后从右侧滑出 Drawer，左侧显示表列表，右侧 Tab 切换表结构/数据预览
@@ -824,11 +824,68 @@
 
 ---
 
-## Epic 9: Pipeline 增强与异步任务
-**优先级**: P1 | **状态**: 📋 待规划
+## Epic 9: 内置通道与算子注册中心（CatalogPlugin）
+**优先级**: P1 | **状态**: ✅ 已完成 (Sprint 8)
+**价值**: 清理架构债务，建立 DataFrame 通道和内置算子的统一注册/发现机制，支持具名 DataFrame 通道跨 Pipeline 共享
+**设计文档**: `tasks/sprints/sprint8/design.md`
+
+### Story 9.1: 清理 plugins/example 和 plugins/testdata
+**状态**: ✅ 已完成 (Sprint 8)
+**验收标准**:
+- 删除 `plugins/example/` 目录（MemoryChannel + PassthroughOperator）
+- 删除 `plugins/testdata/` 目录
+- `MemoryChannel` 移入 `src/framework/core/`，保留为公共类
+- `PassthroughOperator` 移入 `src/framework/core/`
+- 所有引用这两个插件的测试和代码更新为直接构造，编译通过
+- `config/deploy-single.yaml` 和 `config/deploy-multi.yaml` 删除旧插件条目（待 Story 9.2 完成后替换为 `libflowsql_catalog.so`）
+
+---
+
+### Story 9.2: IChannelRegistry 接口 + CatalogPlugin 骨架
+**状态**: ✅ 已完成 (Sprint 8)
+**验收标准**:
+- 新增 `src/framework/interfaces/ichannel_registry.h`（IChannelRegistry 接口，shared_ptr 语义，含 Register/Get/Unregister/Rename/List）
+- 新增 `src/framework/interfaces/ioperator_registry.h`（IOperatorRegistry 接口）
+- 新增 `src/services/catalog/` 目录，实现 CatalogPlugin（多继承 IPlugin + IChannelRegistry + IOperatorRegistry + IRouterHandle）
+- `Option()` 支持 `data_dir` 配置项（默认 `./dataframes/`）
+- `Register` 自动将通道数据序列化为 `data_dir/<name>.csv`（具名即持久化）
+- `Unregister` 同步删除磁盘文件；`Rename` 同步重命名磁盘文件
+- `Start()` 扫描 `data_dir` 目录，自动恢复所有具名通道（进程重启后无需重新导入）
+- `Load()` 阶段注册内置算子类型（passthrough）
+- 编译通过，单元测试验证：注册/查找/注销/重命名/重启恢复/并发安全
+
+---
+
+### Story 9.3: Scheduler 集成 — dataframe. 通道寻址
+**状态**: ✅ 已完成 (Sprint 8)
+**验收标准**:
+- Scheduler `FindChannel()` 新增 `dataframe.` 分支，走 `IChannelRegistry::Get`
+- SQL `INTO dataframe.<name>` 执行后自动调用 `IChannelRegistry::Register`
+- SQL `FROM dataframe.<name>` 可读取已注册的具名通道
+- 端到端测试：`INTO dataframe.result` → `FROM dataframe.result INTO sqlite.mydb.output` 链路通过
+
+---
+
+### Story 9.4: HTTP 端点 + Web UI 展示
+**状态**: ✅ 已完成 (Sprint 8)
+**验收标准**:
+- CatalogPlugin 实现 `GET /channels/dataframe`（列出具名通道，含 name/rows/schema）
+- CatalogPlugin 实现 `POST /channels/dataframe/import`（multipart 上传 CSV，自动推断类型，名称冲突时追加时间戳）
+- CatalogPlugin 实现 `POST /channels/dataframe/preview`（预览指定通道前 100 行，格式对齐 DatabasePlugin）
+- CatalogPlugin 实现 `POST /channels/dataframe/rename`（body: `{"name":"x","new_name":"y"}`，new_name 已存在返回 409）
+- CatalogPlugin 实现 `POST /channels/dataframe/delete`（body: `{"name":"x"}`，注销通道）
+- `web_server.cpp` 双通道注册（Init() httplib 代理 + EnumApiRoutes() IRouterHandle 代理）
+- `Channels.vue` 新增 DataFrame 通道分组展示，显示通道名、行数、列定义（列名 + 类型）
+- 通道列表页顶部新增"导入 CSV"按钮，上传成功后刷新列表并高亮新通道
+- 每行操作列：预览（Drawer 展示前 100 行）| 重命名（inline 编辑，回车确认）| 删除（确认后注销）
+
+---
+
+## Epic 10: Pipeline 增强与异步任务
+**优先级**: P1 | **状态**: 📋 待规划（原 Epic 9）
 **价值**: 增强 Pipeline 编排能力，支持异步任务执行，提升系统易用性
 
-### Story 9.1: 多算子 Pipeline
+### Story 10.1: 多算子 Pipeline
 **状态**: 📋 待规划
 **验收标准**:
 - 支持算子链式调用（USING op1 THEN op2 THEN op3）
@@ -838,7 +895,7 @@
 
 ---
 
-### Story 9.2: 异步任务执行
+### Story 10.2: 异步任务执行
 **状态**: 📋 待规划
 **验收标准**:
 - 任务队列实现（基于线程池）
@@ -849,11 +906,11 @@
 
 ---
 
-## Epic 10: 流式架构
+## Epic 11: 流式架构
 **优先级**: P2 | **状态**: 📋 设计阶段
 **价值**: 支持流式数据处理，满足网络性能分析等实时场景
 
-### Story 10.1: IStreamChannel 接口设计
+### Story 11.1: IStreamChannel 接口设计
 **状态**: 📋 设计阶段
 **验收标准**:
 - 定义 IStreamChannel 接口（基于描述符）
@@ -863,7 +920,7 @@
 
 ---
 
-### Story 10.2: IStreamOperator 接口设计
+### Story 11.2: IStreamOperator 接口设计
 **状态**: 📋 设计阶段
 **验收标准**:
 - 定义 IStreamOperator 接口
@@ -873,7 +930,7 @@
 
 ---
 
-### Story 10.3: StreamWorker 通用容器
+### Story 11.3: StreamWorker 通用容器
 **状态**: 📋 设计阶段
 **验收标准**:
 - 实现 StreamWorker 容器
@@ -883,7 +940,7 @@
 
 ---
 
-### Story 10.4: Scheduler 流式调度
+### Story 11.4: Scheduler 流式调度
 **状态**: 📋 设计阶段
 **验收标准**:
 - Scheduler 支持流式任务调度
@@ -893,7 +950,7 @@
 
 ---
 
-### Story 10.5: DPDK 网卡采集插件
+### Story 11.5: DPDK 网卡采集插件
 **状态**: 📋 设计阶段
 **验收标准**:
 - 实现 netcard 插件（基于 DPDK）
@@ -903,7 +960,7 @@
 
 ---
 
-### Story 10.6: 网络性能分析算子
+### Story 11.6: 网络性能分析算子
 **状态**: 📋 设计阶段
 **验收标准**:
 - 实现 npm 算子（网络性能分析）
@@ -913,11 +970,11 @@
 
 ---
 
-## Epic 11: 平台增强与用户认证
+## Epic 12: 平台增强与用户认证
 **优先级**: P2 | **状态**: 📋 待规划
 **价值**: 提升系统可观测性、可维护性、易用性和安全性
 
-### Story 11.1: 用户认证与权限
+### Story 12.1: 用户认证与权限
 **状态**: 📋 待规划
 **验收标准**:
 - 用户注册和登录（JWT Token）
@@ -928,7 +985,7 @@
 
 ---
 
-### Story 11.2: 监控和告警
+### Story 12.2: 监控和告警
 **状态**: 📋 待规划
 **验收标准**:
 - Prometheus 指标导出
@@ -938,7 +995,7 @@
 
 ---
 
-### Story 11.3: 日志聚合
+### Story 12.3: 日志聚合
 **状态**: 📋 待规划
 **验收标准**:
 - 结构化日志输出（JSON 格式）
@@ -948,7 +1005,7 @@
 
 ---
 
-### Story 11.4: 配置中心
+### Story 12.4: 配置中心
 **状态**: 📋 待规划
 **验收标准**:
 - 配置热更新
@@ -958,7 +1015,7 @@
 
 ---
 
-### Story 11.5: 插件市场
+### Story 12.5: 插件市场
 **状态**: 📋 待规划
 **验收标准**:
 - 插件上传和下载
@@ -968,7 +1025,7 @@
 
 ---
 
-### Story 11.6: 文档和示例
+### Story 12.6: 文档和示例
 **状态**: 📋 待规划
 **验收标准**:
 - 用户手册

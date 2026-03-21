@@ -8,7 +8,6 @@
 namespace flowsql {
 
 int PassthroughOperator::Work(IChannel* in, IChannel* out) {
-    // dynamic_cast 到 IDataFrameChannel
     auto* df_in = dynamic_cast<IDataFrameChannel*>(in);
     auto* df_out = dynamic_cast<IDataFrameChannel*>(out);
     if (!df_in || !df_out) {
@@ -16,14 +15,12 @@ int PassthroughOperator::Work(IChannel* in, IChannel* out) {
         return -1;
     }
 
-    // 从输入通道读取
     DataFrame data;
     if (df_in->Read(&data) != 0) {
         printf("PassthroughOperator::Work: Read failed\n");
         return -1;
     }
 
-    // 原样写入输出通道
     if (df_out->Write(&data) != 0) {
         printf("PassthroughOperator::Work: Write failed\n");
         return -1;

@@ -1,12 +1,12 @@
-project(flowsql_testdata)
+project(flowsql_catalog)
 
-file(GLOB_RECURSE DIR_SRCS *.cpp)
+file(GLOB DIR_SRCS *.cpp)
 
 add_library(${PROJECT_NAME} SHARED ${DIR_SRCS})
 
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR})
 
-add_thirddepen(${PROJECT_NAME} rapidjson)
+add_thirddepen(${PROJECT_NAME} arrow rapidjson)
 
 add_dependencies(${PROJECT_NAME} flowsql_common)
 target_link_libraries(${PROJECT_NAME} flowsql_common)

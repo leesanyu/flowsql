@@ -61,7 +61,6 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle {
                             const std::string& source_type, const std::string& sink_type,
                             const SqlStatement& stmt, int64_t* rows_affected = nullptr,
                             std::string* error = nullptr);
-
     IQuerier* querier_ = nullptr;
 
     // 通道表

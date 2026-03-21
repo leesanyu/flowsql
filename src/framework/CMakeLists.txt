@@ -5,6 +5,8 @@ project(flowsql_common)
 add_library(${PROJECT_NAME} SHARED
     core/dataframe.cpp
     core/dataframe_channel.cpp
+    core/memory_channel.cpp
+    core/passthrough_operator.cpp
     core/sql_parser.cpp
 )
 
