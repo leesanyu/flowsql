@@ -4,7 +4,7 @@
 
 - **Sprint 周期**：Sprint 9
 - **开始日期**：2026-03-21
-- **结束日期**：待定
+- **结束日期**：2026-03-23
 - **预计工作量**：10-12 天
 - **Sprint 目标**：完成 Epic 10（算子目录与状态下沉 CatalogPlugin）并启动 Epic 11（Pipeline 增强与异步任务）的核心能力落地
 
@@ -27,7 +27,7 @@
 - [ ] `/operators/query` 成为唯一统一查询入口，旧路径与调用引用清零
 - [ ] Web `/api/operators*` 仅做代理，不再读写本地 `operators` 表
 - [ ] Epic 10 关键回归与契约测试通过，且无 blocker 级缺陷
-- [ ] Epic 11 至少完成可演示的 MVP 闭环（仅 Story 11.1/11.2）
+- [x] Epic 11 至少完成可演示的 MVP 闭环（仅 Story 11.1/11.2）
 
 ---
 
@@ -91,33 +91,33 @@
 **优先级**：P1
 **工作量估算**：3 天
 **依赖**：无
-**状态**：📋 待开始
+**状态**：✅ 已完成（MVP）
 
 **验收标准（Sprint 9 最小闭环）**：
-- [ ] 支持 `USING op1 THEN op2` 基础串行链路
-- [ ] 支持算子间数据传递（临时 DataFrame 通道链）
-- [ ] 任意步骤失败时，所有临时通道被释放（无资源泄漏）
-- [ ] `result_row_count` 记录最后一步写入 sink 的行数
-- [ ] 至少 2 条端到端自动化用例通过（成功链路 + 失败链路含资源清理验证）
+- [x] 支持 `USING op1 THEN op2` 基础串行链路
+- [x] 支持算子间数据传递（临时 DataFrame 通道链）
+- [x] 任意步骤失败时，所有临时通道被释放（无资源泄漏）
+- [x] `result_row_count` 记录最后一步写入 sink 的行数
+- [x] 至少 2 条端到端自动化用例通过（成功链路 + 失败链路含资源清理验证）
 
 ### Story 11.2：异步任务执行（MVP）
 
 **优先级**：P1
 **工作量估算**：3 天
 **依赖**：Story 11.1（工程排期依赖：先落地 Pipeline 串行语法与执行链路，再联调异步任务）
-**状态**：📋 待开始
+**状态**：✅ 已完成（MVP）
 
 **验收标准（Sprint 9 最小闭环）**：
-- [ ] 提供任务状态模型（`pending/running/completed/failed/cancelled/timeout`）
-- [ ] TaskPlugin 加载顺序在 SchedulerPlugin 之前（服务配置文件已更新）
-- [ ] TaskPlugin `Start()` 时清理孤儿任务（`pending/running` -> `failed`，`error_code=PROCESS_RESTART`）
-- [ ] 提供任务提交与轮询查询接口（最小可用，不依赖 WebSocket）
-- [ ] Web 任务列表支持状态列与”查看结果/删除”操作（前端轮询间隔 3s）
-- [ ] “查看结果”语义：`failed` 展示错误信息；`completed` 展示结果摘要（最后一步写入 sink 的行数）
-- [ ] 历史任务支持删除（删除任务元数据、摘要与错误信息，不影响已写入业务数据）
-- [ ] 不持久化完整执行结果数据集，仅持久化摘要与错误信息
-- [ ] 至少 1 条异步执行链路自动化用例通过
-- [ ] 孤儿任务清理有自动化单元测试并通过
+- [x] 提供任务状态模型（`pending/running/completed/failed/cancelled/timeout`）
+- [x] TaskPlugin 加载顺序在 SchedulerPlugin 之前（服务配置文件已更新）
+- [x] TaskPlugin `Start()` 时清理孤儿任务（`pending/running` -> `failed`，`error_code=PROCESS_RESTART`）
+- [x] 提供任务提交与轮询查询接口（最小可用，不依赖 WebSocket）
+- [x] Web 任务列表支持状态列与”查看结果/删除”操作（前端轮询间隔 3s）
+- [x] “查看结果”语义：`failed` 展示错误信息；`completed` 展示结果摘要（最后一步写入 sink 的行数）
+- [x] 历史任务支持删除（删除任务元数据、摘要与错误信息，不影响已写入业务数据）
+- [x] 不持久化完整执行结果数据集，仅持久化摘要与错误信息
+- [x] 至少 1 条异步执行链路自动化用例通过
+- [x] 孤儿任务清理有自动化单元测试并通过
 
 ### Epic 11 增强项（不在 Sprint 9 范围）
 

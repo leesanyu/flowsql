@@ -88,6 +88,32 @@ static std::string MakeErrorJson(const std::string& error) {
     return buf.GetString();
 }
 
+static std::string MakeExecutionErrorJson(const std::string& error,
+                                          const std::string& error_code,
+                                          const std::string& error_stage) {
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    w.StartObject();
+    w.Key("error");
+    w.String(error.c_str());
+    w.Key("error_code");
+    w.String(error_code.c_str());
+    w.Key("error_stage");
+    w.String(error_stage.c_str());
+    w.EndObject();
+    return buf.GetString();
+}
+
+static std::string ExtractStageFromExecutionError(const std::string& error) {
+    // Pipeline::Run 失败消息：operator <catelog>.<name> execution failed
+    static const std::regex kPattern(R"(^operator\s+([^.]+)\.([^\s]+)\s+execution failed$)",
+                                     std::regex_constants::icase);
+    std::smatch m;
+    if (!std::regex_match(error, m, kPattern)) return "";
+    if (m.size() < 3) return "";
+    return m[2].str();
+}
+
 static const char* DataTypeName(DataType t) {
     switch (t) {
         case DataType::INT32: return "INT32";
@@ -662,7 +688,9 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             std::string err = exec_error;
             if (err.empty() && !op_chain.empty()) err = op_chain.back()->LastError();
             if (err.empty()) err = "execution failed";
-            rsp = MakeErrorJson(err);
+            std::string stage = ExtractStageFromExecutionError(err);
+            if (stage.empty()) stage = "execute";
+            rsp = MakeExecutionErrorJson(err, "OP_EXEC_FAIL", stage);
             return error::INTERNAL_ERROR;
         }
 
@@ -707,6 +735,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         w.Key("status"); w.String("completed");
         w.Key("rows"); w.Int64(row_count);
         w.Key("result_row_count"); w.Int64(row_count);
+        w.Key("result_target"); w.String(stmt.dest.c_str());
         w.Key("data"); w.RawValue(result_json.c_str(), result_json.size(), rapidjson::kArrayType);
         w.EndObject();
         rsp = buf.GetString();

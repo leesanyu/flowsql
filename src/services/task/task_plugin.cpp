@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 
 namespace fs = std::filesystem;
 
@@ -51,6 +52,22 @@ static std::string TruncateSql(const std::string& sql) {
     static constexpr size_t kMaxSql = 4096;
     if (sql.size() <= kMaxSql) return sql;
     return sql.substr(0, kMaxSql);
+}
+
+static std::string ExtractStageFromErrorMessage(const std::string& error_message) {
+    // Pipeline 错误格式：operator <catelog>.<name> execution failed
+    static constexpr const char* kPrefix = "operator ";
+    static constexpr const char* kSuffix = " execution failed";
+    if (error_message.size() <= std::strlen(kPrefix) + std::strlen(kSuffix)) return "";
+    if (error_message.rfind(kPrefix, 0) != 0) return "";
+    if (error_message.size() < std::strlen(kSuffix)) return "";
+    if (error_message.compare(error_message.size() - std::strlen(kSuffix), std::strlen(kSuffix), kSuffix) != 0) {
+        return "";
+    }
+    const size_t begin = std::strlen(kPrefix);
+    const size_t end = error_message.size() - std::strlen(kSuffix);
+    if (end <= begin) return "";
+    return error_message.substr(begin, end - begin);
 }
 
 }  // namespace
@@ -440,13 +457,42 @@ int TaskPlugin::DeleteTask(const std::string& task_id) {
     TaskRecord r;
     if (GetTask(task_id, &r) != 0) return -1;
     if (!IsTerminal(r.status)) return 1;
+    if (sqlite3_exec(db_, "BEGIN IMMEDIATE TRANSACTION;", nullptr, nullptr, nullptr) != SQLITE_OK) return -1;
+
+    bool ok = true;
     sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db_, "DELETE FROM tasks WHERE task_id=?1;", -1, &stmt, nullptr) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, task_id.c_str(), -1, SQLITE_TRANSIENT);
-    const int rc = sqlite3_step(stmt);
-    const int changed = sqlite3_changes(db_);
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE || changed <= 0) return -1;
+
+    if (sqlite3_prepare_v2(db_, "DELETE FROM task_events WHERE task_id=?1;", -1, &stmt, nullptr) != SQLITE_OK) {
+        ok = false;
+    } else {
+        sqlite3_bind_text(stmt, 1, task_id.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) != SQLITE_DONE) ok = false;
+        sqlite3_finalize(stmt);
+        stmt = nullptr;
+    }
+
+    int changed = 0;
+    if (ok) {
+        if (sqlite3_prepare_v2(db_, "DELETE FROM tasks WHERE task_id=?1;", -1, &stmt, nullptr) != SQLITE_OK) {
+            ok = false;
+        } else {
+            sqlite3_bind_text(stmt, 1, task_id.c_str(), -1, SQLITE_TRANSIENT);
+            const int rc = sqlite3_step(stmt);
+            changed = sqlite3_changes(db_);
+            if (rc != SQLITE_DONE || changed <= 0) ok = false;
+            sqlite3_finalize(stmt);
+            stmt = nullptr;
+        }
+    }
+
+    if (!ok) {
+        (void)sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return -1;
+    }
+    if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        (void)sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return -1;
+    }
     return 0;
 }
 
@@ -499,21 +545,44 @@ int TaskPlugin::ExecuteOneTask(const std::string& task_id, std::string* execute_
         rapidjson::Document d;
         d.Parse(rsp.c_str());
         std::string err = "execution failed";
+        std::string err_code = "EXECUTION_FAILED";
+        std::string err_stage = "execute";
         if (!d.HasParseError() && d.IsObject() && d.HasMember("error") && d["error"].IsString()) err = d["error"].GetString();
+        if (!d.HasParseError() && d.IsObject() && d.HasMember("error_code") && d["error_code"].IsString()) {
+            std::string v = d["error_code"].GetString();
+            if (!v.empty()) err_code = v;
+        }
+        if (!d.HasParseError() && d.IsObject() && d.HasMember("error_stage") && d["error_stage"].IsString()) {
+            std::string v = d["error_stage"].GetString();
+            if (!v.empty()) err_stage = v;
+        }
+        if (err_stage == "execute") {
+            std::string inferred = ExtractStageFromErrorMessage(err);
+            if (!inferred.empty()) err_stage = inferred;
+        }
         if (execute_rsp) *execute_rsp = rsp;
-        return UpdateStatus(task_id, TaskStatus::kFailed, "EXECUTION_FAILED", err, "execute", 0, 0, "");
+        return UpdateStatus(task_id, TaskStatus::kFailed, err_code, err, err_stage, 0, 0, "");
     }
 
     rapidjson::Document d;
     d.Parse(rsp.c_str());
     int64_t rows = 0;
     int64_t cols = 0;
+    std::string result_target;
     int64_t derived_rows = 0;
     int64_t derived_cols = 0;
     if (!d.HasParseError() && d.IsObject() && d.HasMember("result_row_count") && d["result_row_count"].IsInt64()) {
         rows = d["result_row_count"].GetInt64();
     } else if (!d.HasParseError() && d.IsObject() && d.HasMember("rows") && d["rows"].IsInt64()) {
         rows = d["rows"].GetInt64();
+    }
+    if (!d.HasParseError() && d.IsObject() && d.HasMember("result_col_count") && d["result_col_count"].IsInt64()) {
+        cols = d["result_col_count"].GetInt64();
+    } else if (!d.HasParseError() && d.IsObject() && d.HasMember("cols") && d["cols"].IsInt64()) {
+        cols = d["cols"].GetInt64();
+    }
+    if (!d.HasParseError() && d.IsObject() && d.HasMember("result_target") && d["result_target"].IsString()) {
+        result_target = d["result_target"].GetString();
     }
     if (!d.HasParseError() && d.IsObject() && d.HasMember("data")) {
         const auto& data = d["data"];
@@ -534,7 +603,7 @@ int TaskPlugin::ExecuteOneTask(const std::string& task_id, std::string* execute_
     if (rows <= 0 && derived_rows > 0) rows = derived_rows;
     cols = std::max<int64_t>(cols, derived_cols);
     if (execute_rsp) *execute_rsp = rsp;
-    return UpdateStatus(task_id, TaskStatus::kCompleted, "", "", "", rows, cols, "");
+    return UpdateStatus(task_id, TaskStatus::kCompleted, "", "", "", rows, cols, result_target);
 }
 
 int32_t TaskPlugin::HandleSubmit(const std::string&, const std::string& req, std::string& rsp) {
@@ -639,6 +708,8 @@ int32_t TaskPlugin::HandleSubmit(const std::string&, const std::string& req, std
         w.String(rec.error_message.empty() ? "execution failed" : rec.error_message.c_str());
         w.Key("error_code");
         w.String(rec.error_code.c_str());
+        w.Key("error_stage");
+        w.String(rec.error_stage.c_str());
     }
     w.EndObject();
     rsp = buf.GetString();

@@ -700,6 +700,12 @@ int32_t WebServer::HandleGetTaskResult(const std::string&, const std::string& re
         w.Key("error");
         if (detail.HasMember("error_message") && detail["error_message"].IsString()) w.String(detail["error_message"].GetString());
         else w.String("execution failed");
+        w.Key("error_code");
+        if (detail.HasMember("error_code") && detail["error_code"].IsString()) w.String(detail["error_code"].GetString());
+        else w.String("");
+        w.Key("error_stage");
+        if (detail.HasMember("error_stage") && detail["error_stage"].IsString()) w.String(detail["error_stage"].GetString());
+        else w.String("");
     } else if (status == "completed") {
         int64_t rows = 0;
         int64_t cols = 0;
@@ -709,6 +715,9 @@ int32_t WebServer::HandleGetTaskResult(const std::string&, const std::string& re
         w.Int64(rows);
         w.Key("cols");
         w.Int64(cols);
+        w.Key("result_target");
+        if (detail.HasMember("result_target") && detail["result_target"].IsString()) w.String(detail["result_target"].GetString());
+        else w.String("");
         w.Key("data");
         w.StartArray();
         w.EndArray();
