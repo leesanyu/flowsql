@@ -61,7 +61,7 @@ TEST(trie_basic_register_match) {
     ASSERT_TRUE(rt.Match("/tasks/instant/execute", &out));
     ASSERT_EQ(out.prefix, "/tasks");
 
-    ASSERT_TRUE(rt.Match("/operators/native/query", &out));
+    ASSERT_TRUE(rt.Match("/operators/query", &out));
     ASSERT_EQ(out.prefix, "/operators");
 
     // 未注册路径

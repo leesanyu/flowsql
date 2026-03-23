@@ -1,7 +1,9 @@
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <unistd.h>
 
 #include <arrow/io/api.h>
@@ -71,18 +73,22 @@ static std::string MakeReq(const std::string& sql) {
     return buf.GetString();
 }
 
-static fnRouterHandler FindExecuteHandler(PluginLoader* loader) {
+static fnRouterHandler FindRouteHandler(PluginLoader* loader, const char* method, const char* uri) {
     fnRouterHandler h;
     loader->Traverse(IID_ROUTER_HANDLE, [&](void* p) -> int {
         auto* rh = static_cast<IRouterHandle*>(p);
         rh->EnumRoutes([&](const RouteItem& item) {
-            if (item.method == "POST" && item.uri == "/tasks/instant/execute") {
+            if (item.method == method && item.uri == uri) {
                 h = item.handler;
             }
         });
         return h ? -1 : 0;
     });
     return h;
+}
+
+static fnRouterHandler FindExecuteHandler(PluginLoader* loader) {
+    return FindRouteHandler(loader, "POST", "/tasks/instant/execute");
 }
 
 static void SeedSourceTable(IDatabaseChannel* db, const char* table) {
@@ -141,13 +147,15 @@ int main() {
     const std::string suffix = std::to_string(::getpid());
     const std::filesystem::path db_path = std::filesystem::temp_directory_path() / ("flowsql_s9_3_" + suffix + ".db");
     const std::filesystem::path data_dir = std::filesystem::temp_directory_path() / ("flowsql_s9_3_df_" + suffix);
+    const std::filesystem::path operator_db_dir = std::filesystem::temp_directory_path() / ("flowsql_s9_3_catalog_" + suffix);
     std::filesystem::remove(db_path);
     std::filesystem::create_directories(data_dir);
+    std::filesystem::create_directories(operator_db_dir);
 
     PluginLoader* loader = PluginLoader::Single();
     const char* libs[] = {"libflowsql_database.so", "libflowsql_catalog.so", "libflowsql_scheduler.so"};
     std::string db_opt = "type=sqlite;name=local;path=" + db_path.string();
-    std::string catalog_opt = "data_dir=" + data_dir.string();
+    std::string catalog_opt = "data_dir=" + data_dir.string() + ";operator_db_dir=" + operator_db_dir.string();
     const char* opts[] = {db_opt.c_str(), catalog_opt.c_str(), nullptr};
     ASSERT_EQ(loader->Load(get_absolute_process_path(), libs, opts, 3), 0);
     std::puts("[INFO] plugins loaded");
@@ -164,7 +172,11 @@ int main() {
     SeedSourceTable(db, "src");
     std::puts("[INFO] source table seeded");
     auto exec = FindExecuteHandler(loader);
+    auto activate = FindRouteHandler(loader, "POST", "/operators/activate");
+    auto deactivate = FindRouteHandler(loader, "POST", "/operators/deactivate");
     ASSERT_TRUE(exec != nullptr);
+    ASSERT_TRUE(activate != nullptr);
+    ASSERT_TRUE(deactivate != nullptr);
     std::puts("[INFO] execute handler ready");
 
     // T18: INTO dataframe.result 后可通过 Registry 读取
@@ -229,7 +241,9 @@ int main() {
         doc.Parse(rsp.c_str());
         ASSERT_TRUE(!doc.HasParseError() && doc.IsObject());
         ASSERT_TRUE(doc.HasMember("rows"));
+        ASSERT_TRUE(doc.HasMember("result_row_count"));
         ASSERT_EQ(doc["rows"].GetInt64(), 3);
+        ASSERT_EQ(doc["result_row_count"].GetInt64(), 3);
         size_t after = 0;
         registry->List([&](const char*, std::shared_ptr<IChannel>) { ++after; });
         ASSERT_EQ(after, before);
@@ -238,6 +252,9 @@ int main() {
 
     // T23: 跨通道链路 + 内置算子 passthrough
     {
+        std::string activate_rsp;
+        ASSERT_EQ(activate("/operators/activate", R"({"name":"builtin.passthrough"})", activate_rsp), error::OK);
+
         std::string rsp;
         ASSERT_EQ(exec("/tasks/instant/execute",
                        MakeReq("SELECT * FROM sqlite.local.src USING builtin.passthrough INTO dataframe.out"), rsp),
@@ -250,11 +267,100 @@ int main() {
     }
     std::puts("[PASS] T23");
 
+    // T24: 去激活仅阻止新任务，不中断已 running 任务
+    {
+        std::string rsp;
+        ASSERT_EQ(activate("/operators/activate", R"({"name":"builtin.passthrough"})", rsp), error::OK);
+
+        int32_t running_rc = error::INTERNAL_ERROR;
+        std::thread worker([&]() {
+            std::string local_rsp;
+            running_rc = exec("/tasks/instant/execute",
+                              MakeReq("SELECT * FROM sqlite.local.src USING builtin.passthrough "
+                                      "WITH delay_ms=800 INTO dataframe.running_out"),
+                              local_rsp);
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        ASSERT_EQ(deactivate("/operators/deactivate", R"({"name":"builtin.passthrough"})", rsp), error::OK);
+
+        worker.join();
+        ASSERT_EQ(running_rc, error::OK);
+        ASSERT_TRUE(std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("running_out")) != nullptr);
+
+        ASSERT_EQ(exec("/tasks/instant/execute",
+                       MakeReq("SELECT * FROM sqlite.local.src USING builtin.passthrough INTO dataframe.blocked"), rsp),
+                  error::CONFLICT);
+    }
+    std::puts("[PASS] T24");
+
+    // T25: 双算子串行链路成功（每个算子独立 WITH）
+    {
+        std::string rsp;
+        ASSERT_EQ(activate("/operators/activate", R"({"name":"builtin.passthrough"})", rsp), error::OK);
+        ASSERT_EQ(exec("/tasks/instant/execute",
+                       MakeReq("SELECT * FROM sqlite.local.src "
+                               "USING builtin.passthrough WITH delay_ms=10 "
+                               "THEN builtin.passthrough WITH delay_ms=0 "
+                               "INTO dataframe.chain_ok"),
+                       rsp),
+                  error::OK);
+        auto ch = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("chain_ok"));
+        ASSERT_TRUE(ch != nullptr);
+        DataFrame out;
+        ASSERT_EQ(ch->Read(&out), 0);
+        ASSERT_EQ(out.RowCount(), 3);
+    }
+    std::puts("[PASS] T25");
+
+    // T26: 双算子链第 2 步失败（独立 WITH 不复用）
+    {
+        std::string rsp;
+        ASSERT_EQ(activate("/operators/activate", R"({"name":"builtin.passthrough"})", rsp), error::OK);
+        size_t before_cnt = 0;
+        registry->List([&](const char*, std::shared_ptr<IChannel>) { ++before_cnt; });
+        int32_t rc = exec("/tasks/instant/execute",
+                          MakeReq("SELECT * FROM sqlite.local.src "
+                                  "USING builtin.passthrough WITH force_fail=0 "
+                                  "THEN builtin.passthrough WITH force_fail=1 "
+                                  "INTO dataframe.chain_fail"),
+                          rsp);
+        ASSERT_EQ(rc, error::INTERNAL_ERROR);
+        ASSERT_TRUE(std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("chain_fail")) == nullptr);
+
+        size_t after_cnt = 0;
+        registry->List([&](const char*, std::shared_ptr<IChannel>) { ++after_cnt; });
+        ASSERT_EQ(after_cnt, before_cnt);  // 失败后不应新增/泄漏具名通道
+
+        // 失败后再次执行，验证执行器状态未污染
+        ASSERT_EQ(exec("/tasks/instant/execute",
+                       MakeReq("SELECT * FROM sqlite.local.src "
+                               "USING builtin.passthrough WITH force_fail=0 "
+                               "THEN builtin.passthrough WITH force_fail=0 "
+                               "INTO dataframe.chain_after_fail"),
+                       rsp),
+                  error::OK);
+        ASSERT_TRUE(std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("chain_after_fail")) != nullptr);
+    }
+    std::puts("[PASS] T26");
+
+    // T27: INTO 非法目标（未限定名）应报 BAD_REQUEST
+    {
+        std::string rsp;
+        int32_t rc = exec("/tasks/instant/execute",
+                          MakeReq("SELECT * FROM sqlite.local.src INTO t2"),
+                          rsp);
+        ASSERT_EQ(rc, error::BAD_REQUEST);
+        ASSERT_TRUE(rsp.find("invalid INTO destination") != std::string::npos);
+    }
+    std::puts("[PASS] T27");
+
     exec = fnRouterHandler();
     loader->StopAll();
     loader->Unload();
     std::filesystem::remove(db_path);
     std::filesystem::remove_all(data_dir);
+    std::filesystem::remove_all(operator_db_dir);
 
     std::puts("=== All Scheduler E2E tests passed ===");
     return 0;

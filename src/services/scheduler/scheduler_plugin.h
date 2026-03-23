@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <common/error_code.h>
 #include <common/iplugin.h>
@@ -40,7 +41,6 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle {
     // 路由处理（fnRouterHandler 签名）
     int32_t HandleExecute(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleGetChannels(const std::string& uri, const std::string& req, std::string& rsp);
-    int32_t HandleGetOperators(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleRefreshOperators(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandlePreviewDataframe(const std::string& uri, const std::string& req, std::string& rsp);
 
@@ -61,6 +61,10 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle {
                             const std::string& source_type, const std::string& sink_type,
                             const SqlStatement& stmt, int64_t* rows_affected = nullptr,
                             std::string* error = nullptr);
+    int ExecuteWithOperatorChain(IChannel* source, IChannel* sink, const std::vector<IOperator*>& ops,
+                                 const std::string& source_type, const std::string& sink_type,
+                                 const SqlStatement& stmt, int64_t* rows_affected = nullptr,
+                                 std::string* error = nullptr);
     IQuerier* querier_ = nullptr;
 
     // 通道表

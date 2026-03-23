@@ -14,17 +14,42 @@ api.interceptors.response.use(
   }
 )
 
+const unwrapList = (payload, keys = []) => {
+  if (Array.isArray(payload)) return payload
+  for (const key of keys) {
+    if (Array.isArray(payload?.[key])) return payload[key]
+  }
+  return []
+}
+
 export default {
   // WebPlugin 直接处理的路由
   health: () => api.get('/api/health'),
-  getChannels: () => api.get('/api/channels'),
-  getOperators: () => api.get('/api/operators'),
+  getChannels: () => api.get('/api/channels/list').then((res) => ({
+    ...res,
+    data: unwrapList(res?.data, ['channels'])
+  })),
+  getOperators: () => api.get('/api/operators/list').then((res) => {
+    return { ...res, data: unwrapList(res?.data, ['operators']) }
+  }),
   uploadOperator: (filename, content) => api.post('/api/operators/upload', { filename, content }),
   activateOperator: (name) => api.post('/api/operators/activate', { name }),
   deactivateOperator: (name) => api.post('/api/operators/deactivate', { name }),
-  getTasks: () => api.get('/api/tasks'),
-  createTask: (sql) => api.post('/api/tasks', { sql }),
+  getOperatorDetail: (name) => api.post('/api/operators/detail', { name }),
+  updateOperator: (name, payload) => api.post('/api/operators/update', { name, ...payload }),
+  getTasks: (params = {}) => api.post('/api/tasks/list', params).then((res) => {
+    const payload = res?.data
+    const items = unwrapList(payload, ['items', 'tasks', 'data'])
+    const total = Number.isFinite(payload?.total) ? payload.total : items.length
+    return {
+      ...res,
+      data: items,
+      total
+    }
+  }),
+  createTask: (sql, mode = 'async') => api.post('/api/tasks/submit', { sql, mode }),
   getTaskResult: (id) => api.post('/api/tasks/result', { task_id: id }),
+  deleteTask: (id) => api.post('/api/tasks/delete', { task_id: id }),
 
   // 数据库通道管理（WebPlugin 内部转发给 DatabasePlugin）
   listDbChannels: () => api.post('/api/channels/database/query', {}),

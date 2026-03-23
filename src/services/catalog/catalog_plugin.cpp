@@ -5,9 +5,11 @@
 #include <framework/core/passthrough_operator.h>
 
 #include <common/error_code.h>
+#include <common/log.h>
 
 #include <cerrno>
 #include <charconv>
+#include <cctype>
 #include <cstdio>
 #include <ctime>
 #include <cstring>
@@ -17,6 +19,7 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <unistd.h>
 
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -26,6 +29,21 @@ namespace fs = std::filesystem;
 
 namespace flowsql {
 namespace catalog {
+
+namespace {
+bool EqualsIgnoreCase(const std::string& a, const char* b) {
+    if (!b) return false;
+    size_t n = a.size();
+    if (n != std::strlen(b)) return false;
+    for (size_t i = 0; i < n; ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+}  // namespace
 
 int CatalogPlugin::Option(const char* arg) {
     if (!arg || !*arg) return 0;
@@ -41,6 +59,8 @@ int CatalogPlugin::Option(const char* arg) {
         std::string key = opts.substr(pos, eq - pos);
         std::string val = opts.substr(eq + 1, end - eq - 1);
         if (key == "data_dir" && !val.empty()) data_dir_ = val;
+        if (key == "operator_db_dir" && !val.empty()) operator_db_dir_ = val;
+        if (key == "operator_db_path" && !val.empty()) operator_db_path_ = val;
         pos = (end < opts.size()) ? end + 1 : opts.size();
     }
     return 0;
@@ -48,6 +68,14 @@ int CatalogPlugin::Option(const char* arg) {
 
 int CatalogPlugin::Load(IQuerier* querier) {
     querier_ = querier;
+    // 在 Load 阶段尽力初始化 operator_catalog DB，避免 Start 顺序导致
+    // Scheduler/Bridge 提前调用 UpsertBatch 时出现未初始化错误。
+    // 这里不把初始化失败作为 Load 失败返回，保留“Start 阶段报错”的既有语义。
+    if (EnsureDataDir() == 0 && EnsureOperatorDbDir() == 0) {
+        if (EnsureOperatorCatalogDb() != 0) {
+            LOG_WARN("CatalogPlugin::Load: operator catalog db init failed, will retry in Start()");
+        }
+    }
     return Register("passthrough", []() -> IOperator* { return new PassthroughOperator(); });
 }
 
@@ -58,6 +86,8 @@ int CatalogPlugin::Unload() {
 
 int CatalogPlugin::Start() {
     if (EnsureDataDir() != 0) return -1;
+    if (EnsureOperatorDbDir() != 0) return -1;
+    if (EnsureOperatorCatalogDb() != 0) return -1;
 
     for (const auto& entry : fs::directory_iterator(data_dir_)) {
         if (!entry.is_regular_file()) continue;
@@ -75,6 +105,10 @@ int CatalogPlugin::Start() {
 int CatalogPlugin::Stop() {
     std::lock_guard<std::mutex> lock(mu_);
     channels_.clear();
+    if (operator_db_ != nullptr) {
+        sqlite3_close(operator_db_);
+        operator_db_ = nullptr;
+    }
     return 0;
 }
 
@@ -184,6 +218,85 @@ void CatalogPlugin::List(std::function<void(const char* name)> callback) {
     for (const auto& name : names) callback(name.c_str());
 }
 
+OperatorStatus CatalogPlugin::QueryStatus(const std::string& catelog, const std::string& name) {
+    if (catelog.empty() || name.empty()) return OperatorStatus::kNotFound;
+
+    std::lock_guard<std::mutex> lock(mu_);
+    if (operator_db_ == nullptr) return OperatorStatus::kNotFound;
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "SELECT active FROM operator_catalog WHERE catelog = ?1 COLLATE NOCASE AND name = ?2 COLLATE NOCASE LIMIT 1;";
+    if (sqlite3_prepare_v2(operator_db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return OperatorStatus::kNotFound;
+    }
+    sqlite3_bind_text(stmt, 1, catelog.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, name.c_str(), -1, SQLITE_TRANSIENT);
+
+    int rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return OperatorStatus::kNotFound;
+    }
+
+    const int active = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return active == 1 ? OperatorStatus::kActive : OperatorStatus::kDeactivated;
+}
+
+UpsertResult CatalogPlugin::UpsertBatch(const std::vector<OperatorMeta>& operators) {
+    UpsertResult result;
+    if (operators.empty()) return result;
+
+    std::lock_guard<std::mutex> lock(mu_);
+    if (operator_db_ == nullptr) {
+        result.failed_count = static_cast<int32_t>(operators.size());
+        result.error_message = "operator catalog db is not initialized";
+        return result;
+    }
+
+    const char* sql =
+        "INSERT INTO operator_catalog("
+        "catelog, name, type, source, description, position, active, editable, created_at, updated_at"
+        ") VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(catelog, name) DO UPDATE SET "
+        "type=excluded.type, source=excluded.source, description=excluded.description, "
+        "position=excluded.position, editable=excluded.editable, updated_at=CURRENT_TIMESTAMP;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(operator_db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        result.failed_count = static_cast<int32_t>(operators.size());
+        result.error_message = sqlite3_errmsg(operator_db_);
+        return result;
+    }
+
+    for (const auto& op : operators) {
+        if (op.catelog.empty() || op.name.empty()) {
+            ++result.failed_count;
+            if (result.error_message.empty()) result.error_message = "catelog/name must not be empty";
+            continue;
+        }
+
+        sqlite3_clear_bindings(stmt);
+        sqlite3_reset(stmt);
+        sqlite3_bind_text(stmt, 1, op.catelog.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, op.name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, op.type.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, op.source.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, op.description.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, op.position.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 7, EqualsIgnoreCase(op.type, "python") ? 1 : 0);
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            ++result.failed_count;
+            if (result.error_message.empty()) result.error_message = sqlite3_errmsg(operator_db_);
+            continue;
+        }
+        ++result.success_count;
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
 void CatalogPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
     cb({"GET", "/channels/dataframe",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
@@ -204,6 +317,30 @@ void CatalogPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
     cb({"POST", "/channels/dataframe/delete",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleDelete(u, req, rsp);
+        }});
+    cb({"GET", "/operators/query",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleQueryOperators(u, req, rsp);
+        }});
+    cb({"POST", "/operators/detail",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleOperatorDetail(u, req, rsp);
+        }});
+    cb({"POST", "/operators/activate",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleOperatorActivate(u, req, rsp);
+        }});
+    cb({"POST", "/operators/deactivate",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleOperatorDeactivate(u, req, rsp);
+        }});
+    cb({"POST", "/operators/update",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleOperatorUpdate(u, req, rsp);
+        }});
+    cb({"POST", "/operators/upsert_batch",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleOperatorUpsertBatch(u, req, rsp);
         }});
 }
 
@@ -451,6 +588,478 @@ int32_t CatalogPlugin::HandleDelete(const std::string&, const std::string& req, 
     return error::OK;
 }
 
+bool CatalogPlugin::ParseOperatorRefFromName(const std::string& full_name, std::string* catelog, std::string* name) {
+    if (!catelog || !name || full_name.empty()) return false;
+    const size_t dot = full_name.find('.');
+    if (dot == std::string::npos || dot == 0 || dot + 1 >= full_name.size()) return false;
+    *catelog = full_name.substr(0, dot);
+    *name = full_name.substr(dot + 1);
+    return true;
+}
+
+bool CatalogPlugin::ParseOperatorRef(const rapidjson::Value& doc, std::string* catelog, std::string* name) {
+    if (!catelog || !name || !doc.IsObject()) return false;
+    if (doc.HasMember("catelog") && doc["catelog"].IsString() && doc.HasMember("name") && doc["name"].IsString()) {
+        *catelog = doc["catelog"].GetString();
+        *name = doc["name"].GetString();
+        return !catelog->empty() && !name->empty();
+    }
+    if (doc.HasMember("name") && doc["name"].IsString()) {
+        return ParseOperatorRefFromName(doc["name"].GetString(), catelog, name);
+    }
+    return false;
+}
+
+int32_t CatalogPlugin::HandleQueryOperators(const std::string&, const std::string&, std::string& rsp) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (operator_db_ == nullptr) {
+        rsp = R"({"error":"operator catalog db is not initialized"})";
+        return error::INTERNAL_ERROR;
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "SELECT catelog, name, type, source, description, position, active, editable, "
+        "created_at, updated_at FROM operator_catalog ORDER BY catelog ASC, name ASC;";
+    if (sqlite3_prepare_v2(operator_db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        rsp = R"({"error":"failed to query operator catalog"})";
+        return error::INTERNAL_ERROR;
+    }
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    w.StartObject();
+    w.Key("operators");
+    w.StartArray();
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        auto txt = [stmt](int idx) -> const char* {
+            const unsigned char* v = sqlite3_column_text(stmt, idx);
+            return v ? reinterpret_cast<const char*>(v) : "";
+        };
+        w.StartObject();
+        w.Key("catelog");
+        w.String(txt(0));
+        w.Key("name");
+        w.String(txt(1));
+        w.Key("full_name");
+        std::string full_name = std::string(txt(0)) + "." + txt(1);
+        w.String(full_name.c_str());
+        w.Key("type");
+        w.String(txt(2));
+        w.Key("source");
+        w.String(txt(3));
+        w.Key("description");
+        w.String(txt(4));
+        w.Key("position");
+        w.String(txt(5));
+        w.Key("active");
+        w.Int(sqlite3_column_int(stmt, 6));
+        w.Key("editable");
+        int editable = sqlite3_column_int(stmt, 7);
+        const std::string type = txt(2);
+        if (!EqualsIgnoreCase(type, "python")) editable = 0;
+        w.Int(editable);
+        w.Key("created_at");
+        w.String(txt(8));
+        w.Key("updated_at");
+        w.String(txt(9));
+        w.EndObject();
+    }
+
+    sqlite3_finalize(stmt);
+    w.EndArray();
+    w.EndObject();
+    rsp = buf.GetString();
+    return error::OK;
+}
+
+int32_t CatalogPlugin::HandleOperatorDetail(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document doc;
+    doc.Parse(req.c_str());
+    std::string catelog;
+    std::string name;
+    if (doc.HasParseError() || !ParseOperatorRef(doc, &catelog, &name)) {
+        rsp = R"({"error":"invalid request, expected {\"name\":\"catelog.op\"}"})";
+        return error::BAD_REQUEST;
+    }
+
+    OperatorMeta meta;
+    int active = 0;
+    int editable = 0;
+    std::string created_at;
+    std::string updated_at;
+    if (QueryOperatorDetail(catelog, name, &meta, &active, &editable, &created_at, &updated_at) != 0) {
+        rsp = R"({"error":"operator not found"})";
+        return error::NOT_FOUND;
+    }
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    w.StartObject();
+    w.Key("catelog");
+    w.String(meta.catelog.c_str());
+    w.Key("name");
+    w.String(meta.name.c_str());
+    w.Key("full_name");
+    std::string full_name = meta.catelog + "." + meta.name;
+    w.String(full_name.c_str());
+    w.Key("type");
+    w.String(meta.type.c_str());
+    w.Key("source");
+    w.String(meta.source.c_str());
+    w.Key("description");
+    w.String(meta.description.c_str());
+    w.Key("position");
+    w.String(meta.position.c_str());
+    w.Key("active");
+    w.Int(active);
+    w.Key("editable");
+    if (!EqualsIgnoreCase(meta.type, "python")) editable = 0;
+    w.Int(editable);
+    if (EqualsIgnoreCase(meta.type, "python")) {
+        std::string content;
+        if (LoadOperatorContent(meta.catelog, meta.name, &content) == 0) {
+            w.Key("content");
+            w.String(content.c_str());
+        }
+    }
+    w.Key("created_at");
+    w.String(created_at.c_str());
+    w.Key("updated_at");
+    w.String(updated_at.c_str());
+    w.EndObject();
+    rsp = buf.GetString();
+    return error::OK;
+}
+
+int32_t CatalogPlugin::HandleOperatorActivate(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document doc;
+    doc.Parse(req.c_str());
+    std::string catelog;
+    std::string name;
+    if (doc.HasParseError() || !ParseOperatorRef(doc, &catelog, &name)) {
+        rsp = R"({"error":"invalid request, expected {\"name\":\"catelog.op\"}"})";
+        return error::BAD_REQUEST;
+    }
+    if (SetOperatorActive(catelog, name, 1) != 0) {
+        rsp = R"({"error":"operator not found"})";
+        return error::NOT_FOUND;
+    }
+    rsp = R"({"ok":true})";
+    return error::OK;
+}
+
+int32_t CatalogPlugin::HandleOperatorDeactivate(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document doc;
+    doc.Parse(req.c_str());
+    std::string catelog;
+    std::string name;
+    if (doc.HasParseError() || !ParseOperatorRef(doc, &catelog, &name)) {
+        rsp = R"({"error":"invalid request, expected {\"name\":\"catelog.op\"}"})";
+        return error::BAD_REQUEST;
+    }
+    if (SetOperatorActive(catelog, name, 0) != 0) {
+        rsp = R"({"error":"operator not found"})";
+        return error::NOT_FOUND;
+    }
+    rsp = R"({"ok":true})";
+    return error::OK;
+}
+
+int32_t CatalogPlugin::HandleOperatorUpdate(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document doc;
+    doc.Parse(req.c_str());
+    std::string catelog;
+    std::string name;
+    if (doc.HasParseError() || !ParseOperatorRef(doc, &catelog, &name)) {
+        rsp = R"({"error":"invalid request, expected {\"name\":\"catelog.op\"}"})";
+        return error::BAD_REQUEST;
+    }
+
+    std::string description;
+    std::string position;
+    std::string content;
+    const std::string* description_ptr = nullptr;
+    const std::string* position_ptr = nullptr;
+    const std::string* content_ptr = nullptr;
+    if (doc.HasMember("description") && doc["description"].IsString()) {
+        description = doc["description"].GetString();
+        description_ptr = &description;
+    }
+    if (doc.HasMember("position") && doc["position"].IsString()) {
+        position = doc["position"].GetString();
+        position_ptr = &position;
+    }
+    if (doc.HasMember("content") && doc["content"].IsString()) {
+        content = doc["content"].GetString();
+        content_ptr = &content;
+    }
+    if (description_ptr == nullptr && position_ptr == nullptr && content_ptr == nullptr) {
+        rsp = R"({"error":"at least one of description/position/content is required"})";
+        return error::BAD_REQUEST;
+    }
+
+    OperatorMeta meta;
+    int active = 0;
+    int editable = 0;
+    std::string created_at;
+    std::string updated_at;
+    if (QueryOperatorDetail(catelog, name, &meta, &active, &editable, &created_at, &updated_at) != 0) {
+        rsp = R"({"error":"operator not found"})";
+        return error::NOT_FOUND;
+    }
+    if (content_ptr != nullptr && !EqualsIgnoreCase(meta.type, "python")) {
+        rsp = R"({"error":"content update only supports python operators"})";
+        return error::BAD_REQUEST;
+    }
+
+    const int rc = UpdateOperatorFields(catelog, name, description_ptr, position_ptr);
+    if (rc == 1) return error::NOT_FOUND;
+    if (rc != 0) {
+        rsp = R"({"error":"failed to update operator"})";
+        return error::INTERNAL_ERROR;
+    }
+    if (content_ptr != nullptr && SaveOperatorContent(catelog, name, *content_ptr) != 0) {
+        rsp = R"({"error":"failed to update operator content"})";
+        return error::INTERNAL_ERROR;
+    }
+    rsp = R"({"ok":true})";
+    return error::OK;
+}
+
+int32_t CatalogPlugin::HandleOperatorUpsertBatch(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document doc;
+    doc.Parse(req.c_str());
+    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("operators") || !doc["operators"].IsArray()) {
+        rsp = R"({"error":"invalid request, expected {\"operators\":[...]}"})";
+        return error::BAD_REQUEST;
+    }
+
+    std::vector<OperatorMeta> ops;
+    const auto& arr = doc["operators"];
+    ops.reserve(arr.Size());
+    for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
+        const auto& it = arr[i];
+        if (!it.IsObject() || !it.HasMember("catelog") || !it["catelog"].IsString() || !it.HasMember("name") ||
+            !it["name"].IsString() || !it.HasMember("type") || !it["type"].IsString() || !it.HasMember("source") ||
+            !it["source"].IsString()) {
+            rsp = R"({"error":"operator item must include catelog/name/type/source"})";
+            return error::BAD_REQUEST;
+        }
+        OperatorMeta meta;
+        meta.catelog = it["catelog"].GetString();
+        meta.name = it["name"].GetString();
+        meta.type = it["type"].GetString();
+        meta.source = it["source"].GetString();
+        if (it.HasMember("description") && it["description"].IsString()) meta.description = it["description"].GetString();
+        if (it.HasMember("position") && it["position"].IsString()) meta.position = it["position"].GetString();
+        ops.push_back(std::move(meta));
+    }
+
+    UpsertResult result = UpsertBatch(ops);
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    w.StartObject();
+    w.Key("success_count");
+    w.Int(result.success_count);
+    w.Key("failed_count");
+    w.Int(result.failed_count);
+    w.Key("error_message");
+    w.String(result.error_message.c_str());
+    w.EndObject();
+    rsp = buf.GetString();
+    return result.failed_count > 0 ? error::INTERNAL_ERROR : error::OK;
+}
+
+int CatalogPlugin::EnsureOperatorCatalogDb() {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (operator_db_ != nullptr) return 0;
+
+    if (EnsureOperatorDbDir() != 0) return -1;
+    const std::string db_path = OperatorCatalogDbPath();
+    if (sqlite3_open(db_path.c_str(), &operator_db_) != SQLITE_OK) {
+        if (operator_db_ != nullptr) {
+            sqlite3_close(operator_db_);
+            operator_db_ = nullptr;
+        }
+        return -1;
+    }
+
+    if (sqlite3_exec(operator_db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        sqlite3_close(operator_db_);
+        operator_db_ = nullptr;
+        return -1;
+    }
+    return EnsureOperatorCatalogSchema();
+}
+
+int CatalogPlugin::EnsureOperatorCatalogSchema() {
+    if (operator_db_ == nullptr) return -1;
+    const char* ddl =
+        "CREATE TABLE IF NOT EXISTS operator_catalog ("
+        "catelog TEXT NOT NULL,"
+        "name TEXT NOT NULL,"
+        "type TEXT NOT NULL,"
+        "description TEXT NOT NULL DEFAULT '',"
+        "position TEXT NOT NULL DEFAULT '',"
+        "source TEXT NOT NULL,"
+        "active INTEGER NOT NULL DEFAULT 0,"
+        "editable INTEGER NOT NULL DEFAULT 1,"
+        "content_ref TEXT NOT NULL DEFAULT '',"
+        "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "UNIQUE(catelog COLLATE NOCASE, name COLLATE NOCASE)"
+        ");";
+    if (sqlite3_exec(operator_db_, ddl, nullptr, nullptr, nullptr) != SQLITE_OK) return -1;
+    return 0;
+}
+
+std::string CatalogPlugin::OperatorCatalogDbPath() const {
+    if (!operator_db_path_.empty()) return operator_db_path_;
+    fs::path p(operator_db_dir_);
+    p /= "operator_catalog.db";
+    return p.string();
+}
+
+int CatalogPlugin::QueryOperatorDetail(const std::string& catelog,
+                                       const std::string& name,
+                                       OperatorMeta* meta,
+                                       int* active,
+                                       int* editable,
+                                       std::string* created_at,
+                                       std::string* updated_at) {
+    if (!meta || !active || !editable || !created_at || !updated_at) return -1;
+
+    std::lock_guard<std::mutex> lock(mu_);
+    if (operator_db_ == nullptr) return -1;
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "SELECT catelog, name, type, source, description, position, active, editable, created_at, updated_at "
+        "FROM operator_catalog WHERE catelog = ?1 COLLATE NOCASE AND name = ?2 COLLATE NOCASE LIMIT 1;";
+    if (sqlite3_prepare_v2(operator_db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, catelog.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, name.c_str(), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    auto txt = [stmt](int idx) -> std::string {
+        const unsigned char* v = sqlite3_column_text(stmt, idx);
+        return v ? reinterpret_cast<const char*>(v) : "";
+    };
+    meta->catelog = txt(0);
+    meta->name = txt(1);
+    meta->type = txt(2);
+    meta->source = txt(3);
+    meta->description = txt(4);
+    meta->position = txt(5);
+    *active = sqlite3_column_int(stmt, 6);
+    *editable = sqlite3_column_int(stmt, 7);
+    *created_at = txt(8);
+    *updated_at = txt(9);
+    sqlite3_finalize(stmt);
+    return 0;
+}
+
+int CatalogPlugin::SetOperatorActive(const std::string& catelog, const std::string& name, int active) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (operator_db_ == nullptr) return -1;
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "UPDATE operator_catalog SET active = ?1, updated_at = CURRENT_TIMESTAMP "
+        "WHERE catelog = ?2 COLLATE NOCASE AND name = ?3 COLLATE NOCASE;";
+    if (sqlite3_prepare_v2(operator_db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, active);
+    sqlite3_bind_text(stmt, 2, catelog.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, name.c_str(), -1, SQLITE_TRANSIENT);
+    const int rc = sqlite3_step(stmt);
+    const int changed = sqlite3_changes(operator_db_);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+    return changed > 0 ? 0 : -1;
+}
+
+int CatalogPlugin::UpdateOperatorFields(const std::string& catelog,
+                                        const std::string& name,
+                                        const std::string* description,
+                                        const std::string* position) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (operator_db_ == nullptr) return -1;
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "UPDATE operator_catalog SET "
+        "description = CASE WHEN ?1 IS NULL THEN description ELSE ?1 END, "
+        "position = CASE WHEN ?2 IS NULL THEN position ELSE ?2 END, "
+        "updated_at = CURRENT_TIMESTAMP "
+        "WHERE catelog = ?3 COLLATE NOCASE AND name = ?4 COLLATE NOCASE;";
+    if (sqlite3_prepare_v2(operator_db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return -1;
+
+    if (description != nullptr) {
+        sqlite3_bind_text(stmt, 1, description->c_str(), -1, SQLITE_TRANSIENT);
+    } else {
+        sqlite3_bind_null(stmt, 1);
+    }
+    if (position != nullptr) {
+        sqlite3_bind_text(stmt, 2, position->c_str(), -1, SQLITE_TRANSIENT);
+    } else {
+        sqlite3_bind_null(stmt, 2);
+    }
+    sqlite3_bind_text(stmt, 3, catelog.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, name.c_str(), -1, SQLITE_TRANSIENT);
+
+    const int rc = sqlite3_step(stmt);
+    const int changed = sqlite3_changes(operator_db_);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+    return changed > 0 ? 0 : 1;
+}
+
+std::string CatalogPlugin::OperatorsDirPath() const {
+    char exe_path[1024];
+    ssize_t len = ::readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len > 0) {
+        exe_path[len] = '\0';
+        std::string exe_dir(exe_path);
+        size_t pos = exe_dir.find_last_of('/');
+        if (pos != std::string::npos) return exe_dir.substr(0, pos) + "/operators";
+    }
+    return "operators";
+}
+
+std::string CatalogPlugin::OperatorContentPath(const std::string& catelog, const std::string& name) const {
+    fs::path p(OperatorsDirPath());
+    p /= (catelog + "_" + name + ".py");
+    return p.string();
+}
+
+int CatalogPlugin::LoadOperatorContent(const std::string& catelog, const std::string& name, std::string* content) const {
+    if (!content) return -1;
+    const std::string path = OperatorContentPath(catelog, name);
+    std::ifstream ifs(path, std::ios::in | std::ios::binary);
+    if (!ifs.is_open()) {
+        LOG_ERROR("CatalogPlugin::LoadOperatorContent: open failed path=%s errno=%d", path.c_str(), errno);
+        return -1;
+    }
+    std::ostringstream ss;
+    ss << ifs.rdbuf();
+    *content = ss.str();
+    return 0;
+}
+
+int CatalogPlugin::SaveOperatorContent(const std::string& catelog, const std::string& name, const std::string& content) const {
+    std::error_code ec;
+    fs::create_directories(OperatorsDirPath(), ec);
+    std::ofstream ofs(OperatorContentPath(catelog, name), std::ios::out | std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()) return -1;
+    ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
+    return ofs.good() ? 0 : -1;
+}
+
 std::string CatalogPlugin::GenerateImportName(const std::string& filename) {
     std::string base = filename;
     auto slash = base.find_last_of("/\\");
@@ -492,6 +1101,20 @@ const char* CatalogPlugin::DataTypeName(DataType t) {
 int CatalogPlugin::EnsureDataDir() {
     std::error_code ec;
     fs::create_directories(data_dir_, ec);
+    return ec ? -1 : 0;
+}
+
+int CatalogPlugin::EnsureOperatorDbDir() const {
+    if (!operator_db_path_.empty()) {
+        fs::path p(operator_db_path_);
+        fs::path parent = p.parent_path();
+        if (parent.empty()) return 0;
+        std::error_code ec;
+        fs::create_directories(parent, ec);
+        return ec ? -1 : 0;
+    }
+    std::error_code ec;
+    fs::create_directories(operator_db_dir_, ec);
     return ec ? -1 : 0;
 }
 

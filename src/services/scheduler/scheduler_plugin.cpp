@@ -13,6 +13,7 @@
 #include <cstring>
 #include <regex>
 #include <type_traits>
+#include <unordered_set>
 
 #include "framework/core/channel_adapter.h"
 #include "framework/core/dataframe.h"
@@ -25,6 +26,7 @@
 #include "framework/interfaces/idatabase_factory.h"
 #include "framework/interfaces/idataframe_channel.h"
 #include "framework/interfaces/ioperator.h"
+#include "framework/interfaces/ioperator_catalog.h"
 #include "framework/interfaces/ioperator_registry.h"
 
 namespace flowsql {
@@ -59,6 +61,20 @@ static bool IsDataFrameRef(const std::string& name) {
 static std::string DataFrameNamePart(const std::string& name) {
     if (!IsDataFrameRef(name)) return "";
     return name.substr(strlen("dataframe."));
+}
+
+static bool IsQualifiedDestination(const std::string& dest) {
+    // 合法目标：
+    // 1) dataframe.<name>
+    // 2) type.name 或 type.name.table
+    if (dest.empty()) return false;
+    if (IsDataFrameRef(dest)) return true;
+    const auto first = dest.find('.');
+    if (first == std::string::npos || first == 0 || first == dest.size() - 1) return false;
+    const auto second = dest.find('.', first + 1);
+    if (second == first + 1) return false;
+    if (second != std::string::npos && second == dest.size() - 1) return false;
+    return true;
 }
 
 // --- JSON 辅助 ---
@@ -128,6 +144,58 @@ void SchedulerPlugin::RegisterChannel(const std::string& key, std::shared_ptr<IC
 
 // --- IPlugin::Start ---
 int SchedulerPlugin::Start() {
+    auto* catalog = querier_ ? static_cast<IOperatorCatalog*>(querier_->First(IID_OPERATOR_CATALOG)) : nullptr;
+    if (catalog) {
+        std::vector<OperatorMeta> ops;
+        std::unordered_set<std::string> seen;
+        auto append_unique = [&](OperatorMeta meta) {
+            const std::string key = ToLowerAscii(meta.catelog) + "." + ToLowerAscii(meta.name);
+            if (seen.insert(key).second) {
+                ops.push_back(std::move(meta));
+            }
+        };
+        querier_->Traverse(IID_OPERATOR, [&](void* p) -> int {
+            auto* op = static_cast<IOperator*>(p);
+            if (!op || op->Catelog().empty() || op->Name().empty()) return 0;
+            OperatorMeta meta;
+            meta.catelog = op->Catelog();
+            meta.name = op->Name();
+            meta.type = "cpp";
+            meta.source = "scheduler";
+            meta.description = op->Description();
+            meta.position = op->Position() == OperatorPosition::STORAGE ? "storage" : "data";
+            append_unique(std::move(meta));
+            return 0;
+        });
+        auto* op_registry = static_cast<IOperatorRegistry*>(querier_->First(IID_OPERATOR_REGISTRY));
+        if (op_registry) {
+            op_registry->List([&](const char* name) {
+                if (!name || name[0] == '\0') return;
+                OperatorMeta meta;
+                meta.catelog = "builtin";
+                meta.name = name;
+                meta.type = "cpp";
+                meta.source = "scheduler";
+                meta.position = "data";
+                IOperator* op = op_registry->Create(name);
+                if (op) {
+                    meta.description = op->Description();
+                    meta.position = op->Position() == OperatorPosition::STORAGE ? "storage" : "data";
+                    delete op;
+                }
+                append_unique(std::move(meta));
+            });
+        }
+        UpsertResult upsert = catalog->UpsertBatch(ops);
+        if (upsert.failed_count > 0) {
+            LOG_ERROR("SchedulerPlugin::Start: catalog upsert failed, success=%d failed=%d err=%s",
+                      upsert.success_count, upsert.failed_count, upsert.error_message.c_str());
+        } else {
+            LOG_INFO("SchedulerPlugin::Start: synced %d C++ operators to Catalog", upsert.success_count);
+        }
+    } else {
+        LOG_ERROR("SchedulerPlugin::Start: IOperatorCatalog not found");
+    }
     LOG_INFO("SchedulerPlugin::Start: ready");
     return 0;
 }
@@ -155,11 +223,6 @@ void SchedulerPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandlePreviewDataframe(u, req, rsp);
         }});
-    // 算子查询
-    cb({"POST", "/operators/native/query",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
-            return HandleGetOperators(u, req, rsp);
-        }});
     // Python 算子刷新
     cb({"POST", "/operators/python/refresh",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
@@ -179,14 +242,6 @@ IChannel* SchedulerPlugin::FindChannel(const std::string& name) {
     // 先在内部通道表中查找
     auto it = channels_.find(name);
     if (it != channels_.end()) return it->second.get();
-
-    // 按 catelog.name 格式拆分后查找
-    auto dot = name.find('.');
-    if (dot != std::string::npos) {
-        std::string key = name.substr(0, dot) + "." + name.substr(dot + 1);
-        it = channels_.find(key);
-        if (it != channels_.end()) return it->second.get();
-    }
 
     // 通过 IQuerier 遍历静态注册的通道
     IChannel* found = nullptr;
@@ -395,9 +450,22 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
                                           const std::string& sink_type,
                                           const SqlStatement& stmt, int64_t* rows_affected,
                                           std::string* error) {
+    std::vector<IOperator*> ops;
+    ops.push_back(op);
+    return ExecuteWithOperatorChain(source, sink, ops, source_type, sink_type, stmt, rows_affected, error);
+}
+
+int SchedulerPlugin::ExecuteWithOperatorChain(IChannel* source, IChannel* sink,
+                                              const std::vector<IOperator*>& ops,
+                                              const std::string& source_type,
+                                              const std::string& sink_type,
+                                              const SqlStatement& stmt, int64_t* rows_affected,
+                                              std::string* error) {
+    if (ops.empty()) return -1;
     IChannel* actual_source = source;
     IChannel* actual_sink = sink;
-    std::shared_ptr<DataFrameChannel> tmp_in, tmp_out;
+    std::shared_ptr<DataFrameChannel> tmp_in;
+    std::vector<std::shared_ptr<DataFrameChannel>> stage_buffers;
 
     if (source_type == ChannelType::kDatabase) {
         auto* db_src = dynamic_cast<IDatabaseChannel*>(source);
@@ -421,32 +489,47 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
         actual_source = tmp_in.get();
     }
 
+    for (size_t i = 0; i < ops.size(); ++i) {
+        std::shared_ptr<DataFrameChannel> stage_out;
+        if (i + 1 == ops.size()) {
+            if (sink_type == ChannelType::kDatabase) {
+                stage_out = std::make_shared<DataFrameChannel>("_adapter", std::to_string(++tmp_channel_seq_));
+                stage_out->Open();
+                actual_sink = stage_out.get();
+            } else {
+                actual_sink = sink;
+            }
+        } else {
+            stage_out = std::make_shared<DataFrameChannel>("_pipe", std::to_string(++tmp_channel_seq_));
+            stage_out->Open();
+            actual_sink = stage_out.get();
+        }
+
+        auto pipeline = PipelineBuilder()
+                            .SetSource(actual_source)
+                            .SetOperator(ops[i])
+                            .SetSink(actual_sink)
+                            .Build();
+        pipeline->Run();
+
+        if (pipeline->State() == PipelineState::FAILED) {
+            if (error) *error = pipeline->ErrorMessage();
+            return -1;
+        }
+
+        if (stage_out) {
+            stage_buffers.push_back(stage_out);
+            actual_source = stage_out.get();
+        }
+    }
+
     if (sink_type == ChannelType::kDatabase) {
-        tmp_out = std::make_shared<DataFrameChannel>("_adapter", std::to_string(++tmp_channel_seq_));
-        tmp_out->Open();
-        actual_sink = tmp_out.get();
-    }
-
-    auto pipeline = PipelineBuilder()
-                        .SetSource(actual_source)
-                        .SetOperator(op)
-                        .SetSink(actual_sink)
-                        .Build();
-    // 注意：Run() 当前为同步执行，返回时 pipeline 已完成或失败。
-    // 若未来改为异步，需在此处等待完成（如 pipeline->Wait()）再检查 State()。
-    pipeline->Run();
-
-    if (pipeline->State() == PipelineState::FAILED) {
-        if (error) *error = pipeline->ErrorMessage();
-        return -1;
-    }
-
-    if (sink_type == ChannelType::kDatabase && tmp_out) {
         auto* db_sink = dynamic_cast<IDatabaseChannel*>(sink);
         if (!db_sink) return -1;
+        if (stage_buffers.empty()) return -1;
 
         std::string table = ExtractTableName(stmt.dest);
-        int64_t written_rows = ChannelAdapter::WriteFromDataFrame(tmp_out.get(), db_sink, table.c_str(), error);
+        int64_t written_rows = ChannelAdapter::WriteFromDataFrame(stage_buffers.back().get(), db_sink, table.c_str(), error);
         if (written_rows < 0) return -1;
 
         if (rows_affected) *rows_affected = written_rows;
@@ -485,21 +568,47 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         return IsDataFrameRef(stmt.source) ? error::NOT_FOUND : error::BAD_REQUEST;
     }
 
-    IOperator* op = nullptr;
-    std::shared_ptr<IOperator> op_holder;
-    if (stmt.HasOperator()) {
-        op_holder = FindOperator(stmt.op_catelog, stmt.op_name);
-        if (!op_holder) {
-            rsp = MakeErrorJson("operator not found: " + stmt.op_catelog + "." + stmt.op_name);
-            return error::BAD_REQUEST;
+    std::vector<std::shared_ptr<IOperator>> op_holders;
+    std::vector<IOperator*> op_chain;
+    std::vector<OperatorRef> parsed_ops = stmt.operators;
+    if (parsed_ops.empty() && !stmt.op_catelog.empty() && !stmt.op_name.empty()) {
+        parsed_ops.push_back({stmt.op_catelog, stmt.op_name});
+    }
+    if (!parsed_ops.empty()) {
+        auto* catalog = querier_ ? static_cast<IOperatorCatalog*>(querier_->First(IID_OPERATOR_CATALOG)) : nullptr;
+        if (!catalog) {
+            rsp = MakeErrorJson("operator catalog unavailable");
+            return error::UNAVAILABLE;
         }
-        op = op_holder.get();
+        for (const auto& op_ref : parsed_ops) {
+            OperatorStatus status = catalog->QueryStatus(op_ref.catelog, op_ref.name);
+            if (status == OperatorStatus::kNotFound) {
+                rsp = MakeErrorJson("operator not found: " + op_ref.catelog + "." + op_ref.name);
+                return error::NOT_FOUND;
+            }
+            if (status == OperatorStatus::kDeactivated) {
+                rsp = MakeErrorJson("operator is deactivated: " + op_ref.catelog + "." + op_ref.name);
+                return error::CONFLICT;
+            }
+            auto holder = FindOperator(op_ref.catelog, op_ref.name);
+            if (!holder) {
+                rsp = MakeErrorJson("operator not found: " + op_ref.catelog + "." + op_ref.name);
+                return error::NOT_FOUND;
+            }
+            op_chain.push_back(holder.get());
+            op_holders.push_back(std::move(holder));
+        }
     }
 
     try {
-        if (op) {
-            for (auto& [k, v] : stmt.with_params) {
-                op->Configure(k.c_str(), v.c_str());
+        if (!op_chain.empty()) {
+            for (size_t i = 0; i < op_chain.size(); ++i) {
+                const auto& params = (i < stmt.operator_with_params.size())
+                    ? stmt.operator_with_params[i]
+                    : (i == 0 ? stmt.with_params : std::unordered_map<std::string, std::string>{});
+                for (const auto& kv : params) {
+                    op_chain[i]->Configure(kv.first.c_str(), kv.second.c_str());
+                }
             }
         }
 
@@ -508,6 +617,11 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         IChannel* sink = nullptr;
 
         if (!stmt.dest.empty()) {
+            if (!IsQualifiedDestination(stmt.dest)) {
+                rsp = MakeErrorJson("invalid INTO destination: " + stmt.dest +
+                                    ", expected dataframe.<name> or <type>.<name>[.<table>]");
+                return error::BAD_REQUEST;
+            }
             if (IsDataFrameRef(stmt.dest)) {
                 if (!ch_registry) {
                     rsp = MakeErrorJson("channel registry unavailable");
@@ -521,9 +635,8 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             } else {
                 sink = FindChannel(stmt.dest);
                 if (!sink) {
-                    temp_sink = std::make_shared<DataFrameChannel>("result", stmt.dest);
-                    temp_sink->Open();
-                    sink = temp_sink.get();
+                    rsp = MakeErrorJson("destination channel not found: " + stmt.dest);
+                    return error::NOT_FOUND;
                 }
             }
         } else {
@@ -539,15 +652,15 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         int64_t affected_rows = 0;
         std::string exec_error;
 
-        if (!op) {
+        if (op_chain.empty()) {
             rc = ExecuteTransfer(source, sink, source_type, sink_type, stmt, &affected_rows, &exec_error);
         } else {
-            rc = ExecuteWithOperator(source, sink, op, source_type, sink_type, stmt, &affected_rows, &exec_error);
+            rc = ExecuteWithOperatorChain(source, sink, op_chain, source_type, sink_type, stmt, &affected_rows, &exec_error);
         }
 
         if (rc != 0) {
             std::string err = exec_error;
-            if (err.empty() && op) err = op->LastError();
+            if (err.empty() && !op_chain.empty()) err = op_chain.back()->LastError();
             if (err.empty()) err = "execution failed";
             rsp = MakeErrorJson(err);
             return error::INTERNAL_ERROR;
@@ -593,6 +706,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         w.StartObject();
         w.Key("status"); w.String("completed");
         w.Key("rows"); w.Int64(row_count);
+        w.Key("result_row_count"); w.Int64(row_count);
         w.Key("data"); w.RawValue(result_json.c_str(), result_json.size(), rapidjson::kArrayType);
         w.EndObject();
         rsp = buf.GetString();
@@ -804,45 +918,6 @@ int32_t SchedulerPlugin::HandlePreviewDataframe(const std::string&, const std::s
     rsp = buf.GetString();
     return error::OK;
 }
-int32_t SchedulerPlugin::HandleGetOperators(const std::string&, const std::string&, std::string& rsp) {
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    w.StartArray();
-
-    if (querier_) {
-        querier_->Traverse(IID_OPERATOR, [&w](void* p) -> int {
-            auto* op = static_cast<IOperator*>(p);
-            w.StartObject();
-            w.Key("catelog"); w.String(op->Catelog().c_str());
-            w.Key("name"); w.String(op->Name().c_str());
-            w.Key("description"); w.String(op->Description().c_str());
-            std::string pos = (op->Position() == OperatorPosition::STORAGE) ? "STORAGE" : "DATA";
-            w.Key("position"); w.String(pos.c_str());
-            w.EndObject();
-            return 0;
-        });
-
-        // Python 算子（通过 IBridge 遍历）
-        auto* bridge = static_cast<IBridge*>(querier_->First(IID_BRIDGE));
-        if (bridge) {
-            bridge->TraverseOperators([&w](IOperator* op) -> int {
-                w.StartObject();
-                w.Key("catelog"); w.String(op->Catelog().c_str());
-                w.Key("name"); w.String(op->Name().c_str());
-                w.Key("description"); w.String(op->Description().c_str());
-                std::string pos = (op->Position() == OperatorPosition::STORAGE) ? "STORAGE" : "DATA";
-                w.Key("position"); w.String(pos.c_str());
-                w.EndObject();
-                return 0;
-            });
-        }
-    }
-
-    w.EndArray();
-    rsp = buf.GetString();
-    return error::OK;
-}
-
 // --- HandleRefreshOperators ---
 int32_t SchedulerPlugin::HandleRefreshOperators(const std::string&, const std::string&, std::string& rsp) {
     if (!querier_) {

@@ -13,6 +13,7 @@
 #include <framework/core/dataframe.h>
 #include <framework/core/dataframe_channel.h>
 #include <framework/interfaces/ioperator.h>
+#include <framework/interfaces/ioperator_catalog.h>
 #include <services/catalog/catalog_plugin.h>
 #include <framework/interfaces/irouter_handle.h>
 #include <rapidjson/document.h>
@@ -49,6 +50,14 @@ static std::string MakeTempDir(const char* suffix) {
     return p.string();
 }
 
+static std::string MakeCatalogOption(const std::string& data_dir) {
+    return "data_dir=" + data_dir + ";operator_db_dir=" + data_dir + "/catalog";
+}
+
+static std::string MakeCatalogOptionWithDbPath(const std::string& data_dir, const std::string& db_path) {
+    return "data_dir=" + data_dir + ";operator_db_path=" + db_path;
+}
+
 static std::shared_ptr<DataFrameChannel> MakeChannel(const std::string& name, int rows = 2) {
     auto ch = std::make_shared<DataFrameChannel>("dataframe", name);
     ch->Open();
@@ -81,7 +90,8 @@ static void TestRegistryBasic() {
     const std::string dir = MakeTempDir("basic");
 
     CatalogPlugin p;
-    ASSERT_EQ(p.Option(("data_dir=" + dir).c_str()), 0);
+    const std::string opt = MakeCatalogOption(dir);
+    ASSERT_EQ(p.Option(opt.c_str()), 0);
     ASSERT_EQ(p.Load(nullptr), 0);
     ASSERT_EQ(p.Start(), 0);
 
@@ -135,14 +145,16 @@ static void TestRestartRecover() {
 
     {
         CatalogPlugin p1;
-        ASSERT_EQ(p1.Option(("data_dir=" + dir).c_str()), 0);
+        const std::string opt = MakeCatalogOption(dir);
+        ASSERT_EQ(p1.Option(opt.c_str()), 0);
         ASSERT_EQ(p1.Load(nullptr), 0);
         ASSERT_EQ(p1.Start(), 0);
         ASSERT_EQ(p1.Register("daily", std::static_pointer_cast<IChannel>(MakeChannel("daily", 3))), 0);
     }
 
     CatalogPlugin p2;
-    ASSERT_EQ(p2.Option(("data_dir=" + dir).c_str()), 0);
+    const std::string opt = MakeCatalogOption(dir);
+    ASSERT_EQ(p2.Option(opt.c_str()), 0);
     ASSERT_EQ(p2.Load(nullptr), 0);
     ASSERT_EQ(p2.Start(), 0);
 
@@ -157,7 +169,8 @@ static void TestConcurrency() {
     const std::string dir = MakeTempDir("concurrency");
 
     CatalogPlugin p;
-    ASSERT_EQ(p.Option(("data_dir=" + dir).c_str()), 0);
+    const std::string opt = MakeCatalogOption(dir);
+    ASSERT_EQ(p.Option(opt.c_str()), 0);
     ASSERT_EQ(p.Load(nullptr), 0);
     ASSERT_EQ(p.Start(), 0);
 
@@ -199,7 +212,8 @@ static void TestOperatorRegistry() {
     const std::string dir = MakeTempDir("operator");
 
     CatalogPlugin p;
-    ASSERT_EQ(p.Option(("data_dir=" + dir).c_str()), 0);
+    const std::string opt = MakeCatalogOption(dir);
+    ASSERT_EQ(p.Option(opt.c_str()), 0);
     ASSERT_EQ(p.Load(nullptr), 0);  // Load 自动注册 passthrough
     ASSERT_EQ(p.Start(), 0);
 
@@ -220,13 +234,114 @@ static void TestOperatorRegistry() {
     std::puts("[PASS] T15-T17 operator registry");
 }
 
+static void TestOperatorCatalog() {
+    std::puts("[TEST] T18-T23 operator catalog ...");
+    const std::string dir = MakeTempDir("op_catalog");
+
+    CatalogPlugin p;
+    const std::string opt = MakeCatalogOption(dir);
+    ASSERT_EQ(p.Option(opt.c_str()), 0);
+    ASSERT_EQ(p.Load(nullptr), 0);
+    ASSERT_EQ(p.Start(), 0);
+
+    std::vector<OperatorMeta> batch;
+    batch.push_back({"ml", "clean", "python", "bridge", "clean op", "data"});
+    UpsertResult upsert = p.UpsertBatch(batch);
+    ASSERT_EQ(upsert.success_count, 1);
+    ASSERT_EQ(upsert.failed_count, 0);
+    ASSERT_EQ(p.QueryStatus("ml", "clean"), OperatorStatus::kDeactivated);
+
+    std::unordered_map<std::string, fnRouterHandler> routes;
+    p.EnumRoutes([&](const RouteItem& item) {
+        routes[item.method + ":" + item.uri] = item.handler;
+    });
+    ASSERT_TRUE(routes.count("GET:/operators/query") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/detail") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/activate") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/deactivate") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/update") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/upsert_batch") == 1);
+
+    std::string rsp;
+    ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", R"({"name":"ml.clean"})", rsp), error::OK);
+    ASSERT_EQ(p.QueryStatus("ml", "clean"), OperatorStatus::kActive);
+
+    // upsert 不覆盖 active
+    std::vector<OperatorMeta> batch2;
+    batch2.push_back({"ml", "clean", "python", "bridge", "clean op v2", "storage"});
+    upsert = p.UpsertBatch(batch2);
+    ASSERT_EQ(upsert.success_count, 1);
+    ASSERT_EQ(upsert.failed_count, 0);
+    ASSERT_EQ(p.QueryStatus("ml", "clean"), OperatorStatus::kActive);
+
+    ASSERT_EQ(routes["POST:/operators/detail"]("/operators/detail", R"({"name":"ml.clean"})", rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_TRUE(d.IsObject());
+        ASSERT_EQ(std::string(d["description"].GetString()), "clean op v2");
+        ASSERT_EQ(std::string(d["position"].GetString()), "storage");
+        ASSERT_EQ(d["active"].GetInt(), 1);
+    }
+
+    ASSERT_EQ(routes["POST:/operators/update"]("/operators/update",
+              R"({"name":"ml.clean","description":"updated desc","position":"data"})", rsp), error::OK);
+    ASSERT_EQ(routes["POST:/operators/detail"]("/operators/detail", R"({"name":"ml.clean"})", rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_TRUE(d.IsObject());
+        ASSERT_EQ(std::string(d["description"].GetString()), "updated desc");
+        ASSERT_EQ(std::string(d["position"].GetString()), "data");
+    }
+
+    ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", R"({"name":"ml.clean"})", rsp), error::OK);
+    ASSERT_EQ(p.QueryStatus("ml", "clean"), OperatorStatus::kDeactivated);
+
+    ASSERT_EQ(routes["GET:/operators/query"]("/operators/query", "", rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_TRUE(d.IsObject() && d.HasMember("operators") && d["operators"].IsArray());
+        ASSERT_EQ(d["operators"].Size(), rapidjson::SizeType(1));
+    }
+
+    ASSERT_EQ(routes["POST:/operators/upsert_batch"]("/operators/upsert_batch",
+              R"({"operators":[{"catelog":"ml","name":"x"}]})", rsp), error::BAD_REQUEST);
+
+    std::puts("[PASS] T18-T23 operator catalog");
+}
+
+static void TestOperatorDbPathOption() {
+    std::puts("[TEST] T41 operator_db_path option ...");
+    const std::string dir = MakeTempDir("op_db_path");
+    const std::string db_path = dir + "/meta/shared.db";
+
+    CatalogPlugin p;
+    const std::string opt = MakeCatalogOptionWithDbPath(dir, db_path);
+    ASSERT_EQ(p.Option(opt.c_str()), 0);
+    ASSERT_EQ(p.Load(nullptr), 0);
+    ASSERT_EQ(p.Start(), 0);
+
+    std::vector<OperatorMeta> batch;
+    batch.push_back({"ml", "clean", "python", "bridge", "clean op", "data"});
+    UpsertResult upsert = p.UpsertBatch(batch);
+    ASSERT_EQ(upsert.success_count, 1);
+    ASSERT_EQ(upsert.failed_count, 0);
+    ASSERT_TRUE(std::filesystem::exists(db_path));
+    ASSERT_TRUE(!std::filesystem::exists(std::filesystem::path(dir) / "catalog" / "operator_catalog.db"));
+    ASSERT_EQ(p.Stop(), 0);
+    std::puts("[PASS] T41 operator_db_path option");
+}
+
 static void TestHttpRoutes() {
     std::puts("[TEST] T24-T35 http routes ...");
     const std::string dir = MakeTempDir("http");
     const std::string upload = MakeTempDir("http_upload");
 
     CatalogPlugin p;
-    ASSERT_EQ(p.Option(("data_dir=" + dir).c_str()), 0);
+    const std::string opt = MakeCatalogOption(dir);
+    ASSERT_EQ(p.Option(opt.c_str()), 0);
     ASSERT_EQ(p.Load(nullptr), 0);
     ASSERT_EQ(p.Start(), 0);
 
@@ -399,6 +514,8 @@ int main() {
     TestConcurrency();
     TestPersistFail();
     TestOperatorRegistry();
+    TestOperatorCatalog();
+    TestOperatorDbPathOption();
     TestHttpRoutes();
 
     std::puts("=== All CatalogPlugin tests passed ===");

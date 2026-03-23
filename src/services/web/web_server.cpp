@@ -7,15 +7,62 @@
 #include <cstdio>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <regex>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
 #include <common/error_code.h>
+#include <common/log.h>
 
 namespace flowsql {
 namespace web {
+
+namespace {
+
+int32_t ProxyPostJson(const std::string& host, int port, const std::string& path, const std::string& req, std::string* rsp) {
+    if (!rsp) return error::INTERNAL_ERROR;
+    httplib::Client client(host, port);
+    client.set_connection_timeout(5);
+    client.set_read_timeout(10);
+    auto result = client.Post(path.c_str(), req, "application/json");
+    if (!result) {
+        *rsp = R"({"error":"service unreachable"})";
+        return error::UNAVAILABLE;
+    }
+    *rsp = result->body;
+    if (result->status == 200) return error::OK;
+    if (result->status == 400) return error::BAD_REQUEST;
+    if (result->status == 404) return error::NOT_FOUND;
+    if (result->status == 409) return error::CONFLICT;
+    if (result->status == 503) return error::UNAVAILABLE;
+    return error::INTERNAL_ERROR;
+}
+
+int32_t ProxyGetJson(const std::string& host, int port, const std::string& path, std::string* rsp) {
+    if (!rsp) return error::INTERNAL_ERROR;
+    httplib::Client client(host, port);
+    client.set_connection_timeout(5);
+    client.set_read_timeout(10);
+    auto result = client.Get(path.c_str());
+    if (!result) {
+        *rsp = R"({"error":"service unreachable"})";
+        return error::UNAVAILABLE;
+    }
+    *rsp = result->body;
+    if (result->status == 200) return error::OK;
+    if (result->status == 400) return error::BAD_REQUEST;
+    if (result->status == 404) return error::NOT_FOUND;
+    if (result->status == 409) return error::CONFLICT;
+    if (result->status == 503) return error::UNAVAILABLE;
+    return error::INTERNAL_ERROR;
+}
+
+}  // namespace
 
 // 内嵌 schema SQL
 static const char* kSchemaSql = R"(
@@ -28,27 +75,6 @@ CREATE TABLE IF NOT EXISTS channels (
     status TEXT NOT NULL DEFAULT 'active',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(catelog, name)
-);
-CREATE TABLE IF NOT EXISTS operators (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    catelog TEXT NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    position TEXT NOT NULL DEFAULT 'DATA',
-    source TEXT NOT NULL DEFAULT 'builtin',
-    file_path TEXT DEFAULT '',
-    active INTEGER NOT NULL DEFAULT 1,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(catelog, name)
-);
-CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    sql_text TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    result_json TEXT DEFAULT '',
-    error_msg TEXT DEFAULT '',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    finished_at DATETIME
 );
 )";
 
@@ -70,9 +96,9 @@ void WebServer::NotifyWorkerReload() {
     client.set_read_timeout(5);
     auto result = client.Post("/operators/python/reload", "", "application/json");
     if (result && result->status == 200) {
-        printf("WebServer: Worker reload OK\n");
+        LOG_INFO("WebServer: Worker reload OK");
     } else {
-        printf("WebServer: Worker reload failed (Worker may not be running)\n");
+        LOG_WARN("WebServer: Worker reload failed (Worker may not be running)");
     }
 }
 
@@ -82,19 +108,19 @@ void WebServer::NotifySchedulerRefresh() {
     client.set_read_timeout(5);
     auto result = client.Post("/operators/python/refresh", "", "application/json");
     if (result && result->status == 200) {
-        printf("WebServer: Scheduler refresh OK\n");
+        LOG_INFO("WebServer: Scheduler refresh OK");
     } else {
-        printf("WebServer: Scheduler refresh failed\n");
+        LOG_WARN("WebServer: Scheduler refresh failed");
     }
 }
 
 int WebServer::Init(const std::string& db_path) {
     if (db_.Open(db_path) != 0) {
-        printf("WebServer::Init: failed to open database: %s\n", db_path.c_str());
+        LOG_ERROR("WebServer::Init: failed to open database: %s", db_path.c_str());
         return -1;
     }
     if (db_.InitSchema(kSchemaSql) != 0) {
-        printf("WebServer::Init: failed to init schema\n");
+        LOG_ERROR("WebServer::Init: failed to init schema");
         return -1;
     }
     std::error_code ec;
@@ -113,10 +139,11 @@ int WebServer::Init(const std::string& db_path) {
         }
     }
     if (!server_.set_mount_point("/", static_dir)) {
-        printf("WebServer: WARNING - static dir not found: %s\n", static_dir.c_str());
+        LOG_WARN("WebServer: static dir not found: %s", static_dir.c_str());
     } else {
-        printf("WebServer: serving static files from %s\n", static_dir.c_str());
+        LOG_INFO("WebServer: serving static files from %s", static_dir.c_str());
     }
+    const std::string index_html = static_dir + "/index.html";
 
     // CORS 统一处理
     server_.set_pre_routing_handler([](const httplib::Request&, httplib::Response& res) {
@@ -129,13 +156,38 @@ int WebServer::Init(const std::string& db_path) {
         res.status = 204;
     });
 
+    // SPA 历史路由回退：
+    // 非 /api 的 GET（且不是静态资源文件）返回 index.html，支持直接访问 /channels、/tasks 等路径。
+    server_.set_error_handler([index_html](const httplib::Request& req, httplib::Response& res) {
+        if (res.status != 404) return;
+        if (req.method != "GET") return;
+        if (req.path == "/api" || req.path.rfind("/api/", 0) == 0) return;
+        if (req.path.find('.') != std::string::npos) return;  // 静态资源 404 保持原样
+
+        std::ifstream ifs(index_html, std::ios::binary);
+        if (!ifs.good()) return;
+        std::string html((std::istreambuf_iterator<char>(ifs)),
+                         std::istreambuf_iterator<char>());
+        res.status = 200;
+        res.set_content(html, "text/html; charset=utf-8");
+    });
+
     // 注册 /api/* 路由（通过 IRouterHandle 机制声明，此处直接绑定到 httplib）
     server_.Get("/api/health", [this](const httplib::Request&, httplib::Response& res) {
         std::string rsp; HandleHealth("", "", rsp);
         res.set_content(rsp, "application/json");
     });
+    // list 风格新路由（保留旧路由兼容）
+    server_.Get("/api/channels/list", [this](const httplib::Request&, httplib::Response& res) {
+        std::string rsp; HandleGetChannels("", "", rsp);
+        res.set_content(rsp, "application/json");
+    });
     server_.Get("/api/channels", [this](const httplib::Request&, httplib::Response& res) {
         std::string rsp; HandleGetChannels("", "", rsp);
+        res.set_content(rsp, "application/json");
+    });
+    server_.Get("/api/operators/list", [this](const httplib::Request&, httplib::Response& res) {
+        std::string rsp; HandleGetOperators("", "", rsp);
         res.set_content(rsp, "application/json");
     });
     server_.Get("/api/operators", [this](const httplib::Request&, httplib::Response& res) {
@@ -155,17 +207,32 @@ int WebServer::Init(const std::string& db_path) {
         std::string rsp; HandleDeactivateOperator("", req.body, rsp);
         res.set_content(rsp, "application/json");
     });
-    server_.Get("/api/tasks", [this](const httplib::Request&, httplib::Response& res) {
-        std::string rsp; HandleGetTasks("", "", rsp);
+    server_.Post("/api/operators/detail", [this](const httplib::Request& req, httplib::Response& res) {
+        std::string rsp; int32_t rc = HandleGetOperatorDetail("", req.body, rsp);
+        res.status = (rc == error::OK) ? 200 : 400;
         res.set_content(rsp, "application/json");
     });
-    server_.Post("/api/tasks", [this](const httplib::Request& req, httplib::Response& res) {
+    server_.Post("/api/operators/update", [this](const httplib::Request& req, httplib::Response& res) {
+        std::string rsp; int32_t rc = HandleUpdateOperator("", req.body, rsp);
+        res.status = (rc == error::OK) ? 200 : 400;
+        res.set_content(rsp, "application/json");
+    });
+    server_.Post("/api/tasks/submit", [this](const httplib::Request& req, httplib::Response& res) {
         std::string rsp; int32_t rc = HandleCreateTask("", req.body, rsp);
         res.status = (rc == 0) ? 200 : 400;
         res.set_content(rsp, "application/json");
     });
+    server_.Post("/api/tasks/list", [this](const httplib::Request& req, httplib::Response& res) {
+        std::string rsp; HandleGetTasks("", req.body, rsp);
+        res.set_content(rsp, "application/json");
+    });
     server_.Post("/api/tasks/result", [this](const httplib::Request& req, httplib::Response& res) {
         std::string rsp; HandleGetTaskResult("", req.body, rsp);
+        res.set_content(rsp, "application/json");
+    });
+    server_.Post("/api/tasks/delete", [this](const httplib::Request& req, httplib::Response& res) {
+        std::string rsp; int32_t rc = HandleDeleteTask("", req.body, rsp);
+        res.status = (rc == error::OK) ? 200 : (rc == error::CONFLICT ? 409 : (rc == error::NOT_FOUND ? 404 : 400));
         res.set_content(rsp, "application/json");
     });
 
@@ -289,14 +356,14 @@ int WebServer::Init(const std::string& db_path) {
         res.set_content(result->body, "application/json");
     });
 
-    printf("WebServer::Init: OK (db=%s)\n", db_path.c_str());
+    LOG_INFO("WebServer::Init: OK (db=%s)", db_path.c_str());
     return 0;
 }
 
 int WebServer::Start(const std::string& host, int port) {
-    printf("WebServer: listening on %s:%d\n", host.c_str(), port);
+    LOG_INFO("WebServer: listening on %s:%d", host.c_str(), port);
     if (!server_.listen(host, port)) {
-        printf("WebServer: failed to start\n");
+        LOG_ERROR("WebServer: failed to start");
         return -1;
     }
     return 0;
@@ -313,9 +380,17 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleHealth(u, req, rsp);
         }});
+    cb({"GET",  "/api/channels/list",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleGetChannels(u, req, rsp);
+        }});
     cb({"GET",  "/api/channels",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleGetChannels(u, req, rsp);
+        }});
+    cb({"GET",  "/api/operators/list",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleGetOperators(u, req, rsp);
         }});
     cb({"GET",  "/api/operators",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
@@ -333,17 +408,29 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleDeactivateOperator(u, req, rsp);
         }});
-    cb({"GET",  "/api/tasks",
+    cb({"POST", "/api/operators/detail",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
-            return HandleGetTasks(u, req, rsp);
+            return HandleGetOperatorDetail(u, req, rsp);
         }});
-    cb({"POST", "/api/tasks",
+    cb({"POST", "/api/operators/update",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleUpdateOperator(u, req, rsp);
+        }});
+    cb({"POST", "/api/tasks/submit",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleCreateTask(u, req, rsp);
+        }});
+    cb({"POST", "/api/tasks/list",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleGetTasks(u, req, rsp);
         }});
     cb({"POST", "/api/tasks/result",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleGetTaskResult(u, req, rsp);
+        }});
+    cb({"POST", "/api/tasks/delete",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleDeleteTask(u, req, rsp);
         }});
 
     // 代理 /api/channels/database/* → Gateway /channels/database/*
@@ -444,15 +531,6 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
 
 // --- JSON 辅助 ---
 
-static std::string MakeErrorJson(const std::string& error) {
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    w.StartObject();
-    w.Key("error"); w.String(error.c_str());
-    w.EndObject();
-    return buf.GetString();
-}
-
 static std::string RowsToJson(const std::vector<Row>& rows) {
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
@@ -493,17 +571,7 @@ int32_t WebServer::HandleGetChannels(const std::string&, const std::string&, std
 }
 
 int32_t WebServer::HandleGetOperators(const std::string&, const std::string&, std::string& rsp) {
-    httplib::Client client(scheduler_host_, scheduler_port_);
-    client.set_connection_timeout(2);
-    client.set_read_timeout(5);
-    auto result = client.Post("/operators/native/query", "{}", "application/json");
-    if (result && result->status == 200) {
-        rsp = result->body;
-    } else {
-        auto rows = db_.Query("SELECT id, catelog, name, description, position, source, active, created_at FROM operators");
-        rsp = RowsToJson(rows);
-    }
-    return error::OK;
+    return ProxyGetJson(scheduler_host_, scheduler_port_, "/operators/query", &rsp);
 }
 
 int32_t WebServer::HandleUploadOperator(const std::string&, const std::string& req, std::string& rsp) {
@@ -547,17 +615,6 @@ int32_t WebServer::HandleUploadOperator(const std::string&, const std::string& r
     fwrite(content.data(), 1, content.size(), fp);
     fclose(fp);
 
-    // 解析 catelog_name.py 格式
-    std::string base = filename;
-    if (base.size() > 3 && base.substr(base.size() - 3) == ".py") base = base.substr(0, base.size() - 3);
-    size_t us = base.find('_');
-    if (us != std::string::npos) {
-        db_.ExecuteParams(
-            "INSERT OR IGNORE INTO operators (catelog, name, description, position, source, file_path, active) "
-            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            {base.substr(0, us), base.substr(us + 1), "", "DATA", "uploaded", filepath, "0"});
-    }
-
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
     w.StartObject();
@@ -570,135 +627,32 @@ int32_t WebServer::HandleUploadOperator(const std::string&, const std::string& r
 
 // POST /api/operators/activate — Body: {"name":"catelog.opname"}
 int32_t WebServer::HandleActivateOperator(const std::string&, const std::string& req, std::string& rsp) {
-    rapidjson::Document doc;
-    doc.Parse(req.c_str());
-    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("name")) {
-        rsp = R"({"error":"invalid request, expected {\"name\":\"catelog.opname\"}"})" ;
-        return error::BAD_REQUEST;
-    }
-    std::string op_key = doc["name"].GetString();
-    db_.ExecuteParams("UPDATE operators SET active=1 WHERE catelog||'.'||name=?1", {op_key});
-    NotifyWorkerReload();
-    NotifySchedulerRefresh();
-
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    w.StartObject();
-    w.Key("status"); w.String("activated");
-    w.Key("operator"); w.String(op_key.c_str());
-    w.EndObject();
-    rsp = buf.GetString();
-    return error::OK;
+    return ProxyPostJson(scheduler_host_, scheduler_port_, "/operators/activate", req, &rsp);
 }
 
 // POST /api/operators/deactivate — Body: {"name":"catelog.opname"}
 int32_t WebServer::HandleDeactivateOperator(const std::string&, const std::string& req, std::string& rsp) {
-    rapidjson::Document doc;
-    doc.Parse(req.c_str());
-    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("name")) {
-        rsp = R"({"error":"invalid request, expected {\"name\":\"catelog.opname\"}"})" ;
-        return error::BAD_REQUEST;
-    }
-    std::string op_key = doc["name"].GetString();
-    db_.ExecuteParams("UPDATE operators SET active=0 WHERE catelog||'.'||name=?1", {op_key});
-    NotifyWorkerReload();
-    NotifySchedulerRefresh();
-
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    w.StartObject();
-    w.Key("status"); w.String("deactivated");
-    w.Key("operator"); w.String(op_key.c_str());
-    w.EndObject();
-    rsp = buf.GetString();
-    return error::OK;
+    return ProxyPostJson(scheduler_host_, scheduler_port_, "/operators/deactivate", req, &rsp);
 }
 
-int32_t WebServer::HandleGetTasks(const std::string&, const std::string&, std::string& rsp) {
-    auto rows = db_.Query("SELECT id, sql_text, status, error_msg, created_at, finished_at FROM tasks ORDER BY id DESC");
-    rsp = RowsToJson(rows);
-    return error::OK;
+// POST /api/operators/detail — Body: {"name":"catelog.opname"}
+int32_t WebServer::HandleGetOperatorDetail(const std::string&, const std::string& req, std::string& rsp) {
+    return ProxyPostJson(scheduler_host_, scheduler_port_, "/operators/detail", req, &rsp);
+}
+
+// POST /api/operators/update — Body: {"name":"catelog.opname","description":"...","content":"..."}
+int32_t WebServer::HandleUpdateOperator(const std::string&, const std::string& req, std::string& rsp) {
+    return ProxyPostJson(scheduler_host_, scheduler_port_, "/operators/update", req, &rsp);
+}
+
+int32_t WebServer::HandleGetTasks(const std::string&, const std::string& req, std::string& rsp) {
+    // 透传请求体（支持分页和状态过滤参数）
+    const std::string body = req.empty() ? "{}" : req;
+    return ProxyPostJson(scheduler_host_, scheduler_port_, "/tasks/list", body, &rsp);
 }
 
 int32_t WebServer::HandleCreateTask(const std::string&, const std::string& req, std::string& rsp) {
-    rapidjson::Document doc;
-    doc.Parse(req.c_str());
-    if (doc.HasParseError() || !doc.HasMember("sql") || !doc["sql"].IsString()) {
-        rsp = R"({"error":"invalid request, expected {\"sql\":\"...\"}"})" ;
-        return error::BAD_REQUEST;
-    }
-    std::string sql_text = doc["sql"].GetString();
-
-    int64_t task_id = db_.InsertParams("INSERT INTO tasks (sql_text, status) VALUES (?1, 'running')", {sql_text});
-    if (task_id < 0) {
-        rsp = R"({"error":"failed to create task"})";
-        return error::INTERNAL_ERROR;
-    }
-
-    // 转发到 Scheduler 执行（通过 RouterAgencyPlugin 分发的新 URI）
-    httplib::Client client(scheduler_host_, scheduler_port_);
-    client.set_connection_timeout(5);
-    client.set_read_timeout(30);
-
-    rapidjson::StringBuffer fwd_buf;
-    rapidjson::Writer<rapidjson::StringBuffer> fwd_w(fwd_buf);
-    fwd_w.StartObject();
-    fwd_w.Key("sql"); fwd_w.String(sql_text.c_str());
-    fwd_w.EndObject();
-
-    auto result = client.Post("/tasks/instant/execute", fwd_buf.GetString(), "application/json");
-
-    if (!result) {
-        std::string err = "scheduler unreachable";
-        db_.ExecuteParams(
-            "UPDATE tasks SET status='failed', error_msg=?1, finished_at=CURRENT_TIMESTAMP WHERE id=?2",
-            {err, std::to_string(task_id)});
-        rsp = MakeErrorJson(err);
-        return error::UNAVAILABLE;
-    }
-
-    rapidjson::Document sched_doc;
-    sched_doc.Parse(result->body.c_str());
-
-    if (result->status != 200) {
-        std::string err = "scheduler error";
-        if (!sched_doc.HasParseError() && sched_doc.HasMember("error") && sched_doc["error"].IsString()) {
-            err = sched_doc["error"].GetString();
-        }
-        db_.ExecuteParams(
-            "UPDATE tasks SET status='failed', error_msg=?1, finished_at=CURRENT_TIMESTAMP WHERE id=?2",
-            {err, std::to_string(task_id)});
-        rsp = MakeErrorJson(err);
-        return error::INTERNAL_ERROR;
-    }
-
-    std::string result_json = "[]";
-    int row_count = 0;
-    if (!sched_doc.HasParseError()) {
-        if (sched_doc.HasMember("data")) {
-            rapidjson::StringBuffer data_buf;
-            rapidjson::Writer<rapidjson::StringBuffer> data_w(data_buf);
-            sched_doc["data"].Accept(data_w);
-            result_json = data_buf.GetString();
-        }
-        if (sched_doc.HasMember("rows") && sched_doc["rows"].IsInt()) {
-            row_count = sched_doc["rows"].GetInt();
-        }
-    }
-
-    db_.ExecuteParams(
-        "UPDATE tasks SET status='completed', result_json=?1, finished_at=CURRENT_TIMESTAMP WHERE id=?2",
-        {result_json, std::to_string(task_id)});
-
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    w.StartObject();
-    w.Key("task_id"); w.Int64(task_id);
-    w.Key("status"); w.String("completed");
-    w.Key("rows"); w.Int(row_count);
-    w.EndObject();
-    rsp = buf.GetString();
-    return error::OK;
+    return ProxyPostJson(scheduler_host_, scheduler_port_, "/tasks/submit", req, &rsp);
 }
 
 // POST /api/tasks/result — Body: {"task_id":123}
@@ -709,37 +663,63 @@ int32_t WebServer::HandleGetTaskResult(const std::string&, const std::string& re
         rsp = R"({"error":"invalid request, expected {\"task_id\":123}"})" ;
         return error::BAD_REQUEST;
     }
-    std::string task_id = std::to_string(doc["task_id"].GetInt64());
-
-    auto rows = db_.QueryParams("SELECT status, result_json, error_msg FROM tasks WHERE id=?1", {task_id});
-    if (rows.empty()) {
-        rsp = R"({"error":"task not found"})";
-        return error::NOT_FOUND;
+    std::string task_id;
+    if (doc["task_id"].IsString()) task_id = doc["task_id"].GetString();
+    else if (doc["task_id"].IsInt64()) task_id = std::to_string(doc["task_id"].GetInt64());
+    else {
+        rsp = R"({"error":"task_id must be string or int"})";
+        return error::BAD_REQUEST;
     }
 
-    auto& row = rows[0];
-    std::string status, result_json, error_msg;
-    for (auto& [k, v] : row) {
-        if (k == "status") status = v;
-        else if (k == "result_json") result_json = v;
-        else if (k == "error_msg") error_msg = v;
+    rapidjson::StringBuffer req_buf;
+    rapidjson::Writer<rapidjson::StringBuffer> req_w(req_buf);
+    req_w.StartObject();
+    req_w.Key("task_id");
+    req_w.String(task_id.c_str());
+    req_w.EndObject();
+
+    std::string detail_rsp;
+    int32_t rc = ProxyPostJson(scheduler_host_, scheduler_port_, "/tasks/detail", req_buf.GetString(), &detail_rsp);
+    if (rc != error::OK) {
+        rsp = detail_rsp;
+        return rc;
     }
 
-    if (status == "failed") {
-        rsp = MakeErrorJson(error_msg);
+    rapidjson::Document detail;
+    detail.Parse(detail_rsp.c_str());
+    if (detail.HasParseError() || !detail.IsObject() || !detail.HasMember("status") || !detail["status"].IsString()) {
+        rsp = R"({"error":"invalid task detail response"})";
         return error::INTERNAL_ERROR;
     }
-
+    std::string status = detail["status"].GetString();
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
     w.StartObject();
     w.Key("status"); w.String(status.c_str());
-    w.Key("data"); w.RawValue(result_json.empty() ? "[]" : result_json.c_str(),
-                               result_json.empty() ? 2 : result_json.size(),
-                               rapidjson::kArrayType);
+    if (status == "failed") {
+        w.Key("error");
+        if (detail.HasMember("error_message") && detail["error_message"].IsString()) w.String(detail["error_message"].GetString());
+        else w.String("execution failed");
+    } else if (status == "completed") {
+        int64_t rows = 0;
+        int64_t cols = 0;
+        if (detail.HasMember("result_row_count") && detail["result_row_count"].IsInt64()) rows = detail["result_row_count"].GetInt64();
+        if (detail.HasMember("result_col_count") && detail["result_col_count"].IsInt64()) cols = detail["result_col_count"].GetInt64();
+        w.Key("rows");
+        w.Int64(rows);
+        w.Key("cols");
+        w.Int64(cols);
+        w.Key("data");
+        w.StartArray();
+        w.EndArray();
+    }
     w.EndObject();
     rsp = buf.GetString();
     return error::OK;
+}
+
+int32_t WebServer::HandleDeleteTask(const std::string&, const std::string& req, std::string& rsp) {
+    return ProxyPostJson(scheduler_host_, scheduler_port_, "/tasks/delete", req, &rsp);
 }
 
 }  // namespace web

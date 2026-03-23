@@ -1,12 +1,17 @@
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <arrow/api.h>
+#include <httplib.h>
 
 #include "services/bridge/arrow_ipc_serializer.h"
+#include "services/bridge/bridge_plugin.h"
+#include "framework/interfaces/ioperator_catalog.h"
 #include "framework/core/dataframe.h"
 
 using namespace flowsql;
@@ -217,6 +222,135 @@ int test_error_handling() {
     return 0;
 }
 
+static bool GuidEqual(const Guid& a, const Guid& b) {
+    return std::memcmp(&a, &b, sizeof(Guid)) == 0;
+}
+
+class MockOperatorCatalog : public IOperatorCatalog {
+ public:
+    OperatorStatus QueryStatus(const std::string&, const std::string&) override {
+        return OperatorStatus::kNotFound;
+    }
+
+    UpsertResult UpsertBatch(const std::vector<flowsql::OperatorMeta>& operators) override {
+        UpsertResult result;
+        batches.push_back(operators);
+        result.success_count = static_cast<int32_t>(operators.size());
+        return result;
+    }
+
+    std::vector<std::vector<flowsql::OperatorMeta>> batches;
+};
+
+class MockQuerier : public IQuerier {
+ public:
+    explicit MockQuerier(MockOperatorCatalog* catalog) : catalog_(catalog) {}
+
+    int Traverse(const Guid&, fntraverse) override { return 0; }
+
+    void* First(const Guid& iid) override {
+        if (GuidEqual(iid, IID_OPERATOR_CATALOG)) return catalog_;
+        return nullptr;
+    }
+
+ private:
+    MockOperatorCatalog* catalog_;
+};
+
+// ============================================================
+// 测试 5: Bridge Start/Refresh 同步 Catalog（不走 HTTP）
+// ============================================================
+int test_bridge_sync_catalog() {
+    printf("\n=== Test: Bridge sync operators to catalog ===\n");
+
+    httplib::Server server;
+    std::string payload = R"([
+        {"catelog":"ml","name":"clean","description":"clean rows"},
+        {"catelog":"ml","name":"enrich","description":"enrich rows"}
+    ])";
+    server.Get("/operators/python/list", [&](const httplib::Request&, httplib::Response& res) {
+        res.set_content(payload, "application/json");
+    });
+
+    int worker_port = server.bind_to_any_port("127.0.0.1");
+    if (worker_port <= 0) {
+        printf("FAIL: failed to bind mock worker\n");
+        return -1;
+    }
+    std::thread server_thread([&]() { server.listen_after_bind(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    MockOperatorCatalog mock_catalog;
+    MockQuerier querier(&mock_catalog);
+    BridgePlugin plugin;
+    std::string opt = "worker_host=127.0.0.1;worker_port=" + std::to_string(worker_port);
+    if (plugin.Option(opt.c_str()) != 0) {
+        printf("FAIL: BridgePlugin::Option failed\n");
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+    if (plugin.Load(&querier) != 0) {
+        printf("FAIL: BridgePlugin::Load failed\n");
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+    if (plugin.Start() != 0) {
+        printf("FAIL: BridgePlugin::Start failed\n");
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+
+    if (mock_catalog.batches.size() != 1) {
+        printf("FAIL: expected 1 upsert batch at start, got %zu\n", mock_catalog.batches.size());
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+    if (mock_catalog.batches[0].size() != 2) {
+        printf("FAIL: expected 2 operators in first batch, got %zu\n", mock_catalog.batches[0].size());
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+    if (mock_catalog.batches[0][0].source != "bridge" || mock_catalog.batches[0][0].type != "python") {
+        printf("FAIL: expected source=bridge,type=python, got source=%s type=%s\n",
+               mock_catalog.batches[0][0].source.c_str(), mock_catalog.batches[0][0].type.c_str());
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+
+    payload = R"([{"catelog":"ml","name":"clean","description":"clean rows v2"}])";
+    if (plugin.Refresh() != 0) {
+        printf("FAIL: BridgePlugin::Refresh failed\n");
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+    if (mock_catalog.batches.size() != 2) {
+        printf("FAIL: expected 2 upsert batches after refresh, got %zu\n", mock_catalog.batches.size());
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+    if (mock_catalog.batches[1].size() != 1) {
+        printf("FAIL: expected 1 operator in refresh batch, got %zu\n", mock_catalog.batches[1].size());
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+
+    plugin.Stop();
+    plugin.Unload();
+    server.stop();
+    server_thread.join();
+    printf("PASS: Bridge synced operators via IOperatorCatalog\n");
+    return 0;
+}
+
 // ============================================================
 int main() {
     printf("========================================\n");
@@ -228,6 +362,7 @@ int main() {
     if (test_dataframe_ipc_roundtrip() != 0) failures++;
     if (test_empty_batch() != 0) failures++;
     if (test_error_handling() != 0) failures++;
+    if (test_bridge_sync_catalog() != 0) failures++;
 
     printf("\n========================================\n");
     if (failures == 0) {

@@ -66,6 +66,10 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_database ${CMAKE_BINARY_DIR}/tes
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/catalog ${CMAKE_BINARY_DIR}/catalog)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_builtin ${CMAKE_BINARY_DIR}/test_builtin)
 
+# Stage 9: Task 异步任务服务
+add_subdirectory(${CMAKE_SOURCE_DIR}/services/task ${CMAKE_BINARY_DIR}/task)
+add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_task ${CMAKE_BINARY_DIR}/test_task)
+
 # Stage 3: Gateway 服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/gateway ${CMAKE_BINARY_DIR}/gateway)
 

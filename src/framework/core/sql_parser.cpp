@@ -263,36 +263,23 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
         stmt.sql_part = sql.substr(0, end);
     }
 
-    // [USING <catelog.name>]
-    const char* saved_pos = pos_;
-    if (MatchKeyword("USING")) {
-        std::string op_full = ReadIdentifier();
-        auto dot = op_full.find('.');
-        if (dot == std::string::npos || dot == 0 || dot == op_full.size() - 1) {
-            stmt.error = "expected catelog.name format after USING, got: " + op_full;
-            return stmt;
-        }
-        stmt.op_catelog = op_full.substr(0, dot);
-        stmt.op_name = op_full.substr(dot + 1);
-    } else {
-        pos_ = saved_pos;
-    }
-
-    // [WITH key=val, ...]
-    if (MatchKeyword("WITH")) {
+    auto parse_with_params = [this](std::unordered_map<std::string, std::string>* out, std::string* err) -> bool {
+        if (!out || !err) return false;
+        out->clear();
+        if (!MatchKeyword("WITH")) return true;
         while (true) {
             std::string key = ReadIdentifier();
             if (key.empty()) break;
 
             SkipWhitespace();
             if (pos_ >= end_ || *pos_ != '=') {
-                stmt.error = "expected = after WITH key: " + key;
-                return stmt;
+                *err = "expected = after WITH key: " + key;
+                return false;
             }
             ++pos_;
 
             std::string val = ReadValue();
-            stmt.with_params[key] = val;
+            (*out)[key] = val;
 
             SkipWhitespace();
             if (pos_ < end_ && *pos_ == ',') {
@@ -300,6 +287,59 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
             } else {
                 break;
             }
+        }
+        return true;
+    };
+
+    // [USING <catelog.name> [WITH ...] (THEN <catelog.name> [WITH ...])*]
+    const char* saved_pos = pos_;
+    if (MatchKeyword("USING")) {
+        while (true) {
+            std::string op_full = ReadIdentifier();
+            auto dot = op_full.find('.');
+            if (dot == std::string::npos || dot == 0 || dot == op_full.size() - 1) {
+                stmt.error = "expected catelog.name format after USING/THEN, got: " + op_full;
+                return stmt;
+            }
+            OperatorRef op_ref;
+            op_ref.catelog = op_full.substr(0, dot);
+            op_ref.name = op_full.substr(dot + 1);
+            stmt.operators.push_back(std::move(op_ref));
+
+            std::unordered_map<std::string, std::string> op_params;
+            if (!parse_with_params(&op_params, &stmt.error)) {
+                return stmt;
+            }
+            stmt.operator_with_params.push_back(std::move(op_params));
+
+            const char* then_pos = pos_;
+            if (!MatchKeyword("THEN")) {
+                pos_ = then_pos;
+                break;
+            }
+        }
+
+        if (!stmt.operators.empty()) {
+            stmt.op_catelog = stmt.operators[0].catelog;
+            stmt.op_name = stmt.operators[0].name;
+            if (!stmt.operator_with_params.empty()) stmt.with_params = stmt.operator_with_params[0];
+        }
+    } else {
+        pos_ = saved_pos;
+    }
+
+    if (!stmt.operators.empty()) {
+        // 每个算子必须在自身后跟 WITH（可选），不支持链路级全局 WITH。
+        const char* with_pos = pos_;
+        if (MatchKeyword("WITH")) {
+            stmt.error = "global WITH is not supported; use WITH after each operator";
+            return stmt;
+        }
+        pos_ = with_pos;
+    } else {
+        // 兼容无算子场景下的历史 WITH 语法。
+        if (!parse_with_params(&stmt.with_params, &stmt.error)) {
+            return stmt;
         }
     }
 

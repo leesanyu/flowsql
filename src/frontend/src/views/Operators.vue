@@ -31,36 +31,52 @@
         <el-table-column prop="catelog" label="类别" width="150" />
         <el-table-column prop="position" label="位置" width="150">
           <template #default="scope">
-            <el-tag :type="scope.row.position === 'builtin' ? 'info' : 'warning'">
-              {{ scope.row.position }}
+            <el-tag :type="scope.row.position === 'STORAGE' ? 'warning' : 'info'">
+              {{ formatPosition(scope.row.position) }}
             </el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="active" label="状态" width="100">
           <template #default="scope">
             <el-tag :type="scope.row.active ? 'success' : 'info'">
-              {{ scope.row.active ? '活跃' : '未激活' }}
+              {{ scope.row.active ? '激活' : '未激活' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200">
+        <el-table-column label="操作" width="260">
           <template #default="scope">
-            <el-button
-              v-if="!scope.row.active"
-              type="success"
-              size="small"
-              @click="activateOperator(scope.row.catelog + '.' + scope.row.name)"
-            >
-              激活
-            </el-button>
-            <el-button
-              v-else
-              type="warning"
-              size="small"
-              @click="deactivateOperator(scope.row.catelog + '.' + scope.row.name)"
-            >
-              停用
-            </el-button>
+            <template v-if="scope.row.active">
+              <el-button
+                type="warning"
+                size="small"
+                @click="deactivateOperator(scope.row.catelog + '.' + scope.row.name)"
+              >
+                去激活
+              </el-button>
+              <el-button
+                type="primary"
+                size="small"
+                @click="viewOperator(scope.row)"
+              >
+                查看
+              </el-button>
+            </template>
+            <template v-else>
+              <el-button
+                type="success"
+                size="small"
+                @click="activateOperator(scope.row.catelog + '.' + scope.row.name)"
+              >
+                激活
+              </el-button>
+              <el-button
+                type="primary"
+                size="small"
+                @click="editOperator(scope.row)"
+              >
+                编辑
+              </el-button>
+            </template>
           </template>
         </el-table-column>
       </el-table>
@@ -142,6 +158,50 @@
         </span>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="detailDialogVisible"
+      :title="detailMode === 'view' ? '查看算子' : '编辑算子'"
+      width="900px"
+      :close-on-click-modal="false"
+    >
+      <el-form :model="detailForm" label-width="100px">
+        <el-form-item label="算子名称">
+          <el-input v-model="detailForm.fullName" disabled />
+        </el-form-item>
+        <el-form-item label="算子描述">
+          <el-input v-model="detailForm.description" :disabled="detailMode === 'view'" />
+        </el-form-item>
+        <el-form-item label="位置">
+          <el-input :model-value="formatPosition(detailForm.position)" disabled />
+        </el-form-item>
+        <el-form-item label="来源">
+          <el-input v-model="detailForm.source" disabled />
+        </el-form-item>
+        <el-form-item label="Python 代码">
+          <el-input
+            v-model="detailForm.code"
+            type="textarea"
+            :rows="20"
+            :disabled="detailMode === 'view'"
+            class="code-textarea"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="detailDialogVisible = false">关闭</el-button>
+          <el-button
+            v-if="detailMode === 'edit'"
+            type="primary"
+            :loading="uploading"
+            @click="saveOperatorEdit"
+          >
+            保存
+          </el-button>
+        </span>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -155,6 +215,8 @@ const operators = ref([])
 const loading = ref(false)
 const fileInputRef = ref(null)
 const createDialogVisible = ref(false)
+const detailDialogVisible = ref(false)
+const detailMode = ref('view')
 const uploading = ref(false)
 
 const operatorForm = ref({
@@ -166,16 +228,30 @@ const operatorForm = ref({
   code: ''
 })
 
+const detailForm = ref({
+  fullName: '',
+  catelog: '',
+  name: '',
+  description: '',
+  position: 'DATA',
+  source: '',
+  editable: false,
+  code: ''
+})
+
 const loadOperators = async () => {
   loading.value = true
   try {
     const res = await api.getOperators()
-    operators.value = res.data.map(op => ({
+    const list = Array.isArray(res.data)
+      ? res.data
+      : (Array.isArray(res.data?.operators) ? res.data.operators : [])
+    operators.value = list.map(op => ({
       ...op,
       active: op.active === '1' || op.active === 1
     }))
   } catch (error) {
-    ElMessage.error('加载算子列表失败: ' + error.message)
+    ElMessage.error('加载算子列表失败: ' + (error.response?.data?.error || error.message))
   } finally {
     loading.value = false
   }
@@ -187,17 +263,73 @@ const activateOperator = async (name) => {
     ElMessage.success(`算子 ${name} 已激活`)
     await loadOperators()
   } catch (error) {
-    ElMessage.error('激活失败: ' + error.message)
+    ElMessage.error('激活失败: ' + (error.response?.data?.error || error.message))
   }
 }
 
 const deactivateOperator = async (name) => {
   try {
     await api.deactivateOperator(name)
-    ElMessage.success(`算子 ${name} 已停用`)
+    ElMessage.success(`算子 ${name} 已去激活`)
     await loadOperators()
   } catch (error) {
-    ElMessage.error('停用失败: ' + error.message)
+    ElMessage.error('去激活失败: ' + (error.response?.data?.error || error.message))
+  }
+}
+
+const formatPosition = (position) => {
+  if (position === 'STORAGE') return '存储算子'
+  return '数据算子'
+}
+
+const openDetail = async (fullName, mode) => {
+  try {
+    const res = await api.getOperatorDetail(fullName)
+    const d = res.data || {}
+    detailForm.value = {
+      fullName: `${d.catelog}.${d.name}`,
+      catelog: d.catelog || '',
+      name: d.name || '',
+      description: d.description || '',
+      position: d.position || 'DATA',
+      source: d.source || '',
+      editable: !!d.editable,
+      code: d.content || ''
+    }
+    if (mode === 'edit' && !detailForm.value.editable) {
+      ElMessage.warning('该算子不支持编辑（通常是内置算子）')
+      return
+    }
+    detailMode.value = mode
+    detailDialogVisible.value = true
+  } catch (error) {
+    ElMessage.error('获取算子详情失败: ' + (error.response?.data?.error || error.message))
+  }
+}
+
+const viewOperator = async (row) => {
+  await openDetail(`${row.catelog}.${row.name}`, 'view')
+}
+
+const editOperator = async (row) => {
+  await openDetail(`${row.catelog}.${row.name}`, 'edit')
+}
+
+const saveOperatorEdit = async () => {
+  if (!detailForm.value.fullName) return
+  uploading.value = true
+  try {
+    await api.updateOperator(detailForm.value.fullName, {
+      description: detailForm.value.description,
+      content: detailForm.value.code
+    })
+    ElMessage.success('算子更新成功')
+    detailDialogVisible.value = false
+    await loadOperators()
+  } catch (error) {
+    ElMessage.error('更新失败: ' + (error.response?.data?.error || error.message))
+  } finally {
+    uploading.value = false
   }
 }
 

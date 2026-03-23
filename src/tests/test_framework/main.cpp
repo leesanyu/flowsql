@@ -324,6 +324,30 @@ void test_sql_parser() {
         assert(stmt.dest == "result");
     }
 
+    // Test THEN pipeline with per-operator WITH
+    {
+        auto stmt = parser.Parse(
+            "SELECT * FROM source USING builtin.op1 WITH p1=1,p2=2 THEN ml.op2 WITH p3=3 INTO result");
+        assert(stmt.error.empty());
+        assert(stmt.operators.size() == 2);
+        assert(stmt.operator_with_params.size() == 2);
+        assert(stmt.operators[0].catelog == "builtin");
+        assert(stmt.operators[0].name == "op1");
+        assert(stmt.operator_with_params[0]["p1"] == "1");
+        assert(stmt.operator_with_params[0]["p2"] == "2");
+        assert(stmt.operators[1].catelog == "ml");
+        assert(stmt.operators[1].name == "op2");
+        assert(stmt.operator_with_params[1]["p3"] == "3");
+    }
+
+    // Test pipeline rejects global WITH after USING/THEN chain
+    {
+        auto stmt = parser.Parse("SELECT * FROM source USING builtin.op1 THEN builtin.op2 WITH p=1 INTO result");
+        assert(stmt.error.empty());
+        auto bad = parser.Parse("SELECT * FROM source USING builtin.op1 THEN builtin.op2 WITH p=1 WITH q=2 INTO result");
+        assert(!bad.error.empty());
+    }
+
     printf("[PASS] SQL parser (USING optional + columns)\n");
 }
 

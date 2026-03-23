@@ -11,6 +11,9 @@
 #include <httplib.h>
 #include <rapidjson/document.h>
 
+#include <common/log.h>
+#include "framework/interfaces/ioperator_catalog.h"
+
 namespace flowsql {
 namespace bridge {
 
@@ -32,7 +35,7 @@ static void CleanupShmFiles(const char* dir) {
     closedir(d);
 
     if (count > 0) {
-        printf("BridgePlugin: cleaned up %d stale shm files in %s\n", count, dir);
+        LOG_INFO("BridgePlugin: cleaned up %d stale shm files in %s", count, dir);
     }
 }
 
@@ -92,7 +95,7 @@ int BridgePlugin::Load(IQuerier* querier) {
                                 host_ = addr.substr(0, c);
                                 port_ = std::stoi(addr.substr(c + 1));
                             }
-                            printf("BridgePlugin::Load: discovered PyWorker at %s:%d via Gateway\n",
+                            LOG_INFO("BridgePlugin::Load: discovered PyWorker at %s:%d via Gateway",
                                    host_.c_str(), port_);
                             goto found;
                         }
@@ -103,7 +106,7 @@ int BridgePlugin::Load(IQuerier* querier) {
         }
     }
 found:
-    printf("BridgePlugin::Load: worker=%s:%d, gateway=%s\n", host_.c_str(), port_,
+    LOG_INFO("BridgePlugin::Load: worker=%s:%d, gateway=%s", host_.c_str(), port_,
            gateway_addr_.empty() ? "(none)" : gateway_addr_.c_str());
     return 0;
 }
@@ -118,14 +121,14 @@ int BridgePlugin::Start() {
 
     for (int retry = 0; retry < 30; ++retry) {
         if (DiscoverOperators() == 0) {
-            printf("BridgePlugin::Start: %zu Python operators registered\n", registered_operators_.size());
+            LOG_INFO("BridgePlugin::Start: %zu Python operators registered", registered_operators_.size());
             return 0;
         }
-        printf("BridgePlugin::Start: waiting for Python Worker... (%d/30)\n", retry + 1);
+        LOG_INFO("BridgePlugin::Start: waiting for Python Worker... (%d/30)", retry + 1);
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 
-    printf("BridgePlugin::Start: Python Worker not available, continuing without Python operators\n");
+    LOG_WARN("BridgePlugin::Start: Python Worker not available, continuing without Python operators");
     return 0;
 }
 
@@ -147,7 +150,7 @@ int BridgePlugin::DiscoverOperators() {
     rapidjson::Document doc;
     doc.Parse(res->body.c_str());
     if (doc.HasParseError() || !doc.IsArray()) {
-        printf("BridgePlugin: invalid operators response\n");
+        LOG_ERROR("BridgePlugin: invalid operators response");
         return -1;
     }
 
@@ -164,9 +167,42 @@ int BridgePlugin::DiscoverOperators() {
 
         // 只存内部，不注册到 PluginLoader
         registered_operators_.push_back(bridge);
-        printf("BridgePlugin: Discovered operator [%s]\n", key.c_str());
+        LOG_INFO("BridgePlugin: Discovered operator [%s]", key.c_str());
     }
 
+    return SyncOperatorsToCatalog();
+}
+
+int BridgePlugin::SyncOperatorsToCatalog() {
+    if (querier_ == nullptr) return 0;
+
+    auto* catalog = static_cast<IOperatorCatalog*>(querier_->First(IID_OPERATOR_CATALOG));
+    if (catalog == nullptr) {
+        LOG_WARN("BridgePlugin: IOperatorCatalog not found, skip sync");
+        return 0;
+    }
+
+    std::vector<flowsql::OperatorMeta> ops;
+    ops.reserve(registered_operators_.size());
+    for (const auto& op : registered_operators_) {
+        if (!op) continue;
+        flowsql::OperatorMeta meta;
+        meta.catelog = op->Catelog();
+        meta.name = op->Name();
+        meta.type = "python";
+        meta.source = "bridge";
+        meta.description = op->Description();
+        meta.position = op->Position() == OperatorPosition::STORAGE ? "storage" : "data";
+        ops.push_back(std::move(meta));
+    }
+
+    UpsertResult result = catalog->UpsertBatch(ops);
+    if (result.failed_count > 0) {
+        LOG_ERROR("BridgePlugin: UpsertBatch failed, success=%d failed=%d err=%s",
+               result.success_count, result.failed_count, result.error_message.c_str());
+        return -1;
+    }
+    LOG_INFO("BridgePlugin: synced %d operators to Catalog", result.success_count);
     return 0;
 }
 

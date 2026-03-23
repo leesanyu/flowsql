@@ -25,10 +25,12 @@ services:
     plugins:
       - name: libflowsql_router.so
         option: "host=127.0.0.1;port=18803;gateway=127.0.0.1:18800"
+      - name: libflowsql_task.so
+        option: "db_path=./meta/flowsql_meta.db"
       - libflowsql_scheduler.so
       - libflowsql_bridge.so
       - name: libflowsql_catalog.so
-        option: "data_dir=./dataframes"
+        option: "data_dir=./dataframes;operator_db_path=./meta/flowsql_meta.db"
       - name: libflowsql_database.so
         option: "config_file=config/flowsql.yml"
 

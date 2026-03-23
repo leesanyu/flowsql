@@ -45,7 +45,7 @@
         </div>
       </template>
       <el-table :data="recentTasks" style="width: 100%">
-        <el-table-column prop="id" label="ID" width="80" />
+        <el-table-column prop="id" label="任务ID" min-width="260" show-overflow-tooltip />
         <el-table-column prop="sql_text" label="SQL" show-overflow-tooltip />
         <el-table-column prop="status" label="状态" width="100">
           <template #default="scope">
@@ -86,9 +86,9 @@ const loadData = async () => {
       api.getTasks()
     ])
 
-    const channels = channelsRes.data
-    const operators = operatorsRes.data
-    const tasks = tasksRes.data
+    const channels = Array.isArray(channelsRes.data) ? channelsRes.data : []
+    const operators = Array.isArray(operatorsRes.data) ? operatorsRes.data : []
+    const tasks = Array.isArray(tasksRes.data) ? tasksRes.data : []
 
     stats.value.channels = channels.length
     stats.value.totalOperators = operators.length

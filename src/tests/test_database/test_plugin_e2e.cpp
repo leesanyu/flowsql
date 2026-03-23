@@ -11,14 +11,33 @@
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
+#include <rapidjson/document.h>
 
+#include <common/error_code.h>
 #include <common/loader.hpp>
 #include <framework/core/dataframe.h>
 #include <framework/core/sql_parser.h>
 #include <framework/interfaces/idatabase_channel.h>
 #include <framework/interfaces/idatabase_factory.h>
+#include <framework/interfaces/irouter_handle.h>
 
 using namespace flowsql;
+
+static fnRouterHandler FindRouteHandler(PluginLoader* loader, const char* method, const char* uri) {
+    fnRouterHandler h;
+    loader->Traverse(IID_ROUTER_HANDLE, [&](void* p) -> int {
+        auto* rh = static_cast<IRouterHandle*>(p);
+        rh->EnumRoutes([&](const RouteItem& item) {
+            if (item.method == method && item.uri == uri) h = item.handler;
+        });
+        return h ? -1 : 0;
+    });
+    return h;
+}
+
+static fnRouterHandler FindDbRoute(PluginLoader* loader, const char* path) {
+    return FindRouteHandler(loader, "POST", path);
+}
 
 // ============================================================
 // 全局：本次测试运行的唯一后缀（避免重跑时表名冲突）
@@ -843,9 +862,9 @@ static std::string g_ch_suffix;
 static std::string MakeClickHouseOption(const std::string& name) {
     const char* host = getenv("CH_HOST")     ? getenv("CH_HOST")     : "127.0.0.1";
     const char* port = getenv("CH_PORT")     ? getenv("CH_PORT")     : "8123";
-    const char* user = getenv("CH_USER")     ? getenv("CH_USER")     : "default";
-    const char* pass = getenv("CH_PASSWORD") ? getenv("CH_PASSWORD") : "";
-    const char* db   = getenv("CH_DATABASE") ? getenv("CH_DATABASE") : "default";
+    const char* user = getenv("CH_USER")     ? getenv("CH_USER")     : "flowsql_user";
+    const char* pass = getenv("CH_PASSWORD") ? getenv("CH_PASSWORD") : "flowSQL@user";
+    const char* db   = getenv("CH_DATABASE") ? getenv("CH_DATABASE") : "flowsql_db";
     return "type=clickhouse;name=" + name +
            ";host=" + host + ";port=" + port +
            ";user=" + user + ";password=" + pass + ";database=" + db;
@@ -1211,6 +1230,180 @@ void test_concurrent_arrow_writers(IDatabaseFactory* factory) {
 }
 
 // ============================================================
+// Sprint8 T41-T46: 数据库浏览路由回归
+// ============================================================
+void test_t41_query_sqlite_channel(PluginLoader* loader, IDatabaseFactory* factory) {
+    printf("[TEST] T41: /channels/database/query returns sqlite channel...\n");
+    const std::string sqlite_name = "t41sqlite_" + g_suffix;
+    const std::string table = "t41_tbl_" + g_suffix;
+    std::string sqlite_opt = "type=sqlite;name=" + sqlite_name + ";path=:memory:";
+    loader->Traverse(IID_PLUGIN, [&sqlite_opt](void* p) -> int {
+        auto* plugin = static_cast<IPlugin*>(p);
+        plugin->Option(sqlite_opt.c_str());
+        return 0;
+    });
+
+    auto* sqlite_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("sqlite", sqlite_name.c_str()));
+    assert(sqlite_ch != nullptr);
+    assert(sqlite_ch->ExecuteSql(("CREATE TABLE " + table + " (id INTEGER, name TEXT)").c_str()) >= 0);
+    assert(sqlite_ch->ExecuteSql(("INSERT INTO " + table + " VALUES (1, 'a'), (2, 'b')").c_str()) >= 0);
+
+    auto query = FindDbRoute(loader, "/channels/database/query");
+    assert(query != nullptr);
+    std::string rsp;
+    assert(query("/channels/database/query", "{}", rsp) == error::OK);
+
+    rapidjson::Document d;
+    d.Parse(rsp.c_str());
+    assert(!d.HasParseError() && d.IsArray());
+    bool found_sqlite = false;
+    for (auto& it : d.GetArray()) {
+        if (!it.IsObject()) continue;
+        if (it.HasMember("type") && it["type"].IsString() &&
+            it.HasMember("name") && it["name"].IsString() &&
+            std::string(it["type"].GetString()) == "sqlite" &&
+            std::string(it["name"].GetString()) == sqlite_name) {
+            found_sqlite = true;
+            break;
+        }
+    }
+    assert(found_sqlite);
+    printf("[PASS] T41: sqlite channel listed\n");
+}
+
+void test_t42_query_mysql_channel(PluginLoader* loader) {
+    printf("[TEST] T42: /channels/database/query returns mysql channel...\n");
+    auto query = FindDbRoute(loader, "/channels/database/query");
+    assert(query != nullptr);
+    std::string rsp;
+    assert(query("/channels/database/query", R"({"type":"mysql","name":"testdb"})", rsp) == error::OK);
+
+    rapidjson::Document d;
+    d.Parse(rsp.c_str());
+    assert(!d.HasParseError() && d.IsArray());
+    bool found_mysql = false;
+    for (auto& it : d.GetArray()) {
+        if (!it.IsObject()) continue;
+        if (it.HasMember("type") && it["type"].IsString() &&
+            it.HasMember("name") && it["name"].IsString() &&
+            std::string(it["type"].GetString()) == "mysql" &&
+            std::string(it["name"].GetString()) == "testdb") {
+            found_mysql = true;
+            break;
+        }
+    }
+    assert(found_mysql);
+    printf("[PASS] T42: mysql channel listed\n");
+}
+
+void test_t44_tables_mysql(PluginLoader* loader) {
+    printf("[TEST] T44: /channels/database/tables returns table list (mysql)...\n");
+    auto tables = FindDbRoute(loader, "/channels/database/tables");
+    assert(tables != nullptr);
+    std::string rsp;
+    assert(tables("/channels/database/tables", R"({"type":"mysql","name":"testdb"})", rsp) == error::OK);
+
+    rapidjson::Document d;
+    d.Parse(rsp.c_str());
+    assert(!d.HasParseError() && d.IsObject());
+    assert(d.HasMember("tables") && d["tables"].IsArray());
+    bool found = false;
+    for (auto& t : d["tables"].GetArray()) {
+        if (t.IsString() && std::string(t.GetString()) == TABLE_USERS) {
+            found = true;
+            break;
+        }
+    }
+    assert(found);
+    printf("[PASS] T44: mysql tables contains %s\n", TABLE_USERS.c_str());
+}
+
+void test_t45_describe_mysql(PluginLoader* loader) {
+    printf("[TEST] T45: /channels/database/describe returns columns (mysql)...\n");
+    auto describe = FindDbRoute(loader, "/channels/database/describe");
+    assert(describe != nullptr);
+    std::string req = std::string("{\"type\":\"mysql\",\"name\":\"testdb\",\"table\":\"") + TABLE_USERS + "\"}";
+    std::string rsp;
+    assert(describe("/channels/database/describe", req, rsp) == error::OK);
+
+    rapidjson::Document d;
+    d.Parse(rsp.c_str());
+    assert(!d.HasParseError() && d.IsObject());
+    assert(d.HasMember("rows") && d["rows"].IsInt64());
+    assert(d["rows"].GetInt64() > 0);
+    assert(d.HasMember("data") && d["data"].IsArray());
+    assert(d["data"].Size() > 0);
+    assert(d["data"][0].IsArray());
+    assert(d["data"][0].Size() > 0);
+    assert(d["data"][0][0].IsString());
+    assert(std::string(d["data"][0][0].GetString()) == "id");
+    printf("[PASS] T45: mysql describe schema returned\n");
+}
+
+void test_t43_query_clickhouse_channel(PluginLoader* loader) {
+    printf("[TEST] T43: /channels/database/query returns clickhouse channel...\n");
+    auto query = FindDbRoute(loader, "/channels/database/query");
+    assert(query != nullptr);
+    std::string rsp;
+    assert(query("/channels/database/query", R"({"type":"clickhouse","name":"ch1"})", rsp) == error::OK);
+
+    rapidjson::Document d;
+    d.Parse(rsp.c_str());
+    assert(!d.HasParseError() && d.IsArray());
+    bool found = false;
+    for (auto& it : d.GetArray()) {
+        if (!it.IsObject()) continue;
+        if (it.HasMember("type") && it["type"].IsString() &&
+            it.HasMember("name") && it["name"].IsString() &&
+            std::string(it["type"].GetString()) == "clickhouse" &&
+            std::string(it["name"].GetString()) == "ch1") {
+            found = true;
+            break;
+        }
+    }
+    assert(found);
+    printf("[PASS] T43: clickhouse channel listed\n");
+}
+
+void test_t46_describe_clickhouse_format(PluginLoader* loader, IDatabaseFactory* factory) {
+    printf("[TEST] T46: ClickHouse describe response format compatibility...\n");
+    auto* ch = dynamic_cast<IDatabaseChannel*>(factory->Get("clickhouse", "ch1"));
+    assert(ch != nullptr);
+    const std::string table = "t46_desc_" + g_ch_suffix;
+
+    {
+        std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
+        ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
+        ch->ExecuteQueryArrow(
+            ("CREATE TABLE " + table + " (id Int32, name String)"
+             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy);
+    }
+
+    auto describe = FindDbRoute(loader, "/channels/database/describe");
+    assert(describe != nullptr);
+    std::string req = std::string("{\"type\":\"clickhouse\",\"name\":\"ch1\",\"table\":\"") + table + "\"}";
+    std::string rsp;
+    assert(describe("/channels/database/describe", req, rsp) == error::OK);
+
+    rapidjson::Document d;
+    d.Parse(rsp.c_str());
+    assert(!d.HasParseError() && d.IsObject());
+    assert(d.HasMember("columns") && d["columns"].IsArray());
+    assert(d.HasMember("types") && d["types"].IsArray());
+    assert(d.HasMember("data") && d["data"].IsArray());
+    assert(d.HasMember("rows") && d["rows"].IsInt64());
+    assert(d["rows"].GetInt64() >= 2);
+    assert(d["data"].Size() > 0);
+    assert(d["data"][0].IsArray() && d["data"][0].Size() >= 2);
+    assert(d["data"][0][0].IsString());
+    assert(std::string(d["data"][0][0].GetString()) == "id");
+
+    std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
+    ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
+    printf("[PASS] T46: clickhouse describe format compatible\n");
+}
+
+// ============================================================
 // main
 // ============================================================
 int main(int argc, char* argv[]) {
@@ -1276,6 +1469,10 @@ int main(int argc, char* argv[]) {
     test_concurrent_readers();
     test_concurrent_writers();
     test_mysql_arrow_interface_unsupported(factory);
+    test_t41_query_sqlite_channel(loader, factory);
+    test_t42_query_mysql_channel(loader);
+    test_t44_tables_mysql(loader);
+    test_t45_describe_mysql(loader);
 
     // 清理 MySQL 测试产生的所有临时表
     {
@@ -1360,6 +1557,8 @@ int main(int argc, char* argv[]) {
     }
 
     test_clickhouse_connect(ch_factory);
+    test_t43_query_clickhouse_channel(loader);
+    test_t46_describe_clickhouse_format(loader, ch_factory);
     test_clickhouse_create_arrow_reader(ch_factory);
     test_clickhouse_create_arrow_writer(ch_factory);
     test_clickhouse_arrow_type_matrix(ch_factory);

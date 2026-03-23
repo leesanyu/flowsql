@@ -24,8 +24,12 @@ class PassthroughOperator : public IOperator {
     // 核心处理：从 in 通道读取 DataFrame，原样写入 out 通道
     int Work(IChannel* in, IChannel* out) override;
 
-    // 配置（无参数）
-    int Configure(const char*, const char*) override { return 0; }
+    // 可选配置：WITH delay_ms=<N>，用于测试长时运行场景
+    int Configure(const char* key, const char* value) override;
+
+ private:
+    int delay_ms_ = 0;
+    bool force_fail_ = false;
 };
 
 }  // namespace flowsql

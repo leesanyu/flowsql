@@ -36,6 +36,7 @@ class BridgePlugin : public IPlugin, public IBridge {
  private:
     // 从 Python Worker 获取算子列表（只存内部，不注册到 PluginLoader）
     int DiscoverOperators();
+    int SyncOperatorsToCatalog();
 
     IQuerier* querier_ = nullptr;
 

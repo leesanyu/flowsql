@@ -47,9 +47,9 @@ static std::unordered_map<std::string, std::string> GetClickHouseParams() {
     std::unordered_map<std::string, std::string> p;
     p["host"]     = getenv("CH_HOST")     ? getenv("CH_HOST")     : "127.0.0.1";
     p["port"]     = getenv("CH_PORT")     ? getenv("CH_PORT")     : "8123";
-    p["user"]     = getenv("CH_USER")     ? getenv("CH_USER")     : "default";
-    p["password"] = getenv("CH_PASSWORD") ? getenv("CH_PASSWORD") : "";
-    p["database"] = getenv("CH_DATABASE") ? getenv("CH_DATABASE") : "default";
+    p["user"]     = getenv("CH_USER")     ? getenv("CH_USER")     : "flowsql_user";
+    p["password"] = getenv("CH_PASSWORD") ? getenv("CH_PASSWORD") : "flowSQL@user";
+    p["database"] = getenv("CH_DATABASE") ? getenv("CH_DATABASE") : "flowsql_db";
     return p;
 }
 
