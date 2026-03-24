@@ -57,6 +57,8 @@ class WebServer {
     int32_t HandleCreateTask(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleGetTaskResult(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleDeleteTask(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleCancelTask(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleTaskDiagnostics(const std::string& uri, const std::string& req, std::string& rsp);
 
     // 通知 Python Worker 重新加载算子
     void NotifyWorkerReload();

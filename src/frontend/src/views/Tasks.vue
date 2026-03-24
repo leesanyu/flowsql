@@ -81,7 +81,7 @@
           </template>
         </el-table-column>
         <el-table-column prop="created_at" label="创建时间" width="180" />
-        <el-table-column label="操作" width="200">
+        <el-table-column label="操作" width="280">
           <template #default="scope">
             <el-button
               type="primary"
@@ -91,6 +91,14 @@
               @click="viewResult(scope.row.id || scope.row.task_id)"
             >
               查看结果
+            </el-button>
+            <el-button
+              type="warning"
+              size="small"
+              :disabled="isTerminal(scope.row.status)"
+              @click="cancelTaskAction(scope.row)"
+            >
+              取消
             </el-button>
             <el-button
               type="danger"
@@ -157,8 +165,21 @@ const dialogResult = ref(null)
 const resultLoadingId = ref('')
 const currentTaskId = ref('')
 let pollTimer = null
+const POLL_INTERVAL_MS = 2000
 
 const isTerminal = (status) => ['completed', 'failed', 'cancelled', 'timeout'].includes(status)
+
+const stopPolling = () => {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+const startPolling = () => {
+  if (pollTimer) return
+  pollTimer = setInterval(loadTasks, POLL_INTERVAL_MS)
+}
 
 const formatTaskResult = (result, runningMessage = '') => {
   if (Array.isArray(result.data)) {
@@ -248,6 +269,7 @@ const executeSQL = async () => {
 
     // 刷新任务列表
     await loadTasks()
+    startPolling()
   } catch (error) {
     // 提取后端返回的具体错误信息
     const detail = error.response?.data?.error || error.message || '未知错误'
@@ -264,6 +286,12 @@ const loadTasks = async () => {
     const res = await api.getTasks()
     const payload = res.data || {}
     tasks.value = Array.isArray(payload) ? payload : (payload.items || [])
+    const hasActiveTask = tasks.value.some(t => !isTerminal(t.status))
+    if (hasActiveTask) {
+      startPolling()
+    } else {
+      stopPolling()
+    }
     if (currentTaskId.value) {
       const current = tasks.value.find(t => (t.id || t.task_id) === currentTaskId.value)
       if (current && isTerminal(current.status)) {
@@ -313,16 +341,25 @@ const deleteTask = async (row) => {
   }
 }
 
+const cancelTaskAction = async (row) => {
+  const taskId = row.id || row.task_id
+  if (!taskId) return
+  try {
+    await api.cancelTask(taskId)
+    ElMessage.success('已发出取消请求')
+    await loadTasks()
+  } catch (error) {
+    const detail = error.response?.data?.error || error.message || '未知错误'
+    ElMessage.error('取消任务失败: ' + detail)
+  }
+}
+
 onMounted(() => {
   loadTasks()
-  pollTimer = setInterval(loadTasks, 3000)
 })
 
 onUnmounted(() => {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
+  stopPolling()
 })
 </script>
 

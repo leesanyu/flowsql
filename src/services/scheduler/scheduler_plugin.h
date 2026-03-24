@@ -9,6 +9,7 @@
 
 #include <common/error_code.h>
 #include <common/iplugin.h>
+#include <common/span.h>
 #include <framework/interfaces/irouter_handle.h>
 #include <framework/interfaces/ibridge.h>
 
@@ -58,11 +59,11 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle {
                         std::string* error = nullptr);
 
     int ExecuteWithOperator(IChannel* source, IChannel* sink, IOperator* op,
-                            const std::string& source_type, const std::string& sink_type,
+                            const std::string& sink_type,
                             const SqlStatement& stmt, int64_t* rows_affected = nullptr,
                             std::string* error = nullptr);
-    int ExecuteWithOperatorChain(IChannel* source, IChannel* sink, const std::vector<IOperator*>& ops,
-                                 const std::string& source_type, const std::string& sink_type,
+    int ExecuteWithOperatorChain(Span<IChannel*> inputs, IChannel* sink, const std::vector<IOperator*>& ops,
+                                 const std::string& sink_type,
                                  const SqlStatement& stmt, int64_t* rows_affected = nullptr,
                                  std::string* error = nullptr);
     IQuerier* querier_ = nullptr;

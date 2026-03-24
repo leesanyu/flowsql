@@ -15,6 +15,7 @@ struct OperatorRef {
 // SQL 解析结果
 struct SqlStatement {
     std::string source;       // FROM 后的源通道名
+    std::vector<std::string> sources;  // FROM 后的全部源通道名（source=sources[0]）
     std::string op_catelog;   // USING 后的算子 catelog（可选，空表示无算子）
     std::string op_name;      // USING 后的算子 name（可选）
     std::vector<OperatorRef> operators;  // USING/THEN 算子链

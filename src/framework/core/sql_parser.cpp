@@ -178,16 +178,30 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
         }
     }
 
-    // FROM <source>
+    // FROM <source>[,<source>...]
     if (!MatchKeyword("FROM")) {
         stmt.error = "expected FROM";
         return stmt;
     }
-    stmt.source = ReadIdentifier();
-    if (stmt.source.empty()) {
+    stmt.sources.clear();
+    stmt.sources.push_back(ReadIdentifier());
+    if (stmt.sources[0].empty()) {
         stmt.error = "expected source channel name after FROM";
         return stmt;
     }
+    SkipWhitespace();
+    while (pos_ < end_ && *pos_ == ',') {
+        ++pos_;  // 跳过逗号
+        SkipWhitespace();
+        std::string src = ReadIdentifier();
+        if (src.empty()) {
+            stmt.error = "expected source channel name after ','";
+            return stmt;
+        }
+        stmt.sources.push_back(std::move(src));
+        SkipWhitespace();
+    }
+    stmt.source = stmt.sources[0];  // 向后兼容
 
     // WHERE（可选）- 简单处理：读到行尾或 USING/WITH/INTO
     const char* saved = pos_;

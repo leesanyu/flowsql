@@ -1,6 +1,6 @@
 project(flowsql_catalog)
 
-file(GLOB DIR_SRCS *.cpp)
+file(GLOB_RECURSE DIR_SRCS *.cpp)
 
 add_library(${PROJECT_NAME} SHARED ${DIR_SRCS})
 

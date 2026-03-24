@@ -5,6 +5,11 @@
 #include <string>
 #include <vector>
 #include <regex>
+#ifndef _WIN32
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include <framework/core/channel_adapter.h>
 #include <framework/core/dataframe.h>
@@ -26,6 +31,8 @@ void test_dataframe_json();
 void test_dataframe_clear();
 void test_dataframe_channel();
 void test_sql_parser();
+void test_operator_multi_input_fallback();
+void test_span_safety();
 void test_normalize_from_table_name();
 void test_channel_adapter_copy();
 void test_channel_type_constants();
@@ -247,6 +254,8 @@ void test_sql_parser() {
         auto stmt = parser.Parse("SELECT * FROM test.data USING explore.chisquare WITH threshold=0.05 INTO result");
         assert(stmt.error.empty());
         assert(stmt.source == "test.data");
+        assert(stmt.sources.size() == 1);
+        assert(stmt.sources[0] == "test.data");
         assert(stmt.op_catelog == "explore");
         assert(stmt.op_name == "chisquare");
         assert(stmt.with_params["threshold"] == "0.05");
@@ -259,6 +268,8 @@ void test_sql_parser() {
         auto stmt = parser.Parse("SELECT * FROM memory_data INTO clickhouse.my_table");
         assert(stmt.error.empty());
         assert(stmt.source == "memory_data");
+        assert(stmt.sources.size() == 1);
+        assert(stmt.sources[0] == "memory_data");
         assert(!stmt.HasOperator());
         assert(stmt.dest == "clickhouse.my_table");
     }
@@ -267,6 +278,8 @@ void test_sql_parser() {
         auto stmt = parser.Parse("SELECT * FROM test.data");
         assert(stmt.error.empty());
         assert(stmt.source == "test.data");
+        assert(stmt.sources.size() == 1);
+        assert(stmt.sources[0] == "test.data");
         assert(!stmt.HasOperator());
         assert(stmt.dest.empty());
     }
@@ -283,7 +296,35 @@ void test_sql_parser() {
         auto stmt = parser.Parse("select * from test.data into result");
         assert(stmt.error.empty());
         assert(stmt.source == "test.data");
+        assert(stmt.sources.size() == 1);
+        assert(stmt.sources[0] == "test.data");
         assert(stmt.dest == "result");
+    }
+
+    // Test multi-source FROM parsing
+    {
+        auto stmt = parser.Parse("SELECT * FROM dataframe.d1, dataframe.d2 USING builtin.concat INTO dataframe.dd");
+        assert(stmt.error.empty());
+        assert(stmt.source == "dataframe.d1");
+        assert(stmt.sources.size() == 2);
+        assert(stmt.sources[0] == "dataframe.d1");
+        assert(stmt.sources[1] == "dataframe.d2");
+        assert(stmt.op_catelog == "builtin");
+        assert(stmt.op_name == "concat");
+        assert(stmt.dest == "dataframe.dd");
+        assert(stmt.sql_part == "SELECT * FROM dataframe.d1, dataframe.d2");
+    }
+
+    // Test multi-source parser error: missing source after FROM
+    {
+        auto stmt = parser.Parse("SELECT * FROM");
+        assert(stmt.error == "expected source channel name after FROM");
+    }
+
+    // Test multi-source parser error: missing source after comma
+    {
+        auto stmt = parser.Parse("SELECT * FROM dataframe.d1,");
+        assert(stmt.error == "expected source channel name after ','");
     }
 
     // Test sql_part extraction with GROUP BY/ORDER BY (Story 4.5)
@@ -349,6 +390,85 @@ void test_sql_parser() {
     }
 
     printf("[PASS] SQL parser (USING optional + columns)\n");
+}
+
+// ============================================================
+// Test 8: IOperator 多输入默认回退（Span -> inputs[0]）
+// ============================================================
+void test_operator_multi_input_fallback() {
+    printf("[TEST] IOperator multi-input fallback...\n");
+
+    class SingleOnlyOperator : public IOperator {
+     public:
+        std::string Catelog() override { return "test"; }
+        std::string Name() override { return "single_only"; }
+        std::string Description() override { return "single input only"; }
+        OperatorPosition Position() override { return OperatorPosition::DATA; }
+        int Work(IChannel* in, IChannel* out) override {
+            last_in = in;
+            last_out = out;
+            ++work_count;
+            return 0;
+        }
+        int Configure(const char*, const char*) override { return 0; }
+
+        IChannel* last_in = nullptr;
+        IChannel* last_out = nullptr;
+        int work_count = 0;
+    };
+
+    MemoryChannel in1;
+    MemoryChannel in2;
+    DataFrameChannel out("test", "sink");
+    in1.SetIdentity("test", "in1");
+    in2.SetIdentity("test", "in2");
+
+    SingleOnlyOperator op;
+    IOperator& op_iface = op;
+    std::vector<IChannel*> inputs = {&in1, &in2};
+    int rc = op_iface.Work(Span<IChannel*>(inputs), &out);
+    assert(rc == 0);
+    assert(op.work_count == 1);
+    assert(op.last_in == &in1);
+    assert(op.last_out == &out);
+
+    std::vector<IChannel*> empty_inputs;
+    rc = op_iface.Work(Span<IChannel*>(empty_inputs), &out);
+    assert(rc != 0);
+
+    printf("[PASS] IOperator multi-input fallback\n");
+}
+
+// ============================================================
+// Test 9: Span 基础语义（empty + 越界 assert）
+// ============================================================
+void test_span_safety() {
+    printf("[TEST] Span safety...\n");
+
+    std::vector<int> empty_data;
+    Span<int> empty_span(empty_data);
+    assert(empty_span.empty());
+
+    std::vector<int> one = {7};
+    Span<int> one_span(one);
+    assert(!one_span.empty());
+    assert(one_span[0] == 7);
+
+#ifndef _WIN32
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        volatile int v = one_span[1];
+        (void)v;
+        _exit(0);
+    }
+    int status = 0;
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFSIGNALED(status));
+    assert(WTERMSIG(status) == SIGABRT);
+#endif
+
+    printf("[PASS] Span safety\n");
 }
 
 // ============================================================
@@ -520,6 +640,8 @@ int main(int argc, char* argv[]) {
     test_dataframe_clear();
     test_dataframe_channel();
     test_sql_parser();
+    test_operator_multi_input_fallback();
+    test_span_safety();
     test_normalize_from_table_name();
     test_build_query_integration();
     test_channel_adapter_copy();

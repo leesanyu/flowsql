@@ -472,51 +472,71 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
 // --- 有算子：自动适配通道类型 ---
 int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
                                           IOperator* op,
-                                          const std::string& source_type,
                                           const std::string& sink_type,
                                           const SqlStatement& stmt, int64_t* rows_affected,
                                           std::string* error) {
     std::vector<IOperator*> ops;
+    std::vector<IChannel*> inputs;
+    inputs.push_back(source);
     ops.push_back(op);
-    return ExecuteWithOperatorChain(source, sink, ops, source_type, sink_type, stmt, rows_affected, error);
+    return ExecuteWithOperatorChain(Span<IChannel*>(inputs), sink, ops, sink_type, stmt, rows_affected, error);
 }
 
-int SchedulerPlugin::ExecuteWithOperatorChain(IChannel* source, IChannel* sink,
+int SchedulerPlugin::ExecuteWithOperatorChain(Span<IChannel*> inputs, IChannel* sink,
                                               const std::vector<IOperator*>& ops,
-                                              const std::string& source_type,
                                               const std::string& sink_type,
                                               const SqlStatement& stmt, int64_t* rows_affected,
                                               std::string* error) {
-    if (ops.empty()) return -1;
-    IChannel* actual_source = source;
-    IChannel* actual_sink = sink;
+    if (ops.empty() || inputs.empty()) return -1;
+
+    Span<IChannel*> stage_inputs = inputs;
     std::shared_ptr<DataFrameChannel> tmp_in;
+    std::vector<IChannel*> stage_input_holder;
     std::vector<std::shared_ptr<DataFrameChannel>> stage_buffers;
 
-    if (source_type == ChannelType::kDatabase) {
-        auto* db_src = dynamic_cast<IDatabaseChannel*>(source);
-        if (!db_src) return -1;
+    // 单源算子路径仍保留 Database/DataFrame 自动适配；多源在 HandleExecute 限制为 dataframe.*
+    if (stage_inputs.size == 1) {
+        IChannel* single = stage_inputs[0];
+        const std::string source_type(single->Type());
 
-        tmp_in = std::make_shared<DataFrameChannel>("_adapter", std::to_string(++tmp_channel_seq_));
-        tmp_in->Open();
+        if (source_type == ChannelType::kDatabase) {
+            auto* db_src = dynamic_cast<IDatabaseChannel*>(single);
+            if (!db_src) return -1;
 
-        std::string query = BuildQuery(stmt.source, stmt);
-        int rc = ChannelAdapter::ReadToDataFrame(db_src, query.c_str(), tmp_in.get(), error);
-        if (rc != 0) return rc;
+            tmp_in = std::make_shared<DataFrameChannel>("_adapter", std::to_string(++tmp_channel_seq_));
+            tmp_in->Open();
 
-        actual_source = tmp_in.get();
-    } else if (source_type == ChannelType::kDataFrame && !stmt.where_clause.empty()) {
-        // DataFrame + WHERE → 先过滤
-        auto* df_src = dynamic_cast<IDataFrameChannel*>(source);
-        if (!df_src) return -1;
+            std::string query = BuildQuery(stmt.source, stmt);
+            int rc = ChannelAdapter::ReadToDataFrame(db_src, query.c_str(), tmp_in.get(), error);
+            if (rc != 0) return rc;
 
-        tmp_in = ApplyDataFrameFilter(df_src, stmt.where_clause, ++tmp_channel_seq_);
-        if (!tmp_in) return -1;
-        actual_source = tmp_in.get();
+            stage_input_holder.clear();
+            stage_input_holder.push_back(tmp_in.get());
+            stage_inputs = Span<IChannel*>(stage_input_holder);
+        } else if (source_type == ChannelType::kDataFrame && !stmt.where_clause.empty()) {
+            auto* df_src = dynamic_cast<IDataFrameChannel*>(single);
+            if (!df_src) return -1;
+
+            tmp_in = ApplyDataFrameFilter(df_src, stmt.where_clause, ++tmp_channel_seq_);
+            if (!tmp_in) return -1;
+
+            stage_input_holder.clear();
+            stage_input_holder.push_back(tmp_in.get());
+            stage_inputs = Span<IChannel*>(stage_input_holder);
+        }
+    } else {
+        for (size_t i = 0; i < stage_inputs.size; ++i) {
+            auto* df = dynamic_cast<IDataFrameChannel*>(stage_inputs[i]);
+            if (!df) {
+                if (error) *error = "multi-source operator input must be dataframe channel";
+                return -1;
+            }
+        }
     }
 
     for (size_t i = 0; i < ops.size(); ++i) {
         std::shared_ptr<DataFrameChannel> stage_out;
+        IChannel* actual_sink = nullptr;
         if (i + 1 == ops.size()) {
             if (sink_type == ChannelType::kDatabase) {
                 stage_out = std::make_shared<DataFrameChannel>("_adapter", std::to_string(++tmp_channel_seq_));
@@ -531,21 +551,23 @@ int SchedulerPlugin::ExecuteWithOperatorChain(IChannel* source, IChannel* sink,
             actual_sink = stage_out.get();
         }
 
-        auto pipeline = PipelineBuilder()
-                            .SetSource(actual_source)
-                            .SetOperator(ops[i])
-                            .SetSink(actual_sink)
-                            .Build();
-        pipeline->Run();
-
-        if (pipeline->State() == PipelineState::FAILED) {
-            if (error) *error = pipeline->ErrorMessage();
+        if (ops[i]->Work(stage_inputs, actual_sink) != 0) {
+            if (error && error->empty()) {
+                std::string op_error = ops[i]->LastError();
+                if (!op_error.empty()) {
+                    *error = op_error;
+                } else {
+                    *error = "operator " + ops[i]->Catelog() + "." + ops[i]->Name() + " execution failed";
+                }
+            }
             return -1;
         }
 
         if (stage_out) {
             stage_buffers.push_back(stage_out);
-            actual_source = stage_out.get();
+            stage_input_holder.clear();
+            stage_input_holder.push_back(stage_out.get());
+            stage_inputs = Span<IChannel*>(stage_input_holder);
         }
     }
 
@@ -588,10 +610,23 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         return error::BAD_REQUEST;
     }
 
-    IChannel* source = FindChannel(stmt.source);
-    if (!source) {
-        rsp = MakeErrorJson("source channel not found: " + stmt.source);
-        return IsDataFrameRef(stmt.source) ? error::NOT_FOUND : error::BAD_REQUEST;
+    if (stmt.sources.empty() && !stmt.source.empty()) {
+        stmt.sources.push_back(stmt.source);
+    }
+    if (stmt.sources.empty()) {
+        rsp = MakeErrorJson("source channel not found");
+        return error::BAD_REQUEST;
+    }
+
+    std::vector<IChannel*> input_channels;
+    input_channels.reserve(stmt.sources.size());
+    for (const auto& name : stmt.sources) {
+        IChannel* ch = FindChannel(name);
+        if (!ch) {
+            rsp = MakeErrorJson("source channel not found: " + name);
+            return IsDataFrameRef(name) ? error::NOT_FOUND : error::BAD_REQUEST;
+        }
+        input_channels.push_back(ch);
     }
 
     std::vector<std::shared_ptr<IOperator>> op_holders;
@@ -671,17 +706,39 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             sink = temp_sink.get();
         }
 
-        std::string source_type(source->Type());
-        std::string sink_type(sink->Type());
-
         int rc = 0;
         int64_t affected_rows = 0;
         std::string exec_error;
+        std::string sink_type(sink->Type());
+
+        if (input_channels.size() > 1 && op_chain.empty()) {
+            rsp = MakeErrorJson("multi-source FROM requires USING operator");
+            return error::BAD_REQUEST;
+        }
+        if (input_channels.size() > 1) {
+            for (const auto& source_name : stmt.sources) {
+                if (!IsDataFrameRef(source_name)) {
+                    rsp = MakeErrorJson("multi-source FROM only supports dataframe.* in Sprint 10");
+                    return error::BAD_REQUEST;
+                }
+            }
+            if (!stmt.where_clause.empty()) {
+                rsp = MakeErrorJson("multi-source FROM does not support WHERE in Sprint 10");
+                return error::BAD_REQUEST;
+            }
+        }
 
         if (op_chain.empty()) {
+            if (input_channels.size() != 1) {
+                rsp = MakeErrorJson("invalid source count");
+                return error::BAD_REQUEST;
+            }
+            IChannel* source = input_channels[0];
+            std::string source_type(source->Type());
             rc = ExecuteTransfer(source, sink, source_type, sink_type, stmt, &affected_rows, &exec_error);
         } else {
-            rc = ExecuteWithOperatorChain(source, sink, op_chain, source_type, sink_type, stmt, &affected_rows, &exec_error);
+            rc = ExecuteWithOperatorChain(Span<IChannel*>(input_channels), sink, op_chain, sink_type, stmt,
+                                          &affected_rows, &exec_error);
         }
 
         if (rc != 0) {

@@ -235,6 +235,16 @@ int WebServer::Init(const std::string& db_path) {
         res.status = (rc == error::OK) ? 200 : (rc == error::CONFLICT ? 409 : (rc == error::NOT_FOUND ? 404 : 400));
         res.set_content(rsp, "application/json");
     });
+    server_.Post("/api/tasks/cancel", [this](const httplib::Request& req, httplib::Response& res) {
+        std::string rsp; int32_t rc = HandleCancelTask("", req.body, rsp);
+        res.status = (rc == error::OK) ? 200 : (rc == error::CONFLICT ? 409 : (rc == error::NOT_FOUND ? 404 : 400));
+        res.set_content(rsp, "application/json");
+    });
+    server_.Post("/api/tasks/diagnostics", [this](const httplib::Request& req, httplib::Response& res) {
+        std::string rsp; int32_t rc = HandleTaskDiagnostics("", req.body, rsp);
+        res.status = (rc == error::OK) ? 200 : (rc == error::NOT_FOUND ? 404 : 400);
+        res.set_content(rsp, "application/json");
+    });
 
     // 数据库通道管理路由：转发给内部服务，去掉 /api 前缀
     auto db_proxy = [this](const std::string& target_uri, const std::string& req_body, httplib::Response& res) {
@@ -431,6 +441,14 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
     cb({"POST", "/api/tasks/delete",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleDeleteTask(u, req, rsp);
+        }});
+    cb({"POST", "/api/tasks/cancel",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleCancelTask(u, req, rsp);
+        }});
+    cb({"POST", "/api/tasks/diagnostics",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleTaskDiagnostics(u, req, rsp);
         }});
 
     // 代理 /api/channels/database/* → Gateway /channels/database/*
@@ -729,6 +747,14 @@ int32_t WebServer::HandleGetTaskResult(const std::string&, const std::string& re
 
 int32_t WebServer::HandleDeleteTask(const std::string&, const std::string& req, std::string& rsp) {
     return ProxyPostJson(scheduler_host_, scheduler_port_, "/tasks/delete", req, &rsp);
+}
+
+int32_t WebServer::HandleCancelTask(const std::string&, const std::string& req, std::string& rsp) {
+    return ProxyPostJson(scheduler_host_, scheduler_port_, "/tasks/cancel", req, &rsp);
+}
+
+int32_t WebServer::HandleTaskDiagnostics(const std::string&, const std::string& req, std::string& rsp) {
+    return ProxyPostJson(scheduler_host_, scheduler_port_, "/tasks/diagnostics", req, &rsp);
 }
 
 }  // namespace web

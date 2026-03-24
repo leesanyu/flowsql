@@ -15,6 +15,7 @@
 #include <common/error_code.h>
 #include <common/loader.hpp>
 #include <framework/core/dataframe.h>
+#include <framework/core/dataframe_channel.h>
 #include <framework/interfaces/idatabase_channel.h>
 #include <framework/interfaces/idatabase_factory.h>
 #include <framework/interfaces/ichannel_registry.h>
@@ -344,7 +345,60 @@ int main() {
     }
     std::puts("[PASS] T26");
 
-    // T27: INTO 非法目标（未限定名）应报 BAD_REQUEST
+    // T27: 多源 + USING builtin.passthrough 走统一多输入入口（默认回退到首输入）
+    {
+        std::string rsp;
+        int32_t rc = exec("/tasks/instant/execute",
+                          MakeReq("SELECT * FROM dataframe.result,dataframe.out "
+                                  "USING builtin.passthrough INTO dataframe.multi_ok"),
+                          rsp);
+        ASSERT_EQ(rc, error::OK);
+        auto ch = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("multi_ok"));
+        ASSERT_TRUE(ch != nullptr);
+
+        DataFrame out;
+        ASSERT_EQ(ch->Read(&out), 0);
+        ASSERT_EQ(out.RowCount(), 1);  // dataframe.result 在 T21 被覆盖为 1 行
+        ASSERT_EQ(std::get<int64_t>(out.GetRow(0)[0]), 3);
+    }
+    std::puts("[PASS] T27");
+
+    // T28: 多源无 USING 算子应报 BAD_REQUEST
+    {
+        std::string rsp;
+        int32_t rc = exec("/tasks/instant/execute",
+                          MakeReq("SELECT * FROM dataframe.result,dataframe.out INTO dataframe.multi_no_op"),
+                          rsp);
+        ASSERT_EQ(rc, error::BAD_REQUEST);
+        ASSERT_TRUE(rsp.find("multi-source FROM requires USING operator") != std::string::npos);
+    }
+    std::puts("[PASS] T28");
+
+    // T29: 多源包含非 dataframe.* 应报 BAD_REQUEST
+    {
+        std::string rsp;
+        int32_t rc = exec("/tasks/instant/execute",
+                          MakeReq("SELECT * FROM sqlite.local.src,dataframe.result "
+                                  "USING builtin.passthrough INTO dataframe.multi_mixed"),
+                          rsp);
+        ASSERT_EQ(rc, error::BAD_REQUEST);
+        ASSERT_TRUE(rsp.find("multi-source FROM only supports dataframe.* in Sprint 10") != std::string::npos);
+    }
+    std::puts("[PASS] T29");
+
+    // T30: 多源 + WHERE（Sprint10 V1）应报 BAD_REQUEST
+    {
+        std::string rsp;
+        int32_t rc = exec("/tasks/instant/execute",
+                          MakeReq("SELECT * FROM dataframe.result,dataframe.out "
+                                  "WHERE id > 1 USING builtin.passthrough INTO dataframe.multi_where"),
+                          rsp);
+        ASSERT_EQ(rc, error::BAD_REQUEST);
+        ASSERT_TRUE(rsp.find("multi-source FROM does not support WHERE in Sprint 10") != std::string::npos);
+    }
+    std::puts("[PASS] T30");
+
+    // T31: INTO 非法目标（未限定名）应报 BAD_REQUEST
     {
         std::string rsp;
         int32_t rc = exec("/tasks/instant/execute",
@@ -353,7 +407,196 @@ int main() {
         ASSERT_EQ(rc, error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("invalid INTO destination") != std::string::npos);
     }
-    std::puts("[PASS] T27");
+    std::puts("[PASS] T31");
+
+    // T32: 激活 concat/hstack
+    {
+        std::string rsp;
+        ASSERT_EQ(activate("/operators/activate", R"({"name":"builtin.concat"})", rsp), error::OK);
+        ASSERT_EQ(activate("/operators/activate", R"({"name":"builtin.hstack"})", rsp), error::OK);
+    }
+    std::puts("[PASS] T32");
+
+    // T33: concat 成功（按行合并）
+    {
+        std::string rsp;
+        int32_t rc = exec("/tasks/instant/execute",
+                          MakeReq("SELECT * FROM dataframe.out,dataframe.chain_ok "
+                                  "USING builtin.concat INTO dataframe.concat_ok"),
+                          rsp);
+        ASSERT_EQ(rc, error::OK);
+        auto ch = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("concat_ok"));
+        ASSERT_TRUE(ch != nullptr);
+
+        DataFrame out;
+        ASSERT_EQ(ch->Read(&out), 0);
+        ASSERT_EQ(out.RowCount(), 6);
+        ASSERT_EQ(out.GetSchema().size(), 3u);
+    }
+    std::puts("[PASS] T33");
+
+    // T34: concat schema 不兼容应失败
+    {
+        std::string rsp;
+        ASSERT_EQ(exec("/tasks/instant/execute",
+                       MakeReq("SELECT id FROM sqlite.local.src INTO dataframe.only_id"),
+                       rsp),
+                  error::OK);
+
+        int32_t rc = exec("/tasks/instant/execute",
+                          MakeReq("SELECT * FROM dataframe.out,dataframe.only_id "
+                                  "USING builtin.concat INTO dataframe.concat_bad"),
+                          rsp);
+        ASSERT_EQ(rc, error::INTERNAL_ERROR);
+        ASSERT_TRUE(rsp.find("concat schema mismatch") != std::string::npos);
+    }
+    std::puts("[PASS] T34");
+
+    // T35: hstack 成功（按列合并）
+    {
+        std::string rsp;
+        int32_t rc = exec("/tasks/instant/execute",
+                          MakeReq("SELECT * FROM dataframe.out,dataframe.chain_ok "
+                                  "USING builtin.hstack INTO dataframe.hstack_ok"),
+                          rsp);
+        ASSERT_EQ(rc, error::OK);
+        auto ch = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("hstack_ok"));
+        ASSERT_TRUE(ch != nullptr);
+
+        DataFrame out;
+        ASSERT_EQ(ch->Read(&out), 0);
+        ASSERT_EQ(out.RowCount(), 3);
+        ASSERT_EQ(out.GetSchema().size(), 6u);
+    }
+    std::puts("[PASS] T35");
+
+    // T36: hstack 行数不一致应失败
+    {
+        std::string rsp;
+        int32_t rc = exec("/tasks/instant/execute",
+                          MakeReq("SELECT * FROM dataframe.result,dataframe.out "
+                                  "USING builtin.hstack INTO dataframe.hstack_bad"),
+                          rsp);
+        ASSERT_EQ(rc, error::INTERNAL_ERROR);
+        ASSERT_TRUE(rsp.find("hstack row count mismatch") != std::string::npos);
+    }
+    std::puts("[PASS] T36");
+
+    // T37: concat 覆盖多类型（INT32/INT64/FLOAT/DOUBLE/STRING/BOOL）
+    {
+        auto build_typed_channel = [&](const char* name, int32_t base) {
+            auto ch = std::make_shared<DataFrameChannel>("dataframe", name);
+            ch->Open();
+
+            DataFrame df;
+            df.SetSchema({
+                {"c_i32", DataType::INT32, 0, ""},
+                {"c_i64", DataType::INT64, 0, ""},
+                {"c_f32", DataType::FLOAT, 0, ""},
+                {"c_f64", DataType::DOUBLE, 0, ""},
+                {"c_str", DataType::STRING, 0, ""},
+                {"c_bool", DataType::BOOLEAN, 0, ""},
+            });
+            df.AppendRow({base + 1, int64_t(base + 1000), float(base + 0.5f), double(base + 0.25), std::string("n") + std::to_string(base + 1), true});
+            df.AppendRow({base + 2, int64_t(base + 2000), float(base + 1.5f), double(base + 1.25), std::string("n") + std::to_string(base + 2), false});
+            ASSERT_EQ(ch->Write(&df), 0);
+
+            (void)registry->Unregister(name);
+            ASSERT_EQ(registry->Register(name, std::static_pointer_cast<IChannel>(ch)), 0);
+        };
+
+        build_typed_channel("typed_a", 10);
+        build_typed_channel("typed_b", 20);
+
+        std::string rsp;
+        int32_t rc = exec("/tasks/instant/execute",
+                          MakeReq("SELECT * FROM dataframe.typed_a,dataframe.typed_b "
+                                  "USING builtin.concat INTO dataframe.concat_types"),
+                          rsp);
+        ASSERT_EQ(rc, error::OK);
+        auto ch = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("concat_types"));
+        ASSERT_TRUE(ch != nullptr);
+
+        DataFrame out;
+        ASSERT_EQ(ch->Read(&out), 0);
+        ASSERT_EQ(out.RowCount(), 4);
+        auto schema = out.GetSchema();
+        ASSERT_EQ(schema.size(), size_t(6));
+        ASSERT_EQ(schema[0].type, DataType::INT32);
+        ASSERT_EQ(schema[1].type, DataType::INT64);
+        ASSERT_EQ(schema[2].type, DataType::FLOAT);
+        ASSERT_EQ(schema[3].type, DataType::DOUBLE);
+        ASSERT_EQ(schema[4].type, DataType::STRING);
+        ASSERT_EQ(schema[5].type, DataType::BOOLEAN);
+
+        auto row3 = out.GetRow(3);
+        ASSERT_EQ(std::get<int32_t>(row3[0]), 22);
+        ASSERT_EQ(std::get<int64_t>(row3[1]), 2020);
+        ASSERT_EQ(std::get<std::string>(row3[4]), "n22");
+        ASSERT_EQ(std::get<bool>(row3[5]), false);
+    }
+    std::puts("[PASS] T37");
+
+    // T38: hstack 覆盖多类型（按列合并）
+    {
+        auto left = std::make_shared<DataFrameChannel>("dataframe", "hleft");
+        auto right = std::make_shared<DataFrameChannel>("dataframe", "hright");
+        left->Open();
+        right->Open();
+
+        DataFrame ldf;
+        ldf.SetSchema({
+            {"a_i32", DataType::INT32, 0, ""},
+            {"a_str", DataType::STRING, 0, ""},
+            {"a_bool", DataType::BOOLEAN, 0, ""},
+        });
+        ldf.AppendRow({int32_t(1), std::string("x"), true});
+        ldf.AppendRow({int32_t(2), std::string("y"), false});
+        ASSERT_EQ(left->Write(&ldf), 0);
+
+        DataFrame rdf;
+        rdf.SetSchema({
+            {"b_i64", DataType::INT64, 0, ""},
+            {"b_f32", DataType::FLOAT, 0, ""},
+            {"b_f64", DataType::DOUBLE, 0, ""},
+        });
+        rdf.AppendRow({int64_t(100), float(1.5f), double(10.25)});
+        rdf.AppendRow({int64_t(200), float(2.5f), double(20.25)});
+        ASSERT_EQ(right->Write(&rdf), 0);
+
+        (void)registry->Unregister("hleft");
+        (void)registry->Unregister("hright");
+        ASSERT_EQ(registry->Register("hleft", std::static_pointer_cast<IChannel>(left)), 0);
+        ASSERT_EQ(registry->Register("hright", std::static_pointer_cast<IChannel>(right)), 0);
+
+        std::string rsp;
+        int32_t rc = exec("/tasks/instant/execute",
+                          MakeReq("SELECT * FROM dataframe.hleft,dataframe.hright "
+                                  "USING builtin.hstack INTO dataframe.hstack_types"),
+                          rsp);
+        ASSERT_EQ(rc, error::OK);
+        auto ch = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("hstack_types"));
+        ASSERT_TRUE(ch != nullptr);
+
+        DataFrame out;
+        ASSERT_EQ(ch->Read(&out), 0);
+        ASSERT_EQ(out.RowCount(), 2);
+        auto schema = out.GetSchema();
+        ASSERT_EQ(schema.size(), size_t(6));
+        ASSERT_EQ(schema[0].type, DataType::INT32);
+        ASSERT_EQ(schema[1].type, DataType::STRING);
+        ASSERT_EQ(schema[2].type, DataType::BOOLEAN);
+        ASSERT_EQ(schema[3].type, DataType::INT64);
+        ASSERT_EQ(schema[4].type, DataType::FLOAT);
+        ASSERT_EQ(schema[5].type, DataType::DOUBLE);
+
+        auto row0 = out.GetRow(0);
+        ASSERT_EQ(std::get<int32_t>(row0[0]), 1);
+        ASSERT_EQ(std::get<std::string>(row0[1]), "x");
+        ASSERT_EQ(std::get<bool>(row0[2]), true);
+        ASSERT_EQ(std::get<int64_t>(row0[3]), 100);
+    }
+    std::puts("[PASS] T38");
 
     exec = fnRouterHandler();
     loader->StopAll();

@@ -50,6 +50,8 @@ export default {
   createTask: (sql, mode = 'async') => api.post('/api/tasks/submit', { sql, mode }),
   getTaskResult: (id) => api.post('/api/tasks/result', { task_id: id }),
   deleteTask: (id) => api.post('/api/tasks/delete', { task_id: id }),
+  cancelTask: (id) => api.post('/api/tasks/cancel', { task_id: id }),
+  getTaskDiagnostics: (id) => api.post('/api/tasks/diagnostics', { task_id: id }),
 
   // 数据库通道管理（WebPlugin 内部转发给 DatabasePlugin）
   listDbChannels: () => api.post('/api/channels/database/query', {}),

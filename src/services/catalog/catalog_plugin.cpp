@@ -1,4 +1,6 @@
 #include "catalog_plugin.h"
+#include "builtin/concat_operator.h"
+#include "builtin/hstack_operator.h"
 
 #include <framework/core/dataframe.h>
 #include <framework/core/dataframe_channel.h>
@@ -76,7 +78,10 @@ int CatalogPlugin::Load(IQuerier* querier) {
             LOG_WARN("CatalogPlugin::Load: operator catalog db init failed, will retry in Start()");
         }
     }
-    return Register("passthrough", []() -> IOperator* { return new PassthroughOperator(); });
+    if (Register("passthrough", []() -> IOperator* { return new PassthroughOperator(); }) != 0) return -1;
+    if (Register("concat", []() -> IOperator* { return new ConcatOperator(); }) != 0) return -1;
+    if (Register("hstack", []() -> IOperator* { return new HstackOperator(); }) != 0) return -1;
+    return 0;
 }
 
 int CatalogPlugin::Unload() {
