@@ -72,6 +72,11 @@ core.*
 *.tar.gz
 *.zip
 
+# Frontend build artifacts
+src/frontend/dist/
+src/services/web/static/
+build/output/static/
+
 # Claude Code
 .claude/
 

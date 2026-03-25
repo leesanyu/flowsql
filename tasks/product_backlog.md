@@ -882,12 +882,12 @@
 ---
 
 ## Epic 10: 算子目录与状态下沉 CatalogPlugin（架构收敛）
-**优先级**: P1 | **状态**: 📋 待规划
+**优先级**: P1 | **状态**: ✅ 已完成（Sprint 9，2026-03-23）
 **价值**: 消除 Web/Bridge/Scheduler 三处分裂状态，建立算子目录与激活状态唯一真相，提升一致性与可扩展性
 **设计文档**: `tasks/sprints/sprint9/design.md`
 
 ### Story 10.1: CatalogPlugin 成为算子目录唯一来源
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（Sprint 9，2026-03-23）
 **验收标准**:
 - CatalogPlugin 提供统一算子目录接口（列表/详情/激活/去激活/更新）
 - 算子状态（active）由 CatalogPlugin 持久化并对外查询
@@ -896,7 +896,7 @@
 ---
 
 ### Story 10.2: BridgePlugin 同步 Python 算子到 Catalog
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（Sprint 9，2026-03-23）
 **验收标准**:
 - BridgePlugin 在 `Start/Refresh` 后批量 upsert Python 算子元信息到 Catalog
 - upsert 不覆盖用户状态字段（如 active）
@@ -905,7 +905,7 @@
 ---
 
 ### Story 10.3: Web/Scheduler 读写路径切换到 Catalog
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（Sprint 9，2026-03-23）
 **验收标准**:
 - Web `/api/operators`、`/api/operators/detail`、激活/去激活接口内部改为转发 Catalog
 - Scheduler 执行前以 Catalog 的 active 状态作为准入判断
@@ -914,9 +914,9 @@
 ---
 
 ## Epic 11: Pipeline 增强与异步任务
-**优先级**: P1 | **状态**: 🚧 进行中（11.1/11.2 已完成，11.3/11.4 待规划）
+**优先级**: P1 | **状态**: ✅ 已完成（11.1/11.2：Sprint 9；11.3/11.4：Sprint 10，2026-03-24）
 **价值**: 增强 Pipeline 编排能力，支持异步任务执行，提升系统易用性
-**设计文档**: `tasks/sprints/sprint9/design.md`
+**设计文档**: `tasks/sprints/sprint9/design.md`、`tasks/sprints/sprint10/design.md`
 
 ### Story 11.1: 多算子 Pipeline（MVP）
 **状态**: ✅ 已完成（MVP）
@@ -943,7 +943,7 @@
 ---
 
 ### Story 11.3: 多算子 Pipeline（增强）
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（Sprint 10，2026-03-24）
 **验收标准**:
 
 **1. 多 SQL 任务**
@@ -957,7 +957,7 @@
   // 单输入（纯虚，现有算子必须实现）
   virtual int Work(IChannel* in, IChannel* out) = 0;
   // 多输入（默认实现：转发到 inputs[0]，多输入算子按需覆盖）
-  virtual int Work(std::span<IChannel*> inputs, IChannel* out);
+  virtual int Work(Span<IChannel*> inputs, IChannel* out);
   ```
 - Scheduler 统一调多输入版本，单输入算子通过默认实现自动降级
 - SQL 语法支持多源输入：`FROM ch1, ch2 USING <op> INTO out`
@@ -970,7 +970,7 @@
 ---
 
 ### Story 11.4: 异步任务执行（增强）
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（Sprint 10，2026-03-24）
 **验收标准**:
 
 **1. 任务取消与超时控制**

@@ -599,7 +599,8 @@ int32_t WebServer::HandleUploadOperator(const std::string&, const std::string& r
     rapidjson::Document doc;
     doc.Parse(req.c_str());
     if (doc.HasParseError() || !doc.IsObject() ||
-        !doc.HasMember("filename") || !doc.HasMember("content")) {
+        !doc.HasMember("filename") || !doc.HasMember("content") ||
+        !doc["filename"].IsString() || !doc["content"].IsString()) {
         rsp = R"({"error":"invalid request, expected {\"filename\":\"...\",\"content\":\"...\"}"})" ;
         return error::BAD_REQUEST;
     }
@@ -632,6 +633,11 @@ int32_t WebServer::HandleUploadOperator(const std::string&, const std::string& r
     }
     fwrite(content.data(), 1, content.size(), fp);
     fclose(fp);
+
+    // 上传成功后立即触发 Python Worker 重新发现 + Scheduler 刷新 Catalog，
+    // 保证新算子能尽快出现在 /operators/query 列表中。
+    NotifyWorkerReload();
+    NotifySchedulerRefresh();
 
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);

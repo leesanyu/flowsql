@@ -86,11 +86,13 @@
     <el-dialog
       v-model="createDialogVisible"
       title="新建 Python 算子"
-      width="900px"
+      :width="createDialogFullscreen ? '100%' : '900px'"
+      :fullscreen="createDialogFullscreen"
       :close-on-click-modal="false"
+      @closed="onCreateDialogClosed"
     >
-      <el-form :model="operatorForm" label-width="100px">
-        <el-form-item label="算子名称" required>
+      <el-form :model="operatorForm" :label-width="showCreateMeta ? '100px' : '0px'">
+        <el-form-item v-if="showCreateMeta" label="算子名称" required>
           <el-input
             v-model="operatorForm.fullName"
             placeholder="例如: explore.chisquare"
@@ -108,14 +110,14 @@
           </div>
         </el-form-item>
 
-        <el-form-item label="算子描述">
+        <el-form-item v-if="showCreateMeta" label="算子描述">
           <el-input
             v-model="operatorForm.description"
             placeholder="简要描述算子功能"
           />
         </el-form-item>
 
-        <el-form-item label="依赖库">
+        <el-form-item v-if="showCreateMeta" label="依赖库">
           <el-input
             v-model="operatorForm.dependencies"
             placeholder="例如: scipy>=1.10.0, scikit-learn>=1.3.0 (可选)"
@@ -125,7 +127,11 @@
           </div>
         </el-form-item>
 
-        <el-form-item label="Python 代码" required>
+        <el-form-item
+          :label="showCreateMeta ? 'Python 代码' : ''"
+          required
+          :class="['python-code-form-item', { 'python-code-form-item-fullscreen': createDialogFullscreen }]"
+        >
           <div class="code-editor-header">
             <el-button size="small" @click="insertTemplate">
               <el-icon><Document /></el-icon>
@@ -135,14 +141,33 @@
               <el-icon><Tickets /></el-icon>
               插入示例
             </el-button>
+            <el-button size="small" @click="toggleCreateFullscreen">
+              <el-icon><FullScreen /></el-icon>
+              {{ createDialogFullscreen ? '退出最大化' : '最大化编写' }}
+            </el-button>
           </div>
-          <el-input
-            v-model="operatorForm.code"
-            type="textarea"
-            :rows="20"
-            placeholder="在此编写 Python 代码..."
-            class="code-textarea"
-          />
+          <div
+            :class="['code-editor-container', 'code-editor-container-editable']"
+            :style="createCodeContainerStyle"
+          >
+            <div ref="createCodeLineNumbersRef" class="code-line-numbers code-line-numbers-editor">
+              <div v-for="line in createCodeLines" :key="line">{{ line }}</div>
+            </div>
+            <div class="code-editor-stage">
+              <pre ref="createCodeHighlightRef" class="code-content code-highlight-layer"><code v-html="highlightedCreateCode"></code></pre>
+              <textarea
+                ref="createCodeTextareaRef"
+                v-model="operatorForm.code"
+                class="code-editor-input"
+                wrap="off"
+                spellcheck="false"
+                @scroll="syncCreateEditorScroll"
+                @input="syncCreateEditorScroll"
+                @keyup="syncCreateEditorScroll"
+                @click="syncCreateEditorScroll"
+              ></textarea>
+            </div>
+          </div>
         </el-form-item>
       </el-form>
 
@@ -162,30 +187,78 @@
     <el-dialog
       v-model="detailDialogVisible"
       :title="detailMode === 'view' ? '查看算子' : '编辑算子'"
-      width="900px"
+      :width="detailDialogFullscreen ? '100%' : '900px'"
+      :fullscreen="detailDialogFullscreen"
       :close-on-click-modal="false"
+      @closed="onDetailDialogClosed"
     >
-      <el-form :model="detailForm" label-width="100px">
-        <el-form-item label="算子名称">
+      <el-form :model="detailForm" :label-width="showDetailMeta ? '100px' : '0px'">
+        <el-form-item v-if="showDetailMeta" label="算子名称">
           <el-input v-model="detailForm.fullName" disabled />
         </el-form-item>
-        <el-form-item label="算子描述">
+        <el-form-item v-if="showDetailMeta" label="算子描述">
           <el-input v-model="detailForm.description" :disabled="detailMode === 'view'" />
         </el-form-item>
-        <el-form-item label="位置">
+        <el-form-item v-if="showDetailMeta" label="位置">
           <el-input :model-value="formatPosition(detailForm.position)" disabled />
         </el-form-item>
-        <el-form-item label="来源">
+        <el-form-item v-if="showDetailMeta" label="来源">
           <el-input v-model="detailForm.source" disabled />
         </el-form-item>
-        <el-form-item label="Python 代码">
-          <el-input
-            v-model="detailForm.code"
-            type="textarea"
-            :rows="20"
-            :disabled="detailMode === 'view'"
-            class="code-textarea"
-          />
+        <el-form-item v-if="showDetailMeta" label="类型">
+          <el-input v-model="detailForm.type" disabled />
+        </el-form-item>
+        <el-form-item
+          v-if="isPythonDetail"
+          :label="showDetailMeta ? 'Python 代码' : ''"
+          :class="['python-code-form-item', { 'python-code-form-item-fullscreen': detailDialogFullscreen }]"
+        >
+          <div class="code-viewer-header">
+            <el-tag size="small" type="success">Python</el-tag>
+            <el-button size="small" @click="toggleDetailFullscreen">
+              <el-icon><FullScreen /></el-icon>
+              {{ detailDialogFullscreen ? '退出最大化' : '最大化查看' }}
+            </el-button>
+          </div>
+          <template v-if="detailMode === 'view'">
+            <div
+              :class="['code-editor-container', 'code-editor-container-readonly']"
+              :style="detailCodeContainerStyle"
+            >
+              <div ref="detailCodeReadonlyLineNumbersRef" class="code-line-numbers code-line-numbers-readonly">
+                <div v-for="line in detailCodeLines" :key="line">{{ line }}</div>
+              </div>
+              <pre
+                ref="detailCodeReadonlyContentRef"
+                class="code-content code-content-readonly"
+                @scroll="syncReadonlyScroll"
+              ><code v-html="highlightedDetailCode"></code></pre>
+            </div>
+          </template>
+          <template v-else>
+            <div
+              :class="['code-editor-container', 'code-editor-container-editable']"
+              :style="detailCodeContainerStyle"
+            >
+              <div ref="detailCodeLineNumbersRef" class="code-line-numbers code-line-numbers-editor">
+                <div v-for="line in detailCodeLines" :key="line">{{ line }}</div>
+              </div>
+              <div class="code-editor-stage">
+                <pre ref="detailCodeHighlightRef" class="code-content code-highlight-layer"><code v-html="highlightedDetailCode"></code></pre>
+                <textarea
+                  ref="detailCodeTextareaRef"
+                  v-model="detailForm.code"
+                  class="code-editor-input"
+                  wrap="off"
+                  spellcheck="false"
+                  @scroll="syncEditorScroll"
+                  @input="syncEditorScroll"
+                  @keyup="syncEditorScroll"
+                  @click="syncEditorScroll"
+                ></textarea>
+              </div>
+            </div>
+          </template>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -206,8 +279,8 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
-import { Upload, Edit, QuestionFilled, Document, Tickets } from '@element-plus/icons-vue'
+import { computed, nextTick, ref, onMounted } from 'vue'
+import { Upload, Edit, QuestionFilled, Document, Tickets, FullScreen } from '@element-plus/icons-vue'
 import api from '../api'
 import { ElMessage } from 'element-plus'
 
@@ -215,9 +288,19 @@ const operators = ref([])
 const loading = ref(false)
 const fileInputRef = ref(null)
 const createDialogVisible = ref(false)
+const createDialogFullscreen = ref(false)
 const detailDialogVisible = ref(false)
 const detailMode = ref('view')
 const uploading = ref(false)
+const detailDialogFullscreen = ref(false)
+const createCodeTextareaRef = ref(null)
+const createCodeHighlightRef = ref(null)
+const createCodeLineNumbersRef = ref(null)
+const detailCodeTextareaRef = ref(null)
+const detailCodeHighlightRef = ref(null)
+const detailCodeLineNumbersRef = ref(null)
+const detailCodeReadonlyContentRef = ref(null)
+const detailCodeReadonlyLineNumbersRef = ref(null)
 
 const operatorForm = ref({
   fullName: '',
@@ -235,9 +318,185 @@ const detailForm = ref({
   description: '',
   position: 'DATA',
   source: '',
+  type: '',
   editable: false,
   code: ''
 })
+
+const PYTHON_KEYWORDS = new Set([
+  'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue', 'def', 'del',
+  'elif', 'else', 'except', 'finally', 'for', 'from', 'global', 'if', 'import', 'in',
+  'is', 'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try', 'while',
+  'with', 'yield'
+])
+
+const PYTHON_LITERALS = new Set(['True', 'False', 'None'])
+
+const escapeHtml = (text = '') => {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+const highlightPythonLine = (line) => {
+  let output = ''
+  let index = 0
+  while (index < line.length) {
+    const ch = line[index]
+
+    if (ch === '#') {
+      output += `<span class="token-comment">${escapeHtml(line.slice(index))}</span>`
+      break
+    }
+
+    if (ch === '"' || ch === "'") {
+      const quote = ch
+      let end = index + 1
+      while (end < line.length) {
+        if (line[end] === '\\' && end + 1 < line.length) {
+          end += 2
+          continue
+        }
+        if (line[end] === quote) {
+          end += 1
+          break
+        }
+        end += 1
+      }
+      output += `<span class="token-string">${escapeHtml(line.slice(index, end))}</span>`
+      index = end
+      continue
+    }
+
+    if (/[A-Za-z_]/.test(ch)) {
+      let end = index + 1
+      while (end < line.length && /[A-Za-z0-9_]/.test(line[end])) {
+        end += 1
+      }
+      const word = line.slice(index, end)
+      if (PYTHON_KEYWORDS.has(word)) {
+        output += `<span class="token-keyword">${word}</span>`
+      } else if (PYTHON_LITERALS.has(word)) {
+        output += `<span class="token-literal">${word}</span>`
+      } else {
+        output += escapeHtml(word)
+      }
+      index = end
+      continue
+    }
+
+    if (/[0-9]/.test(ch)) {
+      let end = index + 1
+      while (end < line.length && /[0-9._]/.test(line[end])) {
+        end += 1
+      }
+      output += `<span class="token-number">${escapeHtml(line.slice(index, end))}</span>`
+      index = end
+      continue
+    }
+
+    output += escapeHtml(ch)
+    index += 1
+  }
+  return output
+}
+
+const highlightPythonCode = (code = '') => {
+  return code
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => highlightPythonLine(line))
+    .join('\n')
+}
+
+const isPythonDetail = computed(() => String(detailForm.value.type || '').toLowerCase() === 'python')
+const showDetailMeta = computed(() => !(detailDialogFullscreen.value && isPythonDetail.value))
+const detailCodeContainerStyle = computed(() => (
+  detailDialogFullscreen.value
+    ? { height: 'calc(100vh - 150px)' }
+    : { height: '360px' }
+))
+
+const detailCodeLines = computed(() => {
+  const code = (detailForm.value.code || '').replace(/\r\n/g, '\n')
+  const count = code.length === 0 ? 1 : code.split('\n').length
+  return Array.from({ length: count }, (_, idx) => idx + 1)
+})
+
+const highlightedDetailCode = computed(() => highlightPythonCode(detailForm.value.code || ''))
+const highlightedCreateCode = computed(() => highlightPythonCode(operatorForm.value.code || ''))
+const createCodeLines = computed(() => {
+  const code = (operatorForm.value.code || '').replace(/\r\n/g, '\n')
+  const count = code.length === 0 ? 1 : code.split('\n').length
+  return Array.from({ length: count }, (_, idx) => idx + 1)
+})
+const showCreateMeta = computed(() => !createDialogFullscreen.value)
+const createCodeContainerStyle = computed(() => (
+  createDialogFullscreen.value
+    ? { height: 'calc(100vh - 180px)' }
+    : { height: '420px' }
+))
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const syncEditorScroll = () => {
+  const textarea = detailCodeTextareaRef.value
+  if (!textarea) return
+  const highlight = detailCodeHighlightRef.value
+  const lineNumbers = detailCodeLineNumbersRef.value
+  if (highlight) {
+    highlight.scrollTop = textarea.scrollTop
+    highlight.scrollLeft = textarea.scrollLeft
+  }
+  if (lineNumbers) {
+    lineNumbers.scrollTop = textarea.scrollTop
+  }
+}
+
+const syncCreateEditorScroll = () => {
+  const textarea = createCodeTextareaRef.value
+  if (!textarea) return
+  const highlight = createCodeHighlightRef.value
+  const lineNumbers = createCodeLineNumbersRef.value
+  if (highlight) {
+    highlight.scrollTop = textarea.scrollTop
+    highlight.scrollLeft = textarea.scrollLeft
+  }
+  if (lineNumbers) {
+    lineNumbers.scrollTop = textarea.scrollTop
+  }
+}
+
+const syncReadonlyScroll = () => {
+  const readonlyContent = detailCodeReadonlyContentRef.value
+  const readonlyLineNumbers = detailCodeReadonlyLineNumbersRef.value
+  if (!readonlyContent || !readonlyLineNumbers) return
+  readonlyLineNumbers.scrollTop = readonlyContent.scrollTop
+}
+
+const resetCodeScroll = () => {
+  const createTextarea = createCodeTextareaRef.value
+  if (createTextarea) {
+    createTextarea.scrollTop = 0
+    createTextarea.scrollLeft = 0
+    syncCreateEditorScroll()
+  }
+  const textarea = detailCodeTextareaRef.value
+  if (textarea) {
+    textarea.scrollTop = 0
+    textarea.scrollLeft = 0
+    syncEditorScroll()
+  }
+  const readonlyContent = detailCodeReadonlyContentRef.value
+  if (readonlyContent) {
+    readonlyContent.scrollTop = 0
+    readonlyContent.scrollLeft = 0
+    syncReadonlyScroll()
+  }
+}
 
 const loadOperators = async () => {
   loading.value = true
@@ -255,6 +514,17 @@ const loadOperators = async () => {
   } finally {
     loading.value = false
   }
+}
+
+const waitOperatorSynced = async (fullName, maxRetries = 10, delayMs = 300) => {
+  for (let i = 0; i < maxRetries; i += 1) {
+    await loadOperators()
+    if (!fullName || operators.value.some(op => `${op.catelog}.${op.name}` === fullName)) {
+      return true
+    }
+    await delay(delayMs)
+  }
+  return false
 }
 
 const activateOperator = async (name) => {
@@ -293,6 +563,7 @@ const openDetail = async (fullName, mode) => {
       description: d.description || '',
       position: d.position || 'DATA',
       source: d.source || '',
+      type: d.type || '',
       editable: !!d.editable,
       code: d.content || ''
     }
@@ -301,10 +572,37 @@ const openDetail = async (fullName, mode) => {
       return
     }
     detailMode.value = mode
+    detailDialogFullscreen.value = false
     detailDialogVisible.value = true
+    nextTick(() => {
+      resetCodeScroll()
+    })
   } catch (error) {
     ElMessage.error('获取算子详情失败: ' + (error.response?.data?.error || error.message))
   }
+}
+
+const onDetailDialogClosed = () => {
+  detailDialogFullscreen.value = false
+}
+
+const onCreateDialogClosed = () => {
+  createDialogFullscreen.value = false
+}
+
+const toggleCreateFullscreen = () => {
+  createDialogFullscreen.value = !createDialogFullscreen.value
+  nextTick(() => {
+    syncCreateEditorScroll()
+  })
+}
+
+const toggleDetailFullscreen = () => {
+  detailDialogFullscreen.value = !detailDialogFullscreen.value
+  nextTick(() => {
+    syncEditorScroll()
+    syncReadonlyScroll()
+  })
 }
 
 const viewOperator = async (row) => {
@@ -356,7 +654,7 @@ const handleFileChange = async (event) => {
     const content = await file.text()
     await api.uploadOperator(file.name, content)
     ElMessage.success('算子上传成功')
-    loadOperators()
+    await waitOperatorSynced('')
   } catch (error) {
     ElMessage.error('上传失败: ' + (error.response?.data?.error || error.message))
   } finally {
@@ -382,7 +680,11 @@ const showCreateDialog = () => {
     dependencies: '',
     code: ''
   }
+  createDialogFullscreen.value = false
   createDialogVisible.value = true
+  nextTick(() => {
+    resetCodeScroll()
+  })
 }
 
 const parseOperatorName = () => {
@@ -500,16 +802,21 @@ const saveOperator = async (autoActivate) => {
     const res = await api.uploadOperator(fileName, finalCode)
     ElMessage.success('算子上传成功')
 
+    const fullName = `${operatorForm.value.catelog}.${operatorForm.value.name}`
+    const synced = await waitOperatorSynced(fullName)
+    if (!synced) {
+      ElMessage.warning('算子文件已上传，但目录同步较慢，请稍后在列表中确认')
+    }
+
     // 如果需要自动激活
     if (autoActivate) {
-      const fullName = `${operatorForm.value.catelog}.${operatorForm.value.name}`
       await api.activateOperator(fullName)
       ElMessage.success('算子已激活')
     }
 
     // 关闭对话框并刷新列表
     createDialogVisible.value = false
-    await loadOperators()
+    await waitOperatorSynced('')
   } catch (error) {
     ElMessage.error('保存失败: ' + error.message)
   } finally {
@@ -556,15 +863,171 @@ onMounted(() => {
   margin-bottom: 10px;
 }
 
-.code-textarea {
-  font-family: 'Courier New', 'Consolas', monospace;
-  font-size: 13px;
+.code-viewer-header {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
 }
 
-.code-textarea :deep(textarea) {
-  font-family: 'Courier New', 'Consolas', monospace;
+.python-code-form-item {
+  width: 100%;
+}
+
+.python-code-form-item :deep(.el-form-item__content) {
+  min-width: 0;
+  width: 100%;
+}
+
+.python-code-form-item-fullscreen :deep(.el-form-item__content) {
+  margin-left: 0 !important;
+}
+
+.code-editor-container {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  background: #202535;
+  min-height: 420px;
+}
+
+.code-editor-container-readonly {
+  overflow: hidden;
+}
+
+.code-editor-container-editable {
+  overflow: hidden;
+}
+
+.code-line-numbers {
+  flex: 0 0 56px;
+  align-self: stretch;
+  min-width: 56px;
+  padding: 12px 8px;
+  margin: 0;
+  text-align: right;
+  color: #8b95a5;
+  background: #2b3143;
+  border-right: 1px solid #40485d;
+  font-family: 'Consolas', 'Courier New', monospace;
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.6;
+  user-select: none;
+  overflow: hidden;
+}
+
+.code-line-numbers-editor {
+  border-right: 1px solid #40485d;
+}
+
+.code-editor-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.code-content {
+  margin: 0;
+  padding: 12px 16px;
+  min-width: max-content;
+  white-space: pre;
+  color: #e8edf3;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+
+.code-content-readonly {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: auto;
+}
+
+.code-content code {
+  font-family: inherit;
+}
+
+:deep(.code-highlight-layer) {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: auto;
+  z-index: 1;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+:deep(.code-highlight-layer::-webkit-scrollbar) {
+  display: none;
+}
+
+:deep(.code-highlight-layer code) {
+  display: block;
+  min-height: 100%;
+}
+
+.code-editor-input {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  border: none;
+  resize: none;
+  margin: 0;
+  padding: 12px 16px;
+  background: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: #e8edf3;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 4;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  overflow-x: scroll;
+  overflow-y: scroll;
+  outline: none;
+}
+
+.code-editor-input::selection {
+  background: rgba(115, 208, 255, 0.35);
+}
+
+:deep(.token-keyword) {
+  color: #ffb454;
+  font-weight: 600;
+}
+
+:deep(.token-string) {
+  color: #bae67e;
+}
+
+:deep(.token-number) {
+  color: #73d0ff;
+}
+
+:deep(.token-literal) {
+  color: #d4bfff;
+}
+
+:deep(.token-comment) {
+  color: #6e7a8f;
+}
+
+:deep(.el-dialog.is-fullscreen .el-dialog__body) {
+  overflow: hidden;
 }
 
 .dialog-footer {

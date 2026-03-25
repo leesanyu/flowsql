@@ -45,8 +45,8 @@
         </div>
       </template>
       <el-table :data="recentTasks" style="width: 100%">
-        <el-table-column prop="id" label="任务ID" min-width="260" show-overflow-tooltip />
-        <el-table-column prop="sql_text" label="SQL" show-overflow-tooltip />
+        <el-table-column prop="id" label="任务ID" width="180" show-overflow-tooltip />
+        <el-table-column prop="sql_text" label="SQL" min-width="420" show-overflow-tooltip />
         <el-table-column prop="status" label="状态" width="100">
           <template #default="scope">
             <el-tag :type="scope.row.status === 'completed' ? 'success' : 'danger'">
