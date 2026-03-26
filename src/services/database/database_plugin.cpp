@@ -23,6 +23,7 @@
 #include "drivers/sqlite_driver.h"
 #include "drivers/mysql_driver.h"
 #include "drivers/clickhouse_driver.h"
+#include "drivers/postgres_driver.h"
 
 namespace flowsql {
 namespace database {
@@ -190,12 +191,13 @@ IDatabaseChannel* DatabasePlugin::Get(const char* type, const char* name) {
 
     // 4. 创建 Session 工厂
     IDbDriver* driver_ptr = driver.get();  // 弱引用，driver 由 channels_ 中的 Channel 持有
-    auto session_factory = [driver_ptr]() -> std::shared_ptr<IDbSession> {
-        // 使用 dynamic_cast 调用具体驱动的 CreateSession
-        if (auto* d = dynamic_cast<SqliteDriver*>(driver_ptr))      return d->CreateSession();
-        if (auto* d = dynamic_cast<MysqlDriver*>(driver_ptr))       return d->CreateSession();
-        if (auto* d = dynamic_cast<ClickHouseDriver*>(driver_ptr))  return d->CreateSession();
+    auto* provider = dynamic_cast<IDbSessionFactoryProvider*>(driver_ptr);
+    if (!provider) {
+        last_error_ = "driver does not provide session factory: " + std::string(type);
         return nullptr;
+    }
+    auto session_factory = [provider]() -> std::shared_ptr<IDbSession> {
+        return provider->CreateSession();
     };
 
     // 5. 创建通道并打开连接
@@ -269,6 +271,9 @@ std::unique_ptr<IDbDriver> DatabasePlugin::CreateDriver(const std::string& type)
     }
     if (type == "mysql") {
         return std::make_unique<MysqlDriver>();
+    }
+    if (type == "postgres") {
+        return std::make_unique<PostgresDriver>();
     }
     if (type == "clickhouse") {
         return std::make_unique<ClickHouseDriver>();
@@ -847,10 +852,10 @@ static std::string BatchReaderToJson(IBatchReader* reader) {
 }
 
 // 按数据库类型对表名加引号转义（防止 SQL 注入）
-// SQLite 用双引号，MySQL/ClickHouse 用反引号
+// SQLite/PostgreSQL 用双引号，MySQL/ClickHouse 用反引号
 static std::string QuoteTableName(const std::string& table, const std::string& db_type) {
     if (table.empty()) return "";
-    if (db_type == "sqlite") {
+    if (db_type == "sqlite" || db_type == "postgres") {
         // 双引号转义：将内部双引号替换为两个双引号
         std::string result = "\"";
         for (char c : table) {
@@ -869,6 +874,57 @@ static std::string QuoteTableName(const std::string& table, const std::string& d
         result += "`";
         return result;
     }
+}
+
+static std::string QuoteSqlLiteral(const std::string& value) {
+    std::string out = "'";
+    for (char c : value) {
+        if (c == '\'') out += "''";
+        else out += c;
+    }
+    out += "'";
+    return out;
+}
+
+static std::string BuildTablesSql(const std::string& db_type, const std::string& schema) {
+    if (db_type == "sqlite") {
+        return "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name";
+    }
+    if (db_type == "postgres") {
+        const std::string effective_schema = schema.empty() ? "public" : schema;
+        return "SELECT tablename FROM pg_tables WHERE schemaname=" +
+               QuoteSqlLiteral(effective_schema) + " ORDER BY tablename";
+    }
+    return "SHOW TABLES";
+}
+
+static std::string BuildDescribeSql(const std::string& db_type,
+                                    const std::string& schema,
+                                    const std::string& table) {
+    const std::string quoted = QuoteTableName(table, db_type);
+    if (db_type == "sqlite") {
+        return "PRAGMA table_info(" + quoted + ")";
+    }
+    if (db_type == "postgres") {
+        const std::string effective_schema = schema.empty() ? "public" : schema;
+        return "SELECT column_name, data_type, is_nullable "
+               "FROM information_schema.columns "
+               "WHERE table_schema=" + QuoteSqlLiteral(effective_schema) +
+               " AND table_name=" + QuoteSqlLiteral(table) +
+               " ORDER BY ordinal_position";
+    }
+    return "DESCRIBE " + quoted;
+}
+
+static std::string BuildPreviewSql(const std::string& db_type,
+                                   const std::string& schema,
+                                   const std::string& table) {
+    if (db_type == "postgres") {
+        const std::string effective_schema = schema.empty() ? "public" : schema;
+        return "SELECT * FROM " + QuoteTableName(effective_schema, db_type) + "." +
+               QuoteTableName(table, db_type) + " LIMIT 100";
+    }
+    return "SELECT * FROM " + QuoteTableName(table, db_type) + " LIMIT 100";
 }
 
 // 将 RecordBatch 列表转为 JSON（供 ClickHouse Arrow 路径使用）
@@ -926,8 +982,11 @@ static std::string BatchesToJson(const std::vector<std::shared_ptr<arrow::Record
 
 // 解析请求中的 type/name/table 字段
 static bool ParseBrowseRequest(const std::string& req,
-                                std::string& type, std::string& name, std::string& table,
-                                std::string& err) {
+                               std::string& type,
+                               std::string& name,
+                               std::string& table,
+                               std::string& schema,
+                               std::string& err) {
     rapidjson::Document doc;
     doc.Parse(req.c_str());
     if (doc.HasParseError() || !doc.IsObject()) {
@@ -942,13 +1001,16 @@ static bool ParseBrowseRequest(const std::string& req,
     if (doc.HasMember("table") && doc["table"].IsString()) {
         table = doc["table"].GetString();
     }
+    if (doc.HasMember("schema") && doc["schema"].IsString()) {
+        schema = doc["schema"].GetString();
+    }
     return true;
 }
 
 // POST /channels/database/tables — 列出所有表
 int32_t DatabasePlugin::HandleTables(const std::string&, const std::string& req, std::string& rsp) {
-    std::string type, name, table, err;
-    if (!ParseBrowseRequest(req, type, name, table, err)) {
+    std::string type, name, table, schema, err;
+    if (!ParseBrowseRequest(req, type, name, table, schema, err)) {
         rsp = "{\"error\":\"" + err + "\"}";
         return error::BAD_REQUEST;
     }
@@ -959,12 +1021,7 @@ int32_t DatabasePlugin::HandleTables(const std::string&, const std::string& req,
         return error::NOT_FOUND;
     }
 
-    std::string sql;
-    if (type == "sqlite") {
-        sql = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name";
-    } else {
-        sql = "SHOW TABLES";
-    }
+    const std::string sql = BuildTablesSql(type, schema);
 
     std::vector<std::string> tables;
 
@@ -1028,8 +1085,8 @@ int32_t DatabasePlugin::HandleTables(const std::string&, const std::string& req,
 
 // POST /channels/database/describe — 获取表结构
 int32_t DatabasePlugin::HandleDescribe(const std::string&, const std::string& req, std::string& rsp) {
-    std::string type, name, table, err;
-    if (!ParseBrowseRequest(req, type, name, table, err)) {
+    std::string type, name, table, schema, err;
+    if (!ParseBrowseRequest(req, type, name, table, schema, err)) {
         rsp = "{\"error\":\"" + err + "\"}";
         return error::BAD_REQUEST;
     }
@@ -1044,15 +1101,7 @@ int32_t DatabasePlugin::HandleDescribe(const std::string&, const std::string& re
         return error::NOT_FOUND;
     }
 
-    std::string quoted = QuoteTableName(table, type);
-    std::string sql;
-    if (type == "sqlite") {
-        // PRAGMA 不支持引号，但 SQLite 表名不含特殊字符时可直接用；
-        // 含特殊字符的表名用双引号包裹
-        sql = "PRAGMA table_info(" + quoted + ")";
-    } else {
-        sql = "DESCRIBE " + quoted;
-    }
+    const std::string sql = BuildDescribeSql(type, schema, table);
 
     if (type == "clickhouse") {
         std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
@@ -1076,8 +1125,8 @@ int32_t DatabasePlugin::HandleDescribe(const std::string&, const std::string& re
 
 // POST /channels/database/preview — 预览前 100 条数据
 int32_t DatabasePlugin::HandlePreview(const std::string&, const std::string& req, std::string& rsp) {
-    std::string type, name, table, err;
-    if (!ParseBrowseRequest(req, type, name, table, err)) {
+    std::string type, name, table, schema, err;
+    if (!ParseBrowseRequest(req, type, name, table, schema, err)) {
         rsp = "{\"error\":\"" + err + "\"}";
         return error::BAD_REQUEST;
     }
@@ -1092,8 +1141,7 @@ int32_t DatabasePlugin::HandlePreview(const std::string&, const std::string& req
         return error::NOT_FOUND;
     }
 
-    std::string quoted = QuoteTableName(table, type);
-    std::string sql = "SELECT * FROM " + quoted + " LIMIT 100";
+    const std::string sql = BuildPreviewSql(type, schema, table);
 
     if (type == "clickhouse") {
         std::vector<std::shared_ptr<arrow::RecordBatch>> batches;

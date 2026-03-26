@@ -20,7 +20,7 @@ interface IDatabaseFactory {
     virtual ~IDatabaseFactory() = default;
 
     // 获取或创建数据库通道实例（懒加载）
-    // type: "sqlite", "mysql", "clickhouse"
+    // type: "sqlite", "mysql", "postgres", "clickhouse"
     // name: 通道名称（如 "mydb"）
     // 返回: 通道指针（工厂持有所有权），失败返回 nullptr
     virtual IDatabaseChannel* Get(const char* type, const char* name) = 0;

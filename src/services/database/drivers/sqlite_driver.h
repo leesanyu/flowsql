@@ -10,6 +10,7 @@
 
 #include "../connection_pool.h"
 #include "../db_session.h"
+#include "../capability_interfaces.h"
 #include "../relation_db_session.h"
 
 namespace flowsql {
@@ -29,7 +30,8 @@ class SqliteResultSet;
 
 // SqliteDriver — SQLite 数据库驱动
 // 使用 FULLMUTEX 模式保证多线程安全，WAL 模式提升并发读写性能
-class __attribute__((visibility("default"))) SqliteDriver : public IDbDriver {
+class __attribute__((visibility("default"))) SqliteDriver : public IDbDriver,
+                                                             public IDbSessionFactoryProvider {
  public:
     SqliteDriver() = default;
     ~SqliteDriver() override;
@@ -43,7 +45,7 @@ class __attribute__((visibility("default"))) SqliteDriver : public IDbDriver {
     bool Ping() override;
 
     // 连接池相关
-    std::shared_ptr<IDbSession> CreateSession();
+    std::shared_ptr<IDbSession> CreateSession() override;
     void ReturnToPool(sqlite3* db);
 
  private:

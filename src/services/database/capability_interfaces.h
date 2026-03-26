@@ -14,6 +14,8 @@ class RecordBatch;
 namespace flowsql {
 namespace database {
 
+class IDbSession;
+
 // 批量读取能力（行式数据库）
 interface IBatchReadable {
     virtual ~IBatchReadable() = default;
@@ -51,6 +53,12 @@ interface ITransactional {
     virtual int CommitTransaction() = 0;
     virtual int RollbackTransaction() = 0;
     virtual const char* GetLastError() = 0;
+};
+
+// 会话工厂能力（由 Driver 提供）
+interface IDbSessionFactoryProvider {
+    virtual ~IDbSessionFactoryProvider() = default;
+    virtual std::shared_ptr<IDbSession> CreateSession() = 0;
 };
 
 }  // namespace database

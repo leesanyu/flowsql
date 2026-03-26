@@ -16,7 +16,8 @@ namespace database {
 // ClickHouseDriver — ClickHouse 数据库驱动
 // 基于 HTTP 接口（8123 端口），使用 cpp-httplib，零新依赖
 // HTTP 无状态，不需要连接池，每次 CreateSession() 创建新 Session
-class __attribute__((visibility("default"))) ClickHouseDriver : public IDbDriver {
+class __attribute__((visibility("default"))) ClickHouseDriver : public IDbDriver,
+                                                                 public IDbSessionFactoryProvider {
 public:
     ClickHouseDriver() = default;
     ~ClickHouseDriver() override = default;
@@ -30,7 +31,7 @@ public:
     bool Ping() override;
 
     // 创建 Session（每次返回新实例，HTTP 无状态）
-    std::shared_ptr<IDbSession> CreateSession();
+    std::shared_ptr<IDbSession> CreateSession() override;
 
 private:
     std::string host_;

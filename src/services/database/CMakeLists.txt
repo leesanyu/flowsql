@@ -30,6 +30,23 @@ else()
                         "Please install: sudo apt-get install libmysqlclient-dev")
 endif()
 
+# PostgreSQL 客户端库是必需依赖（Story 4.2）
+find_path(PQ_INCLUDE_DIR libpq-fe.h
+    PATHS /usr/include /usr/include/postgresql /usr/local/include
+)
+find_library(PQ_LIBRARY pq
+    PATHS /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu
+)
+
+if(PQ_INCLUDE_DIR AND PQ_LIBRARY)
+    message(STATUS "PostgreSQL client library found: ${PQ_LIBRARY}")
+    target_include_directories(${PROJECT_NAME} PRIVATE ${PQ_INCLUDE_DIR})
+    target_link_libraries(${PROJECT_NAME} ${PQ_LIBRARY})
+else()
+    message(FATAL_ERROR "PostgreSQL client library not found. This is a required dependency.\n"
+                        "Please install: sudo apt-get install libpq-dev")
+endif()
+
 add_dependencies(${PROJECT_NAME} flowsql_common)
 target_link_libraries(${PROJECT_NAME} flowsql_common)
 

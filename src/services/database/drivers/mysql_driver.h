@@ -10,6 +10,7 @@
 
 #include "../connection_pool.h"
 #include "../db_session.h"
+#include "../capability_interfaces.h"
 #include "../relation_db_session.h"
 
 namespace flowsql {
@@ -28,7 +29,8 @@ class MysqlSession;
 
 // MysqlDriver — MySQL 数据库驱动
 // 基于 libmysqlclient，支持预编译语句和事务
-class __attribute__((visibility("default"))) MysqlDriver : public IDbDriver {
+class __attribute__((visibility("default"))) MysqlDriver : public IDbDriver,
+                                                            public IDbSessionFactoryProvider {
  public:
     MysqlDriver() = default;
     ~MysqlDriver() override;
@@ -42,7 +44,7 @@ class __attribute__((visibility("default"))) MysqlDriver : public IDbDriver {
     bool Ping() override;
 
     // 连接池相关
-    std::shared_ptr<IDbSession> CreateSession();
+    std::shared_ptr<IDbSession> CreateSession() override;
     void ReturnToPool(MYSQL* conn);
 
  private:

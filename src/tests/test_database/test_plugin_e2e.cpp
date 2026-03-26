@@ -75,6 +75,28 @@ static std::string MakeMysqlOption(const std::string& name) {
            ";charset=" + p["charset"];
 }
 
+static std::unordered_map<std::string, std::string> GetPostgresParams() {
+    std::unordered_map<std::string, std::string> p;
+    p["host"] = getenv("PG_HOST") ? getenv("PG_HOST") : "127.0.0.1";
+    p["port"] = getenv("PG_PORT") ? getenv("PG_PORT") : "5432";
+    p["user"] = getenv("PG_USER") ? getenv("PG_USER") : "flowsql_user";
+    p["password"] = getenv("PG_PASSWORD") ? getenv("PG_PASSWORD") : "flowSQL@postgres";
+    p["database"] = getenv("PG_DATABASE") ? getenv("PG_DATABASE") : "flowsql_db";
+    p["timeout"] = "5";
+    return p;
+}
+
+static std::string MakePostgresOption(const std::string& name) {
+    auto p = GetPostgresParams();
+    return "type=postgres;name=" + name +
+           ";host=" + p["host"] +
+           ";port=" + p["port"] +
+           ";user=" + p["user"] +
+           ";password=" + p["password"] +
+           ";database=" + p["database"] +
+           ";timeout=" + p["timeout"];
+}
+
 // 辅助：将 Arrow RecordBatch 序列化为 IPC buffer
 static std::shared_ptr<arrow::Buffer> SerializeBatch(
         const std::shared_ptr<arrow::RecordBatch>& batch) {
@@ -83,6 +105,57 @@ static std::shared_ptr<arrow::Buffer> SerializeBatch(
     (void)ipc_w->WriteRecordBatch(*batch);
     (void)ipc_w->Close();
     return sink->Finish().ValueOrDie();
+}
+
+static std::shared_ptr<arrow::RecordBatch> DeserializeFirstBatch(const uint8_t* data, size_t len) {
+    auto buf = arrow::Buffer::Wrap(data, static_cast<int64_t>(len));
+    auto input = std::make_shared<arrow::io::BufferReader>(buf);
+    auto stream = arrow::ipc::RecordBatchStreamReader::Open(input).ValueOrDie();
+    std::shared_ptr<arrow::RecordBatch> batch;
+    if (!stream->ReadNext(&batch).ok() || !batch) return nullptr;
+    return batch;
+}
+
+static bool StartsWith(const std::string& text, const std::string& prefix) {
+    return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0;
+}
+
+static std::string QuoteMySqlIdentifier(const std::string& name) {
+    std::string result = "`";
+    for (char c : name) {
+        if (c == '`') result += "``";
+        else result += c;
+    }
+    result += "`";
+    return result;
+}
+
+static void CleanupMysqlE2eTables(IDatabaseChannel* db_ch) {
+    if (!db_ch) return;
+    IBatchReader* reader = nullptr;
+    if (db_ch->CreateReader("SHOW TABLES", &reader) != 0 || !reader) return;
+
+    std::vector<std::string> tables;
+    const uint8_t* buf = nullptr;
+    size_t len = 0;
+    while (reader->Next(&buf, &len) == 0) {
+        auto batch = DeserializeFirstBatch(buf, len);
+        if (!batch || batch->num_columns() == 0) continue;
+        auto table_col = std::static_pointer_cast<arrow::StringArray>(batch->column(0));
+        for (int64_t i = 0; i < table_col->length(); ++i) {
+            if (!table_col->IsNull(i)) tables.push_back(table_col->GetString(i));
+        }
+    }
+    reader->Close();
+    reader->Release();
+
+    for (const auto& table : tables) {
+        if (StartsWith(table, "e2e_") ||
+            StartsWith(table, "mt_readers_") ||
+            StartsWith(table, "mt_writers_")) {
+            db_ch->ExecuteSql(("DROP TABLE IF EXISTS " + QuoteMySqlIdentifier(table)).c_str());
+        }
+    }
 }
 
 // 辅助：通过 IDatabaseChannel 写入一批数据（数据准备用）
@@ -1403,6 +1476,171 @@ void test_t46_describe_clickhouse_format(PluginLoader* loader, IDatabaseFactory*
     printf("[PASS] T46: clickhouse describe format compatible\n");
 }
 
+void test_t47_query_postgres_channel(PluginLoader* loader, const std::string& pg_name) {
+    printf("[TEST] T47: /channels/database/query returns postgres channel...\n");
+    auto query = FindDbRoute(loader, "/channels/database/query");
+    assert(query != nullptr);
+
+    std::string req = std::string("{\"type\":\"postgres\",\"name\":\"") + pg_name + "\"}";
+    std::string rsp;
+    assert(query("/channels/database/query", req, rsp) == error::OK);
+
+    rapidjson::Document d;
+    d.Parse(rsp.c_str());
+    assert(!d.HasParseError() && d.IsArray());
+    bool found = false;
+    for (auto& it : d.GetArray()) {
+        if (!it.IsObject()) continue;
+        if (it.HasMember("type") && it["type"].IsString() &&
+            it.HasMember("name") && it["name"].IsString() &&
+            std::string(it["type"].GetString()) == "postgres" &&
+            std::string(it["name"].GetString()) == pg_name) {
+            found = true;
+            break;
+        }
+    }
+    assert(found);
+    printf("[PASS] T47: postgres channel listed\n");
+}
+
+void test_t48_t49_postgres_tables_describe(PluginLoader* loader,
+                                           IDatabaseFactory* factory,
+                                           const std::string& pg_name,
+                                           const std::string& schema,
+                                           const std::string& table) {
+    printf("[TEST] T48/T49: postgres tables+describe with schema...\n");
+    auto* pg = dynamic_cast<IDatabaseChannel*>(factory->Get("postgres", pg_name.c_str()));
+    assert(pg != nullptr);
+    assert(pg->ExecuteSql(("CREATE SCHEMA IF NOT EXISTS " + schema).c_str()) >= 0);
+    assert(pg->ExecuteSql(("DROP TABLE IF EXISTS " + schema + "." + table).c_str()) >= 0);
+    assert(pg->ExecuteSql(("CREATE TABLE " + schema + "." + table + " (id INTEGER, name TEXT)").c_str()) >= 0);
+    assert(pg->ExecuteSql(("INSERT INTO " + schema + "." + table + " VALUES (1, 'a'), (2, 'b')").c_str()) >= 0);
+
+    auto tables = FindDbRoute(loader, "/channels/database/tables");
+    assert(tables != nullptr);
+    std::string tables_req = std::string("{\"type\":\"postgres\",\"name\":\"") + pg_name +
+                             "\",\"schema\":\"" + schema + "\"}";
+    std::string tables_rsp;
+    assert(tables("/channels/database/tables", tables_req, tables_rsp) == error::OK);
+
+    rapidjson::Document td;
+    td.Parse(tables_rsp.c_str());
+    assert(!td.HasParseError() && td.IsObject());
+    assert(td.HasMember("tables") && td["tables"].IsArray());
+    bool found_table = false;
+    for (auto& t : td["tables"].GetArray()) {
+        if (t.IsString() && std::string(t.GetString()) == table) {
+            found_table = true;
+            break;
+        }
+    }
+    assert(found_table);
+
+    auto describe = FindDbRoute(loader, "/channels/database/describe");
+    assert(describe != nullptr);
+    std::string desc_req = std::string("{\"type\":\"postgres\",\"name\":\"") + pg_name +
+                           "\",\"schema\":\"" + schema + "\",\"table\":\"" + table + "\"}";
+    std::string desc_rsp;
+    assert(describe("/channels/database/describe", desc_req, desc_rsp) == error::OK);
+
+    rapidjson::Document dd;
+    dd.Parse(desc_rsp.c_str());
+    assert(!dd.HasParseError() && dd.IsObject());
+    assert(dd.HasMember("rows") && dd["rows"].IsInt64());
+    assert(dd["rows"].GetInt64() >= 2);
+    assert(dd.HasMember("data") && dd["data"].IsArray());
+    assert(dd["data"].Size() > 0);
+    assert(dd["data"][0].IsArray());
+    assert(dd["data"][0][0].IsString());
+    assert(std::string(dd["data"][0][0].GetString()) == "id");
+
+    assert(pg->ExecuteSql(("DROP TABLE IF EXISTS " + schema + "." + table).c_str()) >= 0);
+    assert(pg->ExecuteSql(("DROP SCHEMA IF EXISTS " + schema).c_str()) >= 0);
+    printf("[PASS] T48/T49: postgres schema routes\n");
+}
+
+void test_t50_postgres_preview_with_schema(PluginLoader* loader,
+                                           IDatabaseFactory* factory,
+                                           const std::string& pg_name,
+                                           const std::string& schema,
+                                           const std::string& table) {
+    printf("[TEST] T50: postgres preview with schema...\n");
+    auto* pg = dynamic_cast<IDatabaseChannel*>(factory->Get("postgres", pg_name.c_str()));
+    assert(pg != nullptr);
+    assert(pg->ExecuteSql(("CREATE SCHEMA IF NOT EXISTS " + schema).c_str()) >= 0);
+    assert(pg->ExecuteSql(("DROP TABLE IF EXISTS " + schema + "." + table).c_str()) >= 0);
+    assert(pg->ExecuteSql(("CREATE TABLE " + schema + "." + table + " (id INTEGER, name TEXT)").c_str()) >= 0);
+    assert(pg->ExecuteSql(("INSERT INTO " + schema + "." + table + " VALUES (1, 'x'), (2, 'y')").c_str()) >= 0);
+
+    auto preview = FindDbRoute(loader, "/channels/database/preview");
+    assert(preview != nullptr);
+    std::string preview_req = std::string("{\"type\":\"postgres\",\"name\":\"") + pg_name +
+                              "\",\"schema\":\"" + schema + "\",\"table\":\"" + table + "\"}";
+    std::string preview_rsp;
+    assert(preview("/channels/database/preview", preview_req, preview_rsp) == error::OK);
+
+    rapidjson::Document dp;
+    dp.Parse(preview_rsp.c_str());
+    assert(!dp.HasParseError() && dp.IsObject());
+    assert(dp.HasMember("rows") && dp["rows"].IsInt64());
+    assert(dp["rows"].GetInt64() == 2);
+    assert(dp.HasMember("data") && dp["data"].IsArray());
+    assert(dp["data"].Size() == 2);
+
+    assert(pg->ExecuteSql(("DROP TABLE IF EXISTS " + schema + "." + table).c_str()) >= 0);
+    assert(pg->ExecuteSql(("DROP SCHEMA IF EXISTS " + schema).c_str()) >= 0);
+    printf("[PASS] T50: postgres preview with schema\n");
+}
+
+void test_postgres_plugin_get_reader_writer(IDatabaseFactory* factory, const std::string& pg_name) {
+    printf("[TEST] PostgreSQL plugin path: Get + CreateReader/CreateWriter...\n");
+    auto* pg = dynamic_cast<IDatabaseChannel*>(factory->Get("postgres", pg_name.c_str()));
+    assert(pg != nullptr);
+    assert(pg->IsConnected());
+
+    const std::string table = "e2e_pg_rw_" + g_suffix;
+    pg->ExecuteSql(("DROP TABLE IF EXISTS " + table).c_str());
+
+    auto schema = arrow::schema({
+        arrow::field("id", arrow::int64()),
+        arrow::field("name", arrow::utf8()),
+        arrow::field("flag", arrow::boolean()),
+        arrow::field("bin", arrow::binary()),
+    });
+    arrow::Int64Builder id_b;
+    arrow::StringBuilder name_b;
+    arrow::BooleanBuilder flag_b;
+    arrow::BinaryBuilder bin_b;
+    (void)id_b.AppendValues({1, 2, 3});
+    (void)name_b.AppendValues({"aa", "bb", "cc"});
+    (void)flag_b.AppendValues(std::vector<bool>{true, false, true});
+    const uint8_t b0[] = {0x41};
+    const uint8_t b1[] = {0x42, 0x43};
+    const uint8_t b2[] = {0x01, 0x00, 0x02};
+    (void)bin_b.Append(b0, sizeof(b0));
+    (void)bin_b.Append(b1, sizeof(b1));
+    (void)bin_b.Append(b2, sizeof(b2));
+    auto batch = arrow::RecordBatch::Make(schema, 3, {
+        id_b.Finish().ValueOrDie(),
+        name_b.Finish().ValueOrDie(),
+        flag_b.Finish().ValueOrDie(),
+        bin_b.Finish().ValueOrDie(),
+    });
+    WriteTestData(pg, table.c_str(), batch);
+
+    IBatchReader* reader = nullptr;
+    assert(pg->CreateReader(("SELECT * FROM " + table + " ORDER BY id").c_str(), &reader) == 0);
+    assert(reader != nullptr);
+    const uint8_t* buf = nullptr;
+    size_t len = 0;
+    assert(reader->Next(&buf, &len) == 0);
+    assert(buf != nullptr && len > 0);
+    reader->Close();
+    reader->Release();
+    pg->ExecuteSql(("DROP TABLE IF EXISTS " + table).c_str());
+    printf("[PASS] PostgreSQL plugin path: Get + CreateReader/CreateWriter\n");
+}
+
 // ============================================================
 // main
 // ============================================================
@@ -1421,7 +1659,7 @@ int main(int argc, char* argv[]) {
 
     std::string plugin_dir = get_absolute_process_path();
 
-    // 加载插件
+    // ==================== MySQL 套件 ====================
     PluginLoader* loader = PluginLoader::Single();
     std::string plugin_name = "libflowsql_database.so";
     const char* relapath[] = {plugin_name.c_str()};
@@ -1434,99 +1672,91 @@ int main(int argc, char* argv[]) {
     }
     loader->StartAll();
 
-    // 检查 MySQL 可用性（通过插件层）
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
+    bool mysql_ready = false;
     if (!factory) {
-        printf("[SKIP] No database factory\n");
-        return 0;
+        printf("[SKIP] No database factory for MySQL suite\n");
+    } else {
+        auto* ch = factory->Get("mysql", "testdb");
+        mysql_ready = (ch && ch->IsConnected());
     }
-    auto* ch = factory->Get("mysql", "testdb");
-    if (!ch || !ch->IsConnected()) {
+    if (!mysql_ready) {
         auto p = GetMysqlParams();
         printf("[SKIP] MySQL not available at %s:%s (user=%s database=%s)\n",
                p["host"].c_str(), p["port"].c_str(),
                p["user"].c_str(), p["database"].c_str());
         printf("       Set MYSQL_HOST/MYSQL_PORT/MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE\n");
-        return 0;
     }
 
-    test_option_parsing();
-    test_mysql_connect();
-    test_create_reader();
-    test_create_writer();
-    test_error_paths();
-    test_sql_parser_where();
-    test_dataframe_filter();
-    test_security();
-
-    // 端到端测试
-    test_e2e_db_to_df();
-    test_e2e_db_where_to_df();
-    test_e2e_df_to_db();
-    test_e2e_db_to_db();
-    test_e2e_df_filter_to_db();
-    test_e2e_error_paths();
-    test_concurrent_readers();
-    test_concurrent_writers();
-    test_mysql_arrow_interface_unsupported(factory);
-    test_t41_query_sqlite_channel(loader, factory);
-    test_t42_query_mysql_channel(loader);
-    test_t44_tables_mysql(loader);
-    test_t45_describe_mysql(loader);
-
-    // 清理 MySQL 测试产生的所有临时表
-    {
-        auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
-        auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
-        if (db_ch) {
-            std::string err;
-            // 全局表
-            for (const auto& t : {TABLE_USERS, TABLE_AUTO, TABLE_CITIES, TABLE_COPY, TABLE_ADULTS}) {
-                db_ch->ExecuteSql(("DROP TABLE IF EXISTS " + t).c_str());
-            }
-            // 并发读测试表
-            db_ch->ExecuteSql(("DROP TABLE IF EXISTS mt_readers_" + g_suffix).c_str());
-            // 并发写测试表（6 张）
-            for (int i = 0; i < 6; ++i) {
-                db_ch->ExecuteSql(
-                    ("DROP TABLE IF EXISTS mt_writers_" + g_suffix + "_" + std::to_string(i)).c_str());
-            }
-            printf("  [CLEANUP] MySQL temp tables dropped\n");
+    if (mysql_ready) {
+        auto* mysql_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
+        if (mysql_ch) {
+            CleanupMysqlE2eTables(mysql_ch);
+            printf("  [CLEANUP] MySQL stale E2E tables dropped before run\n");
         }
-    }
 
-    // P1-P3: Epic 6 插件层 E2E（复用已加载的 factory，需要 config_file 支持）
-    {
-        printf("\n=== Epic 6 Plugin E2E Tests (P1-P3) ===\n\n");
-        auto ts_p = std::chrono::system_clock::now().time_since_epoch().count();
-        std::string p_yml = "/tmp/flowsql_p123_" + std::to_string(ts_p % 1000000) + ".yml";
+        test_option_parsing();
+        test_mysql_connect();
+        test_create_reader();
+        test_create_writer();
+        test_error_paths();
+        test_sql_parser_where();
+        test_dataframe_filter();
+        test_security();
 
-        // 通过 Option 设置 config_file（factory 已加载，直接调用 Option 追加配置）
-        auto* p_factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
-        // DatabasePlugin 实现了 IPlugin::Option，通过 Traverse 调用
-        loader->Traverse(IID_PLUGIN, [&p_yml](void* p) -> int {
-            auto* plugin = static_cast<IPlugin*>(p);
-            plugin->Option(("config_file=" + p_yml).c_str());
-            return 0;
-        });
+        // 端到端测试
+        test_e2e_db_to_df();
+        test_e2e_db_where_to_df();
+        test_e2e_df_to_db();
+        test_e2e_db_to_db();
+        test_e2e_df_filter_to_db();
+        test_e2e_error_paths();
+        test_concurrent_readers();
+        test_concurrent_writers();
+        test_mysql_arrow_interface_unsupported(factory);
+        test_t41_query_sqlite_channel(loader, factory);
+        test_t42_query_mysql_channel(loader);
+        test_t44_tables_mysql(loader);
+        test_t45_describe_mysql(loader);
 
-        test_p1_add_channel_then_get(p_factory, p_yml);
-        test_p2_remove_channel_then_get(p_factory, p_yml);
-        test_p3_add_channel_then_query(p_factory, p_yml);
-        test_p4_concurrent_add_channels(p_factory);
+        auto* cur_factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
+        auto* db_ch = dynamic_cast<IDatabaseChannel*>(cur_factory->Get("mysql", "testdb"));
+        if (db_ch) {
+            CleanupMysqlE2eTables(db_ch);
+            printf("  [CLEANUP] MySQL E2E tables dropped after run\n");
+        }
 
-        remove(p_yml.c_str());
-        printf("\n=== P1-P4 passed ===\n");
+        // P1-P3: Epic 6 插件层 E2E（复用已加载的 factory，需要 config_file 支持）
+        {
+            printf("\n=== Epic 6 Plugin E2E Tests (P1-P3) ===\n\n");
+            auto ts_p = std::chrono::system_clock::now().time_since_epoch().count();
+            std::string p_yml = "/tmp/flowsql_p123_" + std::to_string(ts_p % 1000000) + ".yml";
+
+            // 通过 Option 设置 config_file（factory 已加载，直接调用 Option 追加配置）
+            auto* p_factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
+            // DatabasePlugin 实现了 IPlugin::Option，通过 Traverse 调用
+            loader->Traverse(IID_PLUGIN, [&p_yml](void* p) -> int {
+                auto* plugin = static_cast<IPlugin*>(p);
+                plugin->Option(("config_file=" + p_yml).c_str());
+                return 0;
+            });
+
+            test_p1_add_channel_then_get(p_factory, p_yml);
+            test_p2_remove_channel_then_get(p_factory, p_yml);
+            test_p3_add_channel_then_query(p_factory, p_yml);
+            test_p4_concurrent_add_channels(p_factory);
+
+            remove(p_yml.c_str());
+            printf("\n=== P1-P4 passed ===\n");
+        }
+
+        printf("\n=== All database plugin E2E tests passed ===\n");
     }
 
     loader->StopAll();
     loader->Unload();
 
-    printf("\n=== All database plugin E2E tests passed ===\n");
-
-    // ============================================================
-    // ClickHouse E2E（E1-E7）— 复用同一 loader，重新加载插件
-    // ============================================================
+    // ==================== ClickHouse 套件 ====================
     printf("\n=== FlowSQL Database Plugin E2E Tests (ClickHouse) ===\n\n");
 
     auto ts2 = std::chrono::system_clock::now().time_since_epoch().count();
@@ -1539,36 +1769,72 @@ int main(int argc, char* argv[]) {
     int ch_ret = loader->Load(plugin_dir.c_str(), ch_relapath, ch_options, 1);
     if (ch_ret != 0) {
         printf("[SKIP] Plugin not found for ClickHouse tests\n");
-        return 0;
+    } else {
+        loader->StartAll();
+
+        auto* ch_factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
+        bool ch_ready = false;
+        if (ch_factory) {
+            auto* ch_ch = ch_factory->Get("clickhouse", "ch1");
+            ch_ready = (ch_ch && ch_ch->IsConnected());
+        }
+        if (!ch_ready) {
+            printf("[SKIP] ClickHouse not available. Set CH_HOST/CH_PORT/CH_USER/CH_PASSWORD/CH_DATABASE\n");
+        } else {
+            test_clickhouse_connect(ch_factory);
+            test_t43_query_clickhouse_channel(loader);
+            test_t46_describe_clickhouse_format(loader, ch_factory);
+            test_clickhouse_create_arrow_reader(ch_factory);
+            test_clickhouse_create_arrow_writer(ch_factory);
+            test_clickhouse_arrow_type_matrix(ch_factory);
+            test_clickhouse_create_reader_unsupported(ch_factory);
+            test_concurrent_arrow_readers(ch_factory);
+            test_concurrent_arrow_writers(ch_factory);
+            printf("\n=== All ClickHouse E2E tests passed (E1-E7) ===\n");
+        }
+
+        loader->StopAll();
+        loader->Unload();
     }
-    loader->StartAll();
 
-    auto* ch_factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
-    if (!ch_factory) {
-        printf("[SKIP] No database factory for ClickHouse\n");
-        loader->StopAll(); loader->Unload();
-        return 0;
+    // ==================== PostgreSQL 套件 ====================
+    printf("\n=== FlowSQL Database Plugin E2E Tests (PostgreSQL) ===\n\n");
+    const std::string pg_name = "pg1";
+    const std::string pg_schema = "e2e_pg_schema_" + g_suffix;
+    const std::string pg_table = "e2e_pg_tbl_" + g_suffix;
+    const std::string pg_preview_schema = "e2e_pg_pv_schema_" + g_suffix;
+    const std::string pg_preview_table = "e2e_pg_pv_tbl_" + g_suffix;
+    std::string pg_opt = MakePostgresOption(pg_name);
+    const char* pg_relapath[] = {plugin_name.c_str()};
+    const char* pg_options[] = {pg_opt.c_str()};
+
+    int pg_ret = loader->Load(plugin_dir.c_str(), pg_relapath, pg_options, 1);
+    if (pg_ret != 0) {
+        printf("[SKIP] Plugin not found for PostgreSQL tests\n");
+    } else {
+        loader->StartAll();
+        auto* pg_factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
+        bool pg_ready = false;
+        if (pg_factory) {
+            auto* pg_ch = pg_factory->Get("postgres", pg_name.c_str());
+            pg_ready = (pg_ch && pg_ch->IsConnected());
+        }
+        if (!pg_ready) {
+            auto p = GetPostgresParams();
+            printf("[SKIP] PostgreSQL not available at %s:%s (user=%s database=%s)\n",
+                   p["host"].c_str(), p["port"].c_str(), p["user"].c_str(), p["database"].c_str());
+            printf("       Set PG_HOST/PG_PORT/PG_USER/PG_PASSWORD/PG_DATABASE\n");
+        } else {
+            test_postgres_plugin_get_reader_writer(pg_factory, pg_name);
+            test_t47_query_postgres_channel(loader, pg_name);
+            test_t48_t49_postgres_tables_describe(loader, pg_factory, pg_name, pg_schema, pg_table);
+            test_t50_postgres_preview_with_schema(
+                loader, pg_factory, pg_name, pg_preview_schema, pg_preview_table);
+            printf("\n=== PostgreSQL plugin E2E tests passed ===\n");
+        }
+        loader->StopAll();
+        loader->Unload();
     }
-    auto* ch_ch = ch_factory->Get("clickhouse", "ch1");
-    if (!ch_ch || !ch_ch->IsConnected()) {
-        printf("[SKIP] ClickHouse not available. Set CH_HOST/CH_PORT/CH_USER/CH_PASSWORD/CH_DATABASE\n");
-        loader->StopAll(); loader->Unload();
-        return 0;
-    }
 
-    test_clickhouse_connect(ch_factory);
-    test_t43_query_clickhouse_channel(loader);
-    test_t46_describe_clickhouse_format(loader, ch_factory);
-    test_clickhouse_create_arrow_reader(ch_factory);
-    test_clickhouse_create_arrow_writer(ch_factory);
-    test_clickhouse_arrow_type_matrix(ch_factory);
-    test_clickhouse_create_reader_unsupported(ch_factory);
-    test_concurrent_arrow_readers(ch_factory);
-    test_concurrent_arrow_writers(ch_factory);
-
-    loader->StopAll();
-    loader->Unload();
-
-    printf("\n=== All ClickHouse E2E tests passed (E1-E7) ===\n");
     return 0;
 }

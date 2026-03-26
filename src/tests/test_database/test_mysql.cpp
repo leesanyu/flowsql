@@ -90,12 +90,53 @@ static std::shared_ptr<arrow::RecordBatch> DeserializeFirstBatch(
     return batch;
 }
 
+static bool StartsWith(const std::string& text, const std::string& prefix) {
+    return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0;
+}
+
+static std::string QuoteMysqlIdentifier(const std::string& name) {
+    std::string quoted = "`";
+    for (char c : name) {
+        if (c == '`') quoted += "``";
+        else quoted += c;
+    }
+    quoted += "`";
+    return quoted;
+}
+
 // ============================================================
 // 辅助：建立连接并执行清理 SQL（忽略错误）
 // ============================================================
 static void DropTableIfExists(IDbSession* session, const char* table) {
-    std::string sql = std::string("DROP TABLE IF EXISTS ") + table;
+    if (!session || !table || !*table) return;
+    std::string sql = std::string("DROP TABLE IF EXISTS ") + QuoteMysqlIdentifier(table);
     session->ExecuteSql(sql.c_str());
+}
+
+static void CleanupMysqlTestTables(IDbSession* session) {
+    if (!session) return;
+    IResultSet* rs = nullptr;
+    if (session->ExecuteQuery("SHOW TABLES", &rs) != 0 || !rs) return;
+
+    std::vector<std::string> tables;
+    while (rs->Next()) {
+        const char* name = nullptr;
+        size_t len = 0;
+        if (rs->GetString(0, &name, &len) == 0 && name) {
+            tables.emplace_back(name, len);
+        }
+    }
+    delete rs;
+
+    for (const auto& table : tables) {
+        if (StartsWith(table, "mysql_test_") ||
+            StartsWith(table, "mt_write_") ||
+            table == "mt_sessions_test" ||
+            table == "tab`le" ||
+            table == "t3;DROP TABLE t3") {
+            DropTableIfExists(session, table.c_str());
+        }
+    }
 }
 
 // ============================================================
@@ -919,6 +960,7 @@ void test_quote_identifier() {
             w->Write(buf->data(), buf->size());
             BatchWriteStats stats; w->Close(&stats);
             w->Release();
+            DropTableIfExists(session.get(), "t3;DROP TABLE t3");
             printf("  table name with semicolon: accepted and quoted correctly\n");
         } else {
             printf("  table name with semicolon: correctly rejected by driver\n");
@@ -1154,6 +1196,16 @@ int main() {
 
     printf("MySQL available, running tests...\n\n");
 
+    // 兜底清理：处理上次异常中断遗留的测试表，保证可重复执行
+    {
+        MysqlDriver cleanup_driver;
+        assert(cleanup_driver.Connect(GetMysqlParams()) == 0);
+        auto cleanup_session = cleanup_driver.CreateSession();
+        assert(cleanup_session != nullptr);
+        CleanupMysqlTestTables(cleanup_session.get());
+        cleanup_driver.Disconnect();
+    }
+
     test_connect_disconnect();
     test_connect_wrong_password();
     test_ddl();
@@ -1173,6 +1225,16 @@ int main() {
     test_quote_identifier();
     test_concurrent_sessions();
     test_concurrent_writers();
+
+    // 本轮结束后再做一次清理，避免影响其他测试
+    {
+        MysqlDriver cleanup_driver;
+        assert(cleanup_driver.Connect(GetMysqlParams()) == 0);
+        auto cleanup_session = cleanup_driver.CreateSession();
+        assert(cleanup_session != nullptr);
+        CleanupMysqlTestTables(cleanup_session.get());
+        cleanup_driver.Disconnect();
+    }
 
     printf("\n=== All MySQL tests passed (%d/%d) ===\n",
            g_passed, g_passed + g_skipped);

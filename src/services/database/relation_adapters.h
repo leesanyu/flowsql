@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <cctype>
 
 namespace flowsql {
 namespace database {
@@ -91,6 +92,35 @@ public:
                     case arrow::Type::DOUBLE: {
                         double v; if (result_->GetDouble(col, &v) == 0)
                             (void)static_cast<arrow::DoubleBuilder*>(b)->Append(v);
+                        else (void)b->AppendNull();
+                        break;
+                    }
+                    case arrow::Type::BOOL: {
+                        const char* s = nullptr;
+                        size_t len = 0;
+                        bool parsed = false;
+                        bool val = false;
+                        if (result_->GetString(col, &s, &len) == 0 && s != nullptr) {
+                            std::string text(s, len);
+                            for (char& ch : text) {
+                                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                            }
+                            if (text == "t" || text == "true" || text == "1") {
+                                val = true;
+                                parsed = true;
+                            } else if (text == "f" || text == "false" || text == "0") {
+                                val = false;
+                                parsed = true;
+                            }
+                        }
+                        if (!parsed) {
+                            int iv = 0;
+                            if (result_->GetInt(col, &iv) == 0) {
+                                val = (iv != 0);
+                                parsed = true;
+                            }
+                        }
+                        if (parsed) (void)static_cast<arrow::BooleanBuilder*>(b)->Append(val);
                         else (void)b->AppendNull();
                         break;
                     }
