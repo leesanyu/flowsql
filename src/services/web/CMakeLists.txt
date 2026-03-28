@@ -19,6 +19,10 @@ set_target_properties(flowsql_web PROPERTIES
 # 构建后自动将前端 dist 同步到 output/static/
 set(FRONTEND_DIST ${CMAKE_SOURCE_DIR}/frontend/dist)
 add_custom_command(TARGET flowsql_web POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E remove_directory
+        ${CMAKE_BINARY_DIR}/output/static
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        ${CMAKE_BINARY_DIR}/output/static
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${FRONTEND_DIST}
         ${CMAKE_BINARY_DIR}/output/static

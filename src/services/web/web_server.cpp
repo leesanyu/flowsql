@@ -43,38 +43,19 @@ int32_t ProxyPostJson(const std::string& host, int port, const std::string& path
     return error::INTERNAL_ERROR;
 }
 
-int32_t ProxyGetJson(const std::string& host, int port, const std::string& path, std::string* rsp) {
-    if (!rsp) return error::INTERNAL_ERROR;
-    httplib::Client client(host, port);
-    client.set_connection_timeout(5);
-    client.set_read_timeout(10);
-    auto result = client.Get(path.c_str());
-    if (!result) {
-        *rsp = R"({"error":"service unreachable"})";
-        return error::UNAVAILABLE;
-    }
-    *rsp = result->body;
-    if (result->status == 200) return error::OK;
-    if (result->status == 400) return error::BAD_REQUEST;
-    if (result->status == 404) return error::NOT_FOUND;
-    if (result->status == 409) return error::CONFLICT;
-    if (result->status == 503) return error::UNAVAILABLE;
-    return error::INTERNAL_ERROR;
-}
-
 }  // namespace
 
 // 内嵌 schema SQL
 static const char* kSchemaSql = R"(
 CREATE TABLE IF NOT EXISTS channels (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    catelog TEXT NOT NULL,
+    category TEXT NOT NULL,
     name TEXT NOT NULL,
     type TEXT NOT NULL DEFAULT 'dataframe',
     schema_json TEXT DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'active',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(catelog, name)
+    UNIQUE(category, name)
 );
 )";
 
@@ -186,25 +167,80 @@ int WebServer::Init(const std::string& db_path) {
         std::string rsp; HandleGetChannels("", "", rsp);
         res.set_content(rsp, "application/json");
     });
-    server_.Get("/api/operators/list", [this](const httplib::Request&, httplib::Response& res) {
-        std::string rsp; HandleGetOperators("", "", rsp);
+    server_.Get("/api/operators/list", [this](const httplib::Request& req, httplib::Response& res) {
+        const std::string type = req.has_param("type") ? req.get_param_value("type") : "python";
+        std::string req_json = std::string("{\"type\":\"") + type + "\"}";
+        std::string rsp;
+        int32_t rc = HandleGetOperators("", req_json, rsp);
+        res.status = (rc == error::OK) ? 200 : (rc == error::NOT_FOUND ? 404 : 400);
         res.set_content(rsp, "application/json");
     });
-    server_.Get("/api/operators", [this](const httplib::Request&, httplib::Response& res) {
-        std::string rsp; HandleGetOperators("", "", rsp);
+    server_.Get("/api/operators", [this](const httplib::Request& req, httplib::Response& res) {
+        const std::string type = req.has_param("type") ? req.get_param_value("type") : "python";
+        std::string req_json = std::string("{\"type\":\"") + type + "\"}";
+        std::string rsp;
+        int32_t rc = HandleGetOperators("", req_json, rsp);
+        res.status = (rc == error::OK) ? 200 : (rc == error::NOT_FOUND ? 404 : 400);
         res.set_content(rsp, "application/json");
     });
     server_.Post("/api/operators/upload", [this](const httplib::Request& req, httplib::Response& res) {
-        std::string rsp; int32_t rc = HandleUploadOperator("", req.body, rsp);
-        res.status = (rc == 0) ? 200 : 400;
+        std::string body = req.body;
+        std::string managed_tmp_path;
+        if (req.has_file("file")) {
+            const auto file = req.get_file_value("file");
+            const std::string type = req.has_param("type")
+                                         ? req.get_param_value("type")
+                                         : ((file.filename.size() >= 3 && file.filename.substr(file.filename.size() - 3) == ".so")
+                                                ? "cpp"
+                                                : "python");
+            std::filesystem::path tmp_path = std::filesystem::path(upload_dir_) /
+                                             (std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                                              "_" + file.filename);
+            FILE* fp = fopen(tmp_path.string().c_str(), "wb");
+            if (!fp) {
+                res.status = 500;
+                res.set_content(R"({"error":"failed to persist upload temp file"})", "application/json");
+                return;
+            }
+            fwrite(file.content.data(), 1, file.content.size(), fp);
+            fclose(fp);
+
+            rapidjson::StringBuffer req_buf;
+            rapidjson::Writer<rapidjson::StringBuffer> req_w(req_buf);
+            req_w.StartObject();
+            req_w.Key("type");
+            req_w.String(type.c_str());
+            req_w.Key("filename");
+            req_w.String(file.filename.c_str());
+            req_w.Key("tmp_path");
+            req_w.String(tmp_path.string().c_str());
+            req_w.EndObject();
+            body = req_buf.GetString();
+            managed_tmp_path = tmp_path.string();
+        }
+
+        std::string rsp;
+        int32_t rc = HandleUploadOperator("", body, rsp);
+        if (rc != error::OK && !managed_tmp_path.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(managed_tmp_path, ec);
+        }
+        res.status = (rc == error::OK) ? 200 : (rc == error::CONFLICT ? 409 : (rc == error::NOT_FOUND ? 404 : 400));
         res.set_content(rsp, "application/json");
     });
     server_.Post("/api/operators/activate", [this](const httplib::Request& req, httplib::Response& res) {
-        std::string rsp; HandleActivateOperator("", req.body, rsp);
+        std::string rsp; int32_t rc = HandleActivateOperator("", req.body, rsp);
+        res.status = (rc == error::OK) ? 200 : (rc == error::CONFLICT ? 409 : (rc == error::NOT_FOUND ? 404 : 400));
         res.set_content(rsp, "application/json");
     });
     server_.Post("/api/operators/deactivate", [this](const httplib::Request& req, httplib::Response& res) {
-        std::string rsp; HandleDeactivateOperator("", req.body, rsp);
+        std::string rsp; int32_t rc = HandleDeactivateOperator("", req.body, rsp);
+        res.status = (rc == error::OK) ? 200 : (rc == error::CONFLICT ? 409 : (rc == error::NOT_FOUND ? 404 : 400));
+        res.set_content(rsp, "application/json");
+    });
+    server_.Post("/api/operators/delete", [this](const httplib::Request& req, httplib::Response& res) {
+        std::string rsp; int32_t rc = HandleDeleteOperator("", req.body, rsp);
+        res.status = (rc == error::OK) ? 200 : (rc == error::CONFLICT ? 409 : (rc == error::NOT_FOUND ? 404 : 400));
         res.set_content(rsp, "application/json");
     });
     server_.Post("/api/operators/detail", [this](const httplib::Request& req, httplib::Response& res) {
@@ -418,6 +454,10 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleDeactivateOperator(u, req, rsp);
         }});
+    cb({"POST", "/api/operators/delete",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleDeleteOperator(u, req, rsp);
+        }});
     cb({"POST", "/api/operators/detail",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleGetOperatorDetail(u, req, rsp);
@@ -582,89 +622,102 @@ int32_t WebServer::HandleGetChannels(const std::string&, const std::string&, std
         rsp = result->body;
     } else {
         // 回退到本地数据库
-        auto rows = db_.Query("SELECT id, catelog, name, type, schema_json, status, created_at FROM channels");
+        auto rows = db_.Query("SELECT id, category, name, type, schema_json, status, created_at FROM channels");
         rsp = RowsToJson(rows);
     }
     return error::OK;
 }
 
-int32_t WebServer::HandleGetOperators(const std::string&, const std::string&, std::string& rsp) {
-    return ProxyGetJson(scheduler_host_, scheduler_port_, "/operators/query", &rsp);
+int32_t WebServer::HandleGetOperators(const std::string&, const std::string& req, std::string& rsp) {
+    const std::string body = req.empty() ? R"({"type":"python"})" : req;
+    return ProxyPostJson(scheduler_host_, scheduler_port_, "/operators/list", body, &rsp);
 }
 
 int32_t WebServer::HandleUploadOperator(const std::string&, const std::string& req, std::string& rsp) {
-    // 通过 JSON body 传递 base64 编码的文件内容
-    // Body: {"filename":"xxx.py","content":"<base64>"}
-    // 注意：multipart 上传需要 httplib 直接处理，此处简化为 JSON 上传
+    // Body(兼容): {"type":"python|cpp","filename":"...","content":"..."} 或 {"type":"...","filename":"...","tmp_path":"..."}
     rapidjson::Document doc;
     doc.Parse(req.c_str());
     if (doc.HasParseError() || !doc.IsObject() ||
-        !doc.HasMember("filename") || !doc.HasMember("content") ||
-        !doc["filename"].IsString() || !doc["content"].IsString()) {
-        rsp = R"({"error":"invalid request, expected {\"filename\":\"...\",\"content\":\"...\"}"})" ;
+        !doc.HasMember("filename") || !doc["filename"].IsString()) {
+        rsp = R"({"error":"invalid request, expected {\"filename\":\"...\",\"content\":\"...\"} or {\"filename\":\"...\",\"tmp_path\":\"...\"}"})";
         return error::BAD_REQUEST;
     }
-    std::string filename = doc["filename"].GetString();
-    std::string content  = doc["content"].GetString();
+    const std::string type =
+        (doc.HasMember("type") && doc["type"].IsString()) ? doc["type"].GetString() : "python";
+    const std::string filename = doc["filename"].GetString();
 
-    // 安全校验
     if (filename.find('/') != std::string::npos || filename.find("..") != std::string::npos) {
         rsp = R"({"error":"invalid filename"})";
         return error::BAD_REQUEST;
     }
 
-    std::string operators_dir;
-    char exe_path[1024];
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-    if (len > 0) {
-        exe_path[len] = '\0';
-        std::string exe_dir(exe_path);
-        size_t pos = exe_dir.find_last_of('/');
-        if (pos != std::string::npos) operators_dir = exe_dir.substr(0, pos) + "/operators";
+    std::string tmp_path;
+    bool created_temp = false;
+    if (doc.HasMember("tmp_path") && doc["tmp_path"].IsString()) {
+        tmp_path = doc["tmp_path"].GetString();
+    } else {
+        if (!doc.HasMember("content") || !doc["content"].IsString()) {
+            rsp = R"({"error":"missing content or tmp_path"})";
+            return error::BAD_REQUEST;
+        }
+        const std::string content = doc["content"].GetString();
+        std::filesystem::path tmp = std::filesystem::path(upload_dir_) /
+                                    (std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                                     "_" + filename);
+        FILE* fp = fopen(tmp.string().c_str(), "wb");
+        if (!fp) {
+            rsp = R"({"error":"failed to persist upload temp file"})";
+            return error::INTERNAL_ERROR;
+        }
+        fwrite(content.data(), 1, content.size(), fp);
+        fclose(fp);
+        tmp_path = tmp.string();
+        created_temp = true;
     }
-    if (operators_dir.empty()) operators_dir = "operators";
-    ::mkdir(operators_dir.c_str(), 0755);
 
-    std::string filepath = operators_dir + "/" + filename;
-    FILE* fp = fopen(filepath.c_str(), "wb");
-    if (!fp) {
-        rsp = R"({"error":"failed to save file"})";
-        return error::INTERNAL_ERROR;
+    rapidjson::StringBuffer req_buf;
+    rapidjson::Writer<rapidjson::StringBuffer> req_w(req_buf);
+    req_w.StartObject();
+    req_w.Key("type");
+    req_w.String(type.c_str());
+    req_w.Key("filename");
+    req_w.String(filename.c_str());
+    req_w.Key("tmp_path");
+    req_w.String(tmp_path.c_str());
+    req_w.EndObject();
+
+    int32_t rc = ProxyPostJson(scheduler_host_, scheduler_port_, "/operators/upload", req_buf.GetString(), &rsp);
+    if (rc != error::OK && created_temp) {
+        std::error_code ec;
+        std::filesystem::remove(tmp_path, ec);
     }
-    fwrite(content.data(), 1, content.size(), fp);
-    fclose(fp);
-
-    // 上传成功后立即触发 Python Worker 重新发现 + Scheduler 刷新 Catalog，
-    // 保证新算子能尽快出现在 /operators/query 列表中。
-    NotifyWorkerReload();
-    NotifySchedulerRefresh();
-
-    rapidjson::StringBuffer buf;
-    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-    w.StartObject();
-    w.Key("status"); w.String("uploaded");
-    w.Key("filename"); w.String(filename.c_str());
-    w.EndObject();
-    rsp = buf.GetString();
-    return error::OK;
+    if (rc == error::OK && type == "python") {
+        NotifyWorkerReload();
+        NotifySchedulerRefresh();
+    }
+    return rc;
 }
 
-// POST /api/operators/activate — Body: {"name":"catelog.opname"}
+// POST /api/operators/activate — Body: {"name":"category.opname"}
 int32_t WebServer::HandleActivateOperator(const std::string&, const std::string& req, std::string& rsp) {
     return ProxyPostJson(scheduler_host_, scheduler_port_, "/operators/activate", req, &rsp);
 }
 
-// POST /api/operators/deactivate — Body: {"name":"catelog.opname"}
+// POST /api/operators/deactivate — Body: {"name":"category.opname"}
 int32_t WebServer::HandleDeactivateOperator(const std::string&, const std::string& req, std::string& rsp) {
     return ProxyPostJson(scheduler_host_, scheduler_port_, "/operators/deactivate", req, &rsp);
 }
 
-// POST /api/operators/detail — Body: {"name":"catelog.opname"}
+int32_t WebServer::HandleDeleteOperator(const std::string&, const std::string& req, std::string& rsp) {
+    return ProxyPostJson(scheduler_host_, scheduler_port_, "/operators/delete", req, &rsp);
+}
+
+// POST /api/operators/detail — Body: {"name":"category.opname"}
 int32_t WebServer::HandleGetOperatorDetail(const std::string&, const std::string& req, std::string& rsp) {
     return ProxyPostJson(scheduler_host_, scheduler_port_, "/operators/detail", req, &rsp);
 }
 
-// POST /api/operators/update — Body: {"name":"catelog.opname","description":"...","content":"..."}
+// POST /api/operators/update — Body: {"name":"category.opname","description":"...","content":"..."}
 int32_t WebServer::HandleUpdateOperator(const std::string&, const std::string& req, std::string& rsp) {
     return ProxyPostJson(scheduler_host_, scheduler_port_, "/operators/update", req, &rsp);
 }

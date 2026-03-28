@@ -74,20 +74,20 @@ class ControlClient:
         """发送 Worker 就绪通知"""
         return self.send_message("worker_ready", {"operators": operators})
 
-    def send_operator_added(self, catelog: str, name: str,
+    def send_operator_added(self, category: str, name: str,
                            description: str = "", position: str = "DATA") -> bool:
         """发送算子添加通知"""
         return self.send_message("operator_added", {
-            "catelog": catelog,
+            "category": category,
             "name": name,
             "description": description,
             "position": position
         })
 
-    def send_operator_removed(self, catelog: str, name: str) -> bool:
+    def send_operator_removed(self, category: str, name: str) -> bool:
         """发送算子移除通知"""
         return self.send_message("operator_removed", {
-            "catelog": catelog,
+            "category": category,
             "name": name
         })
 

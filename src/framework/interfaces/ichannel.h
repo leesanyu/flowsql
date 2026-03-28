@@ -21,7 +21,7 @@ interface IChannel {
     virtual ~IChannel() = default;
 
     // 身份标识
-    virtual const char* Catelog() = 0;
+    virtual const char* Category() = 0;
     virtual const char* Name() = 0;
 
     // 通道类型（"dataframe"、"database" 等）

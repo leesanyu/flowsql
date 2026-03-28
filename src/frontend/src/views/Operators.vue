@@ -5,20 +5,22 @@
     <el-card>
       <template #header>
         <div class="card-header">
-          <span>算子列表</span>
+          <div class="header-left">
+            <span>算子列表</span>
+          </div>
           <div class="header-buttons">
-            <el-button type="primary" @click="showCreateDialog">
+            <el-button v-if="operatorType === 'python'" type="primary" @click="showCreateDialog">
               <el-icon><Edit /></el-icon>
               新建算子
             </el-button>
-            <el-button type="success" @click="triggerFileInput">
+            <el-button v-if="operatorType !== 'builtin'" type="success" @click="triggerFileInput">
                 <el-icon><Upload /></el-icon>
                 上传文件
               </el-button>
-              <input
+              <input v-if="operatorType !== 'builtin'"
                 ref="fileInputRef"
                 type="file"
-                accept=".py"
+                :accept="uploadAccept"
                 style="display:none"
                 @change="handleFileChange"
               />
@@ -26,60 +28,157 @@
         </div>
       </template>
 
-      <el-table :data="operators" style="width: 100%" v-loading="loading">
-        <el-table-column prop="name" label="名称" width="250" />
-        <el-table-column prop="catelog" label="类别" width="150" />
-        <el-table-column prop="position" label="位置" width="150">
-          <template #default="scope">
-            <el-tag :type="scope.row.position === 'STORAGE' ? 'warning' : 'info'">
-              {{ formatPosition(scope.row.position) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="active" label="状态" width="100">
-          <template #default="scope">
-            <el-tag :type="scope.row.active ? 'success' : 'info'">
-              {{ scope.row.active ? '激活' : '未激活' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="260">
-          <template #default="scope">
-            <template v-if="scope.row.active">
-              <el-button
-                type="warning"
-                size="small"
-                @click="deactivateOperator(scope.row.catelog + '.' + scope.row.name)"
-              >
-                去激活
-              </el-button>
-              <el-button
-                type="primary"
-                size="small"
-                @click="viewOperator(scope.row)"
-              >
-                查看
-              </el-button>
-            </template>
-            <template v-else>
-              <el-button
-                type="success"
-                size="small"
-                @click="activateOperator(scope.row.catelog + '.' + scope.row.name)"
-              >
-                激活
-              </el-button>
-              <el-button
-                type="primary"
-                size="small"
-                @click="editOperator(scope.row)"
-              >
-                编辑
-              </el-button>
-            </template>
-          </template>
-        </el-table-column>
-      </el-table>
+      <div class="operator-layout">
+        <div class="operator-sidebar">
+          <div
+            class="operator-type-item"
+            :class="{ active: operatorType === 'builtin' }"
+            @click="switchOperatorType('builtin')"
+          >
+            <span>内置算子</span>
+            <el-tag size="small" effect="plain">{{ operatorCountText('builtin') }}</el-tag>
+          </div>
+          <div
+            class="operator-type-item"
+            :class="{ active: operatorType === 'python' }"
+            @click="switchOperatorType('python')"
+          >
+            <span>Python 算子</span>
+            <el-tag size="small" effect="plain">{{ operatorCountText('python') }}</el-tag>
+          </div>
+          <div
+            class="operator-type-item"
+            :class="{ active: operatorType === 'cpp' }"
+            @click="switchOperatorType('cpp')"
+          >
+            <span>C++ 插件</span>
+            <el-tag size="small" effect="plain">{{ operatorCountText('cpp') }}</el-tag>
+          </div>
+        </div>
+
+        <div class="operator-main">
+          <div class="section-title">{{ operatorTypeLabel }}</div>
+
+          <el-table v-if="operatorType !== 'cpp'" :data="operators" style="width: 100%" v-loading="loading">
+            <el-table-column prop="name" label="名称" width="250" />
+            <el-table-column label="类别" width="150">
+              <template #default="scope">
+                {{ scope.row.category }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="position" label="位置" width="150">
+              <template #default="scope">
+                <el-tag :type="scope.row.position === 'STORAGE' ? 'warning' : 'info'">
+                  {{ formatPosition(scope.row.position) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="active" label="状态" width="100">
+              <template #default="scope">
+                <el-tag :type="scope.row.active ? 'success' : 'info'">
+                  {{ scope.row.active ? '激活' : '未激活' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="320">
+              <template #default="scope">
+                <template v-if="scope.row.active">
+                  <el-button
+                    type="warning"
+                    size="small"
+                    @click="deactivateOperator(scope.row)"
+                  >
+                    去激活
+                  </el-button>
+                  <el-button
+                    type="primary"
+                    size="small"
+                    @click="viewOperator(scope.row)"
+                  >
+                    查看
+                  </el-button>
+                </template>
+                <template v-else>
+                  <el-button
+                    type="success"
+                    size="small"
+                    @click="activateOperator(scope.row)"
+                  >
+                    激活
+                  </el-button>
+                  <el-button
+                    type="primary"
+                    size="small"
+                    @click="editOperator(scope.row)"
+                  >
+                    编辑
+                  </el-button>
+                  <el-button
+                    v-if="operatorType === 'python'"
+                    type="danger"
+                    size="small"
+                    @click="deletePythonOperator(scope.row)"
+                  >
+                    删除
+                  </el-button>
+                </template>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <el-table v-else :data="operators" style="width: 100%" v-loading="loading">
+            <el-table-column prop="plugin.so_file" label="插件名" min-width="180" />
+            <el-table-column prop="plugin.size_bytes" label="大小(bytes)" width="130" />
+            <el-table-column label="状态" width="120">
+              <template #default="scope">
+                <el-tag :type="scope.row.plugin?.status === 'activated' ? 'success' : (scope.row.plugin?.status === 'broken' ? 'danger' : 'info')">
+                  {{ scope.row.plugin?.status || '-' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="算子数量" width="100">
+              <template #default="scope">
+                {{ scope.row.plugin?.operator_count ?? '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="算子列表" min-width="180">
+              <template #default="scope">
+                <span v-if="Array.isArray(scope.row.plugin?.operators)">{{ scope.row.plugin.operators.join(', ') }}</span>
+                <span v-else>-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="300">
+              <template #default="scope">
+                <el-button
+                  v-if="scope.row.plugin?.status === 'activated'"
+                  type="warning"
+                  size="small"
+                  @click="deactivateOperator(scope.row)"
+                >
+                  去激活
+                </el-button>
+                <el-button
+                  v-else
+                  type="success"
+                  size="small"
+                  @click="activateOperator(scope.row)"
+                >
+                  激活
+                </el-button>
+                <el-button type="primary" size="small" @click="viewOperator(scope.row)">查看</el-button>
+                <el-button
+                  type="danger"
+                  size="small"
+                  :disabled="scope.row.plugin?.status === 'activated'"
+                  @click="deleteCppPlugin(scope.row)"
+                >
+                  删除
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
     </el-card>
 
     <!-- 新建算子对话框 -->
@@ -105,7 +204,7 @@
             </template>
           </el-input>
           <div class="form-hint">
-            类别: <el-tag size="small">{{ operatorForm.catelog || '未设置' }}</el-tag>
+            类别: <el-tag size="small">{{ operatorForm.category || '未设置' }}</el-tag>
             名称: <el-tag size="small">{{ operatorForm.name || '未设置' }}</el-tag>
           </div>
         </el-form-item>
@@ -186,80 +285,119 @@
 
     <el-dialog
       v-model="detailDialogVisible"
-      :title="detailMode === 'view' ? '查看算子' : '编辑算子'"
+      :title="isCppDetail ? '查看 C++ 插件详情' : (detailMode === 'view' ? '查看算子' : '编辑算子')"
       :width="detailDialogFullscreen ? '100%' : '900px'"
       :fullscreen="detailDialogFullscreen"
       :close-on-click-modal="false"
       @closed="onDetailDialogClosed"
     >
       <el-form :model="detailForm" :label-width="showDetailMeta ? '100px' : '0px'">
-        <el-form-item v-if="showDetailMeta" label="算子名称">
-          <el-input v-model="detailForm.fullName" disabled />
-        </el-form-item>
-        <el-form-item v-if="showDetailMeta" label="算子描述">
-          <el-input v-model="detailForm.description" :disabled="detailMode === 'view'" />
-        </el-form-item>
-        <el-form-item v-if="showDetailMeta" label="位置">
-          <el-input :model-value="formatPosition(detailForm.position)" disabled />
-        </el-form-item>
-        <el-form-item v-if="showDetailMeta" label="来源">
-          <el-input v-model="detailForm.source" disabled />
-        </el-form-item>
-        <el-form-item v-if="showDetailMeta" label="类型">
-          <el-input v-model="detailForm.type" disabled />
-        </el-form-item>
-        <el-form-item
-          v-if="isPythonDetail"
-          :label="showDetailMeta ? 'Python 代码' : ''"
-          :class="['python-code-form-item', { 'python-code-form-item-fullscreen': detailDialogFullscreen }]"
-        >
-          <div class="code-viewer-header">
-            <el-tag size="small" type="success">Python</el-tag>
-            <el-button size="small" @click="toggleDetailFullscreen">
-              <el-icon><FullScreen /></el-icon>
-              {{ detailDialogFullscreen ? '退出最大化' : '最大化查看' }}
-            </el-button>
-          </div>
-          <template v-if="detailMode === 'view'">
-            <div
-              :class="['code-editor-container', 'code-editor-container-readonly']"
-              :style="detailCodeContainerStyle"
-            >
-              <div ref="detailCodeReadonlyLineNumbersRef" class="code-line-numbers code-line-numbers-readonly">
-                <div v-for="line in detailCodeLines" :key="line">{{ line }}</div>
-              </div>
-              <pre
-                ref="detailCodeReadonlyContentRef"
-                class="code-content code-content-readonly"
-                @scroll="syncReadonlyScroll"
-              ><code v-html="highlightedDetailCode"></code></pre>
+        <template v-if="isCppDetail">
+          <el-form-item label="插件文件">
+            <el-input :model-value="cppDetail.so_file || '-'" disabled />
+          </el-form-item>
+          <el-form-item label="Plugin ID">
+            <el-input :model-value="cppDetail.plugin_id || '-'" disabled class="mono-input" />
+          </el-form-item>
+          <el-form-item label="状态">
+            <el-tag :type="cppDetail.status === 'activated' ? 'success' : (cppDetail.status === 'broken' ? 'danger' : 'info')">
+              {{ cppDetail.status || '-' }}
+            </el-tag>
+          </el-form-item>
+          <el-form-item label="大小(bytes)">
+            <el-input :model-value="cppDetail.size_bytes ?? '-'" disabled />
+          </el-form-item>
+          <el-form-item label="ABI版本">
+            <el-input :model-value="cppDetail.abi_version ?? '-'" disabled />
+          </el-form-item>
+          <el-form-item label="算子数量">
+            <el-input :model-value="cppDetail.operator_count ?? '-'" disabled />
+          </el-form-item>
+          <el-form-item label="SHA256">
+            <el-input :model-value="cppDetail.sha256 || '-'" disabled class="mono-input" />
+          </el-form-item>
+          <el-form-item label="插件路径">
+            <el-input :model-value="cppDetail.path || '-'" disabled />
+          </el-form-item>
+          <el-form-item label="算子列表">
+            <div class="cpp-op-list">
+              <el-tag v-for="name in cppDetail.operators" :key="name" type="info">{{ name }}</el-tag>
+              <span v-if="!Array.isArray(cppDetail.operators) || cppDetail.operators.length === 0">-</span>
             </div>
-          </template>
-          <template v-else>
-            <div
-              :class="['code-editor-container', 'code-editor-container-editable']"
-              :style="detailCodeContainerStyle"
-            >
-              <div ref="detailCodeLineNumbersRef" class="code-line-numbers code-line-numbers-editor">
-                <div v-for="line in detailCodeLines" :key="line">{{ line }}</div>
-              </div>
-              <div class="code-editor-stage">
-                <pre ref="detailCodeHighlightRef" class="code-content code-highlight-layer"><code v-html="highlightedDetailCode"></code></pre>
-                <textarea
-                  ref="detailCodeTextareaRef"
-                  v-model="detailForm.code"
-                  class="code-editor-input"
-                  wrap="off"
-                  spellcheck="false"
-                  @scroll="syncEditorScroll"
-                  @input="syncEditorScroll"
-                  @keyup="syncEditorScroll"
-                  @click="syncEditorScroll"
-                ></textarea>
-              </div>
+          </el-form-item>
+          <el-form-item label="错误信息">
+            <el-input :model-value="cppDetail.last_error || '-'" type="textarea" :rows="3" disabled />
+          </el-form-item>
+        </template>
+        <template v-else>
+          <el-form-item v-if="showDetailMeta" label="算子名称">
+            <el-input v-model="detailForm.fullName" disabled />
+          </el-form-item>
+          <el-form-item v-if="showDetailMeta" label="算子描述">
+            <el-input v-model="detailForm.description" :disabled="detailMode === 'view'" />
+          </el-form-item>
+          <el-form-item v-if="showDetailMeta" label="位置">
+            <el-input :model-value="formatPosition(detailForm.position)" disabled />
+          </el-form-item>
+          <el-form-item v-if="showDetailMeta" label="来源">
+            <el-input v-model="detailForm.source" disabled />
+          </el-form-item>
+          <el-form-item v-if="showDetailMeta" label="类型">
+            <el-input v-model="detailForm.type" disabled />
+          </el-form-item>
+          <el-form-item
+            v-if="isPythonDetail"
+            :label="showDetailMeta ? 'Python 代码' : ''"
+            :class="['python-code-form-item', { 'python-code-form-item-fullscreen': detailDialogFullscreen }]"
+          >
+            <div class="code-viewer-header">
+              <el-tag size="small" type="success">Python</el-tag>
+              <el-button size="small" @click="toggleDetailFullscreen">
+                <el-icon><FullScreen /></el-icon>
+                {{ detailDialogFullscreen ? '退出最大化' : '最大化查看' }}
+              </el-button>
             </div>
-          </template>
-        </el-form-item>
+            <template v-if="detailMode === 'view'">
+              <div
+                :class="['code-editor-container', 'code-editor-container-readonly']"
+                :style="detailCodeContainerStyle"
+              >
+                <div ref="detailCodeReadonlyLineNumbersRef" class="code-line-numbers code-line-numbers-readonly">
+                  <div v-for="line in detailCodeLines" :key="line">{{ line }}</div>
+                </div>
+                <pre
+                  ref="detailCodeReadonlyContentRef"
+                  class="code-content code-content-readonly"
+                  @scroll="syncReadonlyScroll"
+                ><code v-html="highlightedDetailCode"></code></pre>
+              </div>
+            </template>
+            <template v-else>
+              <div
+                :class="['code-editor-container', 'code-editor-container-editable']"
+                :style="detailCodeContainerStyle"
+              >
+                <div ref="detailCodeLineNumbersRef" class="code-line-numbers code-line-numbers-editor">
+                  <div v-for="line in detailCodeLines" :key="line">{{ line }}</div>
+                </div>
+                <div class="code-editor-stage">
+                  <pre ref="detailCodeHighlightRef" class="code-content code-highlight-layer"><code v-html="highlightedDetailCode"></code></pre>
+                  <textarea
+                    ref="detailCodeTextareaRef"
+                    v-model="detailForm.code"
+                    class="code-editor-input"
+                    wrap="off"
+                    spellcheck="false"
+                    @scroll="syncEditorScroll"
+                    @input="syncEditorScroll"
+                    @keyup="syncEditorScroll"
+                    @click="syncEditorScroll"
+                  ></textarea>
+                </div>
+              </div>
+            </template>
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <span class="dialog-footer">
@@ -285,6 +423,8 @@ import api from '../api'
 import { ElMessage } from 'element-plus'
 
 const operators = ref([])
+const operatorType = ref('python')
+const operatorCounts = ref({ builtin: null, python: null, cpp: null })
 const loading = ref(false)
 const fileInputRef = ref(null)
 const createDialogVisible = ref(false)
@@ -304,7 +444,7 @@ const detailCodeReadonlyLineNumbersRef = ref(null)
 
 const operatorForm = ref({
   fullName: '',
-  catelog: '',
+  category: '',
   name: '',
   description: '',
   dependencies: '',
@@ -313,7 +453,7 @@ const operatorForm = ref({
 
 const detailForm = ref({
   fullName: '',
-  catelog: '',
+  category: '',
   name: '',
   description: '',
   position: 'DATA',
@@ -321,6 +461,18 @@ const detailForm = ref({
   type: '',
   editable: false,
   code: ''
+})
+const cppDetail = ref({
+  plugin_id: '',
+  so_file: '',
+  status: '',
+  size_bytes: null,
+  sha256: '',
+  abi_version: null,
+  operator_count: null,
+  operators: [],
+  last_error: '',
+  path: ''
 })
 
 const PYTHON_KEYWORDS = new Set([
@@ -413,6 +565,7 @@ const highlightPythonCode = (code = '') => {
 }
 
 const isPythonDetail = computed(() => String(detailForm.value.type || '').toLowerCase() === 'python')
+const isCppDetail = computed(() => String(detailForm.value.type || '').toLowerCase() === 'cpp')
 const showDetailMeta = computed(() => !(detailDialogFullscreen.value && isPythonDetail.value))
 const detailCodeContainerStyle = computed(() => (
   detailDialogFullscreen.value
@@ -439,8 +592,21 @@ const createCodeContainerStyle = computed(() => (
     ? { height: 'calc(100vh - 180px)' }
     : { height: '420px' }
 ))
+const operatorTypeLabel = computed(() => {
+  if (operatorType.value === 'builtin') return '内置算子'
+  if (operatorType.value === 'cpp') return 'C++ 插件'
+  return 'Python 算子'
+})
+const uploadAccept = computed(() => (operatorType.value === 'cpp' ? '.so' : '.py'))
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const OPERATOR_TYPES = ['builtin', 'python', 'cpp']
+
+const extractOperatorList = (res) => {
+  return Array.isArray(res.data)
+    ? res.data
+    : (Array.isArray(res.data?.operators) ? res.data.operators : [])
+}
 
 const syncEditorScroll = () => {
   const textarea = detailCodeTextareaRef.value
@@ -498,17 +664,30 @@ const resetCodeScroll = () => {
   }
 }
 
-const loadOperators = async () => {
+const loadOperators = async (currentType = operatorType.value) => {
   loading.value = true
   try {
-    const res = await api.getOperators()
-    const list = Array.isArray(res.data)
-      ? res.data
-      : (Array.isArray(res.data?.operators) ? res.data.operators : [])
-    operators.value = list.map(op => ({
-      ...op,
-      active: op.active === '1' || op.active === 1
-    }))
+    const res = await api.getOperators(currentType)
+    const list = extractOperatorList(res)
+    const mappedList = list.map((op) => {
+      if (currentType === 'cpp') {
+        return {
+          ...op,
+          active: op.active === '1' || op.active === 1,
+          plugin_id: op.plugin_id || '',
+          plugin: op.plugin || {}
+        }
+      }
+      return {
+        ...op,
+        active: op.active === '1' || op.active === 1
+      }
+    })
+    operatorCounts.value = {
+      ...operatorCounts.value,
+      [currentType]: mappedList.length
+    }
+    operators.value = mappedList
   } catch (error) {
     ElMessage.error('加载算子列表失败: ' + (error.response?.data?.error || error.message))
   } finally {
@@ -516,10 +695,40 @@ const loadOperators = async () => {
   }
 }
 
+const refreshOperatorCounts = async () => {
+  const settled = await Promise.allSettled(
+    OPERATOR_TYPES.map(async (type) => {
+      const res = await api.getOperators(type)
+      return { type, count: extractOperatorList(res).length }
+    })
+  )
+  const next = { ...operatorCounts.value }
+  for (const item of settled) {
+    if (item.status !== 'fulfilled') continue
+    next[item.value.type] = item.value.count
+  }
+  operatorCounts.value = next
+}
+
+const switchOperatorType = async (nextType) => {
+  if (nextType === operatorType.value) return
+  operatorType.value = nextType
+  await loadOperators()
+}
+
+const operatorCountText = (type) => {
+  const v = operatorCounts.value[type]
+  return Number.isFinite(v) ? v : '-'
+}
+
 const waitOperatorSynced = async (fullName, maxRetries = 10, delayMs = 300) => {
+  if (operatorType.value !== 'python') {
+    await loadOperators()
+    return true
+  }
   for (let i = 0; i < maxRetries; i += 1) {
     await loadOperators()
-    if (!fullName || operators.value.some(op => `${op.catelog}.${op.name}` === fullName)) {
+    if (!fullName || operators.value.some(op => `${op.category}.${op.name}` === fullName)) {
       return true
     }
     await delay(delayMs)
@@ -527,20 +736,30 @@ const waitOperatorSynced = async (fullName, maxRetries = 10, delayMs = 300) => {
   return false
 }
 
-const activateOperator = async (name) => {
+const activateOperator = async (row) => {
+  const isCpp = operatorType.value === 'cpp'
+  const payload = isCpp
+    ? { type: 'cpp', plugin_id: row.plugin_id }
+    : { type: operatorType.value, name: `${row.category}.${row.name}` }
+  const label = isCpp ? row.plugin?.so_file || row.plugin_id : payload.name
   try {
-    await api.activateOperator(name)
-    ElMessage.success(`算子 ${name} 已激活`)
+    await api.activateOperator(payload)
+    ElMessage.success(`算子 ${label} 已激活`)
     await loadOperators()
   } catch (error) {
     ElMessage.error('激活失败: ' + (error.response?.data?.error || error.message))
   }
 }
 
-const deactivateOperator = async (name) => {
+const deactivateOperator = async (row) => {
+  const isCpp = operatorType.value === 'cpp'
+  const payload = isCpp
+    ? { type: 'cpp', plugin_id: row.plugin_id }
+    : { type: operatorType.value, name: `${row.category}.${row.name}` }
+  const label = isCpp ? row.plugin?.so_file || row.plugin_id : payload.name
   try {
-    await api.deactivateOperator(name)
-    ElMessage.success(`算子 ${name} 已去激活`)
+    await api.deactivateOperator(payload)
+    ElMessage.success(`算子 ${label} 已去激活`)
     await loadOperators()
   } catch (error) {
     ElMessage.error('去激活失败: ' + (error.response?.data?.error || error.message))
@@ -554,11 +773,23 @@ const formatPosition = (position) => {
 
 const openDetail = async (fullName, mode) => {
   try {
-    const res = await api.getOperatorDetail(fullName)
+    const res = await api.getOperatorDetail({ type: operatorType.value, name: fullName })
     const d = res.data || {}
+    cppDetail.value = {
+      plugin_id: '',
+      so_file: '',
+      status: '',
+      size_bytes: null,
+      sha256: '',
+      abi_version: null,
+      operator_count: null,
+      operators: [],
+      last_error: '',
+      path: ''
+    }
     detailForm.value = {
-      fullName: `${d.catelog}.${d.name}`,
-      catelog: d.catelog || '',
+      fullName: `${d.category}.${d.name}`,
+      category: d.category || '',
       name: d.name || '',
       description: d.description || '',
       position: d.position || 'DATA',
@@ -579,6 +810,42 @@ const openDetail = async (fullName, mode) => {
     })
   } catch (error) {
     ElMessage.error('获取算子详情失败: ' + (error.response?.data?.error || error.message))
+  }
+}
+
+const openCppDetail = async (pluginId) => {
+  try {
+    const res = await api.getOperatorDetail({ type: 'cpp', plugin_id: pluginId })
+    const d = res.data || {}
+    const p = d.plugin || {}
+    cppDetail.value = {
+      plugin_id: d.plugin_id || pluginId,
+      so_file: p.so_file || '',
+      status: p.status || '',
+      size_bytes: p.size_bytes ?? null,
+      sha256: p.sha256 || '',
+      abi_version: p.abi_version ?? null,
+      operator_count: p.operator_count ?? null,
+      operators: Array.isArray(p.operators) ? p.operators : [],
+      last_error: p.last_error || '',
+      path: p.path || ''
+    }
+    detailForm.value = {
+      fullName: p.so_file || pluginId,
+      category: 'cpp',
+      name: pluginId,
+      description: p.last_error || '',
+      position: 'DATA',
+      source: p.path || '',
+      type: 'cpp',
+      editable: false,
+      code: ''
+    }
+    detailMode.value = 'view'
+    detailDialogFullscreen.value = false
+    detailDialogVisible.value = true
+  } catch (error) {
+    ElMessage.error('获取插件详情失败: ' + (error.response?.data?.error || error.message))
   }
 }
 
@@ -606,11 +873,19 @@ const toggleDetailFullscreen = () => {
 }
 
 const viewOperator = async (row) => {
-  await openDetail(`${row.catelog}.${row.name}`, 'view')
+  if (operatorType.value === 'cpp') {
+    await openCppDetail(row.plugin_id)
+    return
+  }
+  await openDetail(`${row.category}.${row.name}`, 'view')
 }
 
 const editOperator = async (row) => {
-  await openDetail(`${row.catelog}.${row.name}`, 'edit')
+  if (operatorType.value !== 'python') {
+    ElMessage.warning('仅 Python 算子支持编辑')
+    return
+  }
+  await openDetail(`${row.category}.${row.name}`, 'edit')
 }
 
 const saveOperatorEdit = async () => {
@@ -646,15 +921,24 @@ const triggerFileInput = () => {
 const handleFileChange = async (event) => {
   const file = event.target.files[0]
   if (!file) return
-  if (!file.name.endsWith('.py')) {
-    ElMessage.error('只能上传 .py 文件')
+  const isCpp = operatorType.value === 'cpp'
+  if (isCpp && !file.name.endsWith('.so')) {
+    ElMessage.error('当前仅支持上传 .so 文件')
+    return
+  }
+  if (!isCpp && !file.name.endsWith('.py')) {
+    ElMessage.error('当前仅支持上传 .py 文件')
     return
   }
   try {
-    const content = await file.text()
-    await api.uploadOperator(file.name, content)
+    if (isCpp) {
+      await api.uploadOperatorFile(file, 'cpp')
+    } else {
+      const content = await file.text()
+      await api.uploadOperator(file.name, content, 'python')
+    }
     ElMessage.success('算子上传成功')
-    await waitOperatorSynced('')
+    await loadOperators()
   } catch (error) {
     ElMessage.error('上传失败: ' + (error.response?.data?.error || error.message))
   } finally {
@@ -674,7 +958,7 @@ const handleUploadError = (error) => {
 const showCreateDialog = () => {
   operatorForm.value = {
     fullName: '',
-    catelog: '',
+    category: '',
     name: '',
     description: '',
     dependencies: '',
@@ -690,10 +974,10 @@ const showCreateDialog = () => {
 const parseOperatorName = () => {
   const parts = operatorForm.value.fullName.split('.')
   if (parts.length === 2) {
-    operatorForm.value.catelog = parts[0]
+    operatorForm.value.category = parts[0]
     operatorForm.value.name = parts[1]
   } else {
-    operatorForm.value.catelog = ''
+    operatorForm.value.category = ''
     operatorForm.value.name = ''
   }
 }
@@ -703,7 +987,7 @@ const insertTemplate = () => {
 import pandas as pd
 
 @register_operator(
-    catelog="${operatorForm.value.catelog || 'your_catelog'}",
+    category="${operatorForm.value.category || 'your_category'}",
     name="${operatorForm.value.name || 'your_name'}",
     description="${operatorForm.value.description || '算子描述'}"
 )
@@ -736,7 +1020,7 @@ const insertExample = () => {
 import pandas as pd
 
 @register_operator(
-    catelog="${operatorForm.value.catelog || 'explore'}",
+    category="${operatorForm.value.category || 'explore'}",
     name="${operatorForm.value.name || 'chisquare'}",
     description="${operatorForm.value.description || '卡方独立性检验'}"
 )
@@ -778,7 +1062,7 @@ class ChiSquareOperator(OperatorBase):
 
 const saveOperator = async (autoActivate) => {
   // 验证
-  if (!operatorForm.value.fullName || !operatorForm.value.catelog || !operatorForm.value.name) {
+  if (!operatorForm.value.fullName || !operatorForm.value.category || !operatorForm.value.name) {
     ElMessage.warning('请输入算子名称（格式: 类别.名称）')
     return
   }
@@ -796,13 +1080,13 @@ const saveOperator = async (autoActivate) => {
     }
 
     // 生成文件名
-    const fileName = `${operatorForm.value.catelog}_${operatorForm.value.name}.py`
+    const fileName = `${operatorForm.value.category}_${operatorForm.value.name}.py`
 
     // 上传（JSON base64）
-    const res = await api.uploadOperator(fileName, finalCode)
+    await api.uploadOperator(fileName, finalCode, 'python')
     ElMessage.success('算子上传成功')
 
-    const fullName = `${operatorForm.value.catelog}.${operatorForm.value.name}`
+    const fullName = `${operatorForm.value.category}.${operatorForm.value.name}`
     const synced = await waitOperatorSynced(fullName)
     if (!synced) {
       ElMessage.warning('算子文件已上传，但目录同步较慢，请稍后在列表中确认')
@@ -810,7 +1094,7 @@ const saveOperator = async (autoActivate) => {
 
     // 如果需要自动激活
     if (autoActivate) {
-      await api.activateOperator(fullName)
+      await api.activateOperator({ type: 'python', name: fullName })
       ElMessage.success('算子已激活')
     }
 
@@ -824,8 +1108,29 @@ const saveOperator = async (autoActivate) => {
   }
 }
 
-onMounted(() => {
-  loadOperators()
+const deleteCppPlugin = async (row) => {
+  try {
+    await api.deleteOperator({ type: 'cpp', plugin_id: row.plugin_id })
+    ElMessage.success('插件已删除')
+    await loadOperators()
+  } catch (error) {
+    ElMessage.error('删除失败: ' + (error.response?.data?.error || error.message))
+  }
+}
+
+const deletePythonOperator = async (row) => {
+  const fullName = `${row.category}.${row.name}`
+  try {
+    await api.deleteOperator({ type: 'python', name: fullName })
+    ElMessage.success(`算子 ${fullName} 已删除`)
+    await loadOperators()
+  } catch (error) {
+    ElMessage.error('删除失败: ' + (error.response?.data?.error || error.message))
+  }
+}
+
+onMounted(async () => {
+  await Promise.allSettled([loadOperators(), refreshOperatorCounts()])
 })
 </script>
 
@@ -844,11 +1149,85 @@ onMounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
+  min-height: 40px;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .header-buttons {
   display: flex;
   gap: 10px;
+  align-items: center;
+  min-height: 32px;
+}
+
+.operator-layout {
+  display: flex;
+  gap: 16px;
+}
+
+.operator-sidebar {
+  width: 180px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border-color);
+  padding-right: 12px;
+}
+
+.operator-type-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.operator-type-item:hover {
+  background: var(--bg-secondary);
+}
+
+.operator-type-item.active {
+  background: var(--sidebar-active-bg, #dbeafe);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.operator-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.section-title {
+  margin: 10px 0;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.mono {
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+}
+
+.mono-input :deep(input) {
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+}
+
+.cpp-op-list {
+  width: 100%;
+  min-height: 32px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
 }
 
 .form-hint {
@@ -1034,5 +1413,20 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+
+@media (max-width: 900px) {
+  .operator-layout {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .operator-sidebar {
+    width: 100%;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-color);
+    padding-right: 0;
+    padding-bottom: 8px;
+  }
 }
 </style>

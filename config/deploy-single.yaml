@@ -16,6 +16,8 @@ services:
       - libflowsql_bridge.so
       - name: libflowsql_catalog.so
         option: "data_dir=./dataframes;operator_db_path=./meta/flowsql_meta.db"
+      - name: libflowsql_binaddon.so
+        option: "operator_db_path=./meta/flowsql_meta.db;upload_dir=./uploads/binaddon"
       - name: libflowsql_database.so
         option: "config_file=config/flowsql.yml"
 

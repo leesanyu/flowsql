@@ -18,7 +18,7 @@ void Pipeline::Run() {
 
     // 纯连接器：直接将 source 和 sink 通道交给算子
     if (operator_->Work(source_, sink_) != 0) {
-        error_message_ = "operator " + operator_->Catelog() + "." + operator_->Name() + " execution failed";
+        error_message_ = "operator " + operator_->Category() + "." + operator_->Name() + " execution failed";
         state_ = PipelineState::FAILED;
         return;
     }

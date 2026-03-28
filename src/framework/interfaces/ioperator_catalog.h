@@ -21,7 +21,7 @@ enum class OperatorStatus : int32_t {
 };
 
 struct OperatorMeta {
-    std::string catelog;
+    std::string category;
     std::string name;
     std::string type;
     std::string source;
@@ -38,8 +38,9 @@ struct UpsertResult {
 interface IOperatorCatalog {
     virtual ~IOperatorCatalog() = default;
 
-    virtual OperatorStatus QueryStatus(const std::string& catelog, const std::string& name) = 0;
+    virtual OperatorStatus QueryStatus(const std::string& category, const std::string& name) = 0;
     virtual UpsertResult UpsertBatch(const std::vector<OperatorMeta>& operators) = 0;
+    virtual int SetActive(const std::string& category, const std::string& name, bool active) = 0;
 };
 
 }  // namespace flowsql

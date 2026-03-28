@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <cstring>
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -239,6 +240,10 @@ class MockOperatorCatalog : public IOperatorCatalog {
         return result;
     }
 
+    int SetActive(const std::string&, const std::string&, bool) override {
+        return 0;
+    }
+
     std::vector<std::vector<flowsql::OperatorMeta>> batches;
 };
 
@@ -257,6 +262,15 @@ class MockQuerier : public IQuerier {
     MockOperatorCatalog* catalog_;
 };
 
+static size_t CountBridgeOperators(BridgePlugin* plugin) {
+    size_t count = 0;
+    plugin->TraverseOperators([&](IOperator*) {
+        ++count;
+        return 0;
+    });
+    return count;
+}
+
 // ============================================================
 // 测试 5: Bridge Start/Refresh 同步 Catalog（不走 HTTP）
 // ============================================================
@@ -265,8 +279,8 @@ int test_bridge_sync_catalog() {
 
     httplib::Server server;
     std::string payload = R"([
-        {"catelog":"ml","name":"clean","description":"clean rows"},
-        {"catelog":"ml","name":"enrich","description":"enrich rows"}
+        {"category":"ml","name":"clean","description":"clean rows"},
+        {"category":"ml","name":"enrich","description":"enrich rows"}
     ])";
     server.Get("/operators/python/list", [&](const httplib::Request&, httplib::Response& res) {
         res.set_content(payload, "application/json");
@@ -323,7 +337,7 @@ int test_bridge_sync_catalog() {
         return -1;
     }
 
-    payload = R"([{"catelog":"ml","name":"clean","description":"clean rows v2"}])";
+    payload = R"([{"category":"ml","name":"clean","description":"clean rows v2"}])";
     if (plugin.Refresh() != 0) {
         printf("FAIL: BridgePlugin::Refresh failed\n");
         server.stop();
@@ -352,6 +366,176 @@ int test_bridge_sync_catalog() {
 }
 
 // ============================================================
+// 测试 6: 并发 Refresh/Find 不应出现空读或失败
+// ============================================================
+int test_bridge_concurrent_refresh_find() {
+    printf("\n=== Test: Bridge concurrent refresh/find ===\n");
+
+    httplib::Server server;
+    const std::string payload = R"([
+        {"category":"ml","name":"clean","description":"clean rows"},
+        {"category":"ml","name":"enrich","description":"enrich rows"}
+    ])";
+    server.Get("/operators/python/list", [&](const httplib::Request&, httplib::Response& res) {
+        res.set_content(payload, "application/json");
+    });
+
+    int worker_port = server.bind_to_any_port("127.0.0.1");
+    if (worker_port <= 0) {
+        printf("FAIL: failed to bind mock worker\n");
+        return -1;
+    }
+    std::thread server_thread([&]() { server.listen_after_bind(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    MockOperatorCatalog mock_catalog;
+    MockQuerier querier(&mock_catalog);
+    BridgePlugin plugin;
+    std::string opt = "worker_host=127.0.0.1;worker_port=" + std::to_string(worker_port);
+    if (plugin.Option(opt.c_str()) != 0 || plugin.Load(&querier) != 0 || plugin.Start() != 0) {
+        printf("FAIL: bridge init failed\n");
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+
+    std::atomic<int> find_failures{0};
+    std::atomic<int> refresh_failures{0};
+    std::thread find_thread([&]() {
+        for (int i = 0; i < 3000; ++i) {
+            auto op = plugin.FindOperator("ml", "clean");
+            if (!op || op->Name() != "clean") {
+                find_failures.fetch_add(1);
+            }
+        }
+    });
+    std::thread refresh_thread([&]() {
+        for (int i = 0; i < 50; ++i) {
+            if (plugin.Refresh() != 0) {
+                refresh_failures.fetch_add(1);
+            }
+        }
+    });
+
+    find_thread.join();
+    refresh_thread.join();
+
+    if (find_failures.load() != 0 || refresh_failures.load() != 0) {
+        printf("FAIL: find_failures=%d refresh_failures=%d\n", find_failures.load(), refresh_failures.load());
+        plugin.Stop();
+        plugin.Unload();
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+
+    if (CountBridgeOperators(&plugin) != 2) {
+        printf("FAIL: expected 2 operators after concurrent refresh, got %zu\n", CountBridgeOperators(&plugin));
+        plugin.Stop();
+        plugin.Unload();
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+
+    plugin.Stop();
+    plugin.Unload();
+    server.stop();
+    server_thread.join();
+    printf("PASS: Bridge concurrent refresh/find OK\n");
+    return 0;
+}
+
+// ============================================================
+// 测试 7: 重复注册项与重复 Refresh 不应导致累积
+// ============================================================
+int test_bridge_refresh_no_accumulation() {
+    printf("\n=== Test: Bridge refresh no accumulation ===\n");
+
+    httplib::Server server;
+    const std::string payload = R"([
+        {"category":"ml","name":"clean","description":"clean rows"},
+        {"category":"ml","name":"clean","description":"clean rows duplicated"},
+        {"category":"ml","name":"enrich","description":"enrich rows"}
+    ])";
+    server.Get("/operators/python/list", [&](const httplib::Request&, httplib::Response& res) {
+        res.set_content(payload, "application/json");
+    });
+
+    int worker_port = server.bind_to_any_port("127.0.0.1");
+    if (worker_port <= 0) {
+        printf("FAIL: failed to bind mock worker\n");
+        return -1;
+    }
+    std::thread server_thread([&]() { server.listen_after_bind(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    MockOperatorCatalog mock_catalog;
+    MockQuerier querier(&mock_catalog);
+    BridgePlugin plugin;
+    std::string opt = "worker_host=127.0.0.1;worker_port=" + std::to_string(worker_port);
+    if (plugin.Option(opt.c_str()) != 0 || plugin.Load(&querier) != 0 || plugin.Start() != 0) {
+        printf("FAIL: bridge init failed\n");
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+
+    if (CountBridgeOperators(&plugin) != 2) {
+        printf("FAIL: expected deduped operator count=2, got %zu\n", CountBridgeOperators(&plugin));
+        plugin.Stop();
+        plugin.Unload();
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+
+    for (int i = 0; i < 20; ++i) {
+        if (plugin.Refresh() != 0) {
+            printf("FAIL: refresh failed at loop %d\n", i);
+            plugin.Stop();
+            plugin.Unload();
+            server.stop();
+            server_thread.join();
+            return -1;
+        }
+    }
+
+    if (CountBridgeOperators(&plugin) != 2) {
+        printf("FAIL: expected operator count remain 2, got %zu\n", CountBridgeOperators(&plugin));
+        plugin.Stop();
+        plugin.Unload();
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+
+    if (mock_catalog.batches.empty()) {
+        printf("FAIL: expected upsert batches, got none\n");
+        plugin.Stop();
+        plugin.Unload();
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+    if (mock_catalog.batches.back().size() != 2) {
+        printf("FAIL: expected last upsert batch size=2, got %zu\n", mock_catalog.batches.back().size());
+        plugin.Stop();
+        plugin.Unload();
+        server.stop();
+        server_thread.join();
+        return -1;
+    }
+
+    plugin.Stop();
+    plugin.Unload();
+    server.stop();
+    server_thread.join();
+    printf("PASS: Bridge refresh dedupe/no-accumulation OK\n");
+    return 0;
+}
+
+// ============================================================
 int main() {
     printf("========================================\n");
     printf("  FlowSQL Bridge Tests\n");
@@ -363,6 +547,8 @@ int main() {
     if (test_empty_batch() != 0) failures++;
     if (test_error_handling() != 0) failures++;
     if (test_bridge_sync_catalog() != 0) failures++;
+    if (test_bridge_concurrent_refresh_find() != 0) failures++;
+    if (test_bridge_refresh_no_accumulation() != 0) failures++;
 
     printf("\n========================================\n");
     if (failures == 0) {

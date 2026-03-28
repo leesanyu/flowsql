@@ -186,6 +186,7 @@ flowSQL/
 │   ├── frontend/           # Vue.js 前端
 │   └── tests/
 ├── docs/                   # 设计文档
+├── samples/                # 开发者样例工程（如 C++ 算子插件）
 └── tasks/                  # Sprint 任务管理
 ```
 
@@ -193,6 +194,7 @@ flowSQL/
 
 - [项目愿景](docs/vision.md)
 - [架构设计](docs/framework.md)
+- [C++ 算子插件 Sample](samples/cpp_operator/README.md)
 
 ## 许可证
 

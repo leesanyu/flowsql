@@ -200,6 +200,7 @@
           <el-select v-model="form.type" placeholder="选择数据库类型" style="width:100%">
             <el-option label="SQLite" value="sqlite" />
             <el-option label="MySQL" value="mysql" />
+            <el-option label="PostgreSQL" value="postgres" />
             <el-option label="ClickHouse" value="clickhouse" />
           </el-select>
         </el-form-item>
@@ -213,21 +214,21 @@
           </el-form-item>
         </template>
 
-        <template v-if="form.type === 'mysql' || form.type === 'clickhouse'">
+        <template v-if="form.type === 'mysql' || form.type === 'postgres' || form.type === 'clickhouse'">
           <el-form-item label="主机">
             <el-input v-model="form.host" placeholder="127.0.0.1" />
           </el-form-item>
           <el-form-item label="端口">
-            <el-input v-model="form.port" :placeholder="form.type === 'mysql' ? '3306' : '8123'" />
+            <el-input v-model="form.port" :placeholder="dbPortPlaceholder(form.type)" />
           </el-form-item>
           <el-form-item label="用户名">
-            <el-input v-model="form.user" :placeholder="form.type === 'mysql' ? 'root' : 'default'" />
+            <el-input v-model="form.user" :placeholder="dbUserPlaceholder(form.type)" />
           </el-form-item>
           <el-form-item label="密码">
             <el-input v-model="form.password" type="password" show-password placeholder="留空表示无密码" />
           </el-form-item>
           <el-form-item label="数据库" prop="database" required>
-            <el-input v-model="form.database" :placeholder="form.type === 'mysql' ? 'mydb' : 'default'" />
+            <el-input v-model="form.database" :placeholder="dbNamePlaceholder(form.type)" />
           </el-form-item>
         </template>
       </el-form>
@@ -283,6 +284,27 @@ const getTypeName = (typeId) => {
     5: 'DOUBLE', 6: 'STRING', 7: 'BYTES', 8: 'TIMESTAMP', 9: 'BOOLEAN'
   }
   return typeMap[typeId] || 'UNKNOWN'
+}
+
+const dbPortPlaceholder = (type) => {
+  if (type === 'mysql') return '3306'
+  if (type === 'postgres') return '5432'
+  if (type === 'clickhouse') return '8123'
+  return ''
+}
+
+const dbUserPlaceholder = (type) => {
+  if (type === 'mysql') return 'root'
+  if (type === 'postgres') return 'postgres'
+  if (type === 'clickhouse') return 'default'
+  return ''
+}
+
+const dbNamePlaceholder = (type) => {
+  if (type === 'mysql') return 'mydb'
+  if (type === 'postgres') return 'postgres'
+  if (type === 'clickhouse') return 'default'
+  return ''
 }
 
 const loadDbChannels = async () => {
@@ -385,8 +407,9 @@ const handleAdd = async () => {
     ElMessage.warning('类型和名称为必填项')
     return
   }
-  if ((form.value.type === 'mysql' || form.value.type === 'clickhouse') && !form.value.database) {
-    ElMessage.warning('MySQL/ClickHouse 通道必须填写数据库名称')
+  if ((form.value.type === 'mysql' || form.value.type === 'postgres' || form.value.type === 'clickhouse') &&
+      !form.value.database) {
+    ElMessage.warning('MySQL/PostgreSQL/ClickHouse 通道必须填写数据库名称')
     return
   }
   submitting.value = true

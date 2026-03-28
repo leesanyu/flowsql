@@ -8,7 +8,7 @@
 namespace flowsql {
 
 struct OperatorRef {
-    std::string catelog;
+    std::string category;
     std::string name;
 };
 
@@ -16,7 +16,7 @@ struct OperatorRef {
 struct SqlStatement {
     std::string source;       // FROM 后的源通道名
     std::vector<std::string> sources;  // FROM 后的全部源通道名（source=sources[0]）
-    std::string op_catelog;   // USING 后的算子 catelog（可选，空表示无算子）
+    std::string op_category;   // USING 后的算子 category（可选，空表示无算子）
     std::string op_name;      // USING 后的算子 name（可选）
     std::vector<OperatorRef> operators;  // USING/THEN 算子链
     std::vector<std::unordered_map<std::string, std::string>> operator_with_params;  // 与 operators 对齐
@@ -30,13 +30,13 @@ struct SqlStatement {
     // 是否有算子
     bool HasOperator() const {
         if (!operators.empty()) return true;
-        return !op_catelog.empty() && !op_name.empty();
+        return !op_category.empty() && !op_name.empty();
     }
 };
 
 // 递归下降 SQL 解析器
 // 语法：SELECT [* | col1, col2, ...] FROM <source> [WHERE <condition>]
-//       [USING <catelog.name> [WITH key=val,...] (THEN <catelog.name> [WITH ...])*] [INTO <dest>]
+//       [USING <category.name> [WITH key=val,...] (THEN <category.name> [WITH ...])*] [INTO <dest>]
 class SqlParser {
  public:
     SqlStatement Parse(const std::string& sql);

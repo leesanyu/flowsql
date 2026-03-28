@@ -51,6 +51,7 @@ class WebServer {
     int32_t HandleUploadOperator(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleActivateOperator(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleDeactivateOperator(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleDeleteOperator(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleGetOperatorDetail(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleUpdateOperator(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleGetTasks(const std::string& uri, const std::string& req, std::string& rsp);

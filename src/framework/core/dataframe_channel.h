@@ -14,11 +14,11 @@ namespace flowsql {
 // Read() 快照语义（非破坏性），Write() 替换语义
 class DataFrameChannel : public IDataFrameChannel {
  public:
-    DataFrameChannel(const std::string& catelog, const std::string& name);
+    DataFrameChannel(const std::string& category, const std::string& name);
     ~DataFrameChannel() override = default;
 
     // IChannel — 身份
-    const char* Catelog() override { return catelog_.c_str(); }
+    const char* Category() override { return category_.c_str(); }
     const char* Name() override { return name_.c_str(); }
     const char* Type() override { return ChannelType::kDataFrame; }
     const char* Schema() override;
@@ -34,7 +34,7 @@ class DataFrameChannel : public IDataFrameChannel {
     int Read(IDataFrame* df) override;
 
  private:
-    std::string catelog_;
+    std::string category_;
     std::string name_;
     bool opened_ = false;
     DataFrame data_;              // 内部存储

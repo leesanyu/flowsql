@@ -21,9 +21,9 @@ registry = OperatorRegistry()
 def _do_reload():
     """重载算子的共享逻辑"""
     config = WorkerConfig.from_args()
-    old_keys = set(f"{op['catelog']}.{op['name']}" for op in registry.list_operators())
+    old_keys = set(f"{op['category']}.{op['name']}" for op in registry.list_operators())
     registry.reload(config.operators_dir)
-    new_keys = set(f"{op['catelog']}.{op['name']}" for op in registry.list_operators())
+    new_keys = set(f"{op['category']}.{op['name']}" for op in registry.list_operators())
     added = new_keys - old_keys
     removed = old_keys - new_keys
     print(f"Worker _do_reload: added={len(added)}, removed={len(removed)}")
@@ -48,11 +48,11 @@ async def reload_operators():
     return {"added": list(added), "removed": list(removed)}
 
 
-@app.post("/operators/python/work/{catelog}/{name}")
-async def work(catelog: str, name: str, request: Request):
-    op = registry.get(catelog, name)
+@app.post("/operators/python/work/{category}/{name}")
+async def work(category: str, name: str, request: Request):
+    op = registry.get(category, name)
     if not op:
-        raise HTTPException(status_code=404, detail=f"Operator {catelog}.{name} not found")
+        raise HTTPException(status_code=404, detail=f"Operator {category}.{name} not found")
 
     body = await request.json()
     input_path = body.get("input")
@@ -79,14 +79,14 @@ async def work(catelog: str, name: str, request: Request):
     return JSONResponse(content={"output": output_path})
 
 
-@app.post("/operators/python/configure/{catelog}/{name}")
-async def configure(catelog: str, name: str, request: Request):
+@app.post("/operators/python/configure/{category}/{name}")
+async def configure(category: str, name: str, request: Request):
     body = await request.json()
     key = body.get("key", "")
     value = body.get("value", "")
 
-    if not registry.configure(catelog, name, key, value):
-        raise HTTPException(status_code=404, detail=f"Operator {catelog}.{name} not found")
+    if not registry.configure(category, name, key, value):
+        raise HTTPException(status_code=404, detail=f"Operator {category}.{name} not found")
 
     return {"status": "ok"}
 

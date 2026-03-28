@@ -108,8 +108,8 @@ int ControlMessage::ParseOperatorList(const std::string& payload_json, std::vect
         if (!item.IsObject()) continue;
 
         OperatorMeta meta;
-        if (item.HasMember("catelog") && item["catelog"].IsString())
-            meta.catelog = item["catelog"].GetString();
+        if (item.HasMember("category") && item["category"].IsString())
+            meta.category = item["category"].GetString();
         if (item.HasMember("name") && item["name"].IsString())
             meta.name = item["name"].GetString();
         if (item.HasMember("description") && item["description"].IsString())
@@ -119,7 +119,7 @@ int ControlMessage::ParseOperatorList(const std::string& payload_json, std::vect
             meta.position = (pos == "STORAGE") ? OperatorPosition::STORAGE : OperatorPosition::DATA;
         }
 
-        if (!meta.catelog.empty() && !meta.name.empty()) {
+        if (!meta.category.empty() && !meta.name.empty()) {
             operators->push_back(std::move(meta));
         }
     }
@@ -135,8 +135,8 @@ int ControlMessage::ParseOperatorMeta(const std::string& payload_json, OperatorM
         return -1;
     }
 
-    if (doc.HasMember("catelog") && doc["catelog"].IsString())
-        meta->catelog = doc["catelog"].GetString();
+    if (doc.HasMember("category") && doc["category"].IsString())
+        meta->category = doc["category"].GetString();
     if (doc.HasMember("name") && doc["name"].IsString())
         meta->name = doc["name"].GetString();
     if (doc.HasMember("description") && doc["description"].IsString())
@@ -146,7 +146,7 @@ int ControlMessage::ParseOperatorMeta(const std::string& payload_json, OperatorM
         meta->position = (pos == "STORAGE") ? OperatorPosition::STORAGE : OperatorPosition::DATA;
     }
 
-    if (meta->catelog.empty() || meta->name.empty()) {
+    if (meta->category.empty() || meta->name.empty()) {
         return -1;
     }
 

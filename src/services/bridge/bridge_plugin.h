@@ -2,12 +2,15 @@
 #define _FLOWSQL_BRIDGE_BRIDGE_PLUGIN_H_
 
 #include <memory>
+#include <shared_mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <common/iplugin.h>
 
 #include "framework/interfaces/ibridge.h"
+#include "framework/interfaces/ioperator_catalog.h"
 #include "python_operator_bridge.h"
 
 namespace flowsql {
@@ -29,19 +32,23 @@ class BridgePlugin : public IPlugin, public IBridge {
     int Stop() override;
 
     // IBridge
-    std::shared_ptr<IOperator> FindOperator(const std::string& catelog, const std::string& name) override;
+    std::shared_ptr<IOperator> FindOperator(const std::string& category, const std::string& name) override;
     void TraverseOperators(std::function<int(IOperator*)> fn) override;
     int Refresh() override;
 
  private:
-    // 从 Python Worker 获取算子列表（只存内部，不注册到 PluginLoader）
+    using BridgeOperatorMap = std::unordered_map<std::string, std::shared_ptr<PythonOperatorBridge>>;
+
+    // 从 Python Worker 获取算子列表并原子替换本地快照（不注册到 PluginLoader）
     int DiscoverOperators();
-    int SyncOperatorsToCatalog();
+    int SyncOperatorsToCatalog(const std::vector<flowsql::OperatorMeta>& ops);
+    size_t OperatorCount() const;
 
     IQuerier* querier_ = nullptr;
 
-    // 已发现的 Python 算子（持有 shared_ptr 保证生命周期安全）
-    std::vector<std::shared_ptr<PythonOperatorBridge>> registered_operators_;
+    // 已发现的 Python 算子快照（持有 shared_ptr 保证生命周期安全）
+    mutable std::shared_mutex operators_mu_;
+    BridgeOperatorMap registered_operators_;
 
     // 配置参数
     std::string host_ = "127.0.0.1";

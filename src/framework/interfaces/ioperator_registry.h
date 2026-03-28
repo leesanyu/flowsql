@@ -27,6 +27,9 @@ interface IOperatorRegistry {
     // 按名创建算子实例（未注册返回 nullptr）
     virtual IOperator* Create(const char* name) = 0;
 
+    // 注销算子工厂（不存在返回 -1）
+    virtual int RemoveFactory(const char* name) = 0;
+
     // 枚举所有已注册算子类型
     virtual void List(std::function<void(const char* name)> callback) = 0;
 };

@@ -26,7 +26,7 @@ interface IOperator {
     virtual ~IOperator() = default;
 
     // 元数据
-    virtual std::string Catelog() = 0;
+    virtual std::string Category() = 0;
     virtual std::string Name() = 0;
     virtual std::string Description() = 0;
     virtual OperatorPosition Position() = 0;

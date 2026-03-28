@@ -2,8 +2,8 @@
 
 namespace flowsql {
 
-DataFrameChannel::DataFrameChannel(const std::string& catelog, const std::string& name)
-    : catelog_(catelog), name_(name) {}
+DataFrameChannel::DataFrameChannel(const std::string& category, const std::string& name)
+    : category_(category), name_(name) {}
 
 const char* DataFrameChannel::Schema() {
     std::lock_guard<std::mutex> lock(mutex_);

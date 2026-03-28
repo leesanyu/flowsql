@@ -13,7 +13,7 @@ namespace bridge {
 
 // Python 算子的元数据
 struct OperatorMeta {
-    std::string catelog;
+    std::string category;
     std::string name;
     std::string description;
     OperatorPosition position = OperatorPosition::DATA;
@@ -27,7 +27,7 @@ class PythonOperatorBridge : public IOperator {
     ~PythonOperatorBridge() override = default;
 
     // IOperator 元数据
-    std::string Catelog() override { return meta_.catelog; }
+    std::string Category() override { return meta_.category; }
     std::string Name() override { return meta_.name; }
     std::string Description() override { return meta_.description; }
     OperatorPosition Position() override { return meta_.position; }

@@ -105,7 +105,7 @@ static std::string MakeExecutionErrorJson(const std::string& error,
 }
 
 static std::string ExtractStageFromExecutionError(const std::string& error) {
-    // Pipeline::Run 失败消息：operator <catelog>.<name> execution failed
+    // Pipeline::Run 失败消息：operator <category>.<name> execution failed
     static const std::regex kPattern(R"(^operator\s+([^.]+)\.([^\s]+)\s+execution failed$)",
                                      std::regex_constants::icase);
     std::smatch m;
@@ -175,18 +175,18 @@ int SchedulerPlugin::Start() {
         std::vector<OperatorMeta> ops;
         std::unordered_set<std::string> seen;
         auto append_unique = [&](OperatorMeta meta) {
-            const std::string key = ToLowerAscii(meta.catelog) + "." + ToLowerAscii(meta.name);
+            const std::string key = ToLowerAscii(meta.category) + "." + ToLowerAscii(meta.name);
             if (seen.insert(key).second) {
                 ops.push_back(std::move(meta));
             }
         };
         querier_->Traverse(IID_OPERATOR, [&](void* p) -> int {
             auto* op = static_cast<IOperator*>(p);
-            if (!op || op->Catelog().empty() || op->Name().empty()) return 0;
+            if (!op || op->Category().empty() || op->Name().empty()) return 0;
             OperatorMeta meta;
-            meta.catelog = op->Catelog();
+            meta.category = op->Category();
             meta.name = op->Name();
-            meta.type = "cpp";
+            meta.type = IEquals(meta.category, "builtin") ? "builtin" : "cpp";
             meta.source = "scheduler";
             meta.description = op->Description();
             meta.position = op->Position() == OperatorPosition::STORAGE ? "storage" : "data";
@@ -197,10 +197,11 @@ int SchedulerPlugin::Start() {
         if (op_registry) {
             op_registry->List([&](const char* name) {
                 if (!name || name[0] == '\0') return;
+                if (std::string(name).find('.') != std::string::npos) return;
                 OperatorMeta meta;
-                meta.catelog = "builtin";
+                meta.category = "builtin";
                 meta.name = name;
-                meta.type = "cpp";
+                meta.type = "builtin";
                 meta.source = "scheduler";
                 meta.position = "data";
                 IOperator* op = op_registry->Create(name);
@@ -275,13 +276,13 @@ IChannel* SchedulerPlugin::FindChannel(const std::string& name) {
         querier_->Traverse(IID_CHANNEL, [&](void* p) -> int {
             auto* c = static_cast<IChannel*>(p);
             auto dot = name.find('.');
-            bool catelog_and_name_match = false;
+            bool category_and_name_match = false;
             if (dot != std::string::npos) {
-                const std::string req_catelog = name.substr(0, dot);
+                const std::string req_category = name.substr(0, dot);
                 const std::string req_name = name.substr(dot + 1);
-                catelog_and_name_match = IEquals(c->Catelog(), req_catelog) && std::string(c->Name()) == req_name;
+                category_and_name_match = IEquals(c->Category(), req_category) && std::string(c->Name()) == req_name;
             }
-            if (catelog_and_name_match || std::string(c->Name()) == name) {
+            if (category_and_name_match || std::string(c->Name()) == name) {
                 found = c;
                 return -1;  // 找到了，停止遍历
             }
@@ -318,7 +319,7 @@ IChannel* SchedulerPlugin::FindChannel(const std::string& name) {
 
 // --- 算子查找 ---
 // 先查 C++ 静态算子（IQuerier），再查 Python 算子（IBridge）
-std::shared_ptr<IOperator> SchedulerPlugin::FindOperator(const std::string& catelog, const std::string& name) {
+std::shared_ptr<IOperator> SchedulerPlugin::FindOperator(const std::string& category, const std::string& name) {
     if (!querier_) return nullptr;
     auto* op_registry = static_cast<IOperatorRegistry*>(querier_->First(IID_OPERATOR_REGISTRY));
 
@@ -326,7 +327,7 @@ std::shared_ptr<IOperator> SchedulerPlugin::FindOperator(const std::string& cate
     IOperator* found = nullptr;
     querier_->Traverse(IID_OPERATOR, [&](void* p) -> int {
         auto* op = static_cast<IOperator*>(p);
-        if (IEquals(op->Catelog(), catelog) && op->Name() == name) {
+        if (IEquals(op->Category(), category) && op->Name() == name) {
             found = op;
             return -1;
         }
@@ -338,12 +339,17 @@ std::shared_ptr<IOperator> SchedulerPlugin::FindOperator(const std::string& cate
     // 2. 再查 Python 算子（通过 IBridge）
     auto* bridge = static_cast<IBridge*>(querier_->First(IID_BRIDGE));
     if (bridge) {
-        auto py_op = bridge->FindOperator(catelog, name);
+        auto py_op = bridge->FindOperator(category, name);
         if (py_op) return py_op;
     }
 
-    // 3. 再查内置算子注册表（CatalogPlugin）
-    if (IEquals(catelog, "builtin") && op_registry) {
+    // 3. 查注册表（兼容 "category.name" 与 legacy builtin name）
+    if (op_registry) {
+        const std::string key = category + "." + name;
+        IOperator* op = op_registry->Create(key.c_str());
+        if (op) return std::shared_ptr<IOperator>(op, [](IOperator* p) { delete p; });
+    }
+    if (IEquals(category, "builtin") && op_registry) {
         IOperator* op = op_registry->Create(name.c_str());
         if (op) return std::shared_ptr<IOperator>(op, [](IOperator* p) { delete p; });
     }
@@ -557,7 +563,7 @@ int SchedulerPlugin::ExecuteWithOperatorChain(Span<IChannel*> inputs, IChannel* 
                 if (!op_error.empty()) {
                     *error = op_error;
                 } else {
-                    *error = "operator " + ops[i]->Catelog() + "." + ops[i]->Name() + " execution failed";
+                    *error = "operator " + ops[i]->Category() + "." + ops[i]->Name() + " execution failed";
                 }
             }
             return -1;
@@ -632,8 +638,8 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
     std::vector<std::shared_ptr<IOperator>> op_holders;
     std::vector<IOperator*> op_chain;
     std::vector<OperatorRef> parsed_ops = stmt.operators;
-    if (parsed_ops.empty() && !stmt.op_catelog.empty() && !stmt.op_name.empty()) {
-        parsed_ops.push_back({stmt.op_catelog, stmt.op_name});
+    if (parsed_ops.empty() && !stmt.op_category.empty() && !stmt.op_name.empty()) {
+        parsed_ops.push_back({stmt.op_category, stmt.op_name});
     }
     if (!parsed_ops.empty()) {
         auto* catalog = querier_ ? static_cast<IOperatorCatalog*>(querier_->First(IID_OPERATOR_CATALOG)) : nullptr;
@@ -642,18 +648,18 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             return error::UNAVAILABLE;
         }
         for (const auto& op_ref : parsed_ops) {
-            OperatorStatus status = catalog->QueryStatus(op_ref.catelog, op_ref.name);
+            OperatorStatus status = catalog->QueryStatus(op_ref.category, op_ref.name);
             if (status == OperatorStatus::kNotFound) {
-                rsp = MakeErrorJson("operator not found: " + op_ref.catelog + "." + op_ref.name);
+                rsp = MakeErrorJson("operator not found: " + op_ref.category + "." + op_ref.name);
                 return error::NOT_FOUND;
             }
             if (status == OperatorStatus::kDeactivated) {
-                rsp = MakeErrorJson("operator is deactivated: " + op_ref.catelog + "." + op_ref.name);
+                rsp = MakeErrorJson("operator is deactivated: " + op_ref.category + "." + op_ref.name);
                 return error::CONFLICT;
             }
-            auto holder = FindOperator(op_ref.catelog, op_ref.name);
+            auto holder = FindOperator(op_ref.category, op_ref.name);
             if (!holder) {
-                rsp = MakeErrorJson("operator not found: " + op_ref.catelog + "." + op_ref.name);
+                rsp = MakeErrorJson("operator not found: " + op_ref.category + "." + op_ref.name);
                 return error::NOT_FOUND;
             }
             op_chain.push_back(holder.get());
@@ -821,7 +827,7 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
     for (auto& [key, ch_ptr] : channels_) {
         auto* ch = ch_ptr.get();
         w.StartObject();
-        w.Key("catelog"); w.String(ch->Catelog());
+        w.Key("category"); w.String(ch->Category());
         w.Key("name"); w.String(ch->Name());
         w.Key("type"); w.String(ch->Type());
         w.Key("schema"); w.String(ch->Schema());
@@ -833,7 +839,7 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
         ch_registry->List([&w](const char* name, std::shared_ptr<IChannel> ch) {
             if (!name || !ch) return;
             w.StartObject();
-            w.Key("catelog"); w.String(ch->Catelog());
+            w.Key("category"); w.String(ch->Category());
             w.Key("name"); w.String(name);
             w.Key("type"); w.String(ch->Type());
             w.Key("schema"); w.String(ch->Schema());
@@ -846,7 +852,7 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
         querier_->Traverse(IID_CHANNEL, [&w](void* p) -> int {
             auto* ch = static_cast<IChannel*>(p);
             w.StartObject();
-            w.Key("catelog"); w.String(ch->Catelog());
+            w.Key("category"); w.String(ch->Category());
             w.Key("name"); w.String(ch->Name());
             w.Key("type"); w.String(ch->Type());
             w.Key("schema"); w.String(ch->Schema());
@@ -859,7 +865,7 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
         if (factory) {
             factory->List([&w](const char* type, const char* name, const char* config_json) {
                 w.StartObject();
-                w.Key("catelog"); w.String(type);
+                w.Key("category"); w.String(type);
                 w.Key("name"); w.String(name);
                 w.Key("type"); w.String(ChannelType::kDatabase);
                 // 从 config_json 提取 database 字段作为 schema 展示
@@ -887,7 +893,7 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
 }
 
 // --- HandlePreviewDataframe ---
-// POST /channels/dataframe/preview — Body: {"catelog":"...","name":"..."} 或 {"name":"..."}
+// POST /channels/dataframe/preview — Body: {"category":"...","name":"..."} 或 {"name":"..."}
 int32_t SchedulerPlugin::HandlePreviewDataframe(const std::string&, const std::string& req, std::string& rsp) {
     auto* ch_registry = querier_ ? static_cast<IChannelRegistry*>(querier_->First(IID_CHANNEL_REGISTRY)) : nullptr;
     rapidjson::Document doc;
@@ -896,9 +902,9 @@ int32_t SchedulerPlugin::HandlePreviewDataframe(const std::string&, const std::s
         rsp = R"({"error":"missing 'name'"})";
         return error::BAD_REQUEST;
     }
-    std::string catelog = "dataframe";
-    if (doc.HasMember("catelog") && doc["catelog"].IsString()) {
-        catelog = doc["catelog"].GetString();
+    std::string category = "dataframe";
+    if (doc.HasMember("category") && doc["category"].IsString()) {
+        category = doc["category"].GetString();
     }
     std::string name = doc["name"].GetString();
     int page = 1;
@@ -908,7 +914,7 @@ int32_t SchedulerPlugin::HandlePreviewDataframe(const std::string&, const std::s
     if (page < 1) page = 1;
     if (page_size < 1) page_size = 20;
     if (page_size > 100) page_size = 100;
-    std::string key     = catelog + "." + name;
+    std::string key     = category + "." + name;
 
     // 先在内部通道表查找
     IChannel* raw_ch = nullptr;
@@ -921,7 +927,7 @@ int32_t SchedulerPlugin::HandlePreviewDataframe(const std::string&, const std::s
     if (!raw_ch && querier_) {
         querier_->Traverse(IID_CHANNEL, [&](void* p) -> int {
             auto* ch = static_cast<IChannel*>(p);
-            if (IEquals(ch->Catelog(), catelog) && std::string(ch->Name()) == name) {
+            if (IEquals(ch->Category(), category) && std::string(ch->Name()) == name) {
                 raw_ch = ch;
                 return 1;  // 找到，停止遍历
             }
@@ -930,7 +936,7 @@ int32_t SchedulerPlugin::HandlePreviewDataframe(const std::string&, const std::s
     }
 
     if (!raw_ch) {
-        if (IEquals(catelog, "dataframe") && ch_registry) {
+        if (IEquals(category, "dataframe") && ch_registry) {
             auto named = ch_registry->Get(name.c_str());
             auto* named_df = dynamic_cast<IDataFrameChannel*>(named.get());
             if (named_df) raw_ch = named_df;

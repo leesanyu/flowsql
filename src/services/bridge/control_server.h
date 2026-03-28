@@ -19,7 +19,7 @@ public:
     virtual ~IMessageHandler() = default;
     virtual void OnWorkerReady(const std::vector<OperatorMeta>& operators) = 0;
     virtual void OnOperatorAdded(const OperatorMeta& meta) = 0;
-    virtual void OnOperatorRemoved(const std::string& catelog, const std::string& name) = 0;
+    virtual void OnOperatorRemoved(const std::string& category, const std::string& name) = 0;
     virtual void OnHeartbeat(const std::string& stats_json) = 0;
     virtual void OnError(int code, const std::string& message) = 0;
 };

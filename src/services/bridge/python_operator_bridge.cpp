@@ -62,7 +62,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     if (!df_in || !df_out) {
         last_error_ = "channel type mismatch (expected IDataFrameChannel)";
         printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.catelog.c_str(), meta_.name.c_str(), last_error_.c_str());
+               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -71,7 +71,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     if (df_in->Read(&in_frame) != 0) {
         last_error_ = "Read from input channel failed";
         printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.catelog.c_str(), meta_.name.c_str(), last_error_.c_str());
+               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -80,7 +80,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     if (!batch) {
         last_error_ = "ToArrow() returned null";
         printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.catelog.c_str(), meta_.name.c_str(), last_error_.c_str());
+               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -89,7 +89,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     if (uuid.empty()) {
         last_error_ = "Failed to generate UUID";
         printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.catelog.c_str(), meta_.name.c_str(), last_error_.c_str());
+               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -100,12 +100,12 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     if (ArrowIpcSerializer::SerializeToFile(batch, in_path) != 0) {
         last_error_ = "Arrow IPC serialize to file failed";
         printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.catelog.c_str(), meta_.name.c_str(), last_error_.c_str());
+               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
     // 4. HTTP POST JSON 路径到 Python Worker
-    std::string path = "/operators/python/work/" + meta_.catelog + "/" + meta_.name;
+    std::string path = "/operators/python/work/" + meta_.category + "/" + meta_.name;
 
     rapidjson::StringBuffer sb;
     rapidjson::Writer<rapidjson::StringBuffer> json_writer(sb);
@@ -119,7 +119,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     if (!res) {
         last_error_ = "HTTP POST to Python Worker failed (connection error)";
         printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.catelog.c_str(), meta_.name.c_str(), last_error_.c_str());
+               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -135,7 +135,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
             }
         }
         printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.catelog.c_str(), meta_.name.c_str(), last_error_.c_str());
+               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -146,7 +146,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
         !res_doc["output"].IsString()) {
         last_error_ = "Invalid JSON response from Python Worker: " + res->body;
         printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.catelog.c_str(), meta_.name.c_str(), last_error_.c_str());
+               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -155,7 +155,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     if (ArrowIpcSerializer::DeserializeFromFile(output_path, &result_batch) != 0) {
         last_error_ = "Deserialize Arrow IPC from file failed: " + output_path;
         printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.catelog.c_str(), meta_.name.c_str(), last_error_.c_str());
+               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -165,7 +165,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     if (df_out->Write(&out_frame) != 0) {
         last_error_ = "Write to output channel failed";
         printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.catelog.c_str(), meta_.name.c_str(), last_error_.c_str());
+               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -175,13 +175,13 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
 int PythonOperatorBridge::Configure(const char* key, const char* value) {
     if (!key || !value) return -1;
 
-    std::string path = "/operators/python/configure/" + meta_.catelog + "/" + meta_.name;
+    std::string path = "/operators/python/configure/" + meta_.category + "/" + meta_.name;
     std::string body = std::string("{\"key\":\"") + key + "\",\"value\":\"" + value + "\"}";
     auto res = client_->Post(path, body, "application/json");
 
     if (!res || res->status != 200) {
         printf("PythonOperatorBridge[%s.%s]: Configure failed\n",
-               meta_.catelog.c_str(), meta_.name.c_str());
+               meta_.category.c_str(), meta_.name.c_str());
         return -1;
     }
     return 0;

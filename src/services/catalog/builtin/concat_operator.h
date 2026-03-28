@@ -16,7 +16,7 @@ class ConcatOperator : public IOperator {
     ConcatOperator() = default;
     ~ConcatOperator() override = default;
 
-    std::string Catelog() override { return "builtin"; }
+    std::string Category() override { return "builtin"; }
     std::string Name() override { return "concat"; }
     std::string Description() override { return "Concatenate multiple DataFrames by rows"; }
     OperatorPosition Position() override { return OperatorPosition::DATA; }

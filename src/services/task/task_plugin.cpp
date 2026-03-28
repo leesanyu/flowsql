@@ -123,7 +123,7 @@ static std::string DataFrameNamePart(const std::string& full_name) {
 }
 
 static std::string ExtractStageFromErrorMessage(const std::string& error_message) {
-    // Pipeline 错误格式：operator <catelog>.<name> execution failed
+    // Pipeline 错误格式：operator <category>.<name> execution failed
     static constexpr const char* kPrefix = "operator ";
     static constexpr const char* kSuffix = " execution failed";
     if (error_message.size() <= std::strlen(kPrefix) + std::strlen(kSuffix)) return "";
@@ -147,10 +147,10 @@ static std::string BuildOperatorChainFromSql(const std::string& sql) {
     if (!stmt.operators.empty()) {
         chain.reserve(stmt.operators.size());
         for (const auto& op : stmt.operators) {
-            chain.push_back(op.catelog + "." + op.name);
+            chain.push_back(op.category + "." + op.name);
         }
-    } else if (!stmt.op_catelog.empty() && !stmt.op_name.empty()) {
-        chain.push_back(stmt.op_catelog + "." + stmt.op_name);
+    } else if (!stmt.op_category.empty() && !stmt.op_name.empty()) {
+        chain.push_back(stmt.op_category + "." + stmt.op_name);
     }
 
     if (chain.empty()) return "";

@@ -16,7 +16,7 @@ class PassthroughOperator : public IOperator {
     ~PassthroughOperator() override = default;
 
     // IOperator 元数据
-    std::string Catelog() override { return "builtin"; }
+    std::string Category() override { return "builtin"; }
     std::string Name() override { return "passthrough"; }
     std::string Description() override { return "Passthrough operator, copies data as-is"; }
     OperatorPosition Position() override { return OperatorPosition::DATA; }

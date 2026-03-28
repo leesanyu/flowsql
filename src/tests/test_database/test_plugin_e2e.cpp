@@ -208,7 +208,7 @@ void test_mysql_connect() {
     auto* ch = factory->Get("mysql", "testdb");
     assert(ch != nullptr);
     assert(std::string(ch->Type()) == "database");
-    assert(std::string(ch->Catelog()) == "mysql");
+    assert(std::string(ch->Category()) == "mysql");
     assert(std::string(ch->Name()) == "testdb");
     assert(ch->IsConnected());
     assert(ch->IsOpened());
@@ -980,7 +980,7 @@ void test_clickhouse_connect(IDatabaseFactory* factory) {
     auto* ch = factory->Get("clickhouse", "ch1");
     assert(ch != nullptr);
     assert(ch->IsConnected());
-    assert(std::string(ch->Catelog()) == "clickhouse");
+    assert(std::string(ch->Category()) == "clickhouse");
     assert(std::string(ch->Name()) == "ch1");
     printf("  factory->Get(clickhouse, ch1): connected OK\n");
 

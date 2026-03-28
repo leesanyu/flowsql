@@ -236,7 +236,7 @@ void test_dataframe_channel() {
     assert(std::get<std::string>(out3.GetRow(0)[0]) == "hello");
 
     assert(std::string(ch.Type()) == "dataframe");
-    assert(std::string(ch.Catelog()) == "test");
+    assert(std::string(ch.Category()) == "test");
     assert(std::string(ch.Name()) == "channel");
 
     ch.Close();
@@ -256,7 +256,7 @@ void test_sql_parser() {
         assert(stmt.source == "test.data");
         assert(stmt.sources.size() == 1);
         assert(stmt.sources[0] == "test.data");
-        assert(stmt.op_catelog == "explore");
+        assert(stmt.op_category == "explore");
         assert(stmt.op_name == "chisquare");
         assert(stmt.with_params["threshold"] == "0.05");
         assert(stmt.dest == "result");
@@ -309,7 +309,7 @@ void test_sql_parser() {
         assert(stmt.sources.size() == 2);
         assert(stmt.sources[0] == "dataframe.d1");
         assert(stmt.sources[1] == "dataframe.d2");
-        assert(stmt.op_catelog == "builtin");
+        assert(stmt.op_category == "builtin");
         assert(stmt.op_name == "concat");
         assert(stmt.dest == "dataframe.dd");
         assert(stmt.sql_part == "SELECT * FROM dataframe.d1, dataframe.d2");
@@ -332,7 +332,7 @@ void test_sql_parser() {
         auto stmt = parser.Parse("SELECT a, COUNT(*) FROM source GROUP BY a ORDER BY COUNT(*) DESC USING ml.predict");
         assert(stmt.error.empty());
         assert(stmt.sql_part == "SELECT a, COUNT(*) FROM source GROUP BY a ORDER BY COUNT(*) DESC");
-        assert(stmt.op_catelog == "ml");
+        assert(stmt.op_category == "ml");
         assert(stmt.op_name == "predict");
         assert(stmt.HasOperator());
     }
@@ -359,7 +359,7 @@ void test_sql_parser() {
         auto stmt = parser.Parse("SELECT a, COUNT(*) FROM source WHERE x>1 GROUP BY a HAVING COUNT(*)>5 ORDER BY a LIMIT 10 USING ml.train WITH epochs=100 INTO result");
         assert(stmt.error.empty());
         assert(stmt.sql_part == "SELECT a, COUNT(*) FROM source WHERE x>1 GROUP BY a HAVING COUNT(*)>5 ORDER BY a LIMIT 10");
-        assert(stmt.op_catelog == "ml");
+        assert(stmt.op_category == "ml");
         assert(stmt.op_name == "train");
         assert(stmt.with_params["epochs"] == "100");
         assert(stmt.dest == "result");
@@ -372,11 +372,11 @@ void test_sql_parser() {
         assert(stmt.error.empty());
         assert(stmt.operators.size() == 2);
         assert(stmt.operator_with_params.size() == 2);
-        assert(stmt.operators[0].catelog == "builtin");
+        assert(stmt.operators[0].category == "builtin");
         assert(stmt.operators[0].name == "op1");
         assert(stmt.operator_with_params[0]["p1"] == "1");
         assert(stmt.operator_with_params[0]["p2"] == "2");
-        assert(stmt.operators[1].catelog == "ml");
+        assert(stmt.operators[1].category == "ml");
         assert(stmt.operators[1].name == "op2");
         assert(stmt.operator_with_params[1]["p3"] == "3");
     }
@@ -400,7 +400,7 @@ void test_operator_multi_input_fallback() {
 
     class SingleOnlyOperator : public IOperator {
      public:
-        std::string Catelog() override { return "test"; }
+        std::string Category() override { return "test"; }
         std::string Name() override { return "single_only"; }
         std::string Description() override { return "single input only"; }
         OperatorPosition Position() override { return OperatorPosition::DATA; }
@@ -569,7 +569,7 @@ void test_build_query_integration() {
         auto stmt = parser.Parse("SELECT a, COUNT(*) FROM catalog.db.table WHERE x > 1 GROUP BY a HAVING COUNT(*) > 5 ORDER BY a LIMIT 10 USING ml.train WITH epochs=100 INTO result");
         assert(stmt.error.empty());
         assert(stmt.sql_part == "SELECT a, COUNT(*) FROM catalog.db.table WHERE x > 1 GROUP BY a HAVING COUNT(*) > 5 ORDER BY a LIMIT 10");
-        assert(stmt.op_catelog == "ml");
+        assert(stmt.op_category == "ml");
         assert(stmt.op_name == "train");
         assert(stmt.with_params["epochs"] == "100");
         assert(stmt.dest == "result");

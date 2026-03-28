@@ -14,7 +14,7 @@ class HstackOperator : public IOperator {
     HstackOperator() = default;
     ~HstackOperator() override = default;
 
-    std::string Catelog() override { return "builtin"; }
+    std::string Category() override { return "builtin"; }
     std::string Name() override { return "hstack"; }
     std::string Description() override { return "Concatenate multiple DataFrames by columns"; }
     OperatorPosition Position() override { return OperatorPosition::DATA; }

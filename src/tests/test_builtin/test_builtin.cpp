@@ -1,7 +1,9 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <string>
 #include <thread>
@@ -12,14 +14,26 @@
 #include <common/error_code.h>
 #include <framework/core/dataframe.h>
 #include <framework/core/dataframe_channel.h>
+#include <framework/interfaces/ibinaddon_host.h>
 #include <framework/interfaces/ioperator.h>
 #include <framework/interfaces/ioperator_catalog.h>
+#include <framework/interfaces/ioperator_registry.h>
+#include <services/binaddon/binaddon_host_plugin.h>
 #include <services/catalog/catalog_plugin.h>
 #include <framework/interfaces/irouter_handle.h>
 #include <rapidjson/document.h>
 
 using namespace flowsql;
+using namespace flowsql::binaddon;
 using namespace flowsql::catalog;
+
+#ifndef FIXTURE_CPP_SO_PATH
+#define FIXTURE_CPP_SO_PATH ""
+#endif
+
+#ifndef FIXTURE_BAD_ABI_SO_PATH
+#define FIXTURE_BAD_ABI_SO_PATH ""
+#endif
 
 #define ASSERT_TRUE(expr)                                                                   \
     do {                                                                                    \
@@ -84,6 +98,50 @@ static int ChannelRowCount(IDataFrameChannel* ch) {
 static std::shared_ptr<IDataFrameChannel> GetDataFrame(CatalogPlugin& p, const char* name) {
     return std::dynamic_pointer_cast<IDataFrameChannel>(p.Get(name));
 }
+
+static std::string CopyToTmp(const std::string& src_path, const std::string& dir, const std::string& filename) {
+    std::filesystem::path dst = std::filesystem::path(dir) / filename;
+    std::error_code ec;
+    std::filesystem::copy_file(src_path, dst, std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) return "";
+    return dst.string();
+}
+
+static std::string RuntimeOperatorsDir() {
+    char exe_path[1024];
+    ssize_t len = ::readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len > 0) {
+        exe_path[len] = '\0';
+        std::string exe_dir(exe_path);
+        size_t pos = exe_dir.find_last_of('/');
+        if (pos != std::string::npos) return exe_dir.substr(0, pos) + "/operators";
+    }
+    return "operators";
+}
+
+static std::string RuntimeOperatorPyPath(const std::string& category, const std::string& name) {
+    std::filesystem::path p(RuntimeOperatorsDir());
+    p /= (category + "_" + name + ".py");
+    return p.string();
+}
+
+class TestQuerier : public IQuerier {
+ public:
+    IOperatorRegistry* op_registry = nullptr;
+    IBinAddonHost* binaddon_host = nullptr;
+
+    int Traverse(const Guid&, fntraverse) override { return 0; }
+
+    void* First(const Guid& iid) override {
+        if (memcmp(&iid, &IID_OPERATOR_REGISTRY, sizeof(Guid)) == 0) {
+            return op_registry;
+        }
+        if (memcmp(&iid, &IID_BINADDON_HOST, sizeof(Guid)) == 0) {
+            return binaddon_host;
+        }
+        return nullptr;
+    }
+};
 
 static void TestRegistryBasic() {
     std::puts("[TEST] T04-T11 registry basic ...");
@@ -237,6 +295,7 @@ static void TestOperatorRegistry() {
 static void TestOperatorCatalog() {
     std::puts("[TEST] T18-T23 operator catalog ...");
     const std::string dir = MakeTempDir("op_catalog");
+    const std::string upload = MakeTempDir("op_catalog_upload");
 
     CatalogPlugin p;
     const std::string opt = MakeCatalogOption(dir);
@@ -255,14 +314,28 @@ static void TestOperatorCatalog() {
     p.EnumRoutes([&](const RouteItem& item) {
         routes[item.method + ":" + item.uri] = item.handler;
     });
-    ASSERT_TRUE(routes.count("GET:/operators/query") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/list") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/upload") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/delete") == 1);
     ASSERT_TRUE(routes.count("POST:/operators/detail") == 1);
     ASSERT_TRUE(routes.count("POST:/operators/activate") == 1);
     ASSERT_TRUE(routes.count("POST:/operators/deactivate") == 1);
     ASSERT_TRUE(routes.count("POST:/operators/update") == 1);
     ASSERT_TRUE(routes.count("POST:/operators/upsert_batch") == 1);
-
     std::string rsp;
+
+    const std::string tmp_py = upload + "/ml_clean.py";
+    {
+        FILE* fp = fopen(tmp_py.c_str(), "wb");
+        ASSERT_TRUE(fp != nullptr);
+        const char* code = "def work(df):\n    return df\n";
+        fwrite(code, 1, strlen(code), fp);
+        fclose(fp);
+    }
+    const std::string upload_req =
+        "{\"type\":\"python\",\"filename\":\"ml_clean.py\",\"tmp_path\":\"" + tmp_py + "\"}";
+    ASSERT_EQ(routes["POST:/operators/upload"]("/operators/upload", upload_req, rsp), error::OK);
+
     ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", R"({"name":"ml.clean"})", rsp), error::OK);
     ASSERT_EQ(p.QueryStatus("ml", "clean"), OperatorStatus::kActive);
 
@@ -298,7 +371,7 @@ static void TestOperatorCatalog() {
     ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", R"({"name":"ml.clean"})", rsp), error::OK);
     ASSERT_EQ(p.QueryStatus("ml", "clean"), OperatorStatus::kDeactivated);
 
-    ASSERT_EQ(routes["GET:/operators/query"]("/operators/query", "", rsp), error::OK);
+    ASSERT_EQ(routes["POST:/operators/list"]("/operators/list", R"({"type":"python"})", rsp), error::OK);
     {
         rapidjson::Document d;
         d.Parse(rsp.c_str());
@@ -307,9 +380,173 @@ static void TestOperatorCatalog() {
     }
 
     ASSERT_EQ(routes["POST:/operators/upsert_batch"]("/operators/upsert_batch",
-              R"({"operators":[{"catelog":"ml","name":"x"}]})", rsp), error::BAD_REQUEST);
+              R"({"operators":[{"category":"ml","name":"x"}]})", rsp), error::BAD_REQUEST);
+
+    const std::string py_path = RuntimeOperatorPyPath("ml", "clean");
+    ASSERT_TRUE(std::filesystem::exists(py_path));
+
+    ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", R"({"name":"ml.clean"})", rsp), error::OK);
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete",
+              R"({"type":"python","name":"ml.clean"})", rsp), error::CONFLICT);
+    ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", R"({"name":"ml.clean"})", rsp), error::OK);
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete",
+              R"({"type":"python","name":"ml.clean"})", rsp), error::OK);
+    ASSERT_EQ(p.QueryStatus("ml", "clean"), OperatorStatus::kNotFound);
+    ASSERT_TRUE(!std::filesystem::exists(py_path));
+    ASSERT_EQ(routes["POST:/operators/detail"]("/operators/detail", R"({"name":"ml.clean"})", rsp), error::NOT_FOUND);
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete",
+              R"({"type":"python","name":"ml.clean"})", rsp), error::NOT_FOUND);
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete",
+              R"({"type":"builtin","name":"builtin.passthrough"})", rsp), error::BAD_REQUEST);
 
     std::puts("[PASS] T18-T23 operator catalog");
+}
+
+static void TestCppPluginLifecycle() {
+    std::puts("[TEST] T42-T48 cpp plugin lifecycle ...");
+    const std::string fixture_so = FIXTURE_CPP_SO_PATH;
+    const std::string bad_abi_so = FIXTURE_BAD_ABI_SO_PATH;
+    ASSERT_TRUE(!fixture_so.empty());
+    ASSERT_TRUE(!bad_abi_so.empty());
+    ASSERT_TRUE(std::filesystem::exists(fixture_so));
+    ASSERT_TRUE(std::filesystem::exists(bad_abi_so));
+
+    const std::string dir = MakeTempDir("cpp_plugin");
+    const std::string upload = MakeTempDir("cpp_upload");
+
+    CatalogPlugin p;
+    BinAddonHostPlugin binaddon;
+    TestQuerier querier;
+    querier.op_registry = static_cast<IOperatorRegistry*>(&p);
+    querier.binaddon_host = static_cast<IBinAddonHost*>(&binaddon);
+
+    const std::string opt = MakeCatalogOption(dir);
+    const std::string db_path = (std::filesystem::path(dir) / "catalog" / "operator_catalog.db").string();
+    const std::string binaddon_opt = "operator_db_path=" + db_path + ";upload_dir=" + (std::filesystem::path(upload) / "binaddon").string();
+    ASSERT_EQ(p.Option(opt.c_str()), 0);
+    ASSERT_EQ(binaddon.Option(binaddon_opt.c_str()), 0);
+    ASSERT_EQ(p.Load(&querier), 0);
+    ASSERT_EQ(binaddon.Load(&querier), 0);
+    ASSERT_EQ(p.Start(), 0);
+    ASSERT_EQ(binaddon.Start(), 0);
+
+    std::unordered_map<std::string, fnRouterHandler> routes;
+    p.EnumRoutes([&](const RouteItem& item) {
+        routes[item.method + ":" + item.uri] = item.handler;
+    });
+    ASSERT_TRUE(routes.count("POST:/operators/upload") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/list") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/activate") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/detail") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/deactivate") == 1);
+    ASSERT_TRUE(routes.count("POST:/operators/delete") == 1);
+
+    const std::string good_filename = "fixture_cpp_operator.so";
+    const std::string good_tmp = CopyToTmp(fixture_so, upload, good_filename);
+    ASSERT_TRUE(!good_tmp.empty());
+
+    std::string rsp;
+    std::string req = "{\"type\":\"cpp\",\"filename\":\"" + good_filename + "\",\"tmp_path\":\"" + good_tmp + "\"}";
+    ASSERT_EQ(routes["POST:/operators/upload"]("/operators/upload", req, rsp), error::OK);
+
+    std::string plugin_id;
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_TRUE(d.IsObject());
+        ASSERT_TRUE(d.HasMember("plugin_id") && d["plugin_id"].IsString());
+        ASSERT_EQ(std::string(d["status"].GetString()), "uploaded");
+        plugin_id = d["plugin_id"].GetString();
+        ASSERT_EQ(plugin_id.size(), size_t(64));
+    }
+
+    ASSERT_EQ(routes["POST:/operators/list"]("/operators/list", R"({"type":"cpp"})", rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_TRUE(d.IsObject() && d["operators"].IsArray());
+        ASSERT_EQ(d["operators"].Size(), rapidjson::SizeType(1));
+        const auto& row = d["operators"][0];
+        ASSERT_EQ(std::string(row["plugin_id"].GetString()), plugin_id);
+        ASSERT_EQ(std::string(row["plugin"]["status"].GetString()), "uploaded");
+        ASSERT_TRUE(row["plugin"]["abi_version"].IsNull());
+        ASSERT_TRUE(row["plugin"]["operator_count"].IsNull());
+        ASSERT_TRUE(row["plugin"]["operators"].IsNull());
+    }
+
+    req = "{\"type\":\"cpp\",\"plugin_id\":\"" + plugin_id + "\"}";
+    ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", req, rsp), error::OK);
+    ASSERT_EQ(p.QueryStatus("cppdemo", "echo"), OperatorStatus::kActive);
+
+    IOperator* op = p.Create("cppdemo.echo");
+    ASSERT_TRUE(op != nullptr);
+    ASSERT_EQ(op->Category(), std::string("cppdemo"));
+    ASSERT_EQ(op->Name(), std::string("echo"));
+    delete op;
+
+    ASSERT_EQ(routes["POST:/operators/list"]("/operators/list", R"({"type":"cpp"})", rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_TRUE(d.IsObject() && d["operators"].IsArray());
+        const auto& row = d["operators"][0];
+        ASSERT_EQ(std::string(row["plugin"]["status"].GetString()), "activated");
+        ASSERT_EQ(row["plugin"]["operator_count"].GetInt(), 1);
+        ASSERT_TRUE(row["plugin"]["operators"].IsArray());
+        ASSERT_EQ(std::string(row["plugin"]["operators"][0].GetString()), "echo");
+    }
+
+    ASSERT_EQ(routes["POST:/operators/detail"]("/operators/detail", req, rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_TRUE(d.IsObject());
+        ASSERT_EQ(std::string(d["type"].GetString()), "cpp");
+        ASSERT_EQ(std::string(d["plugin_id"].GetString()), plugin_id);
+        ASSERT_TRUE(d["plugin"].IsObject());
+        ASSERT_TRUE(d["plugin"]["path"].IsString());
+    }
+
+    ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", req, rsp), error::OK);
+    ASSERT_EQ(p.QueryStatus("cppdemo", "echo"), OperatorStatus::kDeactivated);
+    ASSERT_TRUE(p.Create("cppdemo.echo") == nullptr);
+
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete", req, rsp), error::OK);
+    ASSERT_EQ(p.QueryStatus("cppdemo", "echo"), OperatorStatus::kNotFound);
+    ASSERT_EQ(routes["POST:/operators/list"]("/operators/list", R"({"type":"cpp"})", rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_TRUE(d.IsObject() && d["operators"].IsArray());
+        ASSERT_EQ(d["operators"].Size(), rapidjson::SizeType(0));
+    }
+
+    const std::string bad_filename = "fixture_bad_abi.so";
+    const std::string bad_tmp = CopyToTmp(bad_abi_so, upload, bad_filename);
+    ASSERT_TRUE(!bad_tmp.empty());
+    req = "{\"type\":\"cpp\",\"filename\":\"" + bad_filename + "\",\"tmp_path\":\"" + bad_tmp + "\"}";
+    ASSERT_EQ(routes["POST:/operators/upload"]("/operators/upload", req, rsp), error::OK);
+    std::string bad_plugin_id;
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        bad_plugin_id = d["plugin_id"].GetString();
+    }
+    req = "{\"type\":\"cpp\",\"plugin_id\":\"" + bad_plugin_id + "\"}";
+    ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", req, rsp), error::BAD_REQUEST);
+    ASSERT_EQ(routes["POST:/operators/list"]("/operators/list", R"({"type":"cpp"})", rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_TRUE(d.IsObject() && d["operators"].IsArray());
+        ASSERT_EQ(d["operators"].Size(), rapidjson::SizeType(1));
+        ASSERT_EQ(std::string(d["operators"][0]["plugin"]["status"].GetString()), "broken");
+        ASSERT_TRUE(d["operators"][0]["plugin"]["last_error"].IsString());
+    }
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete", req, rsp), error::OK);
+    ASSERT_EQ(binaddon.Stop(), 0);
+    ASSERT_EQ(p.Stop(), 0);
+    std::puts("[PASS] T42-T48 cpp plugin lifecycle");
 }
 
 static void TestOperatorDbPathOption() {
@@ -515,6 +752,7 @@ int main() {
     TestPersistFail();
     TestOperatorRegistry();
     TestOperatorCatalog();
+    TestCppPluginLifecycle();
     TestOperatorDbPathOption();
     TestHttpRoutes();
 

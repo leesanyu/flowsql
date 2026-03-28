@@ -6,7 +6,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
+#include <mutex>
+#include <shared_mutex>
 #include <thread>
+#include <unordered_map>
+#include <utility>
 
 #include <httplib.h>
 #include <rapidjson/document.h>
@@ -16,6 +20,14 @@
 
 namespace flowsql {
 namespace bridge {
+
+namespace {
+
+std::string MakeOperatorKey(const std::string& category, const std::string& name) {
+    return category + "." + name;
+}
+
+}  // namespace
 
 // 清理指定目录下的 flowsql_* 残留文件
 static void CleanupShmFiles(const char* dir) {
@@ -121,7 +133,7 @@ int BridgePlugin::Start() {
 
     for (int retry = 0; retry < 30; ++retry) {
         if (DiscoverOperators() == 0) {
-            LOG_INFO("BridgePlugin::Start: %zu Python operators registered", registered_operators_.size());
+            LOG_INFO("BridgePlugin::Start: %zu Python operators registered", OperatorCount());
             return 0;
         }
         LOG_INFO("BridgePlugin::Start: waiting for Python Worker... (%d/30)", retry + 1);
@@ -133,6 +145,7 @@ int BridgePlugin::Start() {
 }
 
 int BridgePlugin::Stop() {
+    std::unique_lock<std::shared_mutex> lk(operators_mu_);
     registered_operators_.clear();
     return 0;
 }
@@ -154,46 +167,57 @@ int BridgePlugin::DiscoverOperators() {
         return -1;
     }
 
+    BridgeOperatorMap discovered;
+    discovered.reserve(doc.Size());
+    std::vector<flowsql::OperatorMeta> upsert_ops;
+    upsert_ops.reserve(doc.Size());
+
     for (auto& item : doc.GetArray()) {
         OperatorMeta meta;
-        meta.catelog = item.HasMember("catelog") ? item["catelog"].GetString() : "";
+        meta.category = (item.HasMember("category") && item["category"].IsString()) ? item["category"].GetString() : "";
         meta.name = item.HasMember("name") ? item["name"].GetString() : "";
         meta.description = item.HasMember("description") ? item["description"].GetString() : "";
 
-        if (meta.catelog.empty() || meta.name.empty()) continue;
+        if (meta.category.empty() || meta.name.empty()) continue;
+
+        std::string key = MakeOperatorKey(meta.category, meta.name);
+        if (discovered.find(key) != discovered.end()) {
+            LOG_WARN("BridgePlugin: duplicate operator '%s' from worker, keeping first one", key.c_str());
+            continue;
+        }
 
         auto bridge = std::make_shared<PythonOperatorBridge>(meta, host_, port_);
-        std::string key = meta.catelog + "." + meta.name;
+        discovered.emplace(key, bridge);
 
-        // 只存内部，不注册到 PluginLoader
-        registered_operators_.push_back(bridge);
+        flowsql::OperatorMeta row;
+        row.category = meta.category;
+        row.name = meta.name;
+        row.type = "python";
+        row.source = "bridge";
+        row.description = meta.description;
+        row.position = bridge->Position() == OperatorPosition::STORAGE ? "storage" : "data";
+        upsert_ops.push_back(std::move(row));
         LOG_INFO("BridgePlugin: Discovered operator [%s]", key.c_str());
     }
 
-    return SyncOperatorsToCatalog();
+    if (SyncOperatorsToCatalog(upsert_ops) != 0) {
+        return -1;
+    }
+
+    {
+        std::unique_lock<std::shared_mutex> lk(operators_mu_);
+        registered_operators_.swap(discovered);
+    }
+    return 0;
 }
 
-int BridgePlugin::SyncOperatorsToCatalog() {
+int BridgePlugin::SyncOperatorsToCatalog(const std::vector<flowsql::OperatorMeta>& ops) {
     if (querier_ == nullptr) return 0;
 
     auto* catalog = static_cast<IOperatorCatalog*>(querier_->First(IID_OPERATOR_CATALOG));
     if (catalog == nullptr) {
         LOG_WARN("BridgePlugin: IOperatorCatalog not found, skip sync");
         return 0;
-    }
-
-    std::vector<flowsql::OperatorMeta> ops;
-    ops.reserve(registered_operators_.size());
-    for (const auto& op : registered_operators_) {
-        if (!op) continue;
-        flowsql::OperatorMeta meta;
-        meta.catelog = op->Catelog();
-        meta.name = op->Name();
-        meta.type = "python";
-        meta.source = "bridge";
-        meta.description = op->Description();
-        meta.position = op->Position() == OperatorPosition::STORAGE ? "storage" : "data";
-        ops.push_back(std::move(meta));
     }
 
     UpsertResult result = catalog->UpsertBatch(ops);
@@ -206,25 +230,40 @@ int BridgePlugin::SyncOperatorsToCatalog() {
     return 0;
 }
 
-// IBridge::FindOperator — 按 catelog + name 查找 Python 算子
-std::shared_ptr<IOperator> BridgePlugin::FindOperator(const std::string& catelog, const std::string& name) {
-    for (auto& op : registered_operators_) {
-        if (op->Catelog() == catelog && op->Name() == name) return op;
+// IBridge::FindOperator — 按 category + name 查找 Python 算子
+std::shared_ptr<IOperator> BridgePlugin::FindOperator(const std::string& category, const std::string& name) {
+    std::shared_lock<std::shared_mutex> lk(operators_mu_);
+    auto it = registered_operators_.find(MakeOperatorKey(category, name));
+    if (it != registered_operators_.end()) {
+        return it->second;
     }
     return nullptr;
 }
 
 // IBridge::TraverseOperators — 遍历所有已发现的 Python 算子
 void BridgePlugin::TraverseOperators(std::function<int(IOperator*)> fn) {
-    for (auto& op : registered_operators_) {
+    std::vector<std::shared_ptr<PythonOperatorBridge>> snapshot;
+    {
+        std::shared_lock<std::shared_mutex> lk(operators_mu_);
+        snapshot.reserve(registered_operators_.size());
+        for (const auto& kv : registered_operators_) {
+            snapshot.push_back(kv.second);
+        }
+    }
+
+    for (const auto& op : snapshot) {
         if (fn(op.get()) == -1) break;
     }
 }
 
 // IBridge::Refresh — 重新从 Python Worker 发现算子
 int BridgePlugin::Refresh() {
-    registered_operators_.clear();
     return DiscoverOperators();
+}
+
+size_t BridgePlugin::OperatorCount() const {
+    std::shared_lock<std::shared_mutex> lk(operators_mu_);
+    return registered_operators_.size();
 }
 
 }  // namespace bridge

@@ -270,7 +270,7 @@ void ControlServer::DispatchMessage(const std::string& msg_json) {
     } else if (type == MessageType::OPERATOR_REMOVED) {
         OperatorMeta meta;
         if (ControlMessage::ParseOperatorMeta(payload, &meta) == 0) {
-            handler_->OnOperatorRemoved(meta.catelog, meta.name);
+            handler_->OnOperatorRemoved(meta.category, meta.name);
         }
     } else if (type == MessageType::HEARTBEAT) {
         handler_->OnHeartbeat(payload);

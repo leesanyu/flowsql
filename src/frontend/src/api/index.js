@@ -29,13 +29,37 @@ export default {
     ...res,
     data: unwrapList(res?.data, ['channels'])
   })),
-  getOperators: () => api.get('/api/operators/list').then((res) => {
+  getOperators: (type = 'python') => api.get('/api/operators/list', { params: { type } }).then((res) => {
     return { ...res, data: unwrapList(res?.data, ['operators']) }
   }),
-  uploadOperator: (filename, content) => api.post('/api/operators/upload', { filename, content }),
-  activateOperator: (name) => api.post('/api/operators/activate', { name }),
-  deactivateOperator: (name) => api.post('/api/operators/deactivate', { name }),
-  getOperatorDetail: (name) => api.post('/api/operators/detail', { name }),
+  uploadOperator: (filename, content, type = 'python') => api.post('/api/operators/upload', { type, filename, content }),
+  uploadOperatorFile: (file, type = 'python') => {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('type', type)
+    return api.post('/api/operators/upload', form, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+  activateOperator: (nameOrPayload, type = 'python') => {
+    const body = (nameOrPayload && typeof nameOrPayload === 'object')
+      ? nameOrPayload
+      : { type, name: nameOrPayload }
+    return api.post('/api/operators/activate', body)
+  },
+  deactivateOperator: (nameOrPayload, type = 'python') => {
+    const body = (nameOrPayload && typeof nameOrPayload === 'object')
+      ? nameOrPayload
+      : { type, name: nameOrPayload }
+    return api.post('/api/operators/deactivate', body)
+  },
+  deleteOperator: (payload) => api.post('/api/operators/delete', payload),
+  getOperatorDetail: (nameOrPayload, type = 'python') => {
+    const body = (nameOrPayload && typeof nameOrPayload === 'object')
+      ? nameOrPayload
+      : { type, name: nameOrPayload }
+    return api.post('/api/operators/detail', body)
+  },
   updateOperator: (name, payload) => api.post('/api/operators/update', { name, ...payload }),
   getTasks: (params = {}) => api.post('/api/tasks/list', params).then((res) => {
     const payload = res?.data
@@ -74,7 +98,7 @@ export default {
     })
   },
   previewDfChannel: (name, page = 1, pageSize = 20) =>
-    api.post('/api/channels/dataframe/preview', { catelog: 'dataframe', name, page, page_size: pageSize }),
+    api.post('/api/channels/dataframe/preview', { category: 'dataframe', name, page, page_size: pageSize }),
   renameDfChannel: (name, newName) => api.post('/api/channels/dataframe/rename', { name, new_name: newName }),
   deleteDfChannel: (name) => api.post('/api/channels/dataframe/delete', { name }),
 }

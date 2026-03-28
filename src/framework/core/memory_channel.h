@@ -17,7 +17,7 @@ class MemoryChannel : public IDataFrameChannel {
     ~MemoryChannel() override = default;
 
     // IChannel — 身份
-    const char* Catelog() override { return catelog_.c_str(); }
+    const char* Category() override { return category_.c_str(); }
     const char* Name() override { return name_.c_str(); }
     const char* Type() override { return ChannelType::kDataFrame; }
     const char* Schema() override { return "[]"; }
@@ -33,15 +33,15 @@ class MemoryChannel : public IDataFrameChannel {
     int Read(IDataFrame* df) override;
 
     // 设置通道身份（可选，默认为空字符串）
-    void SetIdentity(const std::string& catelog, const std::string& name) {
-        catelog_ = catelog;
+    void SetIdentity(const std::string& category, const std::string& name) {
+        category_ = category;
         name_ = name;
     }
 
  private:
     bool opened_ = false;
     DataFrame data_;
-    std::string catelog_;
+    std::string category_;
     std::string name_;
 };
 

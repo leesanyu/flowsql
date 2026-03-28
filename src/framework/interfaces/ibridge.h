@@ -18,8 +18,8 @@ interface IOperator;  // 前向声明
 // 提供 Python 算子的查询、遍历和刷新能力
 interface IBridge {
     virtual ~IBridge() {}
-    // 按 catelog + name 查找算子，返回 shared_ptr 保证生命周期安全
-    virtual std::shared_ptr<IOperator> FindOperator(const std::string& catelog, const std::string& name) = 0;
+    // 按 category + name 查找算子，返回 shared_ptr 保证生命周期安全
+    virtual std::shared_ptr<IOperator> FindOperator(const std::string& category, const std::string& name) = 0;
     // 遍历所有已发现的算子，回调返回 -1 时停止遍历
     virtual void TraverseOperators(std::function<int(IOperator*)> fn) = 0;
     // 重新从 Python Worker 发现算子

@@ -50,7 +50,7 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle {
     void RegisterChannel(const std::string& key, std::shared_ptr<IChannel> ch);
 
     // 算子查找
-    std::shared_ptr<IOperator> FindOperator(const std::string& catelog, const std::string& name);
+    std::shared_ptr<IOperator> FindOperator(const std::string& category, const std::string& name);
 
     // 执行路径
     int ExecuteTransfer(IChannel* source, IChannel* sink,

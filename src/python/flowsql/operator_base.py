@@ -10,7 +10,7 @@ import polars as pl
 @dataclass
 class OperatorAttribute:
     """算子元数据"""
-    catelog: str = ""
+    category: str = ""
     name: str = ""
     description: str = ""
     position: str = "DATA"  # "DATA" or "STORAGE"
@@ -49,11 +49,11 @@ class OperatorBase(ABC):
 _registered_operators: Dict[str, type] = {}
 
 
-def register_operator(catelog: str, name: str, description: str = "", position: str = "DATA"):
+def register_operator(category: str, name: str, description: str = "", position: str = "DATA"):
     """装饰器：注册算子类
 
     用法:
-        @register_operator(catelog="explore", name="chisquare", description="卡方分析")
+        @register_operator(category="explore", name="chisquare", description="卡方分析")
         class ChiSquareOperator(OperatorBase):
             ...
     """
@@ -61,12 +61,12 @@ def register_operator(catelog: str, name: str, description: str = "", position: 
         if not issubclass(cls, OperatorBase):
             raise TypeError(f"{cls.__name__} must inherit from OperatorBase")
 
-        key = f"{catelog}.{name}"
+        key = f"{category}.{name}"
         _registered_operators[key] = cls
 
         # 注入默认 attribute 实现
         cls._decorator_attr = OperatorAttribute(
-            catelog=catelog, name=name, description=description, position=position
+            category=category, name=name, description=description, position=position
         )
 
         # 提供 attribute 方法的默认实现

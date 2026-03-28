@@ -305,18 +305,18 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
         return true;
     };
 
-    // [USING <catelog.name> [WITH ...] (THEN <catelog.name> [WITH ...])*]
+    // [USING <category.name> [WITH ...] (THEN <category.name> [WITH ...])*]
     const char* saved_pos = pos_;
     if (MatchKeyword("USING")) {
         while (true) {
             std::string op_full = ReadIdentifier();
             auto dot = op_full.find('.');
             if (dot == std::string::npos || dot == 0 || dot == op_full.size() - 1) {
-                stmt.error = "expected catelog.name format after USING/THEN, got: " + op_full;
+                stmt.error = "expected category.name format after USING/THEN, got: " + op_full;
                 return stmt;
             }
             OperatorRef op_ref;
-            op_ref.catelog = op_full.substr(0, dot);
+            op_ref.category = op_full.substr(0, dot);
             op_ref.name = op_full.substr(dot + 1);
             stmt.operators.push_back(std::move(op_ref));
 
@@ -334,7 +334,7 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
         }
 
         if (!stmt.operators.empty()) {
-            stmt.op_catelog = stmt.operators[0].catelog;
+            stmt.op_category = stmt.operators[0].category;
             stmt.op_name = stmt.operators[0].name;
             if (!stmt.operator_with_params.empty()) stmt.with_params = stmt.operator_with_params[0];
         }

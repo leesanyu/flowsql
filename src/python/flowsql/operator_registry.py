@@ -55,7 +55,7 @@ class OperatorRegistry:
                     instance = cls()
                     self._operators[key] = instance
                     attr = instance.attribute()
-                    print(f"OperatorRegistry: registered [{attr.catelog}.{attr.name}] "
+                    print(f"OperatorRegistry: registered [{attr.category}.{attr.name}] "
                           f"({attr.description})")
                 except Exception:
                     print(f"OperatorRegistry: failed to instantiate '{key}':")
@@ -67,8 +67,8 @@ class OperatorRegistry:
         clear_registered_operators()  # 清空模块级装饰器注册表，避免已删除算子残留
         self.discover(operators_dir)
 
-    def get(self, catelog: str, name: str) -> OperatorBase | None:
-        key = f"{catelog}.{name}"
+    def get(self, category: str, name: str) -> OperatorBase | None:
+        key = f"{category}.{name}"
         return self._operators.get(key)
 
     def list_operators(self) -> List[dict]:
@@ -77,15 +77,15 @@ class OperatorRegistry:
         for key, op in self._operators.items():
             attr = op.attribute()
             result.append({
-                "catelog": attr.catelog,
+                "category": attr.category,
                 "name": attr.name,
                 "description": attr.description,
                 "position": attr.position,
             })
         return result
 
-    def configure(self, catelog: str, name: str, key: str, value: str) -> bool:
-        op = self.get(catelog, name)
+    def configure(self, category: str, name: str, key: str, value: str) -> bool:
+        op = self.get(category, name)
         if op:
             op.configure(key, value)
             return True
