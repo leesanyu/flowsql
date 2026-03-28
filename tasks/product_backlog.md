@@ -435,7 +435,7 @@
 ---
 
 ## Epic 4: 多数据库支持与 SQL 增强
-**优先级**: P1 | **状态**: ✅ 已完成 (Sprint 4)
+**优先级**: P1 | **状态**: ✅ 已完成（4.1/4.3/4.4：Sprint 4；4.2：Sprint 11）
 **价值**: 扩展数据库支持，实现 MySQL 驱动和连接池，增强 SQL 能力
 
 ### Story 4.1: MySQL 驱动支持
@@ -1000,11 +1000,11 @@
 ---
 
 ## Epic 12: C++ 算子插件
-**优先级**: P1 | **状态**: 📋 待规划
+**优先级**: P1 | **状态**: ✅ 已完成（Sprint 11，2026-03-28）
 **价值**: 让用户能够用 C++ 编写高性能算子插件，并在运行时动态加载/卸载，无需重启服务
 
 ### Story 12.1: C++ 算子插件编译工程 Sample
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（Sprint 11，2026-03-28）
 **验收标准**:
 - 提供独立的 C++ 算子插件 sample 工程（`samples/cpp_operator/`）
 - Sample 实现一个完整的示例算子（如列统计算子）
@@ -1015,15 +1015,20 @@
 ---
 
 ### Story 12.2: C++ 算子插件动态激活与去激活
-**状态**: 📋 待规划
+**状态**: ✅ 已完成（Sprint 11，2026-03-28）
 **验收标准**:
-- 新增 CppOperatorPlugin，管理 C++ 算子 .so 的运行时加载/卸载
-- 提供 HTTP API：`POST /operators/cpp/activate`（指定 .so 路径）
-- 提供 HTTP API：`POST /operators/cpp/deactivate`（指定算子标识）
-- 提供 HTTP API：`GET /operators/cpp/list`（列出已激活的 C++ 算子）
-- 激活后算子注册到 IOperatorCatalog，可被调度系统调用
-- 去激活时安全卸载（等待执行中的任务完成后再 dlclose）
-- 与 Python 算子 API 风格保持一致
+- 新增 `BinAddonHostPlugin`（`libflowsql_binaddon.so`），管理 C++ 算子 `.so` 的上传、激活、去激活、删除与详情查询
+- 统一走 `/operators/*` 入口（由 `CatalogPlugin` 委派 cpp 分支），不单独引入 `/operators/cpp/*` URI
+- 提供统一 API：
+  - `POST /operators/upload`（`type=cpp`）
+  - `POST /operators/activate` / `POST /operators/deactivate`（按 `plugin_id`）
+  - `POST /operators/delete`（按 `plugin_id`）
+  - `POST /operators/detail`（按 `plugin_id`）
+  - `POST /operators/list`（`type=cpp`，插件维度返回）
+- 激活后算子注册到 `IOperatorRegistry`，并同步写入 `operator_catalog`（`type=cpp`，`plugin_id` 关联），可被调度系统调用
+- 去激活时安全卸载（执行中 `active_count > 0` 时拒绝去激活，避免 `dlclose` 风险）
+- 激活失败需记录结构化错误状态（ABI 不匹配、符号缺失、名称冲突等），可通过列表/详情接口查看
+- 与 `builtin/python` 管理体验保持一致（同一前端页面、同一 API 风格）
 
 ---
 
