@@ -493,7 +493,7 @@ static void TestCppPluginLifecycle() {
         ASSERT_EQ(std::string(row["plugin"]["status"].GetString()), "activated");
         ASSERT_EQ(row["plugin"]["operator_count"].GetInt(), 1);
         ASSERT_TRUE(row["plugin"]["operators"].IsArray());
-        ASSERT_EQ(std::string(row["plugin"]["operators"][0].GetString()), "echo");
+        ASSERT_EQ(std::string(row["plugin"]["operators"][0].GetString()), "cppdemo.echo");
     }
 
     ASSERT_EQ(routes["POST:/operators/detail"]("/operators/detail", req, rsp), error::OK);
@@ -504,7 +504,7 @@ static void TestCppPluginLifecycle() {
         ASSERT_EQ(std::string(d["type"].GetString()), "cpp");
         ASSERT_EQ(std::string(d["plugin_id"].GetString()), plugin_id);
         ASSERT_TRUE(d["plugin"].IsObject());
-        ASSERT_TRUE(d["plugin"]["path"].IsString());
+        ASSERT_TRUE(!d["plugin"].HasMember("path"));
     }
 
     ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", req, rsp), error::OK);

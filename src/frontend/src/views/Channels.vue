@@ -1,6 +1,6 @@
 <template>
   <div class="channels">
-    <h1 class="page-title">通道列表</h1>
+    <h1 class="page-title">通道管理</h1>
 
     <el-card>
       <template #header>
@@ -561,8 +561,9 @@ onMounted(() => { reloadAll() })
 <style scoped>
 .channels { }
 .page-title { font-size: 24px; font-weight: 600; margin-bottom: 20px; color: var(--text-primary); }
-.card-header { display: flex; justify-content: space-between; align-items: center; }
-.header-actions { display: flex; gap: 10px; }
+.card-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.header-left { display: flex; align-items: center; }
+.header-actions { display: flex; gap: 10px; align-items: center; }
 .channel-layout {
   display: flex;
   gap: 16px;

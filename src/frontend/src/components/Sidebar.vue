@@ -47,7 +47,7 @@ const gatewayOnline = ref(false)
 
 const navItems = [
   { path: '/dashboard', label: '仪表盘', icon: DataAnalysis },
-  { path: '/channels',  label: '通道列表', icon: Connection },
+  { path: '/channels',  label: '通道管理', icon: Connection },
   { path: '/operators', label: '算子管理', icon: Operation },
   { path: '/tasks',     label: 'SQL 工作台', icon: Document },
 ]

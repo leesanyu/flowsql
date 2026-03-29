@@ -6,7 +6,16 @@
       <template #header>
         <div class="card-header">
           <div class="header-left">
-            <span>算子列表</span>
+            <el-input
+              v-model="searchText"
+              placeholder="搜索算子名称"
+              style="width: 300px"
+              clearable
+            >
+              <template #prefix>
+                <el-icon><Search /></el-icon>
+              </template>
+            </el-input>
           </div>
           <div class="header-buttons">
             <el-button v-if="operatorType === 'python'" type="primary" @click="showCreateDialog">
@@ -59,7 +68,7 @@
         <div class="operator-main">
           <div class="section-title">{{ operatorTypeLabel }}</div>
 
-          <el-table v-if="operatorType !== 'cpp'" :data="operators" style="width: 100%" v-loading="loading">
+          <el-table v-if="operatorType !== 'cpp'" :data="filteredOperators" style="width: 100%" v-loading="loading">
             <el-table-column prop="name" label="名称" width="250" />
             <el-table-column label="类别" width="150">
               <template #default="scope">
@@ -83,50 +92,64 @@
             <el-table-column label="操作" width="320">
               <template #default="scope">
                 <template v-if="scope.row.active">
-                  <el-button
-                    type="warning"
-                    size="small"
-                    @click="deactivateOperator(scope.row)"
-                  >
-                    去激活
-                  </el-button>
-                  <el-button
-                    type="primary"
-                    size="small"
-                    @click="viewOperator(scope.row)"
-                  >
-                    查看
-                  </el-button>
+                  <div class="operator-action-group">
+                    <el-button
+                      class="operator-action-link"
+                      type="warning"
+                      size="small"
+                      text
+                      @click="deactivateOperator(scope.row)"
+                    >
+                      去激活
+                    </el-button>
+                    <el-button
+                      class="operator-action-link"
+                      type="primary"
+                      size="small"
+                      text
+                      @click="viewOperator(scope.row)"
+                    >
+                      查看
+                    </el-button>
+                  </div>
                 </template>
                 <template v-else>
-                  <el-button
-                    type="success"
-                    size="small"
-                    @click="activateOperator(scope.row)"
-                  >
-                    激活
-                  </el-button>
-                  <el-button
-                    type="primary"
-                    size="small"
-                    @click="editOperator(scope.row)"
-                  >
-                    编辑
-                  </el-button>
-                  <el-button
-                    v-if="operatorType === 'python'"
-                    type="danger"
-                    size="small"
-                    @click="deletePythonOperator(scope.row)"
-                  >
-                    删除
-                  </el-button>
+                  <div class="operator-action-group">
+                    <el-button
+                      class="operator-action-link"
+                      type="success"
+                      size="small"
+                      text
+                      @click="activateOperator(scope.row)"
+                    >
+                      激活
+                    </el-button>
+                    <el-button
+                      class="operator-action-link"
+                      type="primary"
+                      size="small"
+                      text
+                      @click="editOperator(scope.row)"
+                    >
+                      编辑
+                    </el-button>
+                    <el-button
+                      class="operator-action-link"
+                      v-if="operatorType === 'python'"
+                      type="danger"
+                      size="small"
+                      text
+                      @click="deletePythonOperator(scope.row)"
+                    >
+                      删除
+                    </el-button>
+                  </div>
                 </template>
               </template>
             </el-table-column>
           </el-table>
 
-          <el-table v-else :data="operators" style="width: 100%" v-loading="loading">
+          <el-table v-else :data="filteredOperators" style="width: 100%" v-loading="loading">
             <el-table-column prop="plugin.so_file" label="插件名" min-width="180" />
             <el-table-column prop="plugin.size_bytes" label="大小(bytes)" width="130" />
             <el-table-column label="状态" width="120">
@@ -143,37 +166,73 @@
             </el-table-column>
             <el-table-column label="算子列表" min-width="180">
               <template #default="scope">
-                <span v-if="Array.isArray(scope.row.plugin?.operators)">{{ scope.row.plugin.operators.join(', ') }}</span>
+                <div v-if="Array.isArray(scope.row.plugin?.operators) && scope.row.plugin.operators.length > 0" class="cpp-operator-lines">
+                  <div
+                    v-for="op in scope.row.plugin.operators"
+                    :key="op"
+                    class="cpp-operator-line"
+                  >
+                    {{ op }}
+                  </div>
+                </div>
                 <span v-else>-</span>
               </template>
             </el-table-column>
             <el-table-column label="操作" width="300">
               <template #default="scope">
-                <el-button
-                  v-if="scope.row.plugin?.status === 'activated'"
-                  type="warning"
-                  size="small"
-                  @click="deactivateOperator(scope.row)"
-                >
-                  去激活
-                </el-button>
-                <el-button
-                  v-else
-                  type="success"
-                  size="small"
-                  @click="activateOperator(scope.row)"
-                >
-                  激活
-                </el-button>
-                <el-button type="primary" size="small" @click="viewOperator(scope.row)">查看</el-button>
-                <el-button
-                  type="danger"
-                  size="small"
-                  :disabled="scope.row.plugin?.status === 'activated'"
-                  @click="deleteCppPlugin(scope.row)"
-                >
-                  删除
-                </el-button>
+                <template v-if="scope.row.plugin?.status === 'activated'">
+                  <div class="operator-action-group">
+                    <el-button
+                      class="operator-action-link"
+                      type="warning"
+                      size="small"
+                      text
+                      @click="deactivateOperator(scope.row)"
+                    >
+                      去激活
+                    </el-button>
+                    <el-button
+                      class="operator-action-link"
+                      type="primary"
+                      size="small"
+                      text
+                      @click="viewOperator(scope.row)"
+                    >
+                      查看
+                    </el-button>
+                  </div>
+                </template>
+                <template v-else>
+                  <div class="operator-action-group">
+                    <el-button
+                      class="operator-action-link"
+                      type="success"
+                      size="small"
+                      text
+                      @click="activateOperator(scope.row)"
+                    >
+                      激活
+                    </el-button>
+                    <el-button
+                      class="operator-action-link"
+                      type="primary"
+                      size="small"
+                      text
+                      @click="viewOperator(scope.row)"
+                    >
+                      查看
+                    </el-button>
+                    <el-button
+                      class="operator-action-link"
+                      type="danger"
+                      size="small"
+                      text
+                      @click="deleteCppPlugin(scope.row)"
+                    >
+                      删除
+                    </el-button>
+                  </div>
+                </template>
               </template>
             </el-table-column>
           </el-table>
@@ -316,9 +375,6 @@
           <el-form-item label="SHA256">
             <el-input :model-value="cppDetail.sha256 || '-'" disabled class="mono-input" />
           </el-form-item>
-          <el-form-item label="插件路径">
-            <el-input :model-value="cppDetail.path || '-'" disabled />
-          </el-form-item>
           <el-form-item label="算子列表">
             <div class="cpp-op-list">
               <el-tag v-for="name in cppDetail.operators" :key="name" type="info">{{ name }}</el-tag>
@@ -418,11 +474,12 @@
 
 <script setup>
 import { computed, nextTick, ref, onMounted } from 'vue'
-import { Upload, Edit, QuestionFilled, Document, Tickets, FullScreen } from '@element-plus/icons-vue'
+import { Upload, Edit, QuestionFilled, Document, Tickets, FullScreen, Search } from '@element-plus/icons-vue'
 import api from '../api'
 import { ElMessage } from 'element-plus'
 
 const operators = ref([])
+const searchText = ref('')
 const operatorType = ref('python')
 const operatorCounts = ref({ builtin: null, python: null, cpp: null })
 const loading = ref(false)
@@ -471,8 +528,7 @@ const cppDetail = ref({
   abi_version: null,
   operator_count: null,
   operators: [],
-  last_error: '',
-  path: ''
+  last_error: ''
 })
 
 const PYTHON_KEYWORDS = new Set([
@@ -601,6 +657,33 @@ const uploadAccept = computed(() => (operatorType.value === 'cpp' ? '.so' : '.py
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const OPERATOR_TYPES = ['builtin', 'python', 'cpp']
+
+const filteredOperators = computed(() => {
+  const list = Array.isArray(operators.value) ? operators.value : []
+  const keyword = searchText.value.trim().toLowerCase()
+  if (!keyword) return list
+
+  if (operatorType.value === 'cpp') {
+    return list.filter((op) => {
+      const pluginId = String(op.plugin_id || '').toLowerCase()
+      const soFile = String(op.plugin?.so_file || '').toLowerCase()
+      const names = Array.isArray(op.plugin?.operators) ? op.plugin.operators : []
+      if (pluginId.includes(keyword) || soFile.includes(keyword)) return true
+      return names.some((name) => String(name).toLowerCase().includes(keyword))
+    })
+  }
+
+  return list.filter((op) => {
+    const category = String(op.category || '').toLowerCase()
+    const name = String(op.name || '').toLowerCase()
+    const fullName = `${category}.${name}`
+    const description = String(op.description || '').toLowerCase()
+    return category.includes(keyword) ||
+      name.includes(keyword) ||
+      fullName.includes(keyword) ||
+      description.includes(keyword)
+  })
+})
 
 const extractOperatorList = (res) => {
   return Array.isArray(res.data)
@@ -784,8 +867,7 @@ const openDetail = async (fullName, mode) => {
       abi_version: null,
       operator_count: null,
       operators: [],
-      last_error: '',
-      path: ''
+      last_error: ''
     }
     detailForm.value = {
       fullName: `${d.category}.${d.name}`,
@@ -827,8 +909,7 @@ const openCppDetail = async (pluginId) => {
       abi_version: p.abi_version ?? null,
       operator_count: p.operator_count ?? null,
       operators: Array.isArray(p.operators) ? p.operators : [],
-      last_error: p.last_error || '',
-      path: p.path || ''
+      last_error: p.last_error || ''
     }
     detailForm.value = {
       fullName: p.so_file || pluginId,
@@ -836,7 +917,7 @@ const openCppDetail = async (pluginId) => {
       name: pluginId,
       description: p.last_error || '',
       position: 'DATA',
-      source: p.path || '',
+      source: '',
       type: 'cpp',
       editable: false,
       code: ''
@@ -1150,20 +1231,17 @@ onMounted(async () => {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  min-height: 40px;
 }
 
 .header-left {
   display: flex;
   align-items: center;
-  gap: 12px;
 }
 
 .header-buttons {
   display: flex;
   gap: 10px;
   align-items: center;
-  min-height: 32px;
 }
 
 .operator-layout {
@@ -1228,6 +1306,31 @@ onMounted(async () => {
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
+}
+
+.cpp-operator-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cpp-operator-line {
+  line-height: 1.3;
+  word-break: break-all;
+}
+
+.operator-action-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.operator-action-link {
+  width: 64px;
+  justify-content: center;
+  margin-left: 0 !important;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 .form-hint {

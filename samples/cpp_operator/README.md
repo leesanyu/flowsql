@@ -1,11 +1,15 @@
 # C++ 算子插件 Sample
 
 该目录提供一个可直接编译的 C++ 算子插件示例，开发者可以以此为模板开发自己的 `.so` 插件。
-示例算子为 `sample.column_stats`，输入 DataFrame 后输出按列统计结果（`count/min/max/mean`）。
+示例插件内包含 3 个算子：
+
+- `sample.passthrough`：透传输入 DataFrame
+- `sample.row_count`：输出输入数据的行数和列数
+- `sample.column_stats`：输出按列统计（`count/min/max/mean`）
 
 ## 目录
 
-- `sample_operator.h/.cpp`：`ColumnStatsOperator` 算子实现（`IOperator` 子类）
+- `sample_operator.h/.cpp`：3 个算子实现（`IOperator` 子类）
 - `plugin_exports.cpp`：插件导出符号（ABI + 算子工厂）
 - `CMakeLists.txt`：独立构建脚本
 
@@ -21,6 +25,11 @@
 当前示例使用 ABI 版本 `1`，与运行时 `binaddon` 插件管理器一致。
 
 ## 示例算子输出
+
+`sample.row_count` 输出表结构：
+
+- `row_count`（INT64）
+- `column_count`（INT64）
 
 `sample.column_stats` 输出表结构：
 
@@ -72,7 +81,7 @@ curl -X POST "http://127.0.0.1:8081/api/operators/activate" \
   -d '{"type":"cpp","plugin_id":"<plugin_id>"}'
 ```
 
-3. 查询：
+3. 查询（列表里可看到 `operators` 共 3 项）：
 
 ```bash
 curl "http://127.0.0.1:8081/api/operators/list?type=cpp"

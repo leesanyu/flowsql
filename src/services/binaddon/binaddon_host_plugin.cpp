@@ -820,7 +820,7 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
             return error::INTERNAL_ERROR;
         }
 
-        const std::string operators_json = JsonArrayFromStrings(names);
+        const std::string operators_json = JsonArrayFromStrings(keys);
         if (UpdatePluginStatusLocked(plugin_id, "activated", "", abi, count, operators_json) != 0) {
             rollback_registered(inserted_keys);
             dlclose(handle);
@@ -847,7 +847,7 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
     w.Int(count);
     w.Key("operators");
     w.StartArray();
-    for (const auto& n : names) w.String(n.c_str());
+    for (const auto& key : keys) w.String(key.c_str());
     w.EndArray();
     w.EndObject();
     rsp = buf.GetString();
@@ -985,8 +985,6 @@ int BinAddonHostPlugin::GetCppPluginDetail(const std::string& plugin_id, std::st
     w.Int(EqualsIgnoreCase(row.status, "activated") ? 1 : 0);
     w.Key("plugin");
     w.StartObject();
-    w.Key("path");
-    w.String(row.file_path.c_str());
     w.Key("so_file");
     w.String(row.so_file.c_str());
     w.Key("size_bytes");

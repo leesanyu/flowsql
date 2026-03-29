@@ -17,7 +17,7 @@
         class="nav-menu"
       >
         <el-menu-item index="/dashboard">仪表盘</el-menu-item>
-        <el-menu-item index="/channels">通道列表</el-menu-item>
+        <el-menu-item index="/channels">通道管理</el-menu-item>
         <el-menu-item index="/operators">算子管理</el-menu-item>
         <el-menu-item index="/tasks">SQL 工作台</el-menu-item>
       </el-menu>

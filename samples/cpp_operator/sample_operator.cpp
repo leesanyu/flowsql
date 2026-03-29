@@ -61,6 +61,99 @@ bool TryToDouble(const flowsql::FieldValue& value, double* out) {
 
 }  // namespace
 
+int SampleOperatorBase::Configure(const char*, const char*) {
+    return 0;
+}
+
+std::string PassThroughOperator::Category() {
+    return "sample";
+}
+
+std::string PassThroughOperator::Name() {
+    return "passthrough";
+}
+
+std::string PassThroughOperator::Description() {
+    return "Pass through input DataFrame without modifications";
+}
+
+flowsql::OperatorPosition PassThroughOperator::Position() {
+    return flowsql::OperatorPosition::DATA;
+}
+
+int PassThroughOperator::Work(flowsql::IChannel* in, flowsql::IChannel* out) {
+    SetLastError("");
+
+    auto* df_in = dynamic_cast<flowsql::IDataFrameChannel*>(in);
+    auto* df_out = dynamic_cast<flowsql::IDataFrameChannel*>(out);
+    if (!df_in || !df_out) {
+        SetLastError("passthrough requires dataframe input/output channel");
+        return -1;
+    }
+
+    flowsql::DataFrame input;
+    if (df_in->Read(&input) != 0) {
+        SetLastError("failed to read input dataframe");
+        return -1;
+    }
+    if (df_out->Write(&input) != 0) {
+        SetLastError("failed to write output dataframe");
+        return -1;
+    }
+    return 0;
+}
+
+std::string RowCountOperator::Category() {
+    return "sample";
+}
+
+std::string RowCountOperator::Name() {
+    return "row_count";
+}
+
+std::string RowCountOperator::Description() {
+    return "Return row count and column count for input DataFrame";
+}
+
+flowsql::OperatorPosition RowCountOperator::Position() {
+    return flowsql::OperatorPosition::DATA;
+}
+
+int RowCountOperator::Work(flowsql::IChannel* in, flowsql::IChannel* out) {
+    SetLastError("");
+
+    auto* df_in = dynamic_cast<flowsql::IDataFrameChannel*>(in);
+    auto* df_out = dynamic_cast<flowsql::IDataFrameChannel*>(out);
+    if (!df_in || !df_out) {
+        SetLastError("row_count requires dataframe input/output channel");
+        return -1;
+    }
+
+    flowsql::DataFrame input;
+    if (df_in->Read(&input) != 0) {
+        SetLastError("failed to read input dataframe");
+        return -1;
+    }
+
+    const int64_t row_count = static_cast<int64_t>(input.RowCount());
+    const int64_t column_count = static_cast<int64_t>(input.GetSchema().size());
+
+    flowsql::DataFrame output;
+    output.SetSchema({
+        {"row_count", flowsql::DataType::INT64, 0, ""},
+        {"column_count", flowsql::DataType::INT64, 0, ""},
+    });
+    if (output.AppendRow({row_count, column_count}) != 0) {
+        SetLastError("failed to append result row");
+        return -1;
+    }
+    if (df_out->Write(&output) != 0) {
+        SetLastError("failed to write output dataframe");
+        return -1;
+    }
+    return 0;
+}
+
 std::string ColumnStatsOperator::Category() {
     return "sample";
 }
