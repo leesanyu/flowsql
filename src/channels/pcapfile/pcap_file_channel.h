@@ -98,7 +98,7 @@ class PcapFilePlugin final : public IPlugin,
     int Option(const char* arg) override;
     int Load(IQuerier* querier) override;
     int Unload() override;
-    int Start() override { return 0; }
+    int Start() override;
     int Stop() override;
 
     IBlockStreamChannel* Get(const char* type, const char* name) override;

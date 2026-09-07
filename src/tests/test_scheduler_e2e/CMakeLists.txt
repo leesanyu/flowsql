@@ -60,3 +60,27 @@ set_target_properties(test_scheduler_mutation_guard PROPERTIES
 
 add_test(NAME test_scheduler_e2e COMMAND ${CMAKE_BINARY_DIR}/output/test_scheduler_e2e)
 add_test(NAME test_scheduler_mutation_guard COMMAND ${CMAKE_BINARY_DIR}/output/test_scheduler_mutation_guard)
+
+add_executable(test_pcap_web_e2e test_pcap_web_e2e.cpp)
+target_include_directories(test_pcap_web_e2e PUBLIC ${CMAKE_SOURCE_DIR})
+add_thirddepen(test_pcap_web_e2e arrow httplib rapidjson)
+add_dependencies(test_pcap_web_e2e
+    flowsql_common
+    flowsql_builtin
+    flowsql_catalog
+    flowsql_npi
+    flowsql_pcapfile
+    flowsql_scheduler
+    flowsql_web
+)
+target_link_libraries(test_pcap_web_e2e flowsql_common)
+target_compile_definitions(test_pcap_web_e2e PRIVATE
+    FLOWSQL_NPI_PROTOCOLS_PATH="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml"
+    FLOWSQL_PCAP_FIXTURE_PATH="${CMAKE_SOURCE_DIR}/tests/data/packets/ArpRequestPacket.pcap"
+    FLOWSQL_PCAPNG_FIXTURE_PATH="${CMAKE_SOURCE_DIR}/tests/data/packets/igmp.pcapng"
+)
+target_compile_options(test_pcap_web_e2e PRIVATE -UNDEBUG)
+set_target_properties(test_pcap_web_e2e PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
+)
+add_test(NAME test_pcap_web_e2e COMMAND ${CMAKE_BINARY_DIR}/output/test_pcap_web_e2e)

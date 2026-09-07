@@ -1,21 +1,18 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_WEB_WEB_SERVER_H_
 #define _FLOWSQL_WEB_WEB_SERVER_H_
 
 #include <httplib.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
 #include <common/error_code.h>
 #include <framework/interfaces/irouter_handle.h>
+#include <services/web/managed_capture_store.hpp>
 
 #include "db/database.h"
 
@@ -39,6 +36,7 @@ class WebServer {
     // 设置 Scheduler 转发地址
     void SetSchedulerAddress(const std::string& host, int port);
     void SetUploadDir(const std::string& dir) { upload_dir_ = dir; }
+    void SetPcapUploadMaxBytes(uint64_t max_bytes) { pcap_upload_max_bytes_ = max_bytes; }
 
     // 启动静态文件服务监听（阻塞）
     int Start(const std::string& host, int port);
@@ -61,6 +59,9 @@ class WebServer {
     int32_t HandleModifyStreamChannel(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleResetStreamChannel(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleRemoveStreamChannel(const std::string& uri, const std::string& req, std::string& rsp);
+    void HandlePcapUpload(const httplib::Request& req,
+                          httplib::Response& res,
+                          const httplib::ContentReader& content_reader);
     int32_t HandleGetOperators(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleUploadOperator(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleActivateOperator(const std::string& uri, const std::string& req, std::string& rsp);
@@ -95,6 +96,8 @@ class WebServer {
     std::string scheduler_host_ = "127.0.0.1";
     int scheduler_port_ = 18800;
     std::string upload_dir_ = "./uploads";
+    uint64_t pcap_upload_max_bytes_ = kDefaultPcapUploadMaxBytes;
+    ManagedCaptureStore managed_capture_store_;
 };
 
 }  // namespace web

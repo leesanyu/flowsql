@@ -1,5 +1,3 @@
-version: '3.8'
-
 # FlowSQL 服务编排
 # 所有 C++ 服务共用同一镜像，通过启动参数区分角色
 # 路由注册和故障恢复由各服务内的 RouterAgencyPlugin KeepAlive 线程自治处理
@@ -9,9 +7,16 @@ services:
   # ---- Gateway：统一入口，路由转发 ----
   gateway:
     image: flowsql:latest
-    command: >
-      flowsql --role gateway --port 18800
-      --plugins libflowsql_gateway.so:../config/deploy-multi.yaml
+    command:
+      - flowsql
+      - --role
+      - gateway
+      - --port
+      - "18800"
+      - --plugins
+      - libflowsql_gateway.so
+      - --option
+      - "host=0.0.0.0;heartbeat_interval_s=10;heartbeat_timeout_count=3"
     ports:
       - "18800:18800"
     networks:
@@ -27,14 +32,20 @@ services:
   # ---- Web：前端静态资源 + 管理 API ----
   web:
     image: flowsql:latest
-    command: >
-      flowsql --role web --port 18802
-      --plugins libflowsql_web.so,libflowsql_router.so
-      --option "host=0.0.0.0;port=8081;gateway=gateway:18800;router_host=0.0.0.0;router_port=18802"
+    command:
+      - flowsql
+      - --role
+      - web
+      - --port
+      - "18802"
+      - --plugins
+      - 'libflowsql_web.so:host=0.0.0.0;port=8081;gateway=gateway:18800;upload_dir=/opt/flowsql/uploads,libflowsql_router.so:host=0.0.0.0;port=18802;gateway=gateway:18800'
     ports:
       - "8081:8081"
     expose:
       - "18802"
+    volumes:
+      - pcap-uploads:/opt/flowsql/uploads
     networks:
       - flowsql-net
     depends_on:
@@ -45,14 +56,21 @@ services:
   # ---- Scheduler：SQL 执行 + 通道管理 + 算子 ----
   scheduler:
     image: flowsql:latest
-    command: >
-      flowsql --role scheduler --port 18803
-      --plugins libflowsql_router.so,libflowsql_scheduler.so,libflowsql_bridge.so,libflowsql_example.so,libflowsql_database.so
-      --option "host=0.0.0.0;port=18803;gateway=gateway:18800;config_file=../config/flowsql.yml"
+    command:
+      - flowsql
+      - --role
+      - scheduler
+      - --port
+      - "18803"
+      - --plugins
+      - 'libflowsql_router.so,libflowsql_npi.so:{"ldfile":"/opt/flowsql/config/protocols.yml"},libflowsql_pcapfile.so,libflowsql_scheduler.so,libflowsql_bridge.so,libflowsql_database.so'
+      - --option
+      - "host=0.0.0.0;port=18803;gateway=gateway:18800;config_file=../config/flowsql.yml"
     expose:
       - "18803"
     volumes:
-      - ./config:/opt/flowsql/config
+      - ./config/flowsql.yml:/opt/flowsql/config/flowsql.yml:ro
+      - pcap-uploads:/opt/flowsql/uploads
     networks:
       - flowsql-net
     depends_on:
@@ -73,6 +91,9 @@ services:
       gateway:
         condition: service_healthy
     restart: always
+
+volumes:
+  pcap-uploads:
 
 networks:
   flowsql-net:

@@ -843,12 +843,17 @@ int PcapFilePlugin::Load(IQuerier* querier) {
     std::lock_guard<std::mutex> lock(mutex_);
     querier_ = querier;
     protocol_ = nullptr;
-    if (querier_) {
-        querier_->Traverse(IID_PROTOCOL, [&](void* value) {
-            if (!protocol_) protocol_ = static_cast<IProtocol*>(value);
-            return 0;
-        });
-    }
+    return 0;
+}
+
+int PcapFilePlugin::Start() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    protocol_ = nullptr;
+    if (!querier_) return ENODEV;
+    querier_->Traverse(IID_PROTOCOL, [&](void* value) {
+        if (!protocol_) protocol_ = static_cast<IProtocol*>(value);
+        return 0;
+    });
     return protocol_ ? 0 : ENODEV;
 }
 

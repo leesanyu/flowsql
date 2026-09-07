@@ -1,14 +1,10 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_WEB_WEB_PLUGIN_H_
 #define _FLOWSQL_WEB_WEB_PLUGIN_H_
 
+#include <cstdint>
 #include <string>
 #include <thread>
 
@@ -49,6 +45,7 @@ class WebPlugin : public IPlugin, public IRouterHandle {
     std::string gateway_host_ = "127.0.0.1";
     int gateway_port_ = 18800;  // 内部服务转发目标（Gateway）
     std::string upload_dir_ = "./uploads";
+    uint64_t pcap_upload_max_bytes_ = kDefaultPcapUploadMaxBytes;
 };
 
 }  // namespace web

@@ -7,7 +7,9 @@
 3. **控制面 HTTP**：服务间控制面通信全部走 HTTP + URI 路由，Gateway 负责转发
 4. **数据面独立**：高吞吐数据传输走共享内存 / Arrow IPC，不经过 HTTP
 5. **Interface 思维**：Plugin 通过纯虚接口（`IID_*`）向进程内其他 Plugin 暴露能力，调用方通过 `IQuerier::Traverse` 按 IID 查找，不直接依赖具体实现类
-6. **IPlugin 生命周期批次调用**：插件加载分阶段批次执行——先所有插件 `Option()`，再所有插件 `Load()`，最后所有插件 `Start()`。禁止逐个插件走完整生命周期，因为 `Start()` 时必须保证所有插件的接口已通过 `Load()` 注册完毕
+6. **IPlugin 生命周期批次调用**：插件加载分阶段批次执行——先所有插件 `Option()`，再所有插件 `Load()`，
+   最后所有插件 `Start()`。任一阶段返回非零都视为失败；`Start()` 失败时逆序停止已启动插件。
+   RouterAgency 等外部入口最后启动，避免内部能力尚未就绪时暴露监听端口。
 
 ---
 
@@ -131,6 +133,8 @@ Scheduler 进程加载 SQL、通道、算子等服务插件，通过 `IQuerier` 
 |------|-----|------|
 | `libflowsql_router.so` | — | HTTP 服务 + 路由代理 + Gateway KeepAlive |
 | `libflowsql_task.so` | `IID_TASK_STORE` | 任务提交、异步执行、状态持久化 |
+| `libflowsql_npi.so` | `IID_PROTOCOL` | 从 `protocols.yml` 加载协议定义并提供报文分层能力 |
+| `libflowsql_pcapfile.so` | `IID_BLOCK_STREAM_FACTORY` / `IID_BLOCK_STREAM_MANAGER` | 管理有限 pcap/pcapng source |
 | `libflowsql_scheduler.so` | `IID_SCHEDULER` | SQL 解析、Pipeline 执行、数据读写调度 |
 | `libflowsql_builtin.so` | `IID_BUILTIN_REGISTRY` | 内置通道、批处理算子和流式算子注册 |
 | `libflowsql_catalog.so` | `IID_OPERATOR_CATALOG` / `IID_OPERATOR_REGISTRY` / `IID_CHANNEL_REGISTRY` | DataFrame 目录与算子目录统一管理、`/operators/*` 统一入口 |
@@ -211,6 +215,7 @@ SQL 任务类型由 Source 通道类型决定（以 `FROM` 解析结果为准）
 |------|------|
 | `GET /api/health` | 健康检查 |
 | `GET /api/channels/list` | 查询通道列表（Web 聚合视图） |
+| `POST /api/channels/pcapfile/upload` | multipart 上传 pcap/pcapng 并原子创建 source 通道 |
 | `GET /api/operators/list?type=builtin\|python\|cpp` | 查询算子/插件列表 |
 | `POST /api/operators/upload` | 上传算子（`type=python/cpp`） |
 | `POST /api/operators/activate` | 激活算子或 C++ 插件 |
@@ -242,6 +247,37 @@ SQL 任务类型由 Source 通道类型决定（以 `FROM` 解析结果为准）
 | `POST /api/channels/stream/modify` | 修改 Stream 通道配置 |
 | `POST /api/channels/stream/reset` | 重置 Stream 通道运行态（同配置重建） |
 | `POST /api/channels/stream/remove` | 删除 Stream 通道 |
+
+### pcap/pcapng 离线上传与消费
+
+`POST /api/channels/pcapfile/upload` 直接绑定在 WebPlugin 的 8081 HTTP Server，不加入
+`EnumApiRoutes()`，因此 capture 文件体不会进入 RouterAgency 或 Gateway。multipart 标量字段必须位于唯一的
+`file` part 之前：`name` 必填；`format`、`batch_packets`、`replay_mode`、`replay_speed_milli` 可选，默认分别为
+`auto`、`256`、`fast`、`1000`。文件名仅接受 `.pcap` 或 `.pcapng`。
+
+Web 按块将文件写入 `<upload_dir>/pcapfile/*.part`，默认上限为 1 GiB，可用正整数
+`pcap_upload_max_bytes` 覆盖。写入完成后原子重命名，再经 Gateway 向 Scheduler 的
+`/channels/stream/add` 发送只包含元数据和规范绝对路径的小型 JSON。成功响应和对外查询会删除
+`path`、`option`、`options`、`option_json` 等内部字段。
+
+```text
+浏览器 --multipart 文件体--> Web 8081 / ManagedCaptureStore
+                              |
+                              +--小型 JSON 控制请求--> Gateway --> Scheduler
+                                                               |
+共享受管文件 <--同一绝对路径------------------------------------+
+                                                               |
+                                                               +--> pcapfile IBlockStreamChannel
+                                                                    --Arrow packet batch--> block operator
+```
+
+`pcapfile` 是有限、只读的 `block_stream` source。NPI 在 `Load()` 阶段注册 `IID_PROTOCOL`；
+`PcapFilePlugin::Load()` 只保存 `IQuerier`，等所有插件完成 Load 后在 `Start()` 绑定 NPI。缺少 NPI 时启动失败，
+不对外提供半就绪服务。实际 packet 数据经 `IBlockStreamChannel` 和 Arrow batch 进入 Scheduler，不经过 HTTP。
+
+删除 `pcapfile` 时仍使用 `POST /api/channels/stream/remove`。Web 先从 Scheduler 内部查询取得受管绝对路径，
+再让 Scheduler 移除通道并释放文件句柄，最后只删除规范路径仍位于受管根目录内的普通文件；非受管路径、
+符号链接和路径逃逸均不得删除。
 
 ### Scheduler 端点（RouterAgencyPlugin，内部）
 
@@ -387,6 +423,15 @@ C++ 算子以 `.so` 插件文件为管理单元。一个插件可导出多个算
 
 ## 部署配置
 
+离线 capture 功能的共同部署条件：
+
+- Scheduler 所在进程必须同时加载 `libflowsql_npi.so` 与 `libflowsql_pcapfile.so`；NPI 的 `ldfile` 必须指向
+  可读的 `protocols.yml`。标准构建会将该文件同步至 `build/output/config/protocols.yml`。
+- Web 的 `upload_dir` 必须使用绝对路径。Web 与 Scheduler 必须能以同一个绝对路径看到 capture；多进程原生
+  部署共享宿主机目录，Docker 部署共享同一路径的 named volume。
+- 插件配置顺序不表达依赖关系。加载器批量完成所有 Option 和 Load 后才进入 Start；pcapfile 在 Start 阶段按
+  `IID_PROTOCOL` 查找 NPI。
+
 ### 多进程模式（`config/deploy-multi.yaml`）
 
 ```yaml
@@ -401,7 +446,7 @@ services:
   - name: web
     plugins:
       - name: libflowsql_web.so
-        option: "host=127.0.0.1;port=8081;gateway=127.0.0.1:18800;upload_dir=./uploads"
+        option: "upload_dir=/tmp/flowsql/uploads"
       - name: libflowsql_router.so
         option: "host=127.0.0.1;port=18802;gateway=127.0.0.1:18800"
 
@@ -411,6 +456,9 @@ services:
         option: "host=127.0.0.1;port=18803;gateway=127.0.0.1:18800"
       - name: libflowsql_task.so
         option: "db_path=./meta/flowsql_meta.db"
+      - name: libflowsql_npi.so
+        option: '{"ldfile":"./config/protocols.yml"}'
+      - libflowsql_pcapfile.so
       - libflowsql_scheduler.so
       - libflowsql_bridge.so
       - libflowsql_builtin.so
@@ -441,11 +489,14 @@ services:
       - name: libflowsql_gateway.so
         option: "host=127.0.0.1;port=18800;..."
       - name: libflowsql_web.so
-        option: "host=127.0.0.1;port=8081;gateway=127.0.0.1:18800;upload_dir=./uploads"
+        option: "upload_dir=/tmp/flowsql/uploads"
       - name: libflowsql_router.so
         option: "host=127.0.0.1;port=18803;gateway=127.0.0.1:18800"
       - name: libflowsql_task.so
         option: "db_path=./meta/flowsql_meta.db"
+      - name: libflowsql_npi.so
+        option: '{"ldfile":"./config/protocols.yml"}'
+      - libflowsql_pcapfile.so
       - libflowsql_scheduler.so
       - libflowsql_bridge.so
       - libflowsql_builtin.so
@@ -464,6 +515,24 @@ services:
     type: python
     command: "python3 -m flowsql.worker --port 18900"
 ```
+
+### Docker Compose
+
+运行时镜像把 NPI 协议资产安装到 `/opt/flowsql/config/protocols.yml`。`docker-compose.yml` 让 Web 和
+Scheduler 都将 named volume `pcap-uploads` 挂载至 `/opt/flowsql/uploads`；Web 使用该路径作为
+`upload_dir`，Scheduler 通过通道 JSON 收到相同绝对路径。Scheduler 同时加载：
+
+Compose 的多插件服务使用 argv 数组保存参数边界。Gateway 绑定 `0.0.0.0:18800`；Web 进程中的
+`libflowsql_web.so` 和 `libflowsql_router.so` 分别使用内联 option，前者监听 8081，后者监听 18802，
+二者均通过 `gateway:18800` 访问或注册控制面，不能共享一个含 `host`/`port` 的默认 option。
+
+```text
+libflowsql_npi.so:{"ldfile":"/opt/flowsql/config/protocols.yml"}
+libflowsql_pcapfile.so
+```
+
+Compose 只把宿主机 `config/flowsql.yml` 绑定到对应文件，不能把整个 `config/` 目录覆盖到容器中，否则会遮蔽
+镜像内的 `protocols.yml`。
 
 **`config/flowsql.yml`**（运行时通道配置，由 Web 动态管理）：
 
@@ -487,6 +556,7 @@ channels:
 flowSQL/
 ├── src/
 │   ├── common/             # 公共头文件（define.h、error_code.h、loader.hpp、toolkit.hpp 等）
+│   ├── channels/pcapfile/  # 有限 pcap/pcapng block-stream source provider
 │   ├── framework/          # 框架核心（IPlugin、PluginLoader、SqlParser、Pipeline 等）
 │   │   └── interfaces/     # 跨插件接口（IDatabaseFactory、IRouterHandle 等）
 │   ├── services/
@@ -530,8 +600,12 @@ flowSQL/
 ## 构建与运行
 
 ```bash
-# 构建
-cmake -B build src && cmake --build build -j$(nproc)
+# 前端生产构建
+npm run build --prefix src/frontend
+
+# C++ 标准配置与全量构建
+cmake -B build src
+cmake --build build -j$(nproc)
 
 # 启动（多进程模式，从项目根目录）
 cd build/output && LD_LIBRARY_PATH=. ./flowsql --config ../../config/deploy-multi.yaml
@@ -539,16 +613,6 @@ cd build/output && LD_LIBRARY_PATH=. ./flowsql --config ../../config/deploy-mult
 # 启动（单进程模式）
 cd build/output && LD_LIBRARY_PATH=. ./flowsql --config ../../config/deploy-single.yaml
 
-# 测试
-cd build/output
-./test_router          # RouterAgencyPlugin 路由单元测试（11 个用例）
-./test_framework
-./test_bridge
-./test_builtin
-./test_task
-./test_database_manager
-./test_sqlite
-./test_mysql
-./test_postgres
-./test_clickhouse      # ClickHouse 不可达时自动 SKIP
+# 完整回归
+ctest --test-dir build --output-on-failure
 ```

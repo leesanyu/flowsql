@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <channels/pcapfile/pcap_file_channel.h>
+#include <common/loader.hpp>
 #include <framework/core/packet_codec.h>
 
 #include <arrow/api.h>
@@ -59,6 +60,24 @@ class MockProtocol final : public flowsql::IProtocol {
     uint16_t payload_offset = 0;
     std::vector<int32_t> layer_sizes;
     std::vector<std::vector<uint8_t>> layer_packets;
+};
+
+class DeferredProtocolQuerier final : public flowsql::IQuerier {
+ public:
+    void SetProtocol(flowsql::IProtocol* protocol) { protocol_ = protocol; }
+
+    int Traverse(const flowsql::Guid& iid, fntraverse callback) override {
+        if (iid < flowsql::IID_PROTOCOL || flowsql::IID_PROTOCOL < iid || !protocol_) return 0;
+        return callback ? callback(protocol_) : 0;
+    }
+
+    void* First(const flowsql::Guid& iid) override {
+        if (!(iid < flowsql::IID_PROTOCOL) && !(flowsql::IID_PROTOCOL < iid)) return protocol_;
+        return nullptr;
+    }
+
+ private:
+    flowsql::IProtocol* protocol_ = nullptr;
 };
 
 void Put16(std::vector<uint8_t>* out, uint16_t value, bool little) {
@@ -1264,6 +1283,7 @@ void TestBatchOwnerAndPluginLifecycle() {
         flowsql::IProtocol* protocol_;
     } querier(&protocol);
     assert(plugin.Load(&querier) == 0);
+    assert(plugin.Start() == 0);
     assert(plugin.AddChannel("pcapfile", "owner", "{\"path\":\"" + path + "\"}") == 0);
     auto* channel = plugin.Get("pcapfile", "owner");
     assert(channel != nullptr);
@@ -1405,6 +1425,7 @@ void TestCancelAndManagerBusy() {
         flowsql::IProtocol* protocol_;
     } querier(&protocol);
     assert(plugin.Load(&querier) == 0);
+    assert(plugin.Start() == 0);
     const std::string option = "{\"path\":\"" + path + "\",\"batch_packets\":1}";
     assert(plugin.AddChannel("pcapfile", "busy", option) == 0);
     auto* channel = dynamic_cast<pcapfile::PcapFileChannel*>(plugin.Get("pcapfile", "busy"));
@@ -1450,6 +1471,64 @@ void TestOptions() {
                              "\"replay_mode\":\"timestamp\",\"replay_speed_milli\":2000}");
 }
 
+void TestPluginDependencyLifecycle() {
+    MockProtocol protocol;
+    DeferredProtocolQuerier querier;
+
+    pcapfile::PcapFilePlugin delayed;
+    assert(delayed.Load(&querier) == 0);
+    assert(delayed.Start() == ENODEV);
+    querier.SetProtocol(&protocol);
+    assert(delayed.Start() == 0);
+    assert(delayed.Unload() == 0);
+
+    pcapfile::PcapFilePlugin available;
+    assert(available.Load(&querier) == 0);
+    assert(available.Start() == 0);
+    assert(available.Unload() == 0);
+
+    pcapfile::PcapFilePlugin missing;
+    assert(missing.Load(nullptr) == 0);
+    assert(missing.Start() == ENODEV);
+    assert(missing.Unload() == 0);
+}
+
+void AssertDynamicPluginOrder(bool pcapfile_first) {
+    flowsql::PluginLoader* loader = flowsql::PluginLoader::Single();
+    loader->StopAll();
+    loader->Unload();
+
+    const std::string npi_option = std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\"}";
+    const char* libraries[] = {
+        pcapfile_first ? FLOWSQL_PCAPFILE_PLUGIN_PATH : FLOWSQL_NPI_PLUGIN_PATH,
+        pcapfile_first ? FLOWSQL_NPI_PLUGIN_PATH : FLOWSQL_PCAPFILE_PLUGIN_PATH,
+    };
+    const char* options[] = {
+        pcapfile_first ? nullptr : npi_option.c_str(),
+        pcapfile_first ? npi_option.c_str() : nullptr,
+    };
+
+    assert(loader->Load(".", libraries, options, 2) == 0);
+    assert(loader->StartAll() == 0);
+    assert(loader->First(flowsql::IID_PROTOCOL) != nullptr);
+    assert(loader->First(flowsql::IID_BLOCK_STREAM_FACTORY) != nullptr);
+    loader->StopAll();
+    assert(loader->Unload() == 0);
+}
+
+void TestDynamicPluginDependencyOrders() {
+    AssertDynamicPluginOrder(true);
+    AssertDynamicPluginOrder(false);
+
+    flowsql::PluginLoader* loader = flowsql::PluginLoader::Single();
+    const char* libraries[] = {FLOWSQL_PCAPFILE_PLUGIN_PATH};
+    const char* options[] = {nullptr};
+    assert(loader->Load(".", libraries, options, 1) == 0);
+    assert(loader->StartAll() != 0);
+    loader->StopAll();
+    assert(loader->Unload() == 0);
+}
+
 void TestPluginManager() {
     MockProtocol protocol;
     pcapfile::PcapFilePlugin plugin;
@@ -1468,6 +1547,7 @@ void TestPluginManager() {
         flowsql::IProtocol* protocol_;
     } querier(&protocol);
     assert(plugin.Load(&querier) == 0);
+    assert(plugin.Start() == 0);
     const std::string path = Temp("manager.pcap");
     WriteFile(path, {});
     assert(plugin.AddChannel("pcapfile", "one", "{\"path\":\"" + path + "\"}") == 0);
@@ -1522,6 +1602,8 @@ int main() {
     TestMalformedPcapngAndFormatMismatch();
     TestIncrementalReadAfterOpen();
     TestOptions();
+    TestPluginDependencyLifecycle();
+    TestDynamicPluginDependencyOrders();
     TestPluginManager();
     TestCancelAndManagerBusy();
     std::puts("[PASS] pcapfile import");

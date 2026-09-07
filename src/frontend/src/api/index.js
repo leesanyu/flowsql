@@ -22,6 +22,71 @@ const unwrapList = (payload, keys = []) => {
   return []
 }
 
+export const PCAP_UPLOAD_DEFAULTS = Object.freeze({
+  format: 'auto',
+  batch_packets: 256,
+  replay_mode: 'fast',
+  replay_speed_milli: 1000
+})
+
+export const PCAP_UPLOAD_PATH = '/api/channels/pcapfile/upload'
+export const PCAP_UPLOAD_REQUEST_CONFIG = Object.freeze({ timeout: 0 })
+
+export const isSupportedPcapFile = (file) =>
+  typeof file?.name === 'string' && /^.+\.(pcap|pcapng)$/i.test(file.name)
+
+export const buildPcapUploadFormData = (file, fields = {}, createFormData = () => new FormData()) => {
+  const values = { ...PCAP_UPLOAD_DEFAULTS, ...fields }
+  const form = createFormData()
+  form.append('name', String(values.name ?? '').trim())
+  form.append('format', String(values.format))
+  form.append('batch_packets', String(values.batch_packets))
+  form.append('replay_mode', String(values.replay_mode))
+  form.append('replay_speed_milli', String(values.replay_speed_milli))
+  form.append('file', file)
+  return form
+}
+
+const pcapUploadErrorMessages = Object.freeze({
+  invalid_request: '上传参数或文件无效',
+  channel_conflict: '通道名称已存在',
+  file_too_large: '文件超过上传大小限制',
+  provider_unavailable: 'PCAP 服务暂不可用',
+  storage_failure: '服务器保存文件失败',
+  internal_error: '服务器内部错误'
+})
+
+export const pcapUploadErrorMessage = (error) => {
+  const code = error?.response?.data?.error
+  if (typeof code === 'string' && pcapUploadErrorMessages[code]) {
+    return pcapUploadErrorMessages[code]
+  }
+  if (typeof code === 'string' && code) return `PCAP 上传失败（${code}）`
+  if (error?.response?.status) return `PCAP 上传失败（HTTP ${error.response.status}）`
+  return '无法连接 PCAP 上传服务'
+}
+
+export const isPacketRawPreviewValue = (value) =>
+  value !== null &&
+  typeof value === 'object' &&
+  !Array.isArray(value) &&
+  typeof value.hex === 'string' &&
+  Number.isSafeInteger(value.byte_length) &&
+  value.byte_length >= 0 &&
+  typeof value.truncated === 'boolean'
+
+export const formatPreviewCell = (value) => {
+  if (value === null || value === undefined) return 'NULL'
+  if (isPacketRawPreviewValue(value)) {
+    if (value.byte_length === 0) return '（0 B）'
+    const truncated = value.truncated ? '…' : ''
+    const detail = value.truncated ? `${value.byte_length} B，已截断` : `${value.byte_length} B`
+    return `${value.hex}${truncated}（${detail}）`
+  }
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
 export default {
   // WebPlugin 直接处理的路由
   health: () => api.get('/api/health'),
@@ -122,6 +187,8 @@ export default {
   modifyStreamChannel: (payload) => api.post('/api/channels/stream/modify', payload),
   resetStreamChannel: (type, name) => api.post('/api/channels/stream/reset', { type, name }),
   removeStreamChannel: (type, name) => api.post('/api/channels/stream/remove', { type, name }),
+  uploadPcap: (file, fields) =>
+    api.post(PCAP_UPLOAD_PATH, buildPcapUploadFormData(file, fields), PCAP_UPLOAD_REQUEST_CONFIG),
   importCsv: (file) => {
     const form = new FormData()
     form.append('file', file)

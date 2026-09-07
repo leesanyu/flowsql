@@ -21,6 +21,11 @@
             <input ref="csvInput" type="file" accept=".csv" style="display:none" @change="handleCsvSelected" />
             <el-button v-if="activeChannelType === 'dataframe'" type="success" @click="triggerCsvUpload">导入 CSV</el-button>
             <el-button v-if="activeChannelType === 'database'" type="primary" @click="showAddDialog = true">新增数据库通道</el-button>
+            <el-button
+              v-if="activeChannelType === 'stream'"
+              type="success"
+              @click="openPcapUploadDialog"
+            >上传 PCAP</el-button>
             <el-button v-if="activeChannelType === 'stream'" type="primary" @click="openAddStreamDialog">新增 Stream 通道</el-button>
           </div>
         </div>
@@ -108,6 +113,14 @@
                 <el-tag :type="streamStatusTagType(scope.row.status)">
                   {{ scope.row.status || 'unknown' }}
                 </el-tag>
+                <el-tag
+                  v-if="scope.row.type === 'pcapfile' && scope.row.is_finite"
+                  class="finite-stream-tag"
+                  type="info"
+                  size="small"
+                >
+                  有限流
+                </el-tag>
               </template>
             </el-table-column>
             <el-table-column label="容量/占用" min-width="180">
@@ -118,8 +131,15 @@
             </el-table-column>
             <el-table-column label="操作" width="300">
               <template #default="scope">
-                <el-button type="primary" size="small" text @click="openEditStreamDialog(scope.row)">编辑</el-button>
                 <el-button
+                  v-if="scope.row.type !== 'pcapfile'"
+                  type="primary"
+                  size="small"
+                  text
+                  @click="openEditStreamDialog(scope.row)"
+                >编辑</el-button>
+                <el-button
+                  v-if="scope.row.type !== 'pcapfile'"
                   type="warning"
                   size="small"
                   text
@@ -157,7 +177,13 @@
             :label="col"
             min-width="100"
             show-overflow-tooltip
-          />
+          >
+            <template #default="scope">
+              <span :class="{ 'packet-raw-cell': isPacketRawPreviewValue(scope.row[col]) }">
+                {{ formatPreviewCell(scope.row[col]) }}
+              </span>
+            </template>
+          </el-table-column>
         </el-table>
         <div v-else-if="previewLoading" v-loading="true" style="height: 100px" />
         <div v-else class="browser-empty">暂无数据</div>
@@ -354,13 +380,95 @@
         <el-button type="primary" :loading="streamSubmitting" @click="submitStreamForm">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="showPcapUploadDialog"
+      title="上传 PCAP/PCAPNG"
+      width="560px"
+      :close-on-click-modal="!pcapSubmitting"
+      :close-on-press-escape="!pcapSubmitting"
+      :show-close="!pcapSubmitting"
+      @closed="resetPcapUploadForm"
+    >
+      <el-form :model="pcapForm" label-width="130px">
+        <el-form-item label="Capture 文件" required>
+          <input
+            ref="pcapInput"
+            class="pcap-file-input"
+            type="file"
+            accept=".pcap,.pcapng"
+            :disabled="pcapSubmitting"
+            @change="handlePcapFileSelected"
+          />
+          <div class="form-hint">仅支持单个 .pcap 或 .pcapng 文件</div>
+        </el-form-item>
+        <el-form-item label="通道名称" required>
+          <el-input
+            v-model="pcapForm.name"
+            :disabled="pcapSubmitting"
+            placeholder="例如 capture_01"
+          />
+        </el-form-item>
+        <el-form-item label="文件格式">
+          <el-select v-model="pcapForm.format" :disabled="pcapSubmitting" style="width:100%">
+            <el-option label="自动识别" value="auto" />
+            <el-option label="PCAP" value="pcap" />
+            <el-option label="PCAPNG" value="pcapng" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="每批数据包数">
+          <el-input-number
+            v-model="pcapForm.batch_packets"
+            :disabled="pcapSubmitting"
+            :min="1"
+            :max="4294967295"
+            :precision="0"
+            controls-position="right"
+            style="width:100%"
+          />
+        </el-form-item>
+        <el-form-item label="回放模式">
+          <el-select v-model="pcapForm.replay_mode" :disabled="pcapSubmitting" style="width:100%">
+            <el-option label="最快速度" value="fast" />
+            <el-option label="按时间戳" value="timestamp" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="回放速度">
+          <el-input-number
+            v-model="pcapForm.replay_speed_milli"
+            :disabled="pcapSubmitting"
+            :min="1"
+            :max="4294967295"
+            :precision="0"
+            controls-position="right"
+            style="width:100%"
+          />
+          <div class="form-hint">1000 表示 1 倍速，仅时间戳回放模式生效</div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="pcapSubmitting" @click="showPcapUploadDialog = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="pcapSubmitting"
+          :disabled="pcapSubmitting"
+          @click="submitPcapUpload"
+        >上传并创建通道</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { Search, Loading } from '@element-plus/icons-vue'
-import api from '../api'
+import api, {
+  PCAP_UPLOAD_DEFAULTS,
+  formatPreviewCell,
+  isPacketRawPreviewValue,
+  isSupportedPcapFile,
+  pcapUploadErrorMessage
+} from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const searchText = ref('')
@@ -381,6 +489,12 @@ const showStreamDialog = ref(false)
 const streamDialogMode = ref('add')
 const streamSubmitting = ref(false)
 const streamArrayInputs = ref({})
+const showPcapUploadDialog = ref(false)
+const pcapSubmitting = ref(false)
+const pcapInput = ref(null)
+const pcapFile = ref(null)
+const createPcapUploadForm = () => ({ name: '', ...PCAP_UPLOAD_DEFAULTS })
+const pcapForm = ref(createPcapUploadForm())
 const streamForm = ref({
   type: '',
   name: '',
@@ -511,12 +625,13 @@ const loadStreamChannels = async () => {
     streamChannels.value = list.map(ch => ({
       type: ch.type || '',
       name: ch.name || '',
-      role: ch.role || 'both',
-      status: ch.status || 'unknown'
-      ,
+      role: ch.type === 'pcapfile' ? 'source' : (ch.role || 'both'),
+      status: ch.status || 'unknown',
       in_use: !!ch.in_use,
       size: Number(ch.size || 0),
       capacity: Number(ch.capacity || 0),
+      is_finite: !!ch.is_finite,
+      is_finished: !!ch.is_finished,
       option_json: ch.option_json || {},
       option: ch.option || '',
       derived_channels: Array.isArray(ch.derived_channels) ? ch.derived_channels : []
@@ -694,6 +809,65 @@ const openAddStreamDialog = async () => {
   }
   applyStreamSchemaDefaults()
   showStreamDialog.value = true
+}
+
+const resetPcapUploadForm = () => {
+  pcapForm.value = createPcapUploadForm()
+  pcapFile.value = null
+  if (pcapInput.value) pcapInput.value.value = ''
+}
+
+const openPcapUploadDialog = () => {
+  resetPcapUploadForm()
+  showPcapUploadDialog.value = true
+}
+
+const handlePcapFileSelected = (event) => {
+  const file = event.target.files?.[0] || null
+  if (!file) {
+    pcapFile.value = null
+    return
+  }
+  if (!isSupportedPcapFile(file)) {
+    event.target.value = ''
+    pcapFile.value = null
+    ElMessage.warning('请选择 .pcap 或 .pcapng 文件')
+    return
+  }
+  pcapFile.value = file
+}
+
+const isValidPcapUploadInteger = (value) =>
+  Number.isInteger(value) && value >= 1 && value <= 4294967295
+
+const submitPcapUpload = async () => {
+  if (pcapSubmitting.value) return
+  const name = pcapForm.value.name.trim()
+  if (!name) {
+    ElMessage.warning('通道名称不能为空')
+    return
+  }
+  if (!isSupportedPcapFile(pcapFile.value)) {
+    ElMessage.warning('请选择 .pcap 或 .pcapng 文件')
+    return
+  }
+  if (!isValidPcapUploadInteger(pcapForm.value.batch_packets) ||
+      !isValidPcapUploadInteger(pcapForm.value.replay_speed_milli)) {
+    ElMessage.warning('批大小和回放速度必须是有效正整数')
+    return
+  }
+
+  pcapSubmitting.value = true
+  try {
+    await api.uploadPcap(pcapFile.value, { ...pcapForm.value, name })
+    ElMessage.success('PCAP 上传成功，通道已创建')
+    showPcapUploadDialog.value = false
+    await loadStreamChannels()
+  } catch (error) {
+    ElMessage.error(pcapUploadErrorMessage(error))
+  } finally {
+    pcapSubmitting.value = false
+  }
 }
 
 const openEditStreamDialog = async (row) => {
@@ -982,6 +1156,9 @@ onMounted(() => { reloadAll() })
   min-width: 0;
 }
 .section-title { margin: 10px 0; font-weight: 600; color: var(--text-primary); }
+.finite-stream-tag { margin-left: 8px; }
+.pcap-file-input { width: 100%; color: var(--text-primary); }
+.form-hint { margin-top: 4px; color: var(--text-secondary); font-size: 12px; line-height: 1.4; }
 .schema-popup { max-height: 300px; overflow-y: auto; }
 .schema-field { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #eee; }
 .schema-field:last-child { border-bottom: none; }
@@ -1039,6 +1216,10 @@ onMounted(() => { reloadAll() })
   display: flex;
   justify-content: flex-end;
   padding: 10px 6px 0 6px;
+}
+
+.packet-raw-cell {
+  font-family: monospace;
 }
 
 @media (max-width: 900px) {

@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include <cassert>
 #include <cstdio>
@@ -22,6 +17,7 @@
 #include <common/error_code.h>
 #include <framework/core/dataframe.h>
 #include <framework/core/dataframe_channel.h>
+#include <framework/core/packet_codec.h>
 #include <framework/interfaces/ibuiltin_registry.h>
 #include <framework/interfaces/ibinaddon_host.h>
 #include <framework/interfaces/ioperator.h>
@@ -99,6 +95,84 @@ static std::shared_ptr<DataFrameChannel> MakeChannel(const std::string& name, in
     }
     ASSERT_EQ(ch->Write(&df), 0);
     return ch;
+}
+
+static std::shared_ptr<DataFrameChannel> MakePacketPreviewChannel(const std::string& name) {
+    std::vector<packet::PacketRecord> records;
+    for (size_t row = 0; row < 3; ++row) {
+        const size_t byte_count = row == 0 ? 0 : (row == 1 ? 64 : 65);
+        auto bytes = std::make_shared<std::vector<uint8_t>>(byte_count);
+        for (size_t index = 0; index < byte_count; ++index) {
+            (*bytes)[index] = static_cast<uint8_t>(index);
+        }
+
+        packet::PacketRecord record;
+        record.meta.timestamp_ns = static_cast<int64_t>(row + 1) * 1000;
+        record.meta.captured_len = static_cast<uint32_t>(byte_count);
+        record.meta.wire_len = static_cast<uint32_t>(byte_count);
+        record.meta.link_type = 1;
+        record.meta.source_id = 7;
+        record.meta.sequence = row;
+        record.raw_data.owner = bytes;
+        record.raw_data.data = bytes->empty() ? nullptr : bytes->data();
+        record.raw_data.size = static_cast<uint32_t>(bytes->size());
+        records.push_back(std::move(record));
+    }
+
+    records[1].layer.status = packet::LayerStatus::kDecoded;
+    records[1].layer.layer_count = 2;
+    records[1].layer.layers[0] = {1, 0};
+    records[1].layer.layers[1] = {300, 14};
+    records[1].layer.src_mac.valid = 1;
+    const uint8_t mac[] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55};
+    std::memcpy(records[1].layer.src_mac.value.bytes, mac, sizeof(mac));
+
+    packet::IPv6Address ipv6;
+    for (size_t index = 0; index < sizeof(ipv6.bytes); ++index) {
+        ipv6.bytes[index] = static_cast<uint8_t>(index);
+    }
+    records[2].layer.src_ip = ipv6;
+    records[2].layer.transport_protocol = 6;
+    records[2].layer.src_port = 3389;
+    records[2].layer.dst_port = 49152;
+    records[2].layer.ports_valid = 1;
+    records[2].protocol.status = packet::ProtocolStatus::kIdentified;
+    records[2].protocol.id = 400;
+    records[2].protocol.sub_id = 1;
+
+    std::shared_ptr<arrow::RecordBatch> batch;
+    std::string error;
+    ASSERT_EQ(packet::EncodePacketBatch(records, &batch, &error),
+              packet::PacketBatchError::kNone);
+    ASSERT_TRUE(batch != nullptr);
+
+    DataFrame frame;
+    frame.FromArrow(batch);
+    auto channel = std::make_shared<DataFrameChannel>("dataframe", name);
+    ASSERT_EQ(channel->Open(), 0);
+    ASSERT_EQ(channel->Write(&frame), 0);
+    return channel;
+}
+
+static int JsonColumnIndex(const rapidjson::Value& columns, const char* name) {
+    for (rapidjson::SizeType index = 0; index < columns.Size(); ++index) {
+        if (columns[index].IsString() && std::strcmp(columns[index].GetString(), name) == 0) {
+            return static_cast<int>(index);
+        }
+    }
+    return -1;
+}
+
+static std::string ByteSequenceHex(size_t byte_count) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string output;
+    output.reserve(byte_count * 2);
+    for (size_t index = 0; index < byte_count; ++index) {
+        const uint8_t value = static_cast<uint8_t>(index);
+        output.push_back(kHex[value >> 4]);
+        output.push_back(kHex[value & 0x0f]);
+    }
+    return output;
 }
 
 static int ChannelRowCount(IDataFrameChannel* ch) {
@@ -721,6 +795,110 @@ static void TestHttpRoutes() {
               error::OK);
     ASSERT_TRUE(rsp.find("\"columns\"") != std::string::npos);
     ASSERT_TRUE(rsp.find("\"rows\":2") != std::string::npos);
+    {
+        rapidjson::Document ordinary_page;
+        ordinary_page.Parse(rsp.c_str());
+        ASSERT_TRUE(!ordinary_page.HasParseError() && ordinary_page.IsObject());
+        ASSERT_TRUE(!ordinary_page.HasMember("entity"));
+        ASSERT_EQ(ordinary_page["page"].GetUint(), unsigned(1));
+        ASSERT_EQ(ordinary_page["page_size"].GetUint(), unsigned(100));
+    }
+
+    // npm-packet-dataframe-view T2: packet Arrow values and bounded raw_data hex.
+    ASSERT_EQ(p.Register("packet_preview",
+                         std::static_pointer_cast<IChannel>(MakePacketPreviewChannel("packet_preview"))),
+              0);
+    ASSERT_EQ(routes["POST:/channels/dataframe/preview"](
+                  "/channels/dataframe/preview",
+                  R"({"name":"packet_preview","page":1,"page_size":2})",
+                  rsp),
+              error::OK);
+    {
+        rapidjson::Document packet_page;
+        packet_page.Parse(rsp.c_str());
+        ASSERT_TRUE(!packet_page.HasParseError() && packet_page.IsObject());
+        ASSERT_TRUE(packet_page.HasMember("entity") && packet_page["entity"].IsString());
+        ASSERT_EQ(std::string(packet_page["entity"].GetString()), "packet");
+        ASSERT_TRUE(packet_page.HasMember("rows") && packet_page["rows"].IsInt());
+        ASSERT_EQ(packet_page["rows"].GetInt(), 3);
+        ASSERT_TRUE(packet_page.HasMember("page") && packet_page["page"].IsInt());
+        ASSERT_EQ(packet_page["page"].GetInt(), 1);
+        ASSERT_TRUE(packet_page.HasMember("page_size") && packet_page["page_size"].IsInt());
+        ASSERT_EQ(packet_page["page_size"].GetInt(), 2);
+        ASSERT_TRUE(packet_page.HasMember("columns") && packet_page["columns"].IsArray());
+        ASSERT_TRUE(packet_page.HasMember("data") && packet_page["data"].IsArray());
+        ASSERT_EQ(packet_page["data"].Size(), rapidjson::SizeType(2));
+
+        const int raw_index = JsonColumnIndex(packet_page["columns"], "raw_data");
+        const int status_index = JsonColumnIndex(packet_page["columns"], "layer_status");
+        const int layers_index = JsonColumnIndex(packet_page["columns"], "layer_ids");
+        const int mac_index = JsonColumnIndex(packet_page["columns"], "src_mac");
+        const int port_index = JsonColumnIndex(packet_page["columns"], "src_port");
+        ASSERT_TRUE(raw_index >= 0 && status_index >= 0 && layers_index >= 0);
+        ASSERT_TRUE(mac_index >= 0 && port_index >= 0);
+
+        const auto& first = packet_page["data"][0];
+        const auto& first_raw = first[raw_index];
+        ASSERT_TRUE(first_raw.IsObject());
+        ASSERT_EQ(std::string(first_raw["hex"].GetString()), "");
+        ASSERT_EQ(first_raw["byte_length"].GetUint64(), uint64_t(0));
+        ASSERT_TRUE(!first_raw["truncated"].GetBool());
+        ASSERT_TRUE(first[mac_index].IsNull());
+        ASSERT_TRUE(first[port_index].IsNull());
+
+        const auto& second = packet_page["data"][1];
+        const auto& second_raw = second[raw_index];
+        ASSERT_TRUE(second_raw.IsObject());
+        ASSERT_EQ(std::string(second_raw["hex"].GetString()), ByteSequenceHex(64));
+        ASSERT_EQ(second_raw["byte_length"].GetUint64(), uint64_t(64));
+        ASSERT_TRUE(!second_raw["truncated"].GetBool());
+        ASSERT_TRUE(second[status_index].IsUint());
+        ASSERT_EQ(second[status_index].GetUint(),
+                  static_cast<unsigned>(packet::LayerStatus::kDecoded));
+        ASSERT_TRUE(second[layers_index].IsArray());
+        ASSERT_EQ(second[layers_index].Size(), rapidjson::SizeType(packet::kMaxLayerDepth));
+        ASSERT_EQ(second[layers_index][0].GetUint(), unsigned(1));
+        ASSERT_EQ(second[layers_index][1].GetUint(), unsigned(300));
+        ASSERT_TRUE(second[mac_index].IsString());
+        ASSERT_EQ(std::string(second[mac_index].GetString()), "001122334455");
+    }
+
+    ASSERT_EQ(routes["POST:/channels/dataframe/preview"](
+                  "/channels/dataframe/preview",
+                  R"({"name":"packet_preview","page":2,"page_size":2})",
+                  rsp),
+              error::OK);
+    {
+        rapidjson::Document packet_page;
+        packet_page.Parse(rsp.c_str());
+        ASSERT_TRUE(!packet_page.HasParseError() && packet_page.IsObject());
+        ASSERT_EQ(packet_page["page"].GetInt(), 2);
+        ASSERT_EQ(packet_page["data"].Size(), rapidjson::SizeType(1));
+        const int raw_index = JsonColumnIndex(packet_page["columns"], "raw_data");
+        const int ipv6_index = JsonColumnIndex(packet_page["columns"], "src_ip_v6");
+        const int port_index = JsonColumnIndex(packet_page["columns"], "src_port");
+        const int protocol_index = JsonColumnIndex(packet_page["columns"], "protocol_id");
+        ASSERT_TRUE(raw_index >= 0 && ipv6_index >= 0 && port_index >= 0 && protocol_index >= 0);
+        const auto& row = packet_page["data"][0];
+        const auto& raw = row[raw_index];
+        ASSERT_EQ(std::string(raw["hex"].GetString()), ByteSequenceHex(64));
+        ASSERT_EQ(raw["byte_length"].GetUint64(), uint64_t(65));
+        ASSERT_TRUE(raw["truncated"].GetBool());
+        ASSERT_EQ(std::string(row[ipv6_index].GetString()), ByteSequenceHex(16));
+        ASSERT_EQ(row[port_index].GetUint(), unsigned(3389));
+        ASSERT_EQ(row[protocol_index].GetUint(), unsigned(400));
+    }
+
+    ASSERT_EQ(routes["POST:/channels/dataframe/preview"](
+                  "/channels/dataframe/preview",
+                  R"({"name":"packet_preview","page":1,"page_size":101})",
+                  rsp),
+              error::BAD_REQUEST);
+    ASSERT_EQ(routes["POST:/channels/dataframe/preview"](
+                  "/channels/dataframe/preview",
+                  R"({"name":"packet_preview","page":0,"page_size":2})",
+                  rsp),
+              error::BAD_REQUEST);
     // T30: 预览不存在通道 -> 404
     ASSERT_EQ(routes["POST:/channels/dataframe/preview"]("/channels/dataframe/preview", R"({"name":"not_found"})", rsp),
               error::NOT_FOUND);

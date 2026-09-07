@@ -771,6 +771,58 @@ int main() {
                   error::OK);
     }
     {
+        const std::string channel_name = "scheduler_pcap_dataframe";
+        const std::string dataframe_name = "scheduler_pcap_dataframe";
+        std::string rsp;
+        ASSERT_EQ(stream_add("/channels/stream/add",
+                             MakePcapSourceAddRequest(channel_name, pcap_ok),
+                             rsp),
+                  error::OK);
+
+        pcap_protocol.Reset();
+        const std::string sql = "SELECT * FROM pcapfile." + channel_name +
+                                " INTO dataframe." + dataframe_name;
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
+        rapidjson::Document completed;
+        completed.Parse(rsp.c_str());
+        ASSERT_TRUE(!completed.HasParseError() && completed.IsObject());
+        ASSERT_EQ(completed.MemberCount(), rapidjson::SizeType(4));
+        ASSERT_TRUE(!completed.HasMember("data"));
+        ASSERT_TRUE(completed.HasMember("status") && completed["status"].IsString());
+        ASSERT_EQ(std::string(completed["status"].GetString()), "completed");
+        ASSERT_TRUE(completed.HasMember("rows") && completed["rows"].IsInt64());
+        ASSERT_EQ(completed["rows"].GetInt64(), 2);
+        ASSERT_TRUE(completed.HasMember("result_row_count") && completed["result_row_count"].IsInt64());
+        ASSERT_EQ(completed["result_row_count"].GetInt64(), 2);
+        ASSERT_TRUE(completed.HasMember("result_target") && completed["result_target"].IsString());
+        ASSERT_EQ(std::string(completed["result_target"].GetString()), "dataframe." + dataframe_name);
+        ASSERT_EQ(pcap_protocol.layer_calls, 2);
+
+        auto output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(dataframe_name.c_str()));
+        ASSERT_TRUE(output != nullptr);
+        DataFrame packets;
+        ASSERT_EQ(output->Read(&packets), 0);
+        const auto packet_batch = packets.ToArrow();
+        ASSERT_TRUE(packet_batch != nullptr);
+        ASSERT_EQ(packet_batch->num_rows(), 2);
+        ASSERT_TRUE(packet_batch->schema()->Equals(packet::PacketSchema(), true));
+        auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(
+            packet_batch->GetColumnByName("sequence"));
+        auto raw_data = std::dynamic_pointer_cast<arrow::BinaryArray>(
+            packet_batch->GetColumnByName("raw_data"));
+        ASSERT_TRUE(sequence != nullptr && raw_data != nullptr);
+        ASSERT_EQ(sequence->Value(0), 0);
+        ASSERT_EQ(sequence->Value(1), 1);
+        ASSERT_EQ(std::string(raw_data->GetView(0)), std::string("\x01\x02\x03\x04", 4));
+        ASSERT_EQ(std::string(raw_data->GetView(1)), std::string("\x05\x06\x07\x08", 4));
+
+        ASSERT_EQ(stream_remove("/channels/stream/remove",
+                                MakePcapSourceRemoveRequest(channel_name),
+                                rsp),
+                  error::OK);
+        ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
+    }
+    {
         const std::string channel_name = "scheduler_pcap_error";
         std::string rsp;
         ASSERT_EQ(stream_add("/channels/stream/add",

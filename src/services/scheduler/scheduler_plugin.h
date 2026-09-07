@@ -97,7 +97,6 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
     int32_t HandleResetStreamChannel(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleRemoveStreamChannel(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleRefreshOperators(const std::string& uri, const std::string& req, std::string& rsp);
-    int32_t HandlePreviewDataframe(const std::string& uri, const std::string& req, std::string& rsp);
 
     // 通道管理
     void RegisterManagedChannel(const std::string& key, std::shared_ptr<IChannel> ch);

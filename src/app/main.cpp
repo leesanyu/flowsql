@@ -1,24 +1,20 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 // FlowSQL 通用入口
 // Guardian 模式: flowsql --config deploy-multi.yaml  （fork 守护，拉起所有服务）
 // Gateway 模式:  flowsql --role gateway --port 18800 --plugins libflowsql_gateway.so:...
 // Service 模式:  flowsql --role web --port 18802 --plugins libflowsql_web.so,libflowsql_router.so
 
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
-#include <string>
-#include <vector>
 #include <map>
-#include <chrono>
+#include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -81,23 +77,33 @@ static void WaitForSignal() {
     sigwait(&waitset, &sig);
 }
 
-// 仅加载单个插件（pluginregist → Option → Load），不调用 Start
-static int LoadPluginOnly(PluginLoader* loader, const std::string& path, const char* option) {
-    std::string app_path = std::string(get_absolute_process_path());
+// 将完整插件列表作为一个生命周期批次加载，不调用 Start。
+static int LoadPluginBatch(PluginLoader* loader, const std::vector<std::string>& plugins, const char* default_option) {
+    std::vector<std::string> libraries;
+    std::vector<std::string> plugin_options;
+    libraries.reserve(plugins.size());
+    plugin_options.reserve(plugins.size());
 
-    std::string lib_path = path;
-    std::string plugin_option;
-    auto colon = path.find(':');
-    if (colon != std::string::npos) {
-        lib_path = path.substr(0, colon);
-        plugin_option = path.substr(colon + 1);
+    for (const auto& plugin : plugins) {
+        const size_t colon = plugin.find(':');
+        libraries.push_back(colon == std::string::npos ? plugin : plugin.substr(0, colon));
+
+        std::string current_option = colon == std::string::npos ? "" : plugin.substr(colon + 1);
+        if (current_option.empty() && default_option) current_option = default_option;
+        plugin_options.push_back(std::move(current_option));
     }
-    if (plugin_option.empty() && option) plugin_option = option;
 
-    const char* relapath[] = {lib_path.c_str()};
-    const char* opt_ptr = plugin_option.empty() ? nullptr : plugin_option.c_str();
-    const char* options[] = {opt_ptr};
-    return loader->Load(app_path.c_str(), relapath, options, 1);
+    std::vector<const char*> library_ptrs;
+    std::vector<const char*> option_ptrs;
+    library_ptrs.reserve(libraries.size());
+    option_ptrs.reserve(plugin_options.size());
+    for (size_t i = 0; i < libraries.size(); ++i) {
+        library_ptrs.push_back(libraries[i].c_str());
+        option_ptrs.push_back(plugin_options[i].empty() ? nullptr : plugin_options[i].c_str());
+    }
+
+    return loader->Load(get_absolute_process_path(), library_ptrs.data(), option_ptrs.data(),
+                        static_cast<int>(library_ptrs.size()));
 }
 
 // ============================================================
@@ -120,15 +126,14 @@ static int RunService(const Args& args) {
         auto_option = args.option;
     }
 
-    // Phase 1：所有插件 Load()
-    for (const auto& plugin : plugin_list) {
-        const char* opt = auto_option.empty() ? nullptr : auto_option.c_str();
-        if (LoadPluginOnly(loader, plugin, opt) != 0) {
-            printf("Failed to load plugin: %s\n", plugin.c_str());
-        } else {
-            printf("Loaded plugin: %s\n", plugin.c_str());
-        }
+    // Phase 1：完整批次先完成所有注册/Option，再完成所有 Load。
+    const char* option = auto_option.empty() ? nullptr : auto_option.c_str();
+    if (LoadPluginBatch(loader, plugin_list, option) != 0) {
+        printf("Failed to load plugin batch\n");
+        loader->Unload();
+        return 1;
     }
+    for (const auto& plugin : plugin_list) printf("Loaded plugin: %s\n", plugin.c_str());
 
     // Phase 2：统一 StartAll()
     if (loader->StartAll() != 0) {

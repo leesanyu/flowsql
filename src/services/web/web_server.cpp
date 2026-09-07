@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "web_server.h"
 
@@ -12,10 +7,11 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
-#include <cstdio>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <regex>
 #include <thread>
 #include <unordered_map>
@@ -26,11 +22,20 @@
 
 #include <common/error_code.h>
 #include <common/log.h>
+#include <services/web/pcap_upload_transaction.hpp>
 
 namespace flowsql {
 namespace web {
 
 namespace {
+
+constexpr size_t kMaxPcapUploadFieldBytes = 4096;
+
+enum class PcapMultipartPart {
+    kNone,
+    kField,
+    kFile,
+};
 
 int32_t ProxyPostJson(const std::string& host, int port, const std::string& path, const std::string& req, std::string* rsp) {
     if (!rsp) return error::INTERNAL_ERROR;
@@ -49,6 +54,89 @@ int32_t ProxyPostJson(const std::string& host, int port, const std::string& path
     if (result->status == 409) return error::CONFLICT;
     if (result->status == 503) return error::UNAVAILABLE;
     return error::INTERNAL_ERROR;
+}
+
+PcapUploadError MapPcapSchedulerError(int32_t error_code) {
+    switch (error_code) {
+        case error::OK:
+            return PcapUploadError::kOk;
+        case error::BAD_REQUEST:
+            return PcapUploadError::kInvalidRequest;
+        case error::CONFLICT:
+            return PcapUploadError::kConflict;
+        case error::UNAVAILABLE:
+            return PcapUploadError::kUnavailable;
+        default:
+            return PcapUploadError::kInternal;
+    }
+}
+
+std::string BuildPcapUploadErrorJson(PcapUploadError error_code) {
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    writer.StartObject();
+    writer.Key("error");
+    writer.String(MapPcapUploadError(error_code).error);
+    writer.EndObject();
+    return buffer.GetString();
+}
+
+int32_t RedactPublicStreamQueryResponse(std::string* response) {
+    if (!response) return error::INTERNAL_ERROR;
+    const auto fail = [response]() {
+        *response = R"({"error":"invalid_scheduler_response"})";
+        return error::INTERNAL_ERROR;
+    };
+
+    rapidjson::Document document;
+    document.Parse(response->c_str());
+    if (document.HasParseError() || !document.IsObject()) return fail();
+
+    rapidjson::Value* channels = nullptr;
+    size_t channels_count = 0;
+    for (auto member = document.MemberBegin(); member != document.MemberEnd(); ++member) {
+        if (std::string(member->name.GetString(), member->name.GetStringLength()) != "channels") continue;
+        ++channels_count;
+        if (!member->value.IsArray()) return fail();
+        channels = &member->value;
+    }
+    if (channels_count != 1 || !channels) return fail();
+
+    for (auto& channel : channels->GetArray()) {
+        if (!channel.IsObject()) return fail();
+        const rapidjson::Value* type = nullptr;
+        size_t type_count = 0;
+        for (auto member = channel.MemberBegin(); member != channel.MemberEnd(); ++member) {
+            if (std::string(member->name.GetString(), member->name.GetStringLength()) != "type") continue;
+            ++type_count;
+            if (!member->value.IsString()) return fail();
+            type = &member->value;
+        }
+        if (type_count != 1 || !type) return fail();
+        if (std::string(type->GetString(), type->GetStringLength()) != "pcapfile") continue;
+
+        for (const char* field : {"path", "option", "options", "option_json"}) {
+            while (channel.HasMember(field)) channel.RemoveMember(field);
+        }
+    }
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    document.Accept(writer);
+    *response = buffer.GetString();
+    return error::OK;
+}
+
+void SetPcapUploadResponse(PcapUploadError error_code,
+                           const std::string& success_json,
+                           httplib::Response* response) {
+    if (!response) return;
+    const PcapUploadErrorInfo error_info = MapPcapUploadError(error_code);
+    response->status = error_info.http_status;
+    response->set_content(error_code == PcapUploadError::kOk
+                              ? success_json
+                              : BuildPcapUploadErrorJson(error_code),
+                          "application/json");
 }
 
 }  // namespace
@@ -117,8 +205,11 @@ int WebServer::Init(const std::string& db_path) {
         LOG_ERROR("WebServer::Init: failed to init schema");
         return -1;
     }
-    std::error_code ec;
-    std::filesystem::create_directories(upload_dir_, ec);
+    std::string capture_store_error;
+    if (managed_capture_store_.Initialize(upload_dir_, &capture_store_error) != PcapUploadError::kOk) {
+        LOG_ERROR("WebServer::Init: failed to initialize capture store: %s", capture_store_error.c_str());
+        return -1;
+    }
 
     // 静态文件服务（基于可执行文件位置定位 static 目录）
     std::string static_dir = "static";
@@ -225,6 +316,12 @@ int WebServer::Init(const std::string& db_path) {
                      (rc == error::UNAVAILABLE ? 503 : 400)));
         res.set_content(rsp, "application/json");
     });
+    server_.Post("/api/channels/pcapfile/upload",
+                 [this](const httplib::Request& req,
+                        httplib::Response& res,
+                        const httplib::ContentReader& content_reader) {
+                     HandlePcapUpload(req, res, content_reader);
+                 });
     server_.Post("/api/channels/stream/modify", [this](const httplib::Request& req, httplib::Response& res) {
         std::string rsp;
         int32_t rc = HandleModifyStreamChannel("", req.body, rsp);
@@ -246,10 +343,19 @@ int WebServer::Init(const std::string& db_path) {
     server_.Post("/api/channels/stream/remove", [this](const httplib::Request& req, httplib::Response& res) {
         std::string rsp;
         int32_t rc = HandleRemoveStreamChannel("", req.body, rsp);
-        res.status = (rc == error::OK) ? 200 :
-                     (rc == error::CONFLICT ? 409 :
-                     (rc == error::NOT_FOUND ? 404 :
-                     (rc == error::UNAVAILABLE ? 503 : 400)));
+        if (rc == error::OK) {
+            res.status = 200;
+        } else if (rc == error::BAD_REQUEST) {
+            res.status = 400;
+        } else if (rc == error::NOT_FOUND) {
+            res.status = 404;
+        } else if (rc == error::CONFLICT) {
+            res.status = 409;
+        } else if (rc == error::UNAVAILABLE) {
+            res.status = 503;
+        } else {
+            res.status = 500;
+        }
         res.set_content(rsp, "application/json");
     });
     server_.Get("/api/operators/list", [this](const httplib::Request& req, httplib::Response& res) {
@@ -538,6 +644,111 @@ int WebServer::Init(const std::string& db_path) {
     return 0;
 }
 
+void WebServer::HandlePcapUpload(const httplib::Request& req,
+                                 httplib::Response& res,
+                                 const httplib::ContentReader& content_reader) {
+    if (!req.is_multipart_form_data()) {
+        SetPcapUploadResponse(PcapUploadError::kInvalidRequest, "", &res);
+        return;
+    }
+
+    PcapUploadFields fields;
+    PcapMultipartPart current_part = PcapMultipartPart::kNone;
+    std::string current_field_name;
+    std::string current_field_value;
+    std::string error_message;
+    PcapUploadError upload_error = PcapUploadError::kOk;
+    std::unique_ptr<PcapUploadTransaction> transaction;
+
+    auto fail = [&](PcapUploadError error_code, const std::string& message) {
+        if (upload_error == PcapUploadError::kOk) {
+            upload_error = error_code;
+            error_message = message;
+        }
+        if (transaction) transaction->Rollback();
+        return false;
+    };
+    auto finish_field = [&]() {
+        if (current_part != PcapMultipartPart::kField) return true;
+        if (!fields.emplace(current_field_name, std::move(current_field_value)).second) {
+            return fail(PcapUploadError::kInvalidRequest, "duplicate multipart field");
+        }
+        current_field_name.clear();
+        current_field_value.clear();
+        current_part = PcapMultipartPart::kNone;
+        return true;
+    };
+
+    const bool read_ok = content_reader(
+        [&](const httplib::MultipartFormData& part) {
+            if (!finish_field()) return false;
+            if (transaction) {
+                return fail(PcapUploadError::kInvalidRequest, "file part must be last");
+            }
+            if (part.name != "file") {
+                if (!part.filename.empty()) {
+                    return fail(PcapUploadError::kInvalidRequest, "unexpected file part");
+                }
+                current_part = PcapMultipartPart::kField;
+                current_field_name = part.name;
+                current_field_value.clear();
+                return true;
+            }
+
+            PcapUploadRequest upload_request;
+            upload_error = ParsePcapUploadFields(fields, part.filename, &upload_request, &error_message);
+            if (upload_error != PcapUploadError::kOk) return false;
+            transaction = std::make_unique<PcapUploadTransaction>(
+                &managed_capture_store_,
+                std::move(upload_request),
+                pcap_upload_max_bytes_,
+                [this](const std::string& scheduler_request, std::string* message) {
+                    std::string scheduler_response;
+                    const int32_t rc = ProxyPostJson(scheduler_host_,
+                                                     scheduler_port_,
+                                                     "/channels/stream/add",
+                                                     scheduler_request,
+                                                     &scheduler_response);
+                    if (rc != error::OK && message) *message = std::move(scheduler_response);
+                    return MapPcapSchedulerError(rc);
+                });
+            upload_error = transaction->Begin(&error_message);
+            if (upload_error != PcapUploadError::kOk) return false;
+            current_part = PcapMultipartPart::kFile;
+            return true;
+        },
+        [&](const char* data, size_t size) {
+            if (current_part == PcapMultipartPart::kField) {
+                if (size > kMaxPcapUploadFieldBytes - current_field_value.size()) {
+                    return fail(PcapUploadError::kInvalidRequest, "multipart field is too large");
+                }
+                current_field_value.append(data, size);
+                return true;
+            }
+            if (current_part != PcapMultipartPart::kFile || !transaction) {
+                return fail(PcapUploadError::kInvalidRequest, "multipart content has no field header");
+            }
+            upload_error = transaction->Write(data, size, &error_message);
+            return upload_error == PcapUploadError::kOk;
+        });
+
+    if (!read_ok && upload_error == PcapUploadError::kOk) {
+        fail(PcapUploadError::kInvalidRequest, "invalid multipart request");
+    }
+    if (upload_error == PcapUploadError::kOk && !finish_field()) {
+        upload_error = PcapUploadError::kInvalidRequest;
+    }
+    if (upload_error == PcapUploadError::kOk && !transaction) {
+        fail(PcapUploadError::kInvalidRequest, "missing multipart file");
+    }
+
+    std::string public_json;
+    if (upload_error == PcapUploadError::kOk) {
+        upload_error = transaction->Complete(&public_json, &error_message);
+    }
+    SetPcapUploadResponse(upload_error, public_json, &res);
+}
+
 int WebServer::Start(const std::string& host, int port) {
     LOG_INFO("WebServer: listening on %s:%d", host.c_str(), port);
     if (!server_.listen(host, port)) {
@@ -816,7 +1027,8 @@ int32_t WebServer::HandleGetChannels(const std::string&, const std::string&, std
 
 int32_t WebServer::HandleQueryStreamChannels(const std::string&, const std::string& req, std::string& rsp) {
     const std::string body = req.empty() ? "{}" : req;
-    return ProxyPostJson(scheduler_host_, scheduler_port_, "/channels/stream/query", body, &rsp);
+    const int32_t rc = ProxyPostJson(scheduler_host_, scheduler_port_, "/channels/stream/query", body, &rsp);
+    return rc == error::OK ? RedactPublicStreamQueryResponse(&rsp) : rc;
 }
 
 int32_t WebServer::HandleQueryStreamChannelDefinitions(const std::string&,
@@ -839,7 +1051,81 @@ int32_t WebServer::HandleResetStreamChannel(const std::string&, const std::strin
 }
 
 int32_t WebServer::HandleRemoveStreamChannel(const std::string&, const std::string& req, std::string& rsp) {
-    return ProxyPostJson(scheduler_host_, scheduler_port_, "/channels/stream/remove", req, &rsp);
+    rapidjson::Document request;
+    request.Parse(req.c_str());
+    if (request.HasParseError() || !request.IsObject() ||
+        !request.HasMember("type") || !request["type"].IsString() || request["type"].GetStringLength() == 0 ||
+        !request.HasMember("name") || !request["name"].IsString() || request["name"].GetStringLength() == 0) {
+        rsp = R"({"error":"invalid_request"})";
+        return error::BAD_REQUEST;
+    }
+
+    const std::string type(request["type"].GetString(), request["type"].GetStringLength());
+    if (type != "pcapfile") {
+        return ProxyPostJson(scheduler_host_, scheduler_port_, "/channels/stream/remove", req, &rsp);
+    }
+    const std::string name(request["name"].GetString(), request["name"].GetStringLength());
+
+    std::string query_response;
+    const int32_t query_rc =
+        ProxyPostJson(scheduler_host_, scheduler_port_, "/channels/stream/query", "{}", &query_response);
+    if (query_rc != error::OK) {
+        rsp = std::move(query_response);
+        return query_rc;
+    }
+
+    rapidjson::Document query;
+    query.Parse(query_response.c_str());
+    if (query.HasParseError() || !query.IsObject() ||
+        !query.HasMember("channels") || !query["channels"].IsArray()) {
+        rsp = R"({"error":"invalid_scheduler_response"})";
+        return error::INTERNAL_ERROR;
+    }
+
+    size_t match_count = 0;
+    std::string capture_path;
+    for (const auto& channel : query["channels"].GetArray()) {
+        if (!channel.IsObject() || !channel.HasMember("type") || !channel["type"].IsString() ||
+            !channel.HasMember("name") || !channel["name"].IsString()) {
+            rsp = R"({"error":"invalid_scheduler_response"})";
+            return error::INTERNAL_ERROR;
+        }
+        const std::string channel_type(channel["type"].GetString(), channel["type"].GetStringLength());
+        const std::string channel_name(channel["name"].GetString(), channel["name"].GetStringLength());
+        if (channel_type != type || channel_name != name) continue;
+
+        ++match_count;
+        if (match_count > 1 || !channel.HasMember("option_json") || !channel["option_json"].IsObject()) {
+            rsp = R"({"error":"invalid_scheduler_response"})";
+            return error::INTERNAL_ERROR;
+        }
+        const auto& option = channel["option_json"];
+        if (option.HasMember("path")) {
+            if (!option["path"].IsString()) {
+                rsp = R"({"error":"invalid_scheduler_response"})";
+                return error::INTERNAL_ERROR;
+            }
+            capture_path.assign(option["path"].GetString(), option["path"].GetStringLength());
+        }
+    }
+    if (match_count != 1) {
+        rsp = R"({"error":"invalid_scheduler_response"})";
+        return error::INTERNAL_ERROR;
+    }
+
+    const int32_t remove_rc =
+        ProxyPostJson(scheduler_host_, scheduler_port_, "/channels/stream/remove", req, &rsp);
+    if (remove_rc != error::OK || capture_path.empty() ||
+        !managed_capture_store_.IsManagedPath(capture_path)) {
+        return remove_rc;
+    }
+
+    std::string remove_message;
+    if (managed_capture_store_.RemoveManaged(capture_path, &remove_message) != PcapUploadError::kOk) {
+        rsp = R"({"error":"storage_failure"})";
+        return error::INTERNAL_ERROR;
+    }
+    return error::OK;
 }
 
 int32_t WebServer::HandleGetOperators(const std::string&, const std::string& req, std::string& rsp) {

@@ -45,3 +45,5 @@ target_compile_options(${PROJECT_NAME} PRIVATE -UNDEBUG)
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
+
+add_test(NAME test_builtin COMMAND ${CMAKE_BINARY_DIR}/output/test_builtin)

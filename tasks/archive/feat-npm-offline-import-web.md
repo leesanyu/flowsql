@@ -1,6 +1,6 @@
 # Feature: NPM 离线文件上传与通道管理
 
-状态：`[-]` 进行中
+状态：`[x]` 已完成
 优先级：P0
 前置 Feature：`npm-offline-import`（已完成）
 
@@ -59,6 +59,8 @@ Content-Type: multipart/form-data
 
 单文件默认上限为 1 GiB，可由 WebPlugin 的 `pcap_upload_max_bytes` 配置覆盖。超过限制返回 HTTP 413，
 且不得保留临时文件。Web 必须分块写入磁盘，禁止把完整 capture 读入单个 `std::string` 或 JSON/Base64。
+multipart part 顺序固定为标量字段在前、唯一的 `file` part 最后，使 Web 可在首个文件字节到达前完成字段校验
+并启动受管事务；重复、未知或 file 后置标量字段均返回 400。
 
 成功时 Web 向 Scheduler 发送现有控制面请求：
 
@@ -127,9 +129,13 @@ struct ManagedCaptureRef {
 
 - Scheduler 正式运行环境必须同时具备 `libflowsql_npi.so`、可部署的 `protocols.yml` 和
   `libflowsql_pcapfile.so`；NPI 必须收到指向该协议文件的有效 `ldfile` 配置。
-- `PcapFilePlugin::Load()` 依赖进程内 `IID_PROTOCOL`。在开始 Web 上传生产实现前，PluginLoader 必须先修复为
-  批次执行“所有插件注册/Option → 所有 Load → 所有 Start”，且 Option/Load/Start 任意非零返回值均阻止启动。
-- NPI 与 pcapfile 的配置顺序不得影响加载结果；不得以“把 NPI 写在 pcapfile 前面”代替生命周期修复。
+- 插件依赖采用既有 Load/Start 两阶段：NPI 在 `Load()` 完成协议 provider 初始化；`PcapFilePlugin::Load()`
+  只保存 `IQuerier`，在所有插件完成 `Load()` 后由 `Start()` 查询并绑定 `IID_PROTOCOL`。缺少 NPI 时
+  `PcapFilePlugin::Start()` 返回 `ENODEV` 并阻止服务启动。
+- PluginLoader 必须批次执行“所有插件注册/Option → 所有 Load → 所有 Start”，Option/Load/Start 任意非零
+  返回值均为失败；Load 失败不进入 Start，Start 失败逆序停止已启动插件，应用入口不得吞掉加载失败后继续运行。
+- NPI 与 pcapfile 的配置顺序不得影响加载结果，不引入通用插件依赖图或拓扑排序；RouterAgency 等外部 HTTP
+  入口仅在内部 provider/业务插件成功 Start 后激活，失败路径不得留下半就绪监听窗口。
 
 ## 页面契约
 
@@ -146,8 +152,8 @@ struct ManagedCaptureRef {
 1. 用户在 Channels 页面选择文件、填写名称和回放参数并提交 multipart 请求。
 2. Web 校验字段和大小，在受管目录分块写入临时文件，完成后原子重命名。
 3. Web 以绝对受管路径构造小型 `pcapfile` source JSON，经 Gateway 的现有控制面调用 Scheduler。
-4. Scheduler 进程内 NPI 已注册 `IID_PROTOCOL`，`PcapFilePlugin` 校验文件头并打开通道；成功后 Web 返回
-   已脱敏的通道摘要，页面刷新列表。
+4. Scheduler 进程内 NPI 已完成 `Load()`，`PcapFilePlugin::Start()` 已绑定 `IID_PROTOCOL`；插件校验文件头并
+   打开通道，成功后 Web 返回已脱敏的通道摘要，页面刷新列表。
 5. 后续 Scheduler SQL 通过既有 block stream 链路消费该通道，不经过 Web 传输 packet 数据。
 
 ### 失败回滚与删除
@@ -159,15 +165,44 @@ struct ManagedCaptureRef {
 
 ## 原子任务
 
-- `[ ]` T1：冻结上传/删除 HTTP 契约、`ManagedCaptureRef`/受管路径 helper 接口，先增加字段校验、路径逃逸、
-  大小限制、失败回滚和响应脱敏测试锚点；不实现路由。
-- `[ ]` T2（P1 前置）：先以 framework 测试锚定插件顺序无关和 `Load()==ENODEV` 阻止启动，再修复
-  PluginLoader 为所有 Option → 所有 Load → 所有 Start，并统一按任意非零返回失败。
-- `[ ]` T3：实现仅绑定 Web 8081 的 multipart 分块上传、原子创建、失败回滚、受管删除和列表路径脱敏；
-  Web 只通过现有小型 JSON 控制请求调用 Scheduler。
-- `[ ]` T4：实现前端上传 API 与专用对话框，刷新列表并限制 `pcapfile` 的编辑/重置操作；执行前端构建。
-- `[ ]` T5：补齐单进程、Guardian 和 Docker 的 NPI/协议文件/pcapfile provider 与绝对共享目录部署；完成
-  真实 pcap/pcapng 上传→创建→Scheduler 消费→删除闭环，更新 `docs/framework.md` 并运行全量回归。
+- `[x]` T1：冻结上传/删除 HTTP 契约、`ManagedCaptureRef`/受管路径 helper 接口，先增加字段校验、路径逃逸、
+  大小限制、失败回滚和响应脱敏测试锚点；不实现路由。按以下原子切片执行，全部完成后才勾选 T1：
+  - `[x]` T1.1：冻结并实现上传字段/default、严格整数解析、大小累计检查、固定错误映射，以及包含 canonical
+    path 的 Scheduler 内部 JSON 和不含 path/option 的浏览器响应 JSON；`test_pcap_upload_contract` 与既有
+    `test_framework` 已通过。
+  - `[x]` T1.2：冻结并实现受管绝对根目录、canonical 路径约束、`.part` 生命周期、原子提交、失败回滚和安全删除
+    helper 契约，并先增加路径逃逸、残留文件和非受管路径拒删测试；不注册真实 HTTP 路由。
+- `[x]` T2（P1 前置）：按以下原子切片修复插件批次生命周期、pcapfile/NPI 两阶段依赖与外部入口激活门禁，
+  全部完成后才勾选 T2：
+  - `[x]` T2.1：以动态 fixture 测试锚定所有 Option 先于所有 Load、所有 Load 先于所有 Start、
+    Option/Load/Start 任意非零失败和 Start 失败逆序 Stop；修复 PluginLoader 的批次调用/回滚，并使应用入口
+    一次提交完整插件批次、加载失败立即退出，不涉及具体插件依赖。
+  - `[x]` T2.2：使 `PcapFilePlugin::Load()` 只保存 `IQuerier`，`Start()` 再按 `IID_PROTOCOL` 绑定已完成 Load 的
+    NPI；测试 NPI/pcapfile 两种配置顺序均成功，缺少 NPI 时返回 `ENODEV` 且不启动服务。
+  - `[x]` T2.3：测试并实现 RouterAgency 等外部 HTTP 入口最后激活；内部 provider/业务插件 Start 失败时不得
+    进入外部监听，不引入依赖图或拓扑排序。
+- `[x]` T3：实现仅绑定 Web 8081 的 multipart 分块上传、原子创建、失败回滚、受管删除和列表路径脱敏；
+  Web 只通过现有小型 JSON 控制请求调用 Scheduler。按以下原子切片执行，全部完成后才勾选 T3：
+  - `[x]` T3.1：实现与 HTTP 无关的上传事务协调器，以 `Begin → Write* → Complete` 驱动
+    `ManagedCaptureStore`，在 Finalize 后通过注入 callback 发送 Scheduler add JSON；Scheduler 失败立即回滚，
+    成功 Commit 并只返回不含受管路径的 `running` 摘要。测试成功、重名、provider 不可用、格式错误、超限、
+    存储失败和回滚；不注册路由。
+  - `[x]` T3.2：在 Web 8081 初始化受管目录与大小限制，使用 httplib content reader/multipart callback 将文件体
+    分块写入 T3.1 协调器；上传路由不得加入 `EnumApiRoutes()`，RouterAgency/Gateway 的请求体限制保持不变。
+  - `[x]` T3.3：实现受管 `pcapfile` 删除事务；先查询并保存 Scheduler 内部 canonical path，Scheduler remove
+    成功并释放句柄后再安全删除受管文件，删除失败时保留文件与通道状态。
+  - `[x]` T3.4：过滤 Web 对外查询/列表中的 `pcapfile` 路径与 `option/options/option_json` 敏感字段；普通 Stream、
+    DataFrame 和 Database 响应保持不变，完成后勾选 T3。
+- `[x]` T4：实现前端上传 API 与专用对话框，刷新列表并限制 `pcapfile` 的编辑/重置操作；执行前端构建。
+- `[x]` T5：补齐生产部署、真实消费闭环、文档和全量回归。按以下原子切片执行，全部完成后才勾选 T5：
+  - `[x]` T5.1：补齐原生单进程/Guardian 配置中的 NPI、协议文件、pcapfile provider 和宿主机绝对上传目录；
+    构建后同步 `protocols.yml`，以配置解析测试锚定插件 option 和 Web/Scheduler 路径契约。
+  - `[x]` T5.2：补齐 Docker 镜像中的协议资产、Scheduler 的 NPI/pcapfile provider，以及 Web/Scheduler 同路径
+    共享 capture volume；用 Docker Compose 配置校验锚定部署契约。
+  - `[x]` T5.3：以真实 pcap/pcapng fixture 完成 Web HTTP 上传→创建→Scheduler 消费至 completed→受管删除
+    端到端闭环，并锚定坏格式失败不留通道/文件。
+  - `[x]` T5.4：更新 `docs/framework.md`，执行前端生产构建、标准 CMake 全量构建、完整 CTest 和 diff 检查；
+    全部通过后完成 T5、归档 Feature 并更新顶层需求状态。
 
 ## 测试锚点
 
@@ -177,7 +212,7 @@ struct ManagedCaptureRef {
 | 平面隔离 | 上传路由仅存在于 Web 8081 的外部 server，不出现在 `EnumApiRoutes`；Gateway/Router 不接收文件体 |
 | 文件所有权 | 分块落盘；成功前只存在 `.part`；超限/中断/写入失败/通道创建失败不遗留文件 |
 | 路径安全 | 客户端文件名不能逃逸受管根；只删除规范路径位于受管根内的文件；所有 Web 响应不暴露绝对路径 |
-| 插件生命周期 | 所有 Option 先于所有 Load、所有 Load 先于所有 Start；NPI/pcapfile 顺序互换均成功；任意非零返回阻止启动 |
+| 插件生命周期 | Option/Load/Start 分批；pcapfile 在 Start 绑定 NPI；缺失依赖或任意失败均回滚，外部入口不激活 |
 | 端到端 | 上传真实 fixture 后列表可见，Scheduler 可消费并到达 completed；坏格式不会创建通道 |
 | 部署回归 | 三类部署加载 NPI/协议定义/pcapfile 且使用同一绝对路径；普通通道与既有 CTest 不回归 |
 
@@ -185,8 +220,9 @@ struct ManagedCaptureRef {
 
 1. T1～T5 全部完成，浏览器无需服务器路径即可上传单个 pcap/pcapng 并创建 `pcapfile` source。
 2. 大文件按块落盘；失败回滚、受管删除和路径逃逸测试全部通过。
-3. 插件生命周期批次执行且非零失败门禁生效；正式单进程、Guardian 和 Docker 均加载 NPI、协议定义和
-   pcapfile provider，Web/Scheduler 对同一绝对上传路径具有一致可见性。
+3. 插件生命周期批次执行，pcapfile 在 Start 阶段绑定已 Load 的 NPI，非零失败、回滚和外部入口激活门禁
+   生效；正式单进程、Guardian 和 Docker 均加载 NPI、协议定义和 pcapfile provider，Web/Scheduler 对同一
+   绝对上传路径具有一致可见性。
 4. Web 外部响应不泄露受管绝对路径，Router/Gateway 不承载 capture 文件体。
 5. `docs/framework.md` 与实现一致；前端生产构建、标准 CMake 全量构建、相关 CTest 和
    `git diff --check` 全部通过。

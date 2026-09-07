@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "dataframe_channel.h"
 
@@ -91,6 +86,19 @@ int DataFrameChannel::Append(IDataFrame* df) {
         return 0;
     } else if (!SchemaCompatibleLocked(current_schema, incoming_schema)) {
         return -1;
+    }
+
+    const auto current_batch = data_.ToArrow();
+    const auto incoming_batch = df->ToArrow();
+    if (current_batch && incoming_batch &&
+        current_batch->schema()->Equals(incoming_batch->schema())) {
+        auto concatenated = arrow::ConcatenateRecordBatches({current_batch, incoming_batch});
+        if (!concatenated.ok()) {
+            return -1;
+        }
+        data_.FromArrow(*concatenated);
+        RefreshSchemaCacheLocked();
+        return 0;
     }
 
     DataFrame merged;

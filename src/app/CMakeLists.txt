@@ -11,21 +11,33 @@ set_target_properties(flowsql PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
 
-# 构建后同步运行时配置到 output/config，避免使用旧副本导致行为与仓库配置不一致。
-add_custom_command(TARGET flowsql POST_BUILD
+set(FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR ${CMAKE_SOURCE_DIR}/../config)
+set(FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR ${CMAKE_BINARY_DIR}/output/config)
+set(FLOWSQL_NPI_PROTOCOLS_SOURCE ${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml)
+add_custom_target(flowsql_runtime_config
     COMMAND ${CMAKE_COMMAND} -E make_directory
-        ${CMAKE_BINARY_DIR}/output/config
+        ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_SOURCE_DIR}/../config/flowsql.yml
-        ${CMAKE_BINARY_DIR}/output/config/flowsql.yml
+        ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/flowsql.yml
+        ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/flowsql.yml
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_SOURCE_DIR}/../config/deploy-single.yaml
-        ${CMAKE_BINARY_DIR}/output/config/deploy-single.yaml
+        ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/deploy-single.yaml
+        ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/deploy-single.yaml
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_SOURCE_DIR}/../config/deploy-multi.yaml
-        ${CMAKE_BINARY_DIR}/output/config/deploy-multi.yaml
+        ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/deploy-multi.yaml
+        ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/deploy-multi.yaml
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${FLOWSQL_NPI_PROTOCOLS_SOURCE}
+        ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/protocols.yml
+    DEPENDS
+        ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/flowsql.yml
+        ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/deploy-single.yaml
+        ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/deploy-multi.yaml
+        ${FLOWSQL_NPI_PROTOCOLS_SOURCE}
     COMMENT "Syncing runtime config files to output/config"
+    VERBATIM
 )
+add_dependencies(flowsql flowsql_runtime_config)
 
 # 构建后将 web/static 复制到 output/static（前端静态文件）
 # flowsql_web 目标已负责同步静态资源；这里避免并发 copy_directory 造成竞态失败。

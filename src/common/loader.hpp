@@ -1,19 +1,17 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_COMMON_LOADER_HPP_
 #define _FLOWSQL_COMMON_LOADER_HPP_
 
+#include <algorithm>
 #include <functional>
 #include <map>
+#include <string>
 #include <vector>
-#include "toolkit.hpp"
+
 #include "iplugin.h"
+#include "toolkit.hpp"
 
 namespace flowsql {
 
@@ -47,96 +45,108 @@ class PluginLoader : public IRegister, public IQuerier {
 
     std::map<Guid, std::vector<void*>> ifs_ref_;
     std::vector<thandle> plugins_ref_;
-    size_t started_count_ = 0;
+    std::vector<IPlugin*> started_plugins_;
 };
 
 typedef flowsql::IPlugin* (*fnregister)(flowsql::IRegister*, const char*);
+typedef void (*fnunregister)();
 inline int PluginLoader::Load(const char* fullpath[], int count) {
-    std::string app_path = get_absolute_process_path();
-    app_path += "/";
-    for (int pos = 0; pos < count; ++pos) {
-        std::string lib_path = app_path + fullpath[pos];
-        thandle h = loadlibrary(lib_path.c_str());
-        if (!h) {
-            printf("Load shared library '%s' faild, error : '%s'\n", lib_path.c_str(), getlasterror());
-            return -1;
-        }
+    if (count < 0 || (count > 0 && !fullpath)) return -1;
 
-        fnregister fregist = (fnregister)getprocaddress(h, "pluginregist");
-        if (!fregist) {
-            printf("'%s' getprocaddress of '%s' faild\n", lib_path.c_str(), "pluginregist");
-            freelibrary(h);
-            return -1;
-        }
-
-        size_t prev_count = ifs_ref_[flowsql::IID_PLUGIN].size();
-        fregist(this, nullptr);
-
-        // 遍历本次 .so 注册的所有 IPlugin 调用 Load(IQuerier*)
-        auto& plugins = ifs_ref_[flowsql::IID_PLUGIN];
-        for (size_t i = prev_count; i < plugins.size(); ++i) {
-            auto* plugin = reinterpret_cast<flowsql::IPlugin*>(plugins[i]);
-            if (-1 == plugin->Load(this)) {
-                printf("'%s' plugin load faild\n", lib_path.c_str());
-                freelibrary(h);
-                return -1;
-            }
-        }
-
-        plugins_ref_.push_back(h);
-    }
-    return 0;
+    std::vector<const char*> options(static_cast<size_t>(count), nullptr);
+    return Load(get_absolute_process_path(), fullpath, options.data(), count);
 }
 
 inline int PluginLoader::Load(const char* path, const char* relapath[], const char* option[], int count) {
-    char realpath[PATH_MAX] = {0};
-    size_t pathlen = strlen(path);
-    if (pathlen + 1 >= PATH_MAX) {
-        printf("library path '%s' too long.\n", path);
-        return -1;
-    }
-    strncpy(realpath, path, pathlen);
-    realpath[pathlen++] = '/';
-    for (int pos = 0; pos < count; ++pos) {
-        thandle h = 0;
-        if (relapath[pos][0] == '/' || relapath[pos][0] == '.') {
-            h = loadlibrary(relapath[pos]);
-        } else {
-            strncpy(realpath + pathlen, relapath[pos], strlen(relapath[pos]) + 1);
-            h = loadlibrary(realpath);
-        }
-        if (!h) {
-            printf("Load shared library '%s' faild, error : '%s'\n", relapath[pos], getlasterror());
-            return -1;
-        }
+    if (count < 0 || (count > 0 && (!path || !relapath))) return -1;
 
-        fnregister fregist = (fnregister)getprocaddress(h, "pluginregist");
-        if (!fregist) {
-            printf("'%s' getprocaddress of '%s' faild\n", relapath[pos], "pluginregist");
-            freelibrary(h);
-            return -1;
-        }
+    std::map<Guid, size_t> previous_interface_counts;
+    for (const auto& entry : ifs_ref_) previous_interface_counts.emplace(entry.first, entry.second.size());
 
-        size_t prev_count = ifs_ref_[flowsql::IID_PLUGIN].size();
-        fregist(this, option[pos]);
+    std::vector<thandle> pending_handles;
+    std::vector<IPlugin*> pending_plugins;
 
-        // 遍历本次 .so 注册的所有 IPlugin 调用 Load(IQuerier*)
-        auto& plugins = ifs_ref_[flowsql::IID_PLUGIN];
-        for (size_t i = prev_count; i < plugins.size(); ++i) {
-            auto* plugin = reinterpret_cast<flowsql::IPlugin*>(plugins[i]);
-            if (-1 == plugin->Load(this)) {
-                printf("'%s' plugin load faild\n", relapath[pos]);
-                freelibrary(h);
-                return -1;
+    auto restore_interfaces = [this, &previous_interface_counts]() {
+        for (auto it = ifs_ref_.begin(); it != ifs_ref_.end();) {
+            auto previous = previous_interface_counts.find(it->first);
+            if (previous == previous_interface_counts.end()) {
+                it = ifs_ref_.erase(it);
+                continue;
             }
+            it->second.resize(previous->second);
+            ++it;
+        }
+    };
+
+    auto release_handles = [&pending_handles]() {
+        for (auto it = pending_handles.rbegin(); it != pending_handles.rend(); ++it) {
+            fnunregister unregister = reinterpret_cast<fnunregister>(getprocaddress(*it, "pluginunregist"));
+            if (unregister) unregister();
+            freelibrary(*it);
+        }
+        pending_handles.clear();
+    };
+
+    auto rollback = [&pending_plugins, &restore_interfaces, &release_handles](size_t attempted_loads) {
+        while (attempted_loads > 0) pending_plugins[--attempted_loads]->Unload();
+        restore_interfaces();
+        release_handles();
+    };
+
+    // Phase 1: load every library and finish every plugin registration/Option before any Load call.
+    for (int pos = 0; pos < count; ++pos) {
+        if (!relapath[pos]) {
+            rollback(0);
+            return -1;
         }
 
-        plugins_ref_.push_back(h);
+        std::string library_path = relapath[pos];
+        if (!library_path.empty() && library_path[0] != '/' && library_path[0] != '.') {
+            library_path = std::string(path) + "/" + library_path;
+        }
+
+        thandle h = loadlibrary(library_path.c_str());
+        if (!h) {
+            printf("Load shared library '%s' failed, error: '%s'\n", library_path.c_str(), getlasterror());
+            rollback(0);
+            return -1;
+        }
+        pending_handles.push_back(h);
+
+        fnregister register_plugin = reinterpret_cast<fnregister>(getprocaddress(h, "pluginregist"));
+        if (!register_plugin) {
+            printf("'%s' getprocaddress of '%s' failed\n", library_path.c_str(), "pluginregist");
+            rollback(0);
+            return -1;
+        }
+
+        const size_t previous_plugin_count = ifs_ref_[flowsql::IID_PLUGIN].size();
+        IPlugin* registered = register_plugin(this, option ? option[pos] : nullptr);
+        auto& plugins = ifs_ref_[flowsql::IID_PLUGIN];
+        if (!registered || plugins.size() == previous_plugin_count) {
+            printf("'%s' plugin registration/Option failed\n", library_path.c_str());
+            rollback(0);
+            return -1;
+        }
+        for (size_t i = previous_plugin_count; i < plugins.size(); ++i) {
+            pending_plugins.push_back(reinterpret_cast<IPlugin*>(plugins[i]));
+        }
     }
+
+    // Phase 2: only a fully registered/configured batch may enter Load.
+    for (size_t i = 0; i < pending_plugins.size(); ++i) {
+        if (pending_plugins[i]->Load(this) != 0) {
+            printf("IPlugin::Load() failed at batch index %zu\n", i);
+            rollback(i + 1);
+            return -1;
+        }
+    }
+
+    plugins_ref_.insert(plugins_ref_.end(), pending_handles.begin(), pending_handles.end());
+    pending_handles.clear();
     return 0;
 }
 
-typedef void (*fnunregister)();
 inline int PluginLoader::Unload() {
     this->Traverse(flowsql::IID_PLUGIN, [](void* imod) {
         flowsql::IPlugin* iplugin_ = reinterpret_cast<flowsql::IPlugin*>(imod);
@@ -153,7 +163,7 @@ inline int PluginLoader::Unload() {
 
     plugins_ref_.clear();
     ifs_ref_.clear();
-    started_count_ = 0;
+    started_plugins_.clear();
 
     return 0;
 }
@@ -187,31 +197,46 @@ inline int PluginLoader::StartAll() {
     if (it == ifs_ref_.end()) return 0;
 
     auto& plugins = it->second;
-    for (size_t i = started_count_; i < plugins.size(); ++i) {
-        auto* plugin = reinterpret_cast<flowsql::IPlugin*>(plugins[i]);
-        if (-1 == plugin->Start()) {
-            printf("IPlugin::Start() failed at index %zu, rolling back\n", i);
-            for (size_t j = i; j > started_count_; --j) {
-                auto* started = reinterpret_cast<flowsql::IPlugin*>(plugins[j - 1]);
-                started->Stop();
-            }
-            return -1;
+    std::vector<void*> external_entries;
+    auto external_it = ifs_ref_.find(flowsql::IID_PLUGIN_EXTERNAL_ENTRY);
+    if (external_it != ifs_ref_.end()) external_entries = external_it->second;
+
+    const size_t previous_started_count = started_plugins_.size();
+    auto rollback = [this, previous_started_count]() {
+        while (started_plugins_.size() > previous_started_count) {
+            started_plugins_.back()->Stop();
+            started_plugins_.pop_back();
         }
-    }
-    started_count_ = plugins.size();
-    return 0;
+    };
+
+    auto start_phase = [&](bool external_entry) {
+        for (size_t i = 0; i < plugins.size(); ++i) {
+            auto* plugin = reinterpret_cast<IPlugin*>(plugins[i]);
+            const bool marked_external =
+                std::find(external_entries.begin(), external_entries.end(), plugin) != external_entries.end();
+            if (marked_external != external_entry ||
+                std::find(started_plugins_.begin(), started_plugins_.end(), plugin) != started_plugins_.end()) {
+                continue;
+            }
+            if (plugin->Start() != 0) {
+                printf("IPlugin::Start() failed at index %zu, rolling back\n", i);
+                rollback();
+                return -1;
+            }
+            started_plugins_.push_back(plugin);
+        }
+        return 0;
+    };
+
+    if (start_phase(false) != 0) return -1;
+    return start_phase(true);
 }
 
 inline void PluginLoader::StopAll() {
-    auto it = ifs_ref_.find(flowsql::IID_PLUGIN);
-    if (it == ifs_ref_.end()) return;
-
-    auto& plugins = it->second;
-    for (size_t i = started_count_; i > 0; --i) {
-        auto* plugin = reinterpret_cast<flowsql::IPlugin*>(plugins[i - 1]);
-        plugin->Stop();
+    while (!started_plugins_.empty()) {
+        started_plugins_.back()->Stop();
+        started_plugins_.pop_back();
     }
-    started_count_ = 0;
 }
 
 }  // namespace flowsql

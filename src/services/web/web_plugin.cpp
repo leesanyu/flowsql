@@ -1,19 +1,29 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "web_plugin.h"
 
+#include <charconv>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <system_error>
 
 namespace flowsql {
 namespace web {
+
+namespace {
+
+bool ParsePositiveUint64(const std::string& text, uint64_t* output) {
+    if (!output || text.empty()) return false;
+    uint64_t parsed = 0;
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    const auto result = std::from_chars(begin, end, parsed, 10);
+    if (result.ec != std::errc() || result.ptr != end || parsed == 0) return false;
+    *output = parsed;
+    return true;
+}
+
+}  // namespace
 
 int WebPlugin::Option(const char* arg) {
     if (!arg) return 0;
@@ -35,6 +45,9 @@ int WebPlugin::Option(const char* arg) {
         else if (key == "worker_host") worker_host_ = val;
         else if (key == "worker_port") worker_port_ = std::stoi(val);
         else if (key == "upload_dir") upload_dir_ = val;
+        else if (key == "pcap_upload_max_bytes") {
+            if (!ParsePositiveUint64(val, &pcap_upload_max_bytes_)) return -1;
+        }
         else if (key == "gateway") {
             // 格式：host:port，内部服务转发目标
             size_t colon = val.find(':');
@@ -64,6 +77,7 @@ int WebPlugin::Start() {
     // 内部服务转发走 Gateway，与 worker 地址分开
     server_.SetSchedulerAddress(gateway_host_, gateway_port_);
     server_.SetUploadDir(upload_dir_);
+    server_.SetPcapUploadMaxBytes(pcap_upload_max_bytes_);
 
     if (server_.Init(db_path_) != 0) {
         printf("WebPlugin::Start: failed to init WebServer\n");

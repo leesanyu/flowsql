@@ -1,15 +1,11 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "catalog_plugin.h"
 
 #include <framework/core/dataframe.h>
 #include <framework/core/dataframe_channel.h>
+#include <framework/core/packet_codec.h>
 #include <framework/interfaces/ibuiltin_registry.h>
 
 #include <common/error_code.h>
@@ -25,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <string_view>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -78,6 +75,89 @@ int MoveUploadedFile(const fs::path& src, const fs::path& dst) {
     if (ec) return -1;
     fs::remove(src, ec);
     return 0;
+}
+
+constexpr size_t kPacketPreviewBytes = 64;
+using JsonWriter = rapidjson::Writer<rapidjson::StringBuffer>;
+
+std::string HexEncode(std::string_view bytes, size_t max_bytes) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    const size_t encoded_bytes = std::min(bytes.size(), max_bytes);
+    std::string output;
+    output.reserve(encoded_bytes * 2);
+    for (size_t index = 0; index < encoded_bytes; ++index) {
+        const uint8_t value = static_cast<uint8_t>(bytes[index]);
+        output.push_back(kHex[value >> 4]);
+        output.push_back(kHex[value & 0x0f]);
+    }
+    return output;
+}
+
+bool WritePacketPreviewValue(JsonWriter* writer,
+                             const std::shared_ptr<arrow::Array>& array,
+                             int64_t row,
+                             const std::string& field_name) {
+    if (!writer || !array || row < 0 || row >= array->length()) return false;
+    if (array->IsNull(row)) {
+        writer->Null();
+        return true;
+    }
+
+    switch (array->type_id()) {
+        case arrow::Type::INT64:
+            writer->Int64(std::static_pointer_cast<arrow::Int64Array>(array)->Value(row));
+            return true;
+        case arrow::Type::UINT8:
+            writer->Uint(std::static_pointer_cast<arrow::UInt8Array>(array)->Value(row));
+            return true;
+        case arrow::Type::UINT16:
+            writer->Uint(std::static_pointer_cast<arrow::UInt16Array>(array)->Value(row));
+            return true;
+        case arrow::Type::UINT32:
+            writer->Uint(std::static_pointer_cast<arrow::UInt32Array>(array)->Value(row));
+            return true;
+        case arrow::Type::UINT64:
+            writer->Uint64(std::static_pointer_cast<arrow::UInt64Array>(array)->Value(row));
+            return true;
+        case arrow::Type::BOOL:
+            writer->Bool(std::static_pointer_cast<arrow::BooleanArray>(array)->Value(row));
+            return true;
+        case arrow::Type::BINARY: {
+            const auto view = std::static_pointer_cast<arrow::BinaryArray>(array)->GetView(row);
+            const std::string hex = HexEncode(view, field_name == "raw_data" ? kPacketPreviewBytes : view.size());
+            if (field_name != "raw_data") {
+                writer->String(hex.c_str());
+                return true;
+            }
+            writer->StartObject();
+            writer->Key("hex");
+            writer->String(hex.c_str());
+            writer->Key("byte_length");
+            writer->Uint64(view.size());
+            writer->Key("truncated");
+            writer->Bool(view.size() > kPacketPreviewBytes);
+            writer->EndObject();
+            return true;
+        }
+        case arrow::Type::FIXED_SIZE_BINARY: {
+            const auto view = std::static_pointer_cast<arrow::FixedSizeBinaryArray>(array)->GetView(row);
+            const std::string hex = HexEncode(view, view.size());
+            writer->String(hex.c_str());
+            return true;
+        }
+        case arrow::Type::FIXED_SIZE_LIST: {
+            const auto list = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
+            const auto values = list->value_slice(row);
+            writer->StartArray();
+            for (int64_t index = 0; index < values->length(); ++index) {
+                if (!WritePacketPreviewValue(writer, values, index, "")) return false;
+            }
+            writer->EndArray();
+            return true;
+        }
+        default:
+            return false;
+    }
 }
 }  // namespace
 
@@ -573,6 +653,24 @@ int32_t CatalogPlugin::HandlePreview(const std::string&, const std::string& req,
         return error::BAD_REQUEST;
     }
 
+    uint32_t page = 1;
+    uint32_t page_size = 100;
+    if (doc.HasMember("page")) {
+        if (!doc["page"].IsUint() || doc["page"].GetUint() == 0) {
+            rsp = R"({"error":"page must be a positive integer"})";
+            return error::BAD_REQUEST;
+        }
+        page = doc["page"].GetUint();
+    }
+    if (doc.HasMember("page_size")) {
+        if (!doc["page_size"].IsUint() || doc["page_size"].GetUint() == 0 ||
+            doc["page_size"].GetUint() > 100) {
+            rsp = R"({"error":"page_size must be an integer between 1 and 100"})";
+            return error::BAD_REQUEST;
+        }
+        page_size = doc["page_size"].GetUint();
+    }
+
     auto raw_ch = Get(doc["name"].GetString());
     auto ch = std::dynamic_pointer_cast<IDataFrameChannel>(raw_ch);
     if (!ch) {
@@ -588,46 +686,77 @@ int32_t CatalogPlugin::HandlePreview(const std::string&, const std::string& req,
 
     const auto schema = data.GetSchema();
     const int rows = data.RowCount();
-    const int cap = rows > 100 ? 100 : rows;
+    const auto batch = data.ToArrow();
+    const bool is_packet = batch && batch->schema()->Equals(packet::PacketSchema(), true);
+    const int64_t begin = static_cast<int64_t>(page - 1) * page_size;
+    const int64_t end = std::min<int64_t>(rows, begin + page_size);
 
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
     w.StartObject();
+    if (is_packet) {
+        w.Key("entity");
+        w.String("packet");
+    }
     w.Key("columns");
     w.StartArray();
-    for (const auto& f : schema) w.String(f.name.c_str());
+    if (is_packet) {
+        for (const auto& field : batch->schema()->fields()) w.String(field->name().c_str());
+    } else {
+        for (const auto& field : schema) w.String(field.name.c_str());
+    }
     w.EndArray();
     w.Key("types");
     w.StartArray();
-    for (const auto& f : schema) w.String(DataTypeName(f.type));
+    if (is_packet) {
+        for (const auto& field : batch->schema()->fields()) w.String(field->type()->ToString().c_str());
+    } else {
+        for (const auto& field : schema) w.String(DataTypeName(field.type));
+    }
     w.EndArray();
     w.Key("data");
     w.StartArray();
-    for (int r = 0; r < cap; ++r) {
-        const auto row = data.GetRow(r);
+    for (int64_t row_index = begin; row_index < end; ++row_index) {
         w.StartArray();
-        for (const auto& v : row) {
-            std::visit(
-                [&](auto&& val) {
-                    using T = std::decay_t<decltype(val)>;
-                    if constexpr (std::is_same_v<T, int32_t>) w.Int(val);
-                    else if constexpr (std::is_same_v<T, int64_t>) w.Int64(val);
-                    else if constexpr (std::is_same_v<T, uint32_t>) w.Uint(val);
-                    else if constexpr (std::is_same_v<T, uint64_t>) w.Uint64(val);
-                    else if constexpr (std::is_same_v<T, float>) w.Double(val);
-                    else if constexpr (std::is_same_v<T, double>) w.Double(val);
-                    else if constexpr (std::is_same_v<T, std::string>) w.String(val.c_str());
-                    else if constexpr (std::is_same_v<T, std::vector<uint8_t>>)
-                        w.String(reinterpret_cast<const char*>(val.data()), val.size());
-                    else if constexpr (std::is_same_v<T, bool>) w.Bool(val);
-                },
-                v);
+        if (is_packet) {
+            for (int column = 0; column < batch->num_columns(); ++column) {
+                if (!WritePacketPreviewValue(&w,
+                                             batch->column(column),
+                                             row_index,
+                                             batch->schema()->field(column)->name())) {
+                    rsp = R"({"error":"unsupported packet preview value"})";
+                    return error::INTERNAL_ERROR;
+                }
+            }
+        } else {
+            const auto row = data.GetRow(static_cast<int32_t>(row_index));
+            for (const auto& value : row) {
+                std::visit(
+                    [&](auto&& item) {
+                        using T = std::decay_t<decltype(item)>;
+                        if constexpr (std::is_same_v<T, int32_t>) w.Int(item);
+                        else if constexpr (std::is_same_v<T, int64_t>) w.Int64(item);
+                        else if constexpr (std::is_same_v<T, uint32_t>) w.Uint(item);
+                        else if constexpr (std::is_same_v<T, uint64_t>) w.Uint64(item);
+                        else if constexpr (std::is_same_v<T, float>) w.Double(item);
+                        else if constexpr (std::is_same_v<T, double>) w.Double(item);
+                        else if constexpr (std::is_same_v<T, std::string>) w.String(item.c_str());
+                        else if constexpr (std::is_same_v<T, std::vector<uint8_t>>)
+                            w.String(reinterpret_cast<const char*>(item.data()), item.size());
+                        else if constexpr (std::is_same_v<T, bool>) w.Bool(item);
+                    },
+                    value);
+            }
         }
         w.EndArray();
     }
     w.EndArray();
     w.Key("rows");
     w.Int(rows);
+    w.Key("page");
+    w.Uint(page);
+    w.Key("page_size");
+    w.Uint(page_size);
     w.EndObject();
     rsp = buf.GetString();
     return error::OK;

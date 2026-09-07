@@ -18,6 +18,7 @@ COPY build/output/flowsql          ./bin/flowsql
 COPY build/output/lib*.so          ./bin/
 COPY build/output/static/          ./bin/static/
 COPY config/                       ./config/
+COPY src/plugins/npi/conf/protocols.yml ./config/protocols.yml
 
 # Python Worker 源码（如果存在）
 COPY src/python/                   ./python/

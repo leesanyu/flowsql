@@ -1,66 +1,63 @@
 # Active Task
 
-Feature：`npm-offline-import-web`
-原子任务：T0.1 控制面/数据面与部署依赖规格修订
+Feature：`npm-packet-dataframe-view`
+原子任务：T5 移除命名 DataFrame 写入响应的全量展示序列化
 状态：已完成
 
 ## 业务意图
 
-- 按 `docs/framework.md` 与现有代码实现复核 `npm-offline-import-web` 规格，使浏览器上传、服务间控制请求、
-  Scheduler 数据消费三段链路明确落在各自架构平面。
-- 补齐会阻断生产闭环的 NPI provider、协议定义文件、插件批次生命周期、共享绝对路径和受管文件所有权契约，
-  作为后续 Contract/Test First 的实施边界。
+- `SELECT ... INTO dataframe.<name>` 只把原生 Arrow 数据写入命名 DataFrame，不在执行完成阶段调用
+  `DataFrame::ToJson()`。
+- 执行响应只返回状态、行数和 `result_target`；packet 的 JSON/hex 转换只发生在 Catalog 分页 preview。
 
 ## Non-Goals
 
-- 不修改 PluginLoader、Web、Scheduler、pcapfile、NPI、Router、部署配置、前端或测试代码。
-- 不实现上传、删除、路径脱敏、插件生命周期修复或 T1～T5 中任一生产功能。
-- 不改变任何公共 C++ ABI、packet Schema 或现有 HTTP 路由实现。
-- 不重新打开已归档并按原 Non-Goals 完成的 `npm-offline-import` Feature。
-- 不执行 `git commit`/`git push`。
+- 不改变无 `INTO dataframe.*` 查询的即时结果响应，不改变 database/stream sink 语义。
+- 不修改 `pcapfile`、DataFrame/Arrow 存储、Catalog serializer、Web 或前端。
+- 不改变 packet Schema、raw hex 64 字节截断或 preview 分页契约。
+- 不清理其他 Feature 的既有未提交内容，不读取 `tasks/sprints/**`，不执行 commit/push。
 
-## 边界
+## 契约与测试锚点
 
-- 上传路由只绑定 WebServer 对外监听的 `httplib::Server`（默认 8081），不得通过 `EnumApiRoutes()` 注册到
-  RouterAgency（默认 18802）；capture 文件内容只终止于 Web 北向入口。
-- Web 只通过现有 HTTP URI 向 Scheduler 发送小型通道 JSON；packet 运行时数据继续使用
-  `IBlockStreamChannel`/Arrow batch，不经过 HTTP。
-- `pcap_upload_dir` 必须在启动时解析为绝对规范路径；Web 与 Scheduler 在单进程、Guardian 和 Docker
-  部署中必须看到相同绝对目录，禁止依赖当前工作目录碰巧一致。
-- Web 的受管文件存储拥有 `.part`、最终文件、失败回滚和安全删除生命周期；`PcapFileChannel` 只拥有打开的
-  文件句柄及读取/batch 状态，不主动删除文件。
-- 生产闭环必须同时部署 NPI provider、`protocols.yml` 和有效 `ldfile`，再加载 pcapfile provider；
-  PluginLoader 必须先满足“所有 Option → 所有 Load → 所有 Start”且任意非零生命周期返回值均失败。
+- 命名 DataFrame 成功响应恰好包含 `status`、`rows`、`result_row_count`、`result_target`，不包含 `data`。
+- 修改生产代码前，Scheduler E2E 和 Web E2E 必须因执行响应仍包含 `data` 而红灯。
+- 命名 DataFrame 内部仍保持完整 `packet::PacketSchema()`、行序和原始 binary；既有直接读取断言继续通过。
+- Web E2E 随后调用 preview，继续验证按页生成 raw hex 及 layer 数字/数组。
 
 ## 允许修改的文件
 
-- `tasks/active_task.md`：冻结并记录本次文档原子任务状态。
-- `tasks/specs/feat-npm-offline-import-web.md`：修订精益规格和任务/测试锚点。
+- `tasks/active_task.md`
+- `tasks/product_backlog.md`
+- `tasks/archive/feat-npm-packet-dataframe-view.md`
+- `tasks/specs/feat-npm-packet-dataframe-view.md`
+- `src/services/scheduler/scheduler_routes.cpp`
+- `src/tests/test_scheduler_e2e/test_scheduler_e2e.cpp`
+- `src/tests/test_scheduler_e2e/test_pcap_web_e2e.cpp`
 
-## 验收
+## 验收命令
 
-- 规格明确给出北向上传入口、服务间控制面和 Arrow 数据面的归类，禁止文件请求进入 RouterAgency。
-- 规格冻结相同绝对共享目录，以及 Web 受管文件存储与 `PcapFileChannel` 的所有权和删除顺序。
-- 规格将 NPI provider、可部署 `protocols.yml`、有效 `ldfile` 和 pcapfile provider 纳入正式部署验收。
-- 规格将 PluginLoader 批次生命周期与“任意非零返回即失败”列为 P1 前置修复，并有顺序无关/失败阻断测试锚点。
-- Web 对外列表和上传响应不暴露 `options.path`，Scheduler 内部控制 JSON 仍保留真实绝对路径。
-- `git diff HEAD --check` 通过；本任务新增 patch 只落在两个允许文件。
+- 先只增加执行响应契约断言，构建并运行 `test_scheduler_e2e`、`test_pcap_web_e2e` 确认旧实现红灯。
+- `cmake --build build --target test_scheduler_e2e test_scheduler_mutation_guard test_pcap_web_e2e -j$(nproc)`。
+- `ctest --test-dir build -R '^(test_scheduler_e2e|test_scheduler_mutation_guard|test_pcap_web_e2e)$' --output-on-failure`。
+- Feature 收口运行 `ctest --test-dir build --output-on-failure`、`git diff --check`；新增源码行不超过 120 列。
 
 ## 验收结果
 
-- 已按 `docs/framework.md` 和当前实现复核并冻结北向上传入口、HTTP 控制面、进程内 IID 调用及 Arrow
-  数据面边界；上传路由明确不得注册到 RouterAgency。
-- 已明确 Web `ManagedCaptureStore` 与 `PcapFileChannel` 的所有权边界、删除顺序、外部路径脱敏和三类部署的
-  相同绝对目录要求。
-- 已将 NPI provider、可部署 `protocols.yml`、有效 `ldfile`、pcapfile provider 及 PluginLoader P1 修复
-  纳入 T1～T5 任务和机器可执行测试锚点。
-- `git diff HEAD --check` 通过；新规格另以
-  `git diff --no-index --check /dev/null tasks/specs/feat-npm-offline-import-web.md` 检查，无空白错误输出。
-- 本任务只修改 `tasks/active_task.md` 和 `tasks/specs/feat-npm-offline-import-web.md`，未开始 T1 或生产代码修复。
+- 红灯复现：生产修改前，Scheduler E2E 与 Web E2E 均因命名 DataFrame 执行响应有 5 个字段而不是
+  4 个字段失败，确认额外字段为全量序列化的 `data`。
+- 最小修复：`INTO dataframe.*` 仍读取 Arrow 快照取得行数，但不调用 `DataFrame::ToJson()`，也不在
+  执行响应中写入 `data`；无 `INTO dataframe.*` 路径保持原逻辑。
+- Scheduler E2E 继续验证完整 `PacketSchema()`、行序和原始 binary；Web E2E 继续验证后续分页 preview
+  的 raw hex 与 layer 数字/数组，证明展示序列化仅发生在 preview。
+- 相关 3 个 CMake target 编译通过；相关 CTest 3/3 通过（22.94 秒）。
+- 完整 CTest 12/12 通过（51.53 秒）；`git diff --check` 和未跟踪 E2E 空白检查通过。
+- 环境未安装 `clang-format`；本任务新增源码行无超过 120 列的行。
+- 未修改 DataFrame、Catalog、pcapfile、Web 或前端，未清理其他 Feature 的既有未提交内容，
+  未执行 commit/push。
 
 ## 时间盒与停止条件
 
 - 时间盒：20 分钟。
-- 规格修订、diff 边界检查和文档自检完成后，把本工作台标记为已完成并立即停止，不开始 T1 或生产修复。
-- 若复核发现必须改变现有 `pcapfile` ABI、通过 Router 传输文件或实现跨主机文件复制才能满足主链路，
-  以“被明确问题阻塞”停止。
+- 红灯、最小修复、相关回归和完整 CTest 通过后，勾选 T5、重新归档 Feature、更新 backlog 与工作台，
+  然后立即停止。
+- 若必须改变 DataFrame ABI、Catalog preview 或无 `INTO dataframe.*` 查询响应才能实现，以“当前错误待修复”停止。
