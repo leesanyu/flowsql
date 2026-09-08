@@ -1,63 +1,63 @@
 # Active Task
 
-Feature：`npm-packet-dataframe-view`
-原子任务：T5 移除命名 DataFrame 写入响应的全量展示序列化
+Feature：`stage-filter-pipeline`
+原子任务：T4.4b 跨模块 E2E、完整回归与 Feature 归档
 状态：已完成
 
 ## 业务意图
 
-- `SELECT ... INTO dataframe.<name>` 只把原生 Arrow 数据写入命名 DataFrame，不在执行完成阶段调用
-  `DataFrame::ToJson()`。
-- 执行响应只返回状态、行数和 `result_target`；packet 的 JSON/hex 转换只发生在 Catalog 分页 preview。
+- 在现有 Scheduler E2E 中用真实 pcapfile 插件读取测试 PCAP，经两个测试用
+  `IBlockTransformOperatorV1`、逐阶段 WHERE 和命名 DataFrame sink，锚定 parser、provider IID、PacketSchema、
+  Arrow residual、Scheduler runtime 与 DataFrame 注册的完整链路。
+- 跨模块用例验证 source/stage 过滤后的确定内容、命名结果响应不包含序列化 `data`，以及 probe/执行 task
+  exactly-once 释放；旧 pcapfile→终端 block operator E2E 必须保持通过。
+- 定向 E2E 通过后执行标准全量构建与完整 CTest；全部绿色后完成规格、backlog 和归档收口。
 
 ## Non-Goals
 
-- 不改变无 `INTO dataframe.*` 查询的即时结果响应，不改变 database/stream sink 语义。
-- 不修改 `pcapfile`、DataFrame/Arrow 存储、Catalog serializer、Web 或前端。
-- 不改变 packet Schema、raw hex 64 字节截断或 preview 分页契约。
-- 不清理其他 Feature 的既有未提交内容，不读取 `tasks/sprints/**`，不执行 commit/push。
-
-## 契约与测试锚点
-
-- 命名 DataFrame 成功响应恰好包含 `status`、`rows`、`result_row_count`、`result_target`，不包含 `data`。
-- 修改生产代码前，Scheduler E2E 和 Web E2E 必须因执行响应仍包含 `data` 而红灯。
-- 命名 DataFrame 内部仍保持完整 `packet::PacketSchema()`、行序和原始 binary；既有直接读取断言继续通过。
-- Web E2E 随后调用 preview，继续验证按页生成 raw hex 及 layer 数字/数组。
+- 不新增或修改生产能力，不实现 npm.basic、pcapfile 领域函数或具体 source 下推。
+- 不修改 parser、binder、planner、runner、Scheduler、packet/DataFrame 或插件接口 ABI；若 E2E 暴露生产阻塞，
+  以“当前错误待修复”停止并重新拆分任务，不在验收切片内扩大范围。
+- 不增加 Web/UI E2E；展示时 hex 序列化已由已完成 Feature 独立覆盖，本切片只断言命名执行响应不序列化数据。
+- 不读取 `tasks/sprints/**`，不清理或覆盖累计未提交改动，不执行 commit/push。
 
 ## 允许修改的文件
 
 - `tasks/active_task.md`
+- `tasks/specs/feat-stage-filter-pipeline.md`
+- `tasks/archive/feat-stage-filter-pipeline.md`
 - `tasks/product_backlog.md`
-- `tasks/archive/feat-npm-packet-dataframe-view.md`
-- `tasks/specs/feat-npm-packet-dataframe-view.md`
-- `src/services/scheduler/scheduler_routes.cpp`
 - `src/tests/test_scheduler_e2e/test_scheduler_e2e.cpp`
-- `src/tests/test_scheduler_e2e/test_pcap_web_e2e.cpp`
 
 ## 验收命令
 
-- 先只增加执行响应契约断言，构建并运行 `test_scheduler_e2e`、`test_pcap_web_e2e` 确认旧实现红灯。
-- `cmake --build build --target test_scheduler_e2e test_scheduler_mutation_guard test_pcap_web_e2e -j$(nproc)`。
-- `ctest --test-dir build -R '^(test_scheduler_e2e|test_scheduler_mutation_guard|test_pcap_web_e2e)$' --output-on-failure`。
-- Feature 收口运行 `ctest --test-dir build --output-on-failure`、`git diff --check`；新增源码行不超过 120 列。
-
-## 验收结果
-
-- 红灯复现：生产修改前，Scheduler E2E 与 Web E2E 均因命名 DataFrame 执行响应有 5 个字段而不是
-  4 个字段失败，确认额外字段为全量序列化的 `data`。
-- 最小修复：`INTO dataframe.*` 仍读取 Arrow 快照取得行数，但不调用 `DataFrame::ToJson()`，也不在
-  执行响应中写入 `data`；无 `INTO dataframe.*` 路径保持原逻辑。
-- Scheduler E2E 继续验证完整 `PacketSchema()`、行序和原始 binary；Web E2E 继续验证后续分页 preview
-  的 raw hex 与 layer 数字/数组，证明展示序列化仅发生在 preview。
-- 相关 3 个 CMake target 编译通过；相关 CTest 3/3 通过（22.94 秒）。
-- 完整 CTest 12/12 通过（51.53 秒）；`git diff --check` 和未跟踪 E2E 空白检查通过。
-- 环境未安装 `clang-format`；本任务新增源码行无超过 120 列的行。
-- 未修改 DataFrame、Catalog、pcapfile、Web 或前端，未清理其他 Feature 的既有未提交内容，
-  未执行 commit/push。
+- 增加真实 pcapfile→两级 transform→命名 DataFrame E2E，覆盖逐级 WHERE、结果内容、响应契约和任务释放。
+- `cmake --build build --target test_scheduler_e2e -j$(nproc)`
+- `ctest --test-dir build -R '^test_scheduler_e2e$' --output-on-failure`
+- `cmake --build build -j$(nproc)`
+- `ctest --test-dir build --output-on-failure`
+- `git diff --check`
+- `git status --short --untracked-files=all`
+- `git diff --name-only`
 
 ## 时间盒与停止条件
 
-- 时间盒：20 分钟。
-- 红灯、最小修复、相关回归和完整 CTest 通过后，勾选 T5、重新归档 Feature、更新 backlog 与工作台，
-  然后立即停止。
-- 若必须改变 DataFrame ABI、Catalog preview 或无 `INTO dataframe.*` 查询响应才能实现，以“当前错误待修复”停止。
+- 时间盒：30 分钟。
+- 跨模块 E2E、全量构建、完整 CTest 和 diff 审查全部通过后，勾选 T4/T4.4/T4.4b，将 Feature 在 backlog 标记
+  完成并把规格归档，更新工作台后立即停止。
+- 任一定向或完整回归失败时，仅根据当前累计 diff 定位；需要修改允许列表外生产文件时，以“当前错误待修复”
+  停止，不扩大本切片。
+
+## 完成证据
+
+- 新增真实 pcapfile→两级 transform→命名 DataFrame E2E：source 和两个 operator stage 的 WHERE 均由通用
+  Arrow residual 执行，最终只保留 sequence=1、captured_len=4、protocol=`HTTP` 的一行。
+- 命名执行响应只有 status/rows/result_row_count/result_target，不包含 `data`；两个 provider 各创建并
+  exactly-once 释放一个 probe 和一个执行 task，第二级收到零行 batch 后继续处理下一批，证明零行不是 EOF。
+- 兼容回归：旧 pcapfile→终端 block operator 保持通过；T30 改为断言当前 parser 的多 source source-stage
+  WHERE 拒绝文案，未修改生产代码。
+- 定向构建和 `test_scheduler_e2e` 通过，1/1 Passed，21.15 秒。
+- `cmake --build build -j$(nproc)` 全量构建通过；允许本机 loopback 的完整 CTest 12/12 通过，50.55 秒。
+- 受限沙箱首次完整 CTest 的两项 socket 测试因监听权限失败；同一二进制在允许 loopback 环境定向 2/2 通过，
+  随后完整 12/12 通过，确认不是代码回归。
+- `git diff --check` 通过；新增测试源码行均不超过 120 列，环境没有 `clang-format`。

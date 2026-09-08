@@ -14,7 +14,8 @@
 | [x] | NPM 离线数据包全量导入 (`npm-offline-import`) | P0 | 提供 pcap/pcapng 文件的有限流读取与回放，保留原始时间戳、捕获长度、线速长度和报文顺序，接入现有流批任务运行时。 | [归档](archive/feat-npm-offline-import.md) |
 | [x] | NPM 离线文件上传与通道管理 (`npm-offline-import-web`) | P0 | 支持用户在 Web 页面上传 pcap/pcapng 文件并原子创建可执行的 `pcapfile` source 通道。 | [归档](archive/feat-npm-offline-import-web.md) |
 | [x] | NPM 数据包 DataFrame 查看 (`npm-packet-dataframe-view`) | P0 | 支持将有限 `pcapfile` 数据包原样写入命名 DataFrame，并通过 Web 安全查看截断的 hex 报文内容。 | [归档](archive/feat-npm-packet-dataframe-view.md) |
-| [ ] | NPM 离线导入过滤 (`npm-offline-filter`) | P0 | 支持离线文件按时间、MAC、IP、端口、协议、应用等条件过滤导入，并明确过滤下推能力、不可下推条件和异常处理语义。 | 待创建 |
+| [x] | FlowSQL 阶段化过滤管线 (`stage-filter-pipeline`) | P0 | 支持 source 与每级 operator 输出的类型化 WHERE，以 Arrow 统一执行并允许 channel/operator 做精确谓词下推。 | [归档](archive/feat-stage-filter-pipeline.md) |
+| [ ] | NPM 离线导入过滤 (`npm-offline-filter`) | P0 | 基于阶段化过滤管线支持离线文件按时间、MAC、IP、端口、协议、应用等条件过滤，并实现 pcapfile 精确下推。 | 待创建 |
 | [ ] | NPM 基础分析算子 (`npm-basic-analysis`) | P0 | 实现 `npm.basic`，将 packet 转换为可编排的标准化包级/流级事实数据，提供协议、方向和基础流量指标。 | 待创建 |
 | [ ] | NPM TCP/UDP 会话性能分析 (`npm-session-analysis`) | P1 | 基于五元组构建 TCP/UDP 会话状态，产出连接、时延、重传、吞吐、丢包和会话超时等网络性能指标。 | 待创建 |
 | [ ] | NPM 应用协议分析 (`npm-protocol-analysis`) | P1 | 在协议识别基础上增加 DNS、HTTP、TLS、ICMP 等应用/事务实体解析，统一输出可查询的协议分析结果。 | 待创建 |

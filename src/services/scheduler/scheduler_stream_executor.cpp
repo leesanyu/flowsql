@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <regex>
 #include <sstream>
@@ -29,6 +30,8 @@
 #include "framework/core/dataframe_channel.h"
 #include "framework/core/fan_in_stream_channel.h"
 #include "framework/core/fan_out_stream_channel.h"
+#include "framework/core/filter_binding.h"
+#include "framework/core/filter_planner.h"
 #include "framework/core/json_error_builder.h"
 #include "framework/core/pipeline.h"
 #include "framework/core/ring_stream_channel.h"
@@ -430,6 +433,35 @@ IBlockStreamOperator* SchedulerPlugin::FindBlockOperator(const std::string& cate
     return matches == 1 ? found : nullptr;
 }
 
+IBlockTransformOperatorV1* SchedulerPlugin::FindBlockTransformOperator(
+    const std::string& category,
+    const std::string& name,
+    bool* ambiguous,
+    int* traverse_error) {
+    if (ambiguous) *ambiguous = false;
+    if (traverse_error) *traverse_error = 0;
+    if (!querier_) return nullptr;
+
+    IBlockTransformOperatorV1* found = nullptr;
+    size_t matches = 0;
+    const int traversal_rc = querier_->Traverse(
+        IID_BLOCK_TRANSFORM_OPERATOR_V1,
+        [&](void* value) -> int {
+            auto* candidate = static_cast<IBlockTransformOperatorV1*>(value);
+            if (!candidate || !IEquals(candidate->Category(), category) ||
+                candidate->Name() != name) {
+                return 0;
+            }
+            found = candidate;
+            ++matches;
+            return 0;
+        });
+    if (traverse_error) *traverse_error = traversal_rc;
+    if (traversal_rc != 0) return nullptr;
+    if (ambiguous) *ambiguous = matches > 1;
+    return matches == 1 ? found : nullptr;
+}
+
 int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source,
                                            IBlockStreamOperator* op,
                                            BlockExecutionTerminal* terminal,
@@ -531,6 +563,845 @@ int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source,
                             : BlockExecutionTerminal::kCompleted;
     }
     return 0;
+}
+
+namespace {
+
+class SchemaCheckingBlockTransformTask final : public IBlockTransformTaskV1 {
+ public:
+    SchemaCheckingBlockTransformTask(
+        IBlockTransformTaskV1* task,
+        std::shared_ptr<arrow::Schema> expected_output_schema)
+        : task_(task), expected_output_schema_(std::move(expected_output_schema)) {}
+
+    int Open(std::shared_ptr<arrow::Schema> input_schema,
+             std::shared_ptr<arrow::Schema>* output_schema) override {
+        if (!task_) return EINVAL;
+        const int rc = task_->Open(std::move(input_schema), output_schema);
+        if (rc != 0) return rc;
+        if (!output_schema || !*output_schema || !expected_output_schema_ ||
+            !(*output_schema)->Equals(*expected_output_schema_, true)) {
+            last_error_ = "transform execution Schema differs from its planning Schema";
+            return EPROTO;
+        }
+        return 0;
+    }
+
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
+                     int64_t ts_ms,
+                     std::vector<BlockTransformOutputV1>* outputs) override {
+        return task_->ProcessBlock(input, ts_ms, outputs);
+    }
+
+    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+        return task_->Flush(outputs);
+    }
+
+    void Cancel() override { task_->Cancel(); }
+
+    std::string LastError() const override {
+        return last_error_.empty() ? task_->LastError() : last_error_;
+    }
+
+ private:
+    IBlockTransformTaskV1* task_ = nullptr;
+    std::shared_ptr<arrow::Schema> expected_output_schema_;
+    std::string last_error_;
+};
+
+class SynchronousBlockTransformChainTask final : public IBlockTransformTaskV1 {
+ public:
+    SynchronousBlockTransformChainTask(
+        std::vector<IBlockTransformTaskV1*> tasks,
+        std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas,
+        const std::vector<std::shared_ptr<const BoundFilterExpr>>& residuals)
+        : tasks_(std::move(tasks)),
+          expected_output_schemas_(std::move(expected_output_schemas)) {
+        filters_.reserve(residuals.size());
+        for (const auto& residual : residuals) filters_.emplace_back(residual);
+    }
+
+    int Open(std::shared_ptr<arrow::Schema> input_schema,
+             std::shared_ptr<arrow::Schema>* output_schema) override {
+        if (open_attempted_ || !input_schema || !output_schema || tasks_.empty() ||
+            tasks_.size() != expected_output_schemas_.size() ||
+            tasks_.size() != filters_.size()) {
+            last_error_ = "multi transform chain received an invalid Open request";
+            return EINVAL;
+        }
+        open_attempted_ = true;
+        output_schema->reset();
+
+        auto current_schema = std::move(input_schema);
+        for (size_t i = 0; i < tasks_.size(); ++i) {
+            std::shared_ptr<arrow::Schema> actual_output_schema;
+            int open_rc = 0;
+            try {
+                open_rc = tasks_[i]->Open(current_schema, &actual_output_schema);
+            } catch (const std::exception& ex) {
+                return SetStageError(i, "Open threw: " + std::string(ex.what()), EFAULT);
+            } catch (...) {
+                return SetStageError(i, "Open threw an unknown exception", EFAULT);
+            }
+            if (open_rc != 0) {
+                return SetStageError(i, "Open failed: " + TaskError(i), open_rc);
+            }
+            if (!actual_output_schema || !expected_output_schemas_[i] ||
+                !actual_output_schema->Equals(*expected_output_schemas_[i], true)) {
+                return SetStageError(
+                    i, "execution Schema differs from its planning Schema", EPROTO);
+            }
+
+            std::string filter_error;
+            std::shared_ptr<arrow::Schema> filtered_schema;
+            const auto filter_rc = filters_[i].Open(
+                actual_output_schema, &filtered_schema, &filter_error);
+            if (filter_rc != FilterEvalError::kNone) {
+                if (filter_error.empty()) filter_error = "residual filter Open failed";
+                return SetStageError(i, std::move(filter_error), EINVAL);
+            }
+            current_schema = std::move(filtered_schema);
+        }
+
+        opened_ = true;
+        *output_schema = std::move(current_schema);
+        return 0;
+    }
+
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
+                     int64_t ts_ms,
+                     std::vector<BlockTransformOutputV1>* outputs) override {
+        if (!opened_ || !input || !outputs || !outputs->empty() || flush_started_) {
+            last_error_ = "multi transform chain received an invalid ProcessBlock request";
+            return -EINVAL;
+        }
+        std::vector<BlockTransformOutputV1> initial = {{input, ts_ms}};
+        std::vector<BlockTransformOutputV1> final_outputs;
+        bool stopped = false;
+        const int rc = PropagateFrom(
+            0, std::move(initial), &final_outputs, &stopped);
+        if (rc != 0) return rc;
+        *outputs = std::move(final_outputs);
+        return stopped ? static_cast<int>(BlockTransformStatusV1::kStop)
+                       : static_cast<int>(BlockTransformStatusV1::kContinue);
+    }
+
+    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+        if (!opened_ || !outputs || !outputs->empty() || flush_started_) {
+            last_error_ = "multi transform chain received an invalid Flush request";
+            return EINVAL;
+        }
+        flush_started_ = true;
+        std::vector<BlockTransformOutputV1> final_outputs;
+
+        for (size_t i = 0; i < tasks_.size(); ++i) {
+            std::vector<BlockTransformOutputV1> stage_outputs;
+            int flush_rc = 0;
+            try {
+                flush_rc = tasks_[i]->Flush(&stage_outputs);
+            } catch (const std::exception& ex) {
+                return SetStageError(i, "Flush threw: " + std::string(ex.what()), EFAULT);
+            } catch (...) {
+                return SetStageError(i, "Flush threw an unknown exception", EFAULT);
+            }
+            if (flush_rc != 0) {
+                if (!stage_outputs.empty()) {
+                    return SetStageError(
+                        i, "Flush failed while returning output batches", EPROTO);
+                }
+                return SetStageError(i, "Flush failed: " + TaskError(i), flush_rc);
+            }
+
+            std::vector<BlockTransformOutputV1> filtered_outputs;
+            const int filter_rc = FilterStageOutputs(
+                i, stage_outputs, &filtered_outputs);
+            if (filter_rc != 0) return filter_rc;
+
+            std::vector<BlockTransformOutputV1> propagated_outputs;
+            bool ignored_stop = false;
+            const int propagate_rc = PropagateFrom(
+                i + 1,
+                std::move(filtered_outputs),
+                &propagated_outputs,
+                &ignored_stop);
+            if (propagate_rc != 0) return propagate_rc;
+            final_outputs.insert(final_outputs.end(),
+                                 std::make_move_iterator(propagated_outputs.begin()),
+                                 std::make_move_iterator(propagated_outputs.end()));
+        }
+
+        *outputs = std::move(final_outputs);
+        return 0;
+    }
+
+    void Cancel() override {
+        bool expected = false;
+        if (!cancel_started_.compare_exchange_strong(expected, true)) return;
+        for (auto* task : tasks_) {
+            if (!task) continue;
+            try {
+                task->Cancel();
+            } catch (...) {
+            }
+        }
+    }
+
+    std::string LastError() const override { return last_error_; }
+
+ private:
+    int PropagateFrom(size_t first_stage,
+                      std::vector<BlockTransformOutputV1> inputs,
+                      std::vector<BlockTransformOutputV1>* outputs,
+                      bool* stopped) {
+        if (!outputs || !stopped || first_stage > tasks_.size()) return -EINVAL;
+        outputs->clear();
+        for (size_t i = first_stage; i < tasks_.size(); ++i) {
+            std::vector<BlockTransformOutputV1> next_inputs;
+            for (const auto& input : inputs) {
+                if (!input.batch) {
+                    return SetStageError(i, "received a null input batch", EPROTO);
+                }
+                std::vector<BlockTransformOutputV1> stage_outputs;
+                int process_rc = 0;
+                try {
+                    process_rc = tasks_[i]->ProcessBlock(
+                        input.batch, input.ts_ms, &stage_outputs);
+                } catch (const std::exception& ex) {
+                    return SetStageError(
+                        i, "ProcessBlock threw: " + std::string(ex.what()), EFAULT);
+                } catch (...) {
+                    return SetStageError(
+                        i, "ProcessBlock threw an unknown exception", EFAULT);
+                }
+                const bool valid_status =
+                    process_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
+                    process_rc == static_cast<int>(BlockTransformStatusV1::kStop);
+                if (!valid_status) {
+                    if (!stage_outputs.empty()) {
+                        return SetStageError(
+                            i,
+                            "ProcessBlock failed while returning output batches",
+                            EPROTO);
+                    }
+                    return SetStageError(
+                        i, "ProcessBlock failed: " + TaskError(i), process_rc);
+                }
+                if (process_rc == static_cast<int>(BlockTransformStatusV1::kStop)) {
+                    *stopped = true;
+                }
+
+                std::vector<BlockTransformOutputV1> filtered_outputs;
+                const int filter_rc = FilterStageOutputs(
+                    i, stage_outputs, &filtered_outputs);
+                if (filter_rc != 0) return filter_rc;
+                next_inputs.insert(next_inputs.end(),
+                                   std::make_move_iterator(filtered_outputs.begin()),
+                                   std::make_move_iterator(filtered_outputs.end()));
+            }
+            inputs = std::move(next_inputs);
+        }
+        *outputs = std::move(inputs);
+        return 0;
+    }
+
+    int FilterStageOutputs(
+        size_t stage,
+        const std::vector<BlockTransformOutputV1>& inputs,
+        std::vector<BlockTransformOutputV1>* outputs) {
+        if (!outputs || stage >= filters_.size()) return -EINVAL;
+        outputs->clear();
+        for (const auto& input : inputs) {
+            if (!input.batch) {
+                return SetStageError(stage, "returned a null output batch", EPROTO);
+            }
+            BlockTransformOutputV1 filtered;
+            std::string filter_error;
+            const auto filter_rc = filters_[stage].ProcessBlock(
+                input.batch, input.ts_ms, &filtered, &filter_error);
+            if (filter_rc != FilterEvalError::kNone) {
+                if (filter_error.empty()) filter_error = "residual filter failed";
+                return SetStageError(stage, std::move(filter_error), EIO);
+            }
+            outputs->push_back(std::move(filtered));
+        }
+        return 0;
+    }
+
+    int SetStageError(size_t stage, std::string detail, int rc) {
+        last_error_ = "transform stage " + std::to_string(stage + 1) + ": " + detail;
+        if (rc == 0) return -EIO;
+        return rc > 0 ? -rc : rc;
+    }
+
+    std::string TaskError(size_t stage) const {
+        if (stage >= tasks_.size() || !tasks_[stage]) return "task unavailable";
+        try {
+            const std::string detail = tasks_[stage]->LastError();
+            return detail.empty() ? "task did not provide an error message" : detail;
+        } catch (...) {
+            return "task LastError threw";
+        }
+    }
+
+    std::vector<IBlockTransformTaskV1*> tasks_;
+    std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas_;
+    std::vector<BlockFilterStage> filters_;
+    bool open_attempted_ = false;
+    bool opened_ = false;
+    bool flush_started_ = false;
+    std::atomic<bool> cancel_started_{false};
+    std::string last_error_;
+};
+
+std::shared_ptr<FilterExpr> FindStageFilterExpression(
+    const SqlStatement& stmt,
+    uint32_t after_stage,
+    bool* duplicate) {
+    if (duplicate) *duplicate = false;
+    std::shared_ptr<FilterExpr> found;
+    for (const auto& filter : stmt.stage_filters) {
+        if (filter.after_stage != after_stage) continue;
+        if (found) {
+            if (duplicate) *duplicate = true;
+            return nullptr;
+        }
+        found = filter.expression;
+    }
+    return found;
+}
+
+std::string SafeBlockTransformLastError(IBlockTransformTaskV1* task) {
+    if (!task) return "";
+    try {
+        return task->LastError();
+    } catch (...) {
+        return "";
+    }
+}
+
+}  // namespace
+
+int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
+    IBlockStreamChannel* source,
+    IBlockTransformOperatorV1* provider,
+    IDataFrameChannel* sink,
+    const SqlStatement& stmt,
+    BlockExecutionTerminal* terminal,
+    int64_t* rows_affected,
+    std::string* error) {
+    if (terminal) *terminal = BlockExecutionTerminal::kFailed;
+    if (rows_affected) *rows_affected = 0;
+    if (error) error->clear();
+    if (!source || !provider || !sink || stmt.operators.size() != 1) {
+        if (error) *error = "block transform pipeline requires one source, provider, operator, and sink";
+        return EINVAL;
+    }
+    auto* appendable_sink = dynamic_cast<IAppendableDataFrameChannel*>(sink);
+    if (!appendable_sink) {
+        if (error) *error = "block transform pipeline requires an appendable DataFrame sink";
+        return EINVAL;
+    }
+
+    bool duplicate_source_filter = false;
+    bool duplicate_transform_filter = false;
+    auto source_expression = FindStageFilterExpression(
+        stmt, 0, &duplicate_source_filter);
+    auto transform_expression = FindStageFilterExpression(
+        stmt, 1, &duplicate_transform_filter);
+    if (duplicate_source_filter || duplicate_transform_filter) {
+        if (error) *error = "block transform stage contains duplicate filters";
+        return EINVAL;
+    }
+    for (const auto& filter : stmt.stage_filters) {
+        if (filter.after_stage > 1) {
+            if (error) *error = "block transform pipeline received an unsupported filter stage";
+            return EINVAL;
+        }
+    }
+
+    const auto source_schema = packet::PacketSchema();
+    std::shared_ptr<const BoundFilterExpr> source_residual;
+    if (source_expression) {
+        std::string bind_error;
+        const auto bind_rc = BindFilterExpression(
+            source_schema, source_expression, &source_residual, &bind_error);
+        if (bind_rc != FilterBindError::kNone) {
+            if (error) *error = "source-stage filter binding failed: " + bind_error;
+            return EINVAL;
+        }
+    }
+
+    const auto& params = !stmt.operator_with_params.empty()
+                             ? stmt.operator_with_params.front()
+                             : stmt.with_params;
+    const std::string with_params_json = MakeWithParamsJson(params);
+    const std::string task_id = NextStreamTaskId();
+    FilterTaskSessionPlan transform_filter_plan;
+    transform_filter_plan.pushed_filter_plan_json = kEmptyCanonicalFilterPlanV1;
+    std::shared_ptr<arrow::Schema> planned_output_schema;
+
+    auto make_task_holder = [provider](IBlockTransformTaskV1* task) {
+        return std::unique_ptr<IBlockTransformTaskV1,
+                               std::function<void(IBlockTransformTaskV1*)>>(
+            task,
+            [provider](IBlockTransformTaskV1* owned) {
+                if (!owned) return;
+                try {
+                    provider->ReleaseTask(owned);
+                } catch (...) {
+                }
+            });
+    };
+
+    if (transform_expression) {
+        IBlockTransformTaskV1* probe_raw = nullptr;
+        std::string plan_error;
+        const auto create_probe = CreateBlockTransformTaskSession(
+            provider,
+            task_id + ".schema",
+            with_params_json,
+            transform_filter_plan,
+            &probe_raw,
+            &plan_error);
+        if (create_probe != FilterPlanError::kNone) {
+            if (error) *error = "transform Schema probe creation failed: " + plan_error;
+            return EIO;
+        }
+        auto probe = make_task_holder(probe_raw);
+
+        int probe_open_rc = 0;
+        try {
+            probe_open_rc = probe->Open(source_schema, &planned_output_schema);
+        } catch (const std::exception& ex) {
+            if (error) *error = std::string("transform Schema probe Open threw: ") + ex.what();
+            try {
+                probe->Cancel();
+            } catch (...) {
+            }
+            return EFAULT;
+        } catch (...) {
+            if (error) *error = "transform Schema probe Open threw an unknown exception";
+            try {
+                probe->Cancel();
+            } catch (...) {
+            }
+            return EFAULT;
+        }
+        if (probe_open_rc != 0 || !planned_output_schema) {
+            if (error) {
+                *error = "transform Schema probe Open failed";
+                const std::string detail = SafeBlockTransformLastError(probe.get());
+                if (!detail.empty()) *error += ": " + detail;
+            }
+            try {
+                probe->Cancel();
+            } catch (...) {
+            }
+            return probe_open_rc != 0 ? probe_open_rc : EINVAL;
+        }
+        try {
+            probe->Cancel();
+        } catch (...) {
+            if (error) *error = "transform Schema probe Cancel failed";
+            return EFAULT;
+        }
+        probe.reset();
+
+        std::shared_ptr<const BoundFilterExpr> bound_transform_filter;
+        const auto bind_rc = BindFilterExpression(
+            planned_output_schema,
+            transform_expression,
+            &bound_transform_filter,
+            &plan_error);
+        if (bind_rc != FilterBindError::kNone) {
+            if (error) *error = "operator-stage filter binding failed: " + plan_error;
+            return EINVAL;
+        }
+
+        FilterPushdownTarget target;
+        target.kind = FilterPushdownTargetKindV1::kTransform;
+        target.category = stmt.operators.front().category;
+        target.name = stmt.operators.front().name;
+        target.output_schema = planned_output_schema;
+        FilterPushdownNegotiation negotiation;
+        const auto negotiate_rc = NegotiateFilterPushdown(
+            querier_, target, bound_transform_filter, &negotiation, &plan_error);
+        if (negotiate_rc != FilterPlanError::kNone) {
+            if (error) *error = "operator-stage filter pushdown negotiation failed: " + plan_error;
+            return negotiate_rc == FilterPlanError::kInvalidArgument ||
+                           negotiate_rc == FilterPlanError::kInvalidBoundExpression ||
+                           negotiate_rc == FilterPlanError::kCanonicalPlanError
+                       ? EINVAL
+                       : EIO;
+        }
+        const auto materialize_rc = MaterializeFilterTaskSessionPlan(
+            planned_output_schema,
+            bound_transform_filter,
+            negotiation,
+            FilterTaskIsolation::kExclusive,
+            &transform_filter_plan,
+            &plan_error);
+        if (materialize_rc != FilterPlanError::kNone) {
+            if (error) *error = "operator-stage filter task planning failed: " + plan_error;
+            return EIO;
+        }
+    }
+
+    IBlockTransformTaskV1* execution_raw = nullptr;
+    std::string plan_error;
+    const auto create_execution = CreateBlockTransformTaskSession(
+        provider,
+        task_id + ".run",
+        with_params_json,
+        transform_filter_plan,
+        &execution_raw,
+        &plan_error);
+    if (create_execution != FilterPlanError::kNone) {
+        if (error) *error = "transform execution task creation failed: " + plan_error;
+        return EIO;
+    }
+    auto execution = make_task_holder(execution_raw);
+    SchemaCheckingBlockTransformTask checked_execution(
+        execution.get(), planned_output_schema);
+    IBlockTransformTaskV1* runner_task = planned_output_schema
+                                             ? static_cast<IBlockTransformTaskV1*>(&checked_execution)
+                                             : execution.get();
+
+    BlockTransformPipelineConfig config;
+    config.source = source;
+    config.source_schema = source_schema;
+    config.transform = runner_task;
+    config.source_residual = std::move(source_residual);
+    config.transform_residual = transform_filter_plan.residual_expression;
+    config.output_consumer = [appendable_sink](const BlockTransformOutputV1& output) {
+        if (!output.batch) return EINVAL;
+        DataFrame frame;
+        frame.FromArrow(output.batch);
+        return appendable_sink->Append(&frame);
+    };
+
+    BlockTransformPipelineRunner runner(std::move(config));
+    BlockTransformPipelineResult result;
+    std::string runner_error;
+    const auto runner_rc = runner.Run(&result, &runner_error);
+    if (rows_affected) *rows_affected = result.output_rows;
+    if (result.terminal == BlockTransformPipelineTerminal::kCompleted) {
+        if (terminal) *terminal = BlockExecutionTerminal::kCompleted;
+    } else if (result.terminal == BlockTransformPipelineTerminal::kStopped) {
+        if (terminal) *terminal = BlockExecutionTerminal::kStopped;
+    } else if (result.terminal == BlockTransformPipelineTerminal::kCancelled) {
+        if (terminal) *terminal = BlockExecutionTerminal::kCancelled;
+    }
+    if (runner_rc == BlockTransformPipelineError::kNone) return 0;
+    if (error) {
+        *error = runner_error.empty() ? "block transform pipeline execution failed"
+                                     : std::move(runner_error);
+    }
+    return runner_rc == BlockTransformPipelineError::kCancelled ? ECANCELED : EIO;
+}
+
+int SchedulerPlugin::ExecuteBlockTransformPipeline(
+    IBlockStreamChannel* source,
+    const std::vector<IBlockTransformOperatorV1*>& providers,
+    IDataFrameChannel* sink,
+    const SqlStatement& stmt,
+    BlockExecutionTerminal* terminal,
+    int64_t* rows_affected,
+    std::string* error) {
+    if (providers.size() == 1) {
+        return ExecuteSingleBlockTransformPipeline(
+            source,
+            providers.front(),
+            sink,
+            stmt,
+            terminal,
+            rows_affected,
+            error);
+    }
+
+    if (terminal) *terminal = BlockExecutionTerminal::kFailed;
+    if (rows_affected) *rows_affected = 0;
+    if (error) error->clear();
+    if (!source || !sink || providers.size() < 2 ||
+        providers.size() != stmt.operators.size()) {
+        if (error) {
+            *error = "multi block transform pipeline requires one source, aligned providers, "
+                     "operators, and a sink";
+        }
+        return EINVAL;
+    }
+    for (auto* provider : providers) {
+        if (!provider) {
+            if (error) *error = "multi block transform pipeline received a null provider";
+            return EINVAL;
+        }
+    }
+    auto* appendable_sink = dynamic_cast<IAppendableDataFrameChannel*>(sink);
+    if (!appendable_sink) {
+        if (error) *error = "multi block transform pipeline requires an appendable DataFrame sink";
+        return EINVAL;
+    }
+
+    std::vector<std::shared_ptr<FilterExpr>> stage_expressions(providers.size() + 1);
+    for (size_t stage = 0; stage < stage_expressions.size(); ++stage) {
+        bool duplicate = false;
+        stage_expressions[stage] = FindStageFilterExpression(
+            stmt, static_cast<uint32_t>(stage), &duplicate);
+        if (duplicate) {
+            if (error) *error = "block transform stage contains duplicate filters";
+            return EINVAL;
+        }
+    }
+    for (const auto& filter : stmt.stage_filters) {
+        if (filter.after_stage >= stage_expressions.size()) {
+            if (error) *error = "block transform pipeline received an unsupported filter stage";
+            return EINVAL;
+        }
+    }
+
+    const auto source_schema = packet::PacketSchema();
+    std::shared_ptr<const BoundFilterExpr> source_residual;
+    if (stage_expressions[0]) {
+        std::string bind_error;
+        const auto bind_rc = BindFilterExpression(
+            source_schema,
+            stage_expressions[0],
+            &source_residual,
+            &bind_error);
+        if (bind_rc != FilterBindError::kNone) {
+            if (error) *error = "source-stage filter binding failed: " + bind_error;
+            return EINVAL;
+        }
+    }
+
+    struct StagePlan {
+        IBlockTransformOperatorV1* provider = nullptr;
+        std::string with_params_json;
+        FilterTaskSessionPlan filter_plan;
+        std::shared_ptr<arrow::Schema> output_schema;
+    };
+    std::vector<StagePlan> stage_plans(providers.size());
+    const std::unordered_map<std::string, std::string> empty_params;
+    const std::string task_id = NextStreamTaskId();
+    auto input_schema = source_schema;
+
+    using TaskHolder = std::unique_ptr<
+        IBlockTransformTaskV1,
+        std::function<void(IBlockTransformTaskV1*)>>;
+    auto make_task_holder = [](IBlockTransformOperatorV1* provider,
+                               IBlockTransformTaskV1* task) {
+        return TaskHolder(
+            task,
+            [provider](IBlockTransformTaskV1* owned) {
+                if (!owned) return;
+                try {
+                    provider->ReleaseTask(owned);
+                } catch (...) {
+                }
+            });
+    };
+
+    for (size_t i = 0; i < providers.size(); ++i) {
+        auto& plan = stage_plans[i];
+        plan.provider = providers[i];
+        plan.filter_plan.pushed_filter_plan_json = kEmptyCanonicalFilterPlanV1;
+        const auto& params = i < stmt.operator_with_params.size()
+                                 ? stmt.operator_with_params[i]
+                                 : empty_params;
+        plan.with_params_json = MakeWithParamsJson(params);
+
+        IBlockTransformTaskV1* probe_raw = nullptr;
+        std::string plan_error;
+        const auto create_probe = CreateBlockTransformTaskSession(
+            plan.provider,
+            task_id + ".stage" + std::to_string(i + 1) + ".schema",
+            plan.with_params_json,
+            plan.filter_plan,
+            &probe_raw,
+            &plan_error);
+        if (create_probe != FilterPlanError::kNone) {
+            if (error) {
+                *error = "transform stage " + std::to_string(i + 1) +
+                         " Schema probe creation failed: " + plan_error;
+            }
+            return EIO;
+        }
+        auto probe = make_task_holder(plan.provider, probe_raw);
+
+        int probe_open_rc = 0;
+        try {
+            probe_open_rc = probe->Open(input_schema, &plan.output_schema);
+        } catch (const std::exception& ex) {
+            if (error) {
+                *error = "transform stage " + std::to_string(i + 1) +
+                         " Schema probe Open threw: " + ex.what();
+            }
+            try {
+                probe->Cancel();
+            } catch (...) {
+            }
+            return EFAULT;
+        } catch (...) {
+            if (error) {
+                *error = "transform stage " + std::to_string(i + 1) +
+                         " Schema probe Open threw an unknown exception";
+            }
+            try {
+                probe->Cancel();
+            } catch (...) {
+            }
+            return EFAULT;
+        }
+        if (probe_open_rc != 0 || !plan.output_schema) {
+            if (error) {
+                *error = "transform stage " + std::to_string(i + 1) +
+                         " Schema probe Open failed";
+                const std::string detail = SafeBlockTransformLastError(probe.get());
+                if (!detail.empty()) *error += ": " + detail;
+            }
+            try {
+                probe->Cancel();
+            } catch (...) {
+            }
+            return probe_open_rc != 0 ? probe_open_rc : EINVAL;
+        }
+        try {
+            probe->Cancel();
+        } catch (...) {
+            if (error) {
+                *error = "transform stage " + std::to_string(i + 1) +
+                         " Schema probe Cancel failed";
+            }
+            return EFAULT;
+        }
+        probe.reset();
+
+        if (stage_expressions[i + 1]) {
+            std::shared_ptr<const BoundFilterExpr> bound_filter;
+            const auto bind_rc = BindFilterExpression(
+                plan.output_schema,
+                stage_expressions[i + 1],
+                &bound_filter,
+                &plan_error);
+            if (bind_rc != FilterBindError::kNone) {
+                if (error) {
+                    *error = "transform stage " + std::to_string(i + 1) +
+                             " filter binding failed: " + plan_error;
+                }
+                return EINVAL;
+            }
+
+            FilterPushdownTarget target;
+            target.kind = FilterPushdownTargetKindV1::kTransform;
+            target.category = stmt.operators[i].category;
+            target.name = stmt.operators[i].name;
+            target.output_schema = plan.output_schema;
+            FilterPushdownNegotiation negotiation;
+            const auto negotiate_rc = NegotiateFilterPushdown(
+                querier_, target, bound_filter, &negotiation, &plan_error);
+            if (negotiate_rc != FilterPlanError::kNone) {
+                if (error) {
+                    *error = "transform stage " + std::to_string(i + 1) +
+                             " filter pushdown negotiation failed: " + plan_error;
+                }
+                return negotiate_rc == FilterPlanError::kInvalidArgument ||
+                               negotiate_rc == FilterPlanError::kInvalidBoundExpression ||
+                               negotiate_rc == FilterPlanError::kCanonicalPlanError
+                           ? EINVAL
+                           : EIO;
+            }
+            const auto materialize_rc = MaterializeFilterTaskSessionPlan(
+                plan.output_schema,
+                bound_filter,
+                negotiation,
+                FilterTaskIsolation::kExclusive,
+                &plan.filter_plan,
+                &plan_error);
+            if (materialize_rc != FilterPlanError::kNone) {
+                if (error) {
+                    *error = "transform stage " + std::to_string(i + 1) +
+                             " filter task planning failed: " + plan_error;
+                }
+                return EIO;
+            }
+        }
+        input_schema = plan.output_schema;
+    }
+
+    std::vector<TaskHolder> execution_holders;
+    std::vector<IBlockTransformTaskV1*> execution_tasks;
+    execution_holders.reserve(stage_plans.size());
+    execution_tasks.reserve(stage_plans.size());
+    for (size_t i = 0; i < stage_plans.size(); ++i) {
+        auto& plan = stage_plans[i];
+        IBlockTransformTaskV1* execution_raw = nullptr;
+        std::string plan_error;
+        const auto create_execution = CreateBlockTransformTaskSession(
+            plan.provider,
+            task_id + ".stage" + std::to_string(i + 1) + ".run",
+            plan.with_params_json,
+            plan.filter_plan,
+            &execution_raw,
+            &plan_error);
+        if (create_execution != FilterPlanError::kNone) {
+            for (auto* task : execution_tasks) {
+                try {
+                    task->Cancel();
+                } catch (...) {
+                }
+            }
+            if (error) {
+                *error = "transform stage " + std::to_string(i + 1) +
+                         " execution task creation failed: " + plan_error;
+            }
+            return EIO;
+        }
+        execution_tasks.push_back(execution_raw);
+        execution_holders.push_back(
+            make_task_holder(plan.provider, execution_raw));
+    }
+
+    std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas;
+    std::vector<std::shared_ptr<const BoundFilterExpr>> residuals;
+    expected_output_schemas.reserve(stage_plans.size());
+    residuals.reserve(stage_plans.size());
+    for (const auto& plan : stage_plans) {
+        expected_output_schemas.push_back(plan.output_schema);
+        residuals.push_back(plan.filter_plan.residual_expression);
+    }
+    SynchronousBlockTransformChainTask chain_task(
+        execution_tasks, std::move(expected_output_schemas), residuals);
+
+    BlockTransformPipelineConfig config;
+    config.source = source;
+    config.source_schema = source_schema;
+    config.transform = &chain_task;
+    config.source_residual = std::move(source_residual);
+    config.output_consumer = [appendable_sink](const BlockTransformOutputV1& output) {
+        if (!output.batch) return EINVAL;
+        DataFrame frame;
+        frame.FromArrow(output.batch);
+        return appendable_sink->Append(&frame);
+    };
+
+    BlockTransformPipelineRunner runner(std::move(config));
+    BlockTransformPipelineResult result;
+    std::string runner_error;
+    const auto runner_rc = runner.Run(&result, &runner_error);
+    if (rows_affected) *rows_affected = result.output_rows;
+    if (result.terminal == BlockTransformPipelineTerminal::kCompleted) {
+        if (terminal) *terminal = BlockExecutionTerminal::kCompleted;
+    } else if (result.terminal == BlockTransformPipelineTerminal::kStopped) {
+        if (terminal) *terminal = BlockExecutionTerminal::kStopped;
+    } else if (result.terminal == BlockTransformPipelineTerminal::kCancelled) {
+        if (terminal) *terminal = BlockExecutionTerminal::kCancelled;
+    }
+    if (runner_rc == BlockTransformPipelineError::kNone) return 0;
+    if (error) {
+        *error = runner_error.empty() ? "multi block transform pipeline execution failed"
+                                     : std::move(runner_error);
+    }
+    return runner_rc == BlockTransformPipelineError::kCancelled ? ECANCELED : EIO;
 }
 
 // --- Build Database Query ---

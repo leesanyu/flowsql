@@ -3,16 +3,24 @@
 
 set(PYARROW_DIR "/usr/local/lib/python3.12/dist-packages/pyarrow")
 
-if(EXISTS "${PYARROW_DIR}/include/arrow/api.h" AND EXISTS "${PYARROW_DIR}/libarrow.so.2200")
+if(EXISTS "${PYARROW_DIR}/include/arrow/api.h" AND
+   EXISTS "${PYARROW_DIR}/libarrow.so.2200" AND
+   EXISTS "${PYARROW_DIR}/libarrow_compute.so.2200")
     message(STATUS "arrow: using pyarrow at ${PYARROW_DIR}")
     add_custom_target(arrow)
     set(arrow_LINK_INC ${PYARROW_DIR}/include)
     set(arrow_LINK_DIR ${PYARROW_DIR})
-    set(arrow_LINK_TAR ${PYARROW_DIR}/libarrow.so.2200)
+    set(arrow_LINK_TAR
+        ${PYARROW_DIR}/libarrow_compute.so.2200
+        ${PYARROW_DIR}/libarrow.so.2200
+    )
 else()
     set(_arrow_install ${THIRDPARTS_INSTALL_DIR}/arrow)
 
-    if(EXISTS "${_arrow_install}/lib/libarrow.a" OR EXISTS "${_arrow_install}/lib/libarrow.so")
+    if((EXISTS "${_arrow_install}/lib/libarrow.a" OR
+        EXISTS "${_arrow_install}/lib/libarrow.so") AND
+       (EXISTS "${_arrow_install}/lib/libarrow_compute.a" OR
+        EXISTS "${_arrow_install}/lib/libarrow_compute.so"))
         message(STATUS "arrow: using cached install at ${_arrow_install}")
         add_custom_target(arrow)
     else()
@@ -24,7 +32,7 @@ else()
             CMAKE_ARGS
                 -DARROW_BUILD_STATIC=ON
                 -DARROW_BUILD_SHARED=OFF
-                -DARROW_COMPUTE=OFF
+                -DARROW_COMPUTE=ON
                 -DARROW_JSON=ON
                 -DARROW_IPC=ON
                 -DARROW_WITH_UTF8PROC=OFF
@@ -38,5 +46,5 @@ else()
 
     set(arrow_LINK_INC ${_arrow_install}/include)
     set(arrow_LINK_DIR ${_arrow_install}/lib)
-    set(arrow_LINK_TAR -larrow)
+    set(arrow_LINK_TAR -larrow_compute -larrow)
 endif()

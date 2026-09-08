@@ -16,6 +16,9 @@ add_library(${PROJECT_NAME} SHARED
     core/error_contract.cpp
     core/fan_in_stream_channel.cpp
     core/fan_out_stream_channel.cpp
+    core/filter_binding.cpp
+    core/filter_executor.cpp
+    core/filter_planner.cpp
     core/json_error_builder.cpp
     core/memory_channel.cpp
     core/packet_codec.cpp

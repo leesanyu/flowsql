@@ -866,10 +866,150 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             [this, block_runtime_id](void*) { ReleaseStreamTaskLeases(block_runtime_id); });
     }
     if (source_resolved.has_block_source && !parsed_ops.empty()) {
+        std::vector<IBlockTransformOperatorV1*> transform_providers;
+        transform_providers.reserve(parsed_ops.size());
+        size_t transform_matches = 0;
+        for (const auto& op_ref : parsed_ops) {
+            bool transform_ambiguous = false;
+            int transform_traverse_error = 0;
+            IBlockTransformOperatorV1* transform_provider = FindBlockTransformOperator(
+                op_ref.category,
+                op_ref.name,
+                &transform_ambiguous,
+                &transform_traverse_error);
+            if (transform_traverse_error != 0) {
+                rsp = BuildExecutionErrorJson(
+                    "block transform operator discovery failed with code " +
+                        std::to_string(transform_traverse_error),
+                    ErrorCodeId::kOpExecFail,
+                    ErrorStageId::kCapabilityCheck);
+                return error::INTERNAL_ERROR;
+            }
+            if (transform_ambiguous) {
+                rsp = BuildErrorJson("multiple block transform operators matched: " +
+                                     op_ref.category + "." + op_ref.name);
+                return error::CONFLICT;
+            }
+            transform_providers.push_back(transform_provider);
+            if (transform_provider) ++transform_matches;
+        }
+        if (transform_matches != parsed_ops.size() &&
+            (transform_matches != 0 || parsed_ops.size() > 1)) {
+            for (size_t i = 0; i < transform_providers.size(); ++i) {
+                if (transform_providers[i]) continue;
+                rsp = BuildErrorJson("block transform operator not found: " +
+                                     parsed_ops[i].category + "." + parsed_ops[i].name);
+                return error::NOT_FOUND;
+            }
+        }
+        if (transform_matches == parsed_ops.size()) {
+            if (!stmt.dest.empty() && !IsDataframeRefName(stmt.dest)) {
+                rsp = BuildErrorJson("block transform currently requires a DataFrame destination");
+                return error::BAD_REQUEST;
+            }
+            if (!stmt.dest.empty() && !ch_registry) {
+                rsp = BuildErrorJson("channel registry unavailable");
+                return error::INTERNAL_ERROR;
+            }
+
+            const bool named_result = !stmt.dest.empty();
+            const std::string dataframe_name = named_result
+                                                   ? DataframeNamePart(stmt.dest)
+                                                   : std::string("sink");
+            auto dataframe_sink = std::make_shared<DataFrameChannel>(
+                named_result ? "dataframe" : "_temp", dataframe_name);
+            if (dataframe_sink->Open() != 0) {
+                rsp = BuildErrorJson("failed to open block transform DataFrame sink");
+                return error::INTERNAL_ERROR;
+            }
+
+            int64_t rows = 0;
+            std::string transform_error;
+            BlockExecutionTerminal transform_terminal = BlockExecutionTerminal::kFailed;
+            int transform_rc = 0;
+            try {
+                transform_rc = ExecuteBlockTransformPipeline(
+                    source_resolved.block_channels.front().get(),
+                    transform_providers,
+                    dataframe_sink.get(),
+                    stmt,
+                    &transform_terminal,
+                    &rows,
+                    &transform_error);
+            } catch (const std::exception& ex) {
+                transform_error = std::string("block transform execution threw: ") + ex.what();
+                transform_rc = EFAULT;
+            } catch (...) {
+                transform_error = "block transform execution threw an unknown exception";
+                transform_rc = EFAULT;
+            }
+            if (transform_terminal == BlockExecutionTerminal::kFailed ||
+                (transform_terminal != BlockExecutionTerminal::kCancelled &&
+                 transform_rc != 0)) {
+                rsp = BuildExecutionErrorJson(
+                    transform_error.empty()
+                        ? "block transform execution failed"
+                        : transform_error,
+                    transform_rc == EINVAL ? ErrorCodeId::kSqlTextInvalid
+                                           : ErrorCodeId::kOpExecFail,
+                    transform_rc == EINVAL ? ErrorStageId::kCapabilityCheck
+                                           : ErrorStageId::kExecute);
+                return transform_rc == EINVAL ? error::BAD_REQUEST
+                                              : error::INTERNAL_ERROR;
+            }
+
+            if (named_result) {
+                if (ch_registry->Get(dataframe_name.c_str())) {
+                    (void)ch_registry->Unregister(dataframe_name.c_str());
+                }
+                if (ch_registry->Register(
+                        dataframe_name.c_str(),
+                        std::static_pointer_cast<IChannel>(dataframe_sink)) != 0) {
+                    rsp = BuildErrorJson("failed to register dataframe channel: " +
+                                         dataframe_name);
+                    return error::INTERNAL_ERROR;
+                }
+            }
+
+            const char* status = "completed";
+            if (transform_terminal == BlockExecutionTerminal::kStopped) {
+                status = "stopped";
+            } else if (transform_terminal == BlockExecutionTerminal::kCancelled) {
+                status = "cancelled";
+            }
+            DataFrame result;
+            std::string result_json = "[]";
+            if (!named_result && dataframe_sink->Read(&result) == 0 &&
+                result.RowCount() > 0) {
+                result_json = result.ToJson();
+            }
+            rapidjson::StringBuffer transform_buf;
+            rapidjson::Writer<rapidjson::StringBuffer> transform_writer(transform_buf);
+            transform_writer.StartObject();
+            transform_writer.Key("status");
+            transform_writer.String(status);
+            transform_writer.Key("rows");
+            transform_writer.Int64(rows);
+            transform_writer.Key("result_row_count");
+            transform_writer.Int64(rows);
+            transform_writer.Key("result_target");
+            transform_writer.String(stmt.dest.c_str());
+            if (!named_result) {
+                transform_writer.Key("data");
+                transform_writer.RawValue(
+                    result_json.c_str(), result_json.size(), rapidjson::kArrayType);
+            }
+            transform_writer.EndObject();
+            rsp = transform_buf.GetString();
+            return error::OK;
+        }
+
         if (parsed_ops.size() != 1) {
-            rsp = BuildErrorJson("block stream source currently supports one source and one operator");
+            rsp = BuildErrorJson(
+                "block stream terminal operator path currently supports one operator");
             return error::BAD_REQUEST;
         }
+
         IBlockStreamOperator* block_op = FindBlockOperator(parsed_ops[0].category, parsed_ops[0].name);
         if (!block_op) {
             rsp = BuildErrorJson("block stream operator not found: " + parsed_ops[0].category + "." + parsed_ops[0].name);

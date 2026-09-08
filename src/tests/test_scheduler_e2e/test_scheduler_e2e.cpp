@@ -27,9 +27,11 @@
 #include <common/loader.hpp>
 #include <framework/core/dataframe.h>
 #include <framework/core/dataframe_channel.h>
+#include <framework/core/filter_planner.h>
 #include <framework/core/packet_codec.h>
 #include <framework/core/stream_channel_adapter.h>
 #include <framework/interfaces/iblock_stream_operator.h>
+#include <framework/interfaces/iblock_transform_operator.h>
 #include <framework/interfaces/idatabase_channel.h>
 #include <framework/interfaces/idatabase_factory.h>
 #include <framework/interfaces/ichannel_registry.h>
@@ -139,6 +141,178 @@ class SchedulerE2eBlockOperator final : public IBlockStreamOperator {
     bool schema_matches_packet = false;
     std::vector<uint64_t> sequences;
     std::vector<std::string> raw_packets;
+};
+
+static std::shared_ptr<arrow::Schema> SchedulerE2eTransformSchema() {
+    return arrow::schema({
+        arrow::field("sequence", arrow::uint64(), false),
+        arrow::field("captured_len", arrow::uint32(), false),
+        arrow::field("protocol", arrow::utf8(), false),
+    });
+}
+
+enum class SchedulerE2eTransformKind {
+    kPacketToProtocol,
+    kPassthrough,
+};
+
+struct SchedulerE2eTransformSnapshot {
+    int open_calls = 0;
+    int process_calls = 0;
+    int flush_calls = 0;
+    int cancel_calls = 0;
+    std::vector<int64_t> input_rows;
+    bool input_schema_matched = false;
+};
+
+class SchedulerE2eTransformTask final : public IBlockTransformTaskV1 {
+ public:
+    explicit SchedulerE2eTransformTask(SchedulerE2eTransformKind kind) : kind_(kind) {}
+
+    int Open(std::shared_ptr<arrow::Schema> input_schema,
+             std::shared_ptr<arrow::Schema>* output_schema) override {
+        ++open_calls;
+        if (!input_schema || !output_schema || open_calls != 1) return EINVAL;
+        const auto expected = kind_ == SchedulerE2eTransformKind::kPacketToProtocol
+                                  ? packet::PacketSchema()
+                                  : SchedulerE2eTransformSchema();
+        input_schema_matched = input_schema->Equals(*expected, true);
+        if (!input_schema_matched) return EINVAL;
+        *output_schema = SchedulerE2eTransformSchema();
+        return 0;
+    }
+
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
+                     int64_t ts_ms,
+                     std::vector<BlockTransformOutputV1>* outputs) override {
+        ++process_calls;
+        if (!input || !outputs || !outputs->empty()) return -EINVAL;
+        input_rows.push_back(input->num_rows());
+        if (kind_ == SchedulerE2eTransformKind::kPassthrough) {
+            outputs->push_back({input, ts_ms});
+            return static_cast<int>(BlockTransformStatusV1::kContinue);
+        }
+
+        auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(
+            input->GetColumnByName("sequence"));
+        auto captured_len = std::dynamic_pointer_cast<arrow::UInt32Array>(
+            input->GetColumnByName("captured_len"));
+        if (!sequence || !captured_len || sequence->length() != input->num_rows() ||
+            captured_len->length() != input->num_rows()) {
+            last_error_ = "packet columns do not match the transform contract";
+            return -EINVAL;
+        }
+
+        arrow::UInt64Builder sequence_builder;
+        arrow::UInt32Builder captured_len_builder;
+        arrow::StringBuilder protocol_builder;
+        for (int64_t row = 0; row < input->num_rows(); ++row) {
+            if (!sequence_builder.Append(sequence->Value(row)).ok() ||
+                !captured_len_builder.Append(captured_len->Value(row)).ok() ||
+                !protocol_builder.Append(sequence->Value(row) == 0 ? "DROP" : "HTTP").ok()) {
+                last_error_ = "failed to build transform output";
+                return -EIO;
+            }
+        }
+        std::shared_ptr<arrow::Array> output_sequence;
+        std::shared_ptr<arrow::Array> output_captured_len;
+        std::shared_ptr<arrow::Array> output_protocol;
+        if (!sequence_builder.Finish(&output_sequence).ok() ||
+            !captured_len_builder.Finish(&output_captured_len).ok() ||
+            !protocol_builder.Finish(&output_protocol).ok()) {
+            last_error_ = "failed to finish transform output";
+            return -EIO;
+        }
+        outputs->push_back({arrow::RecordBatch::Make(
+                                SchedulerE2eTransformSchema(),
+                                input->num_rows(),
+                                {output_sequence, output_captured_len, output_protocol}),
+                            ts_ms});
+        return static_cast<int>(BlockTransformStatusV1::kContinue);
+    }
+
+    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+        ++flush_calls;
+        return outputs && outputs->empty() ? 0 : EINVAL;
+    }
+
+    void Cancel() override { ++cancel_calls; }
+    std::string LastError() const override { return last_error_; }
+
+    int open_calls = 0;
+    int process_calls = 0;
+    int flush_calls = 0;
+    int cancel_calls = 0;
+    std::vector<int64_t> input_rows;
+    bool input_schema_matched = false;
+
+ private:
+    SchedulerE2eTransformKind kind_;
+    std::string last_error_;
+};
+
+class SchedulerE2eTransformProvider final : public IBlockTransformOperatorV1 {
+ public:
+    SchedulerE2eTransformProvider(std::string name, SchedulerE2eTransformKind kind)
+        : name_(std::move(name)), kind_(kind) {}
+
+    std::string Category() const override { return "test"; }
+    std::string Name() const override { return name_; }
+    std::string Description() const override { return "scheduler cross-module E2E transform"; }
+
+    int CreateTask(const BlockTransformTaskConfigV1& config,
+                   IBlockTransformTaskV1** task) override {
+        ++create_calls;
+        if (!task || !config.task_id || !config.with_params_json ||
+            !config.pushed_filter_plan_json ||
+            config.contract_version != kBlockTransformContractVersionV1) {
+            return EINVAL;
+        }
+        task_ids.emplace_back(config.task_id);
+        with_params.emplace_back(config.with_params_json);
+        pushed_plans.emplace_back(config.pushed_filter_plan_json);
+        *task = new SchedulerE2eTransformTask(kind_);
+        ++live_tasks;
+        return 0;
+    }
+
+    void ReleaseTask(IBlockTransformTaskV1* task) override {
+        auto* concrete = dynamic_cast<SchedulerE2eTransformTask*>(task);
+        ASSERT_TRUE(concrete != nullptr);
+        SchedulerE2eTransformSnapshot snapshot;
+        snapshot.open_calls = concrete->open_calls;
+        snapshot.process_calls = concrete->process_calls;
+        snapshot.flush_calls = concrete->flush_calls;
+        snapshot.cancel_calls = concrete->cancel_calls;
+        snapshot.input_rows = concrete->input_rows;
+        snapshot.input_schema_matched = concrete->input_schema_matched;
+        released.push_back(std::move(snapshot));
+        delete concrete;
+        ++release_calls;
+        --live_tasks;
+    }
+
+    void Reset() {
+        create_calls = 0;
+        release_calls = 0;
+        live_tasks = 0;
+        task_ids.clear();
+        with_params.clear();
+        pushed_plans.clear();
+        released.clear();
+    }
+
+    int create_calls = 0;
+    int release_calls = 0;
+    int live_tasks = 0;
+    std::vector<std::string> task_ids;
+    std::vector<std::string> with_params;
+    std::vector<std::string> pushed_plans;
+    std::vector<SchedulerE2eTransformSnapshot> released;
+
+ private:
+    std::string name_;
+    SchedulerE2eTransformKind kind_;
 };
 
 static void AppendPcapLe16(std::vector<uint8_t>* bytes, uint16_t value) {
@@ -675,8 +849,14 @@ int main() {
     PluginLoader* loader = PluginLoader::Single();
     SchedulerE2eProtocol pcap_protocol;
     SchedulerE2eBlockOperator block_operator;
+    SchedulerE2eTransformProvider packet_transform(
+        "packet_to_protocol", SchedulerE2eTransformKind::kPacketToProtocol);
+    SchedulerE2eTransformProvider passthrough_transform(
+        "protocol_passthrough", SchedulerE2eTransformKind::kPassthrough);
     loader->Regist(IID_PROTOCOL, &pcap_protocol);
     loader->Regist(IID_BLOCK_STREAM_OPERATOR, &block_operator);
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &packet_transform);
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &passthrough_transform);
     const char* libs[] = {"libflowsql_database.so", "libflowsql_builtin.so", "libflowsql_catalog.so",
                           "libflowsql_pcapfile.so", "libflowsql_scheduler.so", "libflowsql_stream.so"};
     std::string db_opt = "type=sqlite;name=local;path=" + db_path.string();
@@ -815,6 +995,102 @@ int main() {
         ASSERT_EQ(sequence->Value(1), 1);
         ASSERT_EQ(std::string(raw_data->GetView(0)), std::string("\x01\x02\x03\x04", 4));
         ASSERT_EQ(std::string(raw_data->GetView(1)), std::string("\x05\x06\x07\x08", 4));
+
+        ASSERT_EQ(stream_remove("/channels/stream/remove",
+                                MakePcapSourceRemoveRequest(channel_name),
+                                rsp),
+                  error::OK);
+        ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
+    }
+    {
+        const std::string channel_name = "scheduler_pcap_transform";
+        const std::string dataframe_name = "scheduler_pcap_transform";
+        std::string rsp;
+        ASSERT_EQ(stream_add("/channels/stream/add",
+                             MakePcapSourceAddRequest(channel_name, pcap_ok),
+                             rsp),
+                  error::OK);
+
+        pcap_protocol.Reset();
+        packet_transform.Reset();
+        passthrough_transform.Reset();
+        const std::string sql =
+            "SELECT * FROM pcapfile." + channel_name +
+            " WHERE captured_len >= 4"
+            " USING test.packet_to_protocol WITH mode=decode"
+            " WHERE sequence >= 1 AND protocol != 'DROP'"
+            " THEN test.protocol_passthrough WITH mode=pass"
+            " WHERE protocol = 'HTTP'"
+            " INTO dataframe." + dataframe_name;
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
+
+        rapidjson::Document completed;
+        completed.Parse(rsp.c_str());
+        ASSERT_TRUE(!completed.HasParseError() && completed.IsObject());
+        ASSERT_EQ(completed.MemberCount(), rapidjson::SizeType(4));
+        ASSERT_TRUE(!completed.HasMember("data"));
+        ASSERT_TRUE(completed.HasMember("status") && completed["status"].IsString());
+        ASSERT_EQ(std::string(completed["status"].GetString()), "completed");
+        ASSERT_TRUE(completed.HasMember("rows") && completed["rows"].IsInt64());
+        ASSERT_EQ(completed["rows"].GetInt64(), 1);
+        ASSERT_TRUE(completed.HasMember("result_row_count") &&
+                    completed["result_row_count"].IsInt64());
+        ASSERT_EQ(completed["result_row_count"].GetInt64(), 1);
+        ASSERT_TRUE(completed.HasMember("result_target") &&
+                    completed["result_target"].IsString());
+        ASSERT_EQ(std::string(completed["result_target"].GetString()),
+                  "dataframe." + dataframe_name);
+        ASSERT_EQ(pcap_protocol.layer_calls, 2);
+
+        auto output = std::dynamic_pointer_cast<IDataFrameChannel>(
+            registry->Get(dataframe_name.c_str()));
+        ASSERT_TRUE(output != nullptr);
+        DataFrame result;
+        ASSERT_EQ(output->Read(&result), 0);
+        auto result_batch = result.ToArrow();
+        ASSERT_TRUE(result_batch != nullptr);
+        ASSERT_EQ(result_batch->num_rows(), 1);
+        ASSERT_TRUE(result_batch->schema()->Equals(*SchedulerE2eTransformSchema(), true));
+        auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(
+            result_batch->GetColumnByName("sequence"));
+        auto captured_len = std::dynamic_pointer_cast<arrow::UInt32Array>(
+            result_batch->GetColumnByName("captured_len"));
+        auto protocol = std::dynamic_pointer_cast<arrow::StringArray>(
+            result_batch->GetColumnByName("protocol"));
+        ASSERT_TRUE(sequence != nullptr && captured_len != nullptr && protocol != nullptr);
+        ASSERT_EQ(sequence->Value(0), 1);
+        ASSERT_EQ(captured_len->Value(0), 4);
+        ASSERT_EQ(protocol->GetString(0), "HTTP");
+
+        const auto verify_provider = [](const SchedulerE2eTransformProvider& provider,
+                                        const std::string& expected_mode,
+                                        const std::vector<int64_t>& execution_input_rows) {
+            ASSERT_EQ(provider.create_calls, 2);
+            ASSERT_EQ(provider.release_calls, 2);
+            ASSERT_EQ(provider.live_tasks, 0);
+            ASSERT_EQ(provider.task_ids.size(), 2u);
+            ASSERT_TRUE(provider.task_ids[0] != provider.task_ids[1]);
+            ASSERT_EQ(provider.with_params.size(), 2u);
+            ASSERT_TRUE(provider.with_params[0].find(expected_mode) != std::string::npos);
+            ASSERT_TRUE(provider.with_params[1].find(expected_mode) != std::string::npos);
+            ASSERT_EQ(provider.pushed_plans,
+                      std::vector<std::string>({kEmptyCanonicalFilterPlanV1,
+                                                kEmptyCanonicalFilterPlanV1}));
+            ASSERT_EQ(provider.released.size(), 2u);
+            ASSERT_EQ(provider.released[0].open_calls, 1);
+            ASSERT_EQ(provider.released[0].process_calls, 0);
+            ASSERT_EQ(provider.released[0].flush_calls, 0);
+            ASSERT_EQ(provider.released[0].cancel_calls, 1);
+            ASSERT_TRUE(provider.released[0].input_schema_matched);
+            ASSERT_EQ(provider.released[1].open_calls, 1);
+            ASSERT_EQ(provider.released[1].process_calls, 2);
+            ASSERT_EQ(provider.released[1].flush_calls, 1);
+            ASSERT_EQ(provider.released[1].cancel_calls, 0);
+            ASSERT_EQ(provider.released[1].input_rows, execution_input_rows);
+            ASSERT_TRUE(provider.released[1].input_schema_matched);
+        };
+        verify_provider(packet_transform, "decode", {1, 1});
+        verify_provider(passthrough_transform, "pass", {0, 1});
 
         ASSERT_EQ(stream_remove("/channels/stream/remove",
                                 MakePcapSourceRemoveRequest(channel_name),
@@ -1118,7 +1394,7 @@ int main() {
     }
     std::puts("[PASS] T29");
 
-    // T30: 多源 + WHERE（Sprint10 V1）应报 BAD_REQUEST
+    // T30: 阶段过滤语法在 parser 层明确拒绝多 source 的 source-stage WHERE。
     {
         std::string rsp;
         int32_t rc = exec("/scheduler/batch/execute",
@@ -1126,7 +1402,8 @@ int main() {
                                   "WHERE id > 1 USING builtin.passthrough INTO dataframe.multi_where"),
                           rsp);
         ASSERT_EQ(rc, error::BAD_REQUEST);
-        ASSERT_TRUE(rsp.find("multi-source FROM does not support WHERE in Sprint 10") != std::string::npos);
+        ASSERT_TRUE(rsp.find("source-stage WHERE does not support multiple sources") !=
+                    std::string::npos);
     }
     std::puts("[PASS] T30");
 

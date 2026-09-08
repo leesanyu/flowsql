@@ -15,12 +15,15 @@
 #include <unordered_map>
 #include <vector>
 
+#include <framework/core/filter_planner.h>
 #include <framework/core/packet_codec.h>
 #include <framework/core/ring_stream_channel.h>
 #include <framework/core/sql_parser.h>
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_manager.h>
+#include <framework/interfaces/iblock_transform_operator.h>
 #include <framework/interfaces/ichannel.h>
+#include <framework/interfaces/ifilter_pushdown.h>
 #include <services/scheduler/scheduler_plugin.h>
 
 #define ASSERT_TRUE(expr)                                                                   \
@@ -256,6 +259,205 @@ class SchemaBlockOperator final : public IBlockStreamOperator {
     bool schema_matches_packet = false;
 };
 
+struct ReleasedTransformTaskSnapshot {
+    int open_calls = 0;
+    int process_calls = 0;
+    int flush_calls = 0;
+    int cancel_calls = 0;
+    int64_t process_input_rows = -1;
+    std::vector<int64_t> process_input_rows_history;
+    std::shared_ptr<arrow::Schema> opened_input_schema;
+};
+
+class SchedulerTransformTask final : public IBlockTransformTaskV1 {
+ public:
+    SchedulerTransformTask(std::shared_ptr<arrow::Schema> output_schema,
+                           std::vector<std::shared_ptr<arrow::RecordBatch>> process_outputs,
+                           bool passthrough,
+                           std::vector<std::shared_ptr<arrow::RecordBatch>> flush_outputs,
+                           int process_result,
+                           int flush_result,
+                           std::string event_label,
+                           std::vector<std::string>* events)
+        : output_schema_(std::move(output_schema)),
+          process_outputs_(std::move(process_outputs)),
+          passthrough_(passthrough),
+          flush_outputs_(std::move(flush_outputs)),
+          process_result_(process_result),
+          flush_result_(flush_result),
+          event_label_(std::move(event_label)),
+          events_(events) {}
+
+    int Open(std::shared_ptr<arrow::Schema> input_schema,
+             std::shared_ptr<arrow::Schema>* output_schema) override {
+        ++open_calls;
+        opened_input_schema = std::move(input_schema);
+        RecordEvent("open");
+        if (!output_schema) return EINVAL;
+        *output_schema = output_schema_;
+        return 0;
+    }
+
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
+                     int64_t,
+                     std::vector<BlockTransformOutputV1>* outputs) override {
+        ++process_calls;
+        if (!input || !outputs || !outputs->empty()) return EINVAL;
+        process_input_rows = input->num_rows();
+        process_input_rows_history.push_back(process_input_rows);
+        RecordEvent("process");
+        if (process_result_ < 0) return process_result_;
+        if (passthrough_) {
+            outputs->push_back({input, 123});
+        } else {
+            for (const auto& output : process_outputs_) {
+                outputs->push_back({output, 123});
+            }
+        }
+        return process_result_;
+    }
+
+    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+        ++flush_calls;
+        RecordEvent("flush");
+        if (!outputs || !outputs->empty()) return EINVAL;
+        if (flush_result_ != 0) return flush_result_;
+        for (const auto& output : flush_outputs_) {
+            outputs->push_back({output, 456});
+        }
+        return 0;
+    }
+
+    void Cancel() override {
+        ++cancel_calls;
+        RecordEvent("cancel");
+    }
+    std::string LastError() const override { return "scheduler transform task failed"; }
+
+    int open_calls = 0;
+    int process_calls = 0;
+    int flush_calls = 0;
+    int cancel_calls = 0;
+    int64_t process_input_rows = -1;
+    std::vector<int64_t> process_input_rows_history;
+    std::shared_ptr<arrow::Schema> opened_input_schema;
+
+ private:
+    void RecordEvent(const std::string& action) {
+        if (events_) events_->push_back(event_label_ + "." + action);
+    }
+
+    std::shared_ptr<arrow::Schema> output_schema_;
+    std::vector<std::shared_ptr<arrow::RecordBatch>> process_outputs_;
+    bool passthrough_ = false;
+    std::vector<std::shared_ptr<arrow::RecordBatch>> flush_outputs_;
+    int process_result_ = static_cast<int>(BlockTransformStatusV1::kContinue);
+    int flush_result_ = 0;
+    std::string event_label_;
+    std::vector<std::string>* events_ = nullptr;
+};
+
+class SchedulerTransformProvider final : public IBlockTransformOperatorV1,
+                                         public IFilterPushdownV1 {
+ public:
+    SchedulerTransformProvider(std::shared_ptr<arrow::Schema> output_schema,
+                               std::shared_ptr<arrow::RecordBatch> output_batch,
+                               std::string name = "stage_transform")
+        : output_schema_(std::move(output_schema)),
+          output_batch_(std::move(output_batch)),
+          name_(std::move(name)) {}
+
+    std::string Category() const override { return "test"; }
+    std::string Name() const override { return name_; }
+    std::string Description() const override { return "scheduler transform test provider"; }
+
+    int CreateTask(const BlockTransformTaskConfigV1& config,
+                   IBlockTransformTaskV1** task) override {
+        ++create_calls;
+        if (!task || !config.task_id || !config.with_params_json ||
+            !config.pushed_filter_plan_json) {
+            return EINVAL;
+        }
+        task_ids.emplace_back(config.task_id);
+        with_params.emplace_back(config.with_params_json);
+        pushed_plans.emplace_back(config.pushed_filter_plan_json);
+        const auto task_schema = create_calls > 1 && execution_output_schema
+                                     ? execution_output_schema
+                                     : output_schema_;
+        auto process_outputs = configured_process_outputs;
+        if (process_outputs.empty() && output_batch_) process_outputs.push_back(output_batch_);
+        *task = new SchedulerTransformTask(task_schema,
+                                           std::move(process_outputs),
+                                           passthrough,
+                                           configured_flush_outputs,
+                                           process_result,
+                                           flush_result,
+                                           event_label.empty() ? Name() : event_label,
+                                           events);
+        ++live_tasks;
+        return 0;
+    }
+
+    void ReleaseTask(IBlockTransformTaskV1* task) override {
+        auto* concrete = dynamic_cast<SchedulerTransformTask*>(task);
+        ASSERT_TRUE(concrete != nullptr);
+        ReleasedTransformTaskSnapshot snapshot;
+        snapshot.open_calls = concrete->open_calls;
+        snapshot.process_calls = concrete->process_calls;
+        snapshot.flush_calls = concrete->flush_calls;
+        snapshot.cancel_calls = concrete->cancel_calls;
+        snapshot.process_input_rows = concrete->process_input_rows;
+        snapshot.process_input_rows_history = concrete->process_input_rows_history;
+        snapshot.opened_input_schema = concrete->opened_input_schema;
+        released.push_back(std::move(snapshot));
+        delete concrete;
+        ++release_calls;
+        --live_tasks;
+    }
+
+    int EvaluatePushdown(const FilterPushdownRequestV1& request,
+                         FilterPushdownResultV1* result) const override {
+        ++pushdown_calls;
+        if (!result || request.target_kind != FilterPushdownTargetKindV1::kTransform ||
+            !request.target_category || !request.target_name ||
+            std::string(request.target_category) != Category() ||
+            std::string(request.target_name) != Name()) {
+            return ENOTSUP;
+        }
+        observed_output_schema = request.output_schema;
+        observed_candidates = request.candidate_node_ids;
+        if (accept_first_candidate && !request.candidate_node_ids.empty()) {
+            result->accepted_node_ids = {request.candidate_node_ids.front()};
+        }
+        return 0;
+    }
+
+    std::vector<std::string> task_ids;
+    std::vector<std::string> with_params;
+    std::vector<std::string> pushed_plans;
+    std::vector<ReleasedTransformTaskSnapshot> released;
+    int create_calls = 0;
+    int release_calls = 0;
+    int live_tasks = 0;
+    mutable int pushdown_calls = 0;
+    mutable std::shared_ptr<arrow::Schema> observed_output_schema;
+    mutable std::vector<uint32_t> observed_candidates;
+    std::shared_ptr<arrow::Schema> execution_output_schema;
+    std::vector<std::shared_ptr<arrow::RecordBatch>> configured_process_outputs;
+    std::vector<std::shared_ptr<arrow::RecordBatch>> configured_flush_outputs;
+    bool passthrough = false;
+    bool accept_first_candidate = true;
+    int process_result = static_cast<int>(BlockTransformStatusV1::kContinue);
+    int flush_result = 0;
+    std::string event_label;
+    std::vector<std::string>* events = nullptr;
+
+ private:
+    std::shared_ptr<arrow::Schema> output_schema_;
+    std::shared_ptr<arrow::RecordBatch> output_batch_;
+    std::string name_;
+};
+
 class BlockProviderQuerier final : public IQuerier {
  public:
     int Traverse(const Guid& iid, fntraverse callback) override {
@@ -269,6 +471,15 @@ class BlockProviderQuerier final : public IQuerier {
         } else if (SameGuid(iid, IID_BLOCK_STREAM_OPERATOR)) {
             ++operator_traverse_calls;
             providers = &operators;
+        } else if (SameGuid(iid, IID_BLOCK_TRANSFORM_OPERATOR_V1)) {
+            ++transform_traverse_calls;
+            if (transform_traverse_return_code != 0) {
+                return transform_traverse_return_code;
+            }
+            providers = &transforms;
+        } else if (SameGuid(iid, IID_FILTER_PUSHDOWN_V1)) {
+            ++filter_pushdown_traverse_calls;
+            providers = &filter_pushdowns;
         } else {
             ++unexpected_traverse_calls;
             return 0;
@@ -276,7 +487,7 @@ class BlockProviderQuerier final : public IQuerier {
         if (!callback) return 0;
         for (void* provider : *providers) {
             const int rc = callback(provider);
-            if (rc == -1) return rc;
+            if (rc != 0) break;
         }
         return 0;
     }
@@ -291,9 +502,14 @@ class BlockProviderQuerier final : public IQuerier {
     std::vector<void*> factories;
     std::vector<void*> managers;
     std::vector<void*> operators;
+    std::vector<void*> transforms;
+    std::vector<void*> filter_pushdowns;
     int factory_traverse_calls = 0;
     int manager_traverse_calls = 0;
     int operator_traverse_calls = 0;
+    int transform_traverse_calls = 0;
+    int filter_pushdown_traverse_calls = 0;
+    int transform_traverse_return_code = 0;
     int unexpected_traverse_calls = 0;
     int first_calls = 0;
     int block_factory_first_calls = 0;
@@ -1290,6 +1506,353 @@ void TestBlockDirectTransferTimeout() {
     ASSERT_EQ(source.poll_calls, 3);
     ASSERT_EQ(source.release_calls, 0);
 }
+
+void TestBlockTransformSchedulerPipeline() {
+    auto raw = std::make_shared<std::vector<uint8_t>>(
+        std::initializer_list<uint8_t>{0x01, 0x02, 0x03});
+    packet::PacketRecord record;
+    record.meta.captured_len = static_cast<uint32_t>(raw->size());
+    record.meta.wire_len = static_cast<uint32_t>(raw->size());
+    record.raw_data.owner = raw;
+    record.raw_data.data = raw->data();
+    record.raw_data.size = static_cast<uint32_t>(raw->size());
+    std::shared_ptr<arrow::RecordBatch> packet_batch;
+    std::string packet_error;
+    ASSERT_EQ(packet::EncodePacketBatch({record}, &packet_batch, &packet_error),
+              packet::PacketBatchError::kNone);
+    ASSERT_TRUE(packet_batch != nullptr && packet_error.empty());
+
+    auto output_schema = arrow::schema({
+        arrow::field("score", arrow::int32(), false),
+        arrow::field("protocol", arrow::utf8(), false),
+    });
+    arrow::Int32Builder score_builder;
+    arrow::StringBuilder protocol_builder;
+    ASSERT_TRUE(score_builder.AppendValues({20, 20}).ok());
+    ASSERT_TRUE(protocol_builder.AppendValues({"HTTP", "DNS"}).ok());
+    std::shared_ptr<arrow::Array> score;
+    std::shared_ptr<arrow::Array> protocol;
+    ASSERT_TRUE(score_builder.Finish(&score).ok());
+    ASSERT_TRUE(protocol_builder.Finish(&protocol).ok());
+    auto output_batch = arrow::RecordBatch::Make(
+        output_schema, 2, {score, protocol});
+
+    SchemaBlockChannel source(packet_batch, 1);
+    TraversalBlockFactory factory(1);
+    factory.channel = &source;
+    SchedulerTransformProvider provider(output_schema, output_batch);
+    BlockProviderQuerier querier;
+    querier.factories = {&factory};
+    querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&provider)};
+    querier.filter_pushdowns = {static_cast<IFilterPushdownV1*>(&provider)};
+    SchedulerPlugin plugin;
+    ASSERT_EQ(plugin.Load(&querier), 0);
+
+    std::string response;
+    ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                  &plugin,
+                  R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2 )"
+                  R"(USING test.stage_transform WITH mode=fast )"
+                  R"(WHERE score >= 10 AND protocol = 'HTTP'"})",
+                  &response),
+              error::OK);
+    ASSERT_TRUE(response.find("\"status\":\"completed\"") != std::string::npos);
+    ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
+    ASSERT_TRUE(response.find("HTTP") != std::string::npos);
+    ASSERT_TRUE(response.find("DNS") == std::string::npos);
+    ASSERT_EQ(source.poll_calls, 2);
+    ASSERT_EQ(source.release_calls, 1);
+    ASSERT_EQ(querier.transform_traverse_calls, 1);
+    ASSERT_EQ(querier.operator_traverse_calls, 0);
+    ASSERT_EQ(querier.filter_pushdown_traverse_calls, 1);
+    ASSERT_EQ(provider.pushdown_calls, 1);
+    ASSERT_TRUE(provider.observed_output_schema != nullptr &&
+                provider.observed_output_schema->Equals(output_schema));
+    ASSERT_EQ(provider.observed_candidates, std::vector<uint32_t>({2, 5}));
+    ASSERT_EQ(provider.create_calls, 2);
+    ASSERT_EQ(provider.release_calls, 2);
+    ASSERT_EQ(provider.live_tasks, 0);
+    ASSERT_EQ(provider.pushed_plans.size(), 2u);
+    ASSERT_EQ(provider.pushed_plans[0], std::string(kEmptyCanonicalFilterPlanV1));
+    ASSERT_TRUE(provider.pushed_plans[1].find("\"field_name\":\"score\"") !=
+                std::string::npos);
+    ASSERT_TRUE(provider.pushed_plans[1].find("\"field_name\":\"protocol\"") ==
+                std::string::npos);
+    ASSERT_TRUE(provider.with_params[0].find("\"mode\":\"fast\"") !=
+                std::string::npos);
+    ASSERT_EQ(provider.released.size(), 2u);
+    ASSERT_EQ(provider.released[0].open_calls, 1);
+    ASSERT_EQ(provider.released[0].process_calls, 0);
+    ASSERT_EQ(provider.released[0].flush_calls, 0);
+    ASSERT_EQ(provider.released[0].cancel_calls, 1);
+    ASSERT_EQ(provider.released[1].open_calls, 1);
+    ASSERT_EQ(provider.released[1].process_calls, 1);
+    ASSERT_EQ(provider.released[1].process_input_rows, 1);
+    ASSERT_EQ(provider.released[1].flush_calls, 1);
+    ASSERT_EQ(provider.released[1].cancel_calls, 0);
+
+    SchemaBlockChannel unfiltered_source(packet_batch, 1);
+    factory.channel = &unfiltered_source;
+    SchedulerTransformProvider unfiltered_provider(output_schema, output_batch);
+    BlockProviderQuerier unfiltered_querier;
+    unfiltered_querier.factories = {&factory};
+    unfiltered_querier.transforms = {
+        static_cast<IBlockTransformOperatorV1*>(&unfiltered_provider)};
+    SchedulerPlugin unfiltered_plugin;
+    ASSERT_EQ(unfiltered_plugin.Load(&unfiltered_querier), 0);
+    ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                  &unfiltered_plugin,
+                  R"({"sql":"SELECT * FROM pcapfile.input USING test.stage_transform"})",
+                  &response),
+              error::OK);
+    ASSERT_TRUE(response.find("\"rows\":2") != std::string::npos);
+    ASSERT_EQ(unfiltered_provider.create_calls, 1);
+    ASSERT_EQ(unfiltered_provider.release_calls, 1);
+    ASSERT_EQ(unfiltered_provider.pushdown_calls, 0);
+    ASSERT_EQ(unfiltered_provider.pushed_plans,
+              std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
+    ASSERT_EQ(unfiltered_provider.released[0].open_calls, 1);
+    ASSERT_EQ(unfiltered_provider.released[0].process_calls, 1);
+    ASSERT_EQ(unfiltered_provider.released[0].flush_calls, 1);
+    ASSERT_EQ(unfiltered_provider.released[0].cancel_calls, 0);
+
+    SchemaBlockChannel invalid_source(packet_batch, 1);
+    factory.channel = &invalid_source;
+    SchedulerTransformProvider invalid_provider(output_schema, output_batch);
+    BlockProviderQuerier invalid_querier;
+    invalid_querier.factories = {&factory};
+    invalid_querier.transforms = {
+        static_cast<IBlockTransformOperatorV1*>(&invalid_provider)};
+    SchedulerPlugin invalid_plugin;
+    ASSERT_EQ(invalid_plugin.Load(&invalid_querier), 0);
+    ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                  &invalid_plugin,
+                  R"({"sql":"SELECT * FROM pcapfile.input USING test.stage_transform WHERE missing = 1"})",
+                  &response),
+              error::BAD_REQUEST);
+    ASSERT_TRUE(response.find("unknown field") != std::string::npos);
+    ASSERT_TRUE(response.find("\"error_stage\":\"capability_check\"") !=
+                std::string::npos);
+    ASSERT_EQ(invalid_source.poll_calls, 0);
+    ASSERT_EQ(invalid_provider.create_calls, 1);
+    ASSERT_EQ(invalid_provider.release_calls, 1);
+    ASSERT_EQ(invalid_provider.released[0].cancel_calls, 1);
+
+    SchemaBlockChannel changed_schema_source(packet_batch, 1);
+    factory.channel = &changed_schema_source;
+    SchedulerTransformProvider changed_schema_provider(output_schema, output_batch);
+    changed_schema_provider.execution_output_schema = arrow::schema({
+        arrow::field("other", arrow::int32(), false),
+    });
+    BlockProviderQuerier changed_schema_querier;
+    changed_schema_querier.factories = {&factory};
+    changed_schema_querier.transforms = {
+        static_cast<IBlockTransformOperatorV1*>(&changed_schema_provider)};
+    changed_schema_querier.filter_pushdowns = {
+        static_cast<IFilterPushdownV1*>(&changed_schema_provider)};
+    SchedulerPlugin changed_schema_plugin;
+    ASSERT_EQ(changed_schema_plugin.Load(&changed_schema_querier), 0);
+    ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                  &changed_schema_plugin,
+                  R"({"sql":"SELECT * FROM pcapfile.input USING test.stage_transform WHERE score >= 10"})",
+                  &response),
+              error::INTERNAL_ERROR);
+    ASSERT_TRUE(response.find("differs from its planning Schema") !=
+                std::string::npos);
+    ASSERT_EQ(changed_schema_source.poll_calls, 0);
+    ASSERT_EQ(changed_schema_provider.create_calls, 2);
+    ASSERT_EQ(changed_schema_provider.release_calls, 2);
+    ASSERT_EQ(changed_schema_provider.released[0].cancel_calls, 1);
+    ASSERT_EQ(changed_schema_provider.released[1].cancel_calls, 1);
+
+    SchemaBlockChannel traversal_source(packet_batch, 1);
+    factory.channel = &traversal_source;
+    SchedulerTransformProvider traversal_provider(output_schema, output_batch);
+    BlockProviderQuerier traversal_querier;
+    traversal_querier.factories = {&factory};
+    traversal_querier.transforms = {
+        static_cast<IBlockTransformOperatorV1*>(&traversal_provider)};
+    traversal_querier.transform_traverse_return_code = EIO;
+    SchedulerPlugin traversal_plugin;
+    ASSERT_EQ(traversal_plugin.Load(&traversal_querier), 0);
+    ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                  &traversal_plugin,
+                  R"({"sql":"SELECT * FROM pcapfile.input USING test.stage_transform"})",
+                  &response),
+              error::INTERNAL_ERROR);
+    ASSERT_TRUE(response.find("operator discovery failed") != std::string::npos);
+    ASSERT_TRUE(response.find("\"error_stage\":\"capability_check\"") !=
+                std::string::npos);
+    ASSERT_EQ(traversal_source.poll_calls, 0);
+    ASSERT_EQ(traversal_provider.create_calls, 0);
+}
+
+void TestMultiBlockTransformSchedulerPipeline() {
+    auto raw = std::make_shared<std::vector<uint8_t>>(
+        std::initializer_list<uint8_t>{0x10, 0x20, 0x30});
+    packet::PacketRecord record;
+    record.meta.captured_len = static_cast<uint32_t>(raw->size());
+    record.meta.wire_len = static_cast<uint32_t>(raw->size());
+    record.raw_data.owner = raw;
+    record.raw_data.data = raw->data();
+    record.raw_data.size = static_cast<uint32_t>(raw->size());
+    std::shared_ptr<arrow::RecordBatch> packet_batch;
+    std::string packet_error;
+    ASSERT_EQ(packet::EncodePacketBatch({record}, &packet_batch, &packet_error),
+              packet::PacketBatchError::kNone);
+    ASSERT_TRUE(packet_batch != nullptr && packet_error.empty());
+
+    auto stage_schema = arrow::schema({
+        arrow::field("score", arrow::int32(), false),
+        arrow::field("protocol", arrow::utf8(), false),
+    });
+    auto make_stage_batch = [&](const std::vector<int32_t>& scores,
+                                const std::vector<std::string>& protocols) {
+        ASSERT_EQ(scores.size(), protocols.size());
+        arrow::Int32Builder score_builder;
+        arrow::StringBuilder protocol_builder;
+        ASSERT_TRUE(score_builder.AppendValues(scores).ok());
+        ASSERT_TRUE(protocol_builder.AppendValues(protocols).ok());
+        std::shared_ptr<arrow::Array> score;
+        std::shared_ptr<arrow::Array> protocol;
+        ASSERT_TRUE(score_builder.Finish(&score).ok());
+        ASSERT_TRUE(protocol_builder.Finish(&protocol).ok());
+        return arrow::RecordBatch::Make(
+            stage_schema, static_cast<int64_t>(scores.size()), {score, protocol});
+    };
+    auto http_batch = make_stage_batch({20}, {"HTTP"});
+    auto drop_dns_batch = make_stage_batch({20, 20}, {"DROP", "DNS"});
+    auto flush1_batch = make_stage_batch({20}, {"FLUSH1"});
+    auto flush2_batch = make_stage_batch({20}, {"FLUSH2"});
+
+    SchemaBlockChannel source(packet_batch, 2);
+    TraversalBlockFactory factory(1);
+    factory.channel = &source;
+    std::vector<std::string> events;
+    SchedulerTransformProvider first_provider(
+        stage_schema, http_batch, "first_transform");
+    first_provider.configured_process_outputs = {http_batch, drop_dns_batch};
+    first_provider.configured_flush_outputs = {flush1_batch};
+    first_provider.event_label = "first";
+    first_provider.events = &events;
+    SchedulerTransformProvider second_provider(
+        stage_schema, nullptr, "second_transform");
+    second_provider.passthrough = true;
+    second_provider.accept_first_candidate = false;
+    second_provider.process_result = static_cast<int>(BlockTransformStatusV1::kStop);
+    second_provider.configured_flush_outputs = {flush2_batch};
+    second_provider.event_label = "second";
+    second_provider.events = &events;
+
+    BlockProviderQuerier querier;
+    querier.factories = {&factory};
+    querier.transforms = {
+        static_cast<IBlockTransformOperatorV1*>(&first_provider),
+        static_cast<IBlockTransformOperatorV1*>(&second_provider),
+    };
+    querier.filter_pushdowns = {
+        static_cast<IFilterPushdownV1*>(&first_provider),
+        static_cast<IFilterPushdownV1*>(&second_provider),
+    };
+    SchedulerPlugin plugin;
+    ASSERT_EQ(plugin.Load(&querier), 0);
+
+    std::string response;
+    ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                  &plugin,
+                  R"JSON({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2 )JSON"
+                  R"JSON(USING test.first_transform WITH mode=first )JSON"
+                  R"JSON(WHERE score >= 10 AND protocol != 'DROP' )JSON"
+                  R"JSON(THEN test.second_transform WITH mode=second )JSON"
+                  R"JSON(WHERE protocol IN ('HTTP', 'DNS', 'FLUSH1', 'FLUSH2')"})JSON",
+                  &response),
+              error::OK);
+    ASSERT_TRUE(response.find("\"status\":\"stopped\"") != std::string::npos);
+    ASSERT_TRUE(response.find("\"rows\":4") != std::string::npos);
+    const auto http_pos = response.find("HTTP");
+    const auto dns_pos = response.find("DNS");
+    const auto flush1_pos = response.find("FLUSH1");
+    const auto flush2_pos = response.find("FLUSH2");
+    ASSERT_TRUE(http_pos < dns_pos && dns_pos < flush1_pos && flush1_pos < flush2_pos);
+    ASSERT_TRUE(response.find("DROP") == std::string::npos);
+
+    ASSERT_EQ(source.poll_calls, 1);
+    ASSERT_EQ(source.release_calls, 1);
+    ASSERT_EQ(querier.transform_traverse_calls, 2);
+    ASSERT_EQ(querier.operator_traverse_calls, 0);
+    ASSERT_EQ(querier.filter_pushdown_traverse_calls, 2);
+    ASSERT_EQ(first_provider.create_calls, 2);
+    ASSERT_EQ(first_provider.release_calls, 2);
+    ASSERT_EQ(first_provider.live_tasks, 0);
+    ASSERT_EQ(second_provider.create_calls, 2);
+    ASSERT_EQ(second_provider.release_calls, 2);
+    ASSERT_EQ(second_provider.live_tasks, 0);
+    ASSERT_EQ(first_provider.pushed_plans[0], std::string(kEmptyCanonicalFilterPlanV1));
+    ASSERT_TRUE(first_provider.pushed_plans[1].find("\"field_name\":\"score\"") !=
+                std::string::npos);
+    ASSERT_TRUE(first_provider.pushed_plans[1].find("\"field_name\":\"protocol\"") ==
+                std::string::npos);
+    ASSERT_EQ(second_provider.pushed_plans,
+              std::vector<std::string>({kEmptyCanonicalFilterPlanV1,
+                                        kEmptyCanonicalFilterPlanV1}));
+    ASSERT_TRUE(first_provider.with_params[1].find("\"mode\":\"first\"") !=
+                std::string::npos);
+    ASSERT_TRUE(second_provider.with_params[1].find("\"mode\":\"second\"") !=
+                std::string::npos);
+
+    ASSERT_TRUE(first_provider.released[0].opened_input_schema->Equals(packet::PacketSchema()));
+    ASSERT_TRUE(first_provider.released[1].opened_input_schema->Equals(packet::PacketSchema()));
+    ASSERT_TRUE(second_provider.released[0].opened_input_schema->Equals(stage_schema));
+    ASSERT_TRUE(second_provider.released[1].opened_input_schema->Equals(stage_schema));
+    ASSERT_EQ(first_provider.released[0].cancel_calls, 1);
+    ASSERT_EQ(first_provider.released[1].process_input_rows_history,
+              std::vector<int64_t>({1}));
+    ASSERT_EQ(first_provider.released[1].flush_calls, 1);
+    ASSERT_EQ(first_provider.released[1].cancel_calls, 0);
+    ASSERT_EQ(second_provider.released[0].cancel_calls, 1);
+    ASSERT_EQ(second_provider.released[1].process_input_rows_history,
+              std::vector<int64_t>({1, 1, 1}));
+    ASSERT_EQ(second_provider.released[1].flush_calls, 1);
+    ASSERT_EQ(second_provider.released[1].cancel_calls, 0);
+    ASSERT_TRUE(events.size() >= 3);
+    ASSERT_EQ(events[events.size() - 3], "first.flush");
+    ASSERT_EQ(events[events.size() - 2], "second.process");
+    ASSERT_EQ(events[events.size() - 1], "second.flush");
+
+    SchemaBlockChannel failing_source(packet_batch, 1);
+    factory.channel = &failing_source;
+    SchedulerTransformProvider before_failure(
+        stage_schema, http_batch, "before_failure");
+    SchedulerTransformProvider failing_provider(
+        stage_schema, nullptr, "failing_transform");
+    failing_provider.passthrough = true;
+    failing_provider.process_result = -EIO;
+    BlockProviderQuerier failing_querier;
+    failing_querier.factories = {&factory};
+    failing_querier.transforms = {
+        static_cast<IBlockTransformOperatorV1*>(&before_failure),
+        static_cast<IBlockTransformOperatorV1*>(&failing_provider),
+    };
+    SchedulerPlugin failing_plugin;
+    ASSERT_EQ(failing_plugin.Load(&failing_querier), 0);
+    ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                  &failing_plugin,
+                  R"({"sql":"SELECT * FROM pcapfile.input )"
+                  R"(USING test.before_failure THEN test.failing_transform"})",
+                  &response),
+              error::INTERNAL_ERROR);
+    ASSERT_TRUE(response.find("\"error_stage\":\"execute\"") != std::string::npos);
+    ASSERT_EQ(failing_source.poll_calls, 1);
+    ASSERT_EQ(failing_source.release_calls, 1);
+    ASSERT_EQ(before_failure.create_calls, 2);
+    ASSERT_EQ(before_failure.release_calls, 2);
+    ASSERT_EQ(failing_provider.create_calls, 2);
+    ASSERT_EQ(failing_provider.release_calls, 2);
+    ASSERT_EQ(before_failure.released[1].flush_calls, 0);
+    ASSERT_EQ(before_failure.released[1].cancel_calls, 1);
+    ASSERT_EQ(failing_provider.released[1].flush_calls, 0);
+    ASSERT_EQ(failing_provider.released[1].cancel_calls, 1);
+}
 }  // namespace scheduler
 }  // namespace flowsql
 
@@ -1302,6 +1865,8 @@ int main() {
     flowsql::scheduler::TestBlockOperatorPollAndRelease();
     flowsql::scheduler::TestBlockTerminalRouteAndBatchSnapshots();
     flowsql::scheduler::TestBlockDirectTransferTimeout();
+    flowsql::scheduler::TestBlockTransformSchedulerPipeline();
+    flowsql::scheduler::TestMultiBlockTransformSchedulerPipeline();
 
     flowsql::scheduler::SchedulerPlugin plugin;
     const std::string source_key = "ring.in";
