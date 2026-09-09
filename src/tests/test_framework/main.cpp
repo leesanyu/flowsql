@@ -7,6 +7,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 #include <regex>
 #ifndef _WIN32
@@ -20,20 +21,25 @@
 #include <framework/core/dataframe_channel.h>
 #include <framework/core/error_contract.h>
 #include <framework/core/filter_binding.h>
+#include <framework/core/filter_expression.h>
 #include <framework/core/filter_executor.h>
 #include <framework/core/filter_planner.h>
 #include <framework/core/json_error_builder.h>
 #include <framework/core/memory_channel.h>
 #include <framework/core/packet_codec.h>
+#include <framework/core/packet_filter_plan.h>
 #include <framework/builtin/dataframe/passthrough_operator.h>
 #include <framework/core/pipeline.h>
 #include <framework/core/sql_parser.h>
 #include <framework/core/sql_text_splitter.h>
 #include <framework/interfaces/ichannel.h>
+#include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_operator.h>
+#include <framework/interfaces/iblock_stream_reader.h>
 #include <framework/interfaces/iblock_transform_operator.h>
 #include <framework/interfaces/idataframe_channel.h>
 #include <framework/interfaces/ifilter_pushdown.h>
+#include <framework/interfaces/ifilter_domain_resolver.h>
 #include <framework/interfaces/ioperator.h>
 #include <rapidjson/document.h>
 
@@ -56,6 +62,8 @@ void test_block_transform_pipeline_runner();
 void test_filter_pushdown_split();
 void test_filter_pushdown_negotiation();
 void test_statement_stage_filters();
+void test_offline_filter_public_contracts();
+void test_offline_filter_reader_factory_contracts();
 void test_stage_filter_interfaces();
 void test_filter_task_session_isolation();
 void test_sql_text_splitter();
@@ -522,7 +530,7 @@ void test_filter_expression_parser() {
     {
         std::shared_ptr<FilterExpr> expr;
         std::string error;
-        assert(SqlParser::ParseFilterExpression("a = 1 OR b = 2 AND NOT c", &expr, &error));
+        assert(ParseFilterExpression("a = 1 OR b = 2 AND NOT c", &expr, &error));
         assert(error.empty());
         assert(expr && expr->kind == FilterExprKind::kOr && expr->node_id == 1);
         assert(expr->operands.size() == 2);
@@ -542,7 +550,7 @@ void test_filter_expression_parser() {
     {
         std::shared_ptr<FilterExpr> expr;
         std::string error;
-        assert(SqlParser::ParseFilterExpression("src_port NOT IN (80, 443)", &expr, &error));
+        assert(ParseFilterExpression("src_port NOT IN (80, 443)", &expr, &error));
         assert(expr && expr->kind == FilterExprKind::kNot);
         assert(expr->operands.size() == 1);
         const auto& in = expr->operands[0];
@@ -555,7 +563,7 @@ void test_filter_expression_parser() {
     {
         std::shared_ptr<FilterExpr> expr;
         std::string error;
-        assert(SqlParser::ParseFilterExpression(
+        assert(ParseFilterExpression(
             "captured_len NOT BETWEEN -1.5e2 AND 1500", &expr, &error));
         assert(expr && expr->kind == FilterExprKind::kNot);
         const auto& between = expr->operands[0];
@@ -568,7 +576,7 @@ void test_filter_expression_parser() {
     {
         std::shared_ptr<FilterExpr> expr;
         std::string error;
-        assert(SqlParser::ParseFilterExpression(
+        assert(ParseFilterExpression(
             "message = 'can''t use INTO' AND HAS_LAYER('tcp')", &expr, &error));
         assert(expr && expr->kind == FilterExprKind::kAnd);
         const auto& compare = expr->operands[0];
@@ -584,12 +592,68 @@ void test_filter_expression_parser() {
     {
         std::shared_ptr<FilterExpr> expr;
         std::string error;
-        assert(SqlParser::ParseFilterExpression("src_port IS NOT NULL", &expr, &error));
+        assert(ParseFilterExpression(
+            "timestamp_ns >= TiMeStAmP '2026-09-08T09:30:00.123456789+08:00'",
+            &expr, &error));
+        assert(error.empty());
+        assert(expr && expr->kind == FilterExprKind::kCompare);
+        assert(expr->compare_op == FilterCompareOp::kGreaterEqual);
+        assert(expr->operands[0]->field_name == "timestamp_ns");
+        assert(expr->operands[1]->literal.kind == FilterLiteralKind::kTyped);
+        assert(expr->operands[1]->literal.type_name == "timestamp");
+        assert(expr->operands[1]->literal.text ==
+               "2026-09-08T09:30:00.123456789+08:00");
+
+        assert(ParseFilterExpression(
+            "timestamp_ns BETWEEN TIMESTAMP '2026-09-08T01:30:00Z' "
+            "AND TIMESTAMP 'not-validated-by-parser'",
+            &expr, &error));
+        assert(expr && expr->kind == FilterExprKind::kBetween);
+        assert(expr->operands[1]->literal.kind == FilterLiteralKind::kTyped);
+        assert(expr->operands[1]->literal.type_name == "timestamp");
+        assert(expr->operands[1]->literal.text == "2026-09-08T01:30:00Z");
+        assert(expr->operands[2]->literal.kind == FilterLiteralKind::kTyped);
+        assert(expr->operands[2]->literal.type_name == "timestamp");
+        assert(expr->operands[2]->literal.text == "not-validated-by-parser");
+
+        assert(ParseFilterExpression(
+            "request_id = UUID '123e4567-e89b-12d3-a456-426614174000'", &expr, &error));
+        assert(expr && expr->kind == FilterExprKind::kCompare);
+        assert(expr->operands[1]->literal.kind == FilterLiteralKind::kTyped);
+        assert(expr->operands[1]->literal.type_name == "uuid");
+        assert(expr->operands[1]->literal.text ==
+               "123e4567-e89b-12d3-a456-426614174000");
+    }
+
+    {
+        const std::vector<std::pair<std::string, std::string>> packet_calls = {
+            {"TCP('192.0.2.10', 52314, '198.51.100.20', 3389)", "tcp"},
+            {"udp('2001:db8::10', 53000, '2001:db8::20', 53)", "udp"},
+        };
+        for (const auto& item : packet_calls) {
+            std::shared_ptr<FilterExpr> expr;
+            std::string error;
+            assert(ParseFilterExpression(item.first, &expr, &error));
+            assert(error.empty());
+            assert(expr && expr->kind == FilterExprKind::kCall);
+            assert(expr->function_name == item.second);
+            assert(expr->operands.size() == 4);
+            assert(expr->operands[0]->literal.kind == FilterLiteralKind::kString);
+            assert(expr->operands[1]->literal.kind == FilterLiteralKind::kInteger);
+            assert(expr->operands[2]->literal.kind == FilterLiteralKind::kString);
+            assert(expr->operands[3]->literal.kind == FilterLiteralKind::kInteger);
+        }
+    }
+
+    {
+        std::shared_ptr<FilterExpr> expr;
+        std::string error;
+        assert(ParseFilterExpression("src_port IS NOT NULL", &expr, &error));
         assert(expr && expr->kind == FilterExprKind::kNot);
         assert(expr->operands[0]->kind == FilterExprKind::kIsNull);
         assert(expr->operands[0]->operands[0]->field_name == "src_port");
 
-        assert(SqlParser::ParseFilterExpression("protocol = HTTP", &expr, &error));
+        assert(ParseFilterExpression("protocol = HTTP", &expr, &error));
         assert(expr->kind == FilterExprKind::kCompare);
         assert(expr->operands[1]->kind == FilterExprKind::kField);
         assert(expr->operands[1]->field_name == "HTTP");
@@ -607,7 +671,7 @@ void test_filter_expression_parser() {
         for (const auto& item : comparisons) {
             std::shared_ptr<FilterExpr> expr;
             std::string error;
-            assert(SqlParser::ParseFilterExpression(item.first, &expr, &error));
+            assert(ParseFilterExpression(item.first, &expr, &error));
             assert(expr->kind == FilterExprKind::kCompare);
             assert(expr->compare_op == item.second);
         }
@@ -616,7 +680,7 @@ void test_filter_expression_parser() {
     {
         std::shared_ptr<FilterExpr> expr;
         std::string error;
-        assert(SqlParser::ParseFilterExpression(
+        assert(ParseFilterExpression(
             "1 < captured_len AND wire_len >= captured_len AND ports_valid = TRUE", &expr, &error));
         assert(expr && expr->kind == FilterExprKind::kAnd);
         const auto& right = expr->operands[1];
@@ -624,10 +688,10 @@ void test_filter_expression_parser() {
         assert(right->operands[1]->literal.kind == FilterLiteralKind::kBoolean);
         assert(right->operands[1]->literal.text == "TRUE");
 
-        assert(SqlParser::ParseFilterExpression("src_port IS NULL", &expr, &error));
+        assert(ParseFilterExpression("src_port IS NULL", &expr, &error));
         assert(expr->kind == FilterExprKind::kIsNull);
 
-        assert(SqlParser::ParseFilterExpression("UNKNOWN_FUNCTION(field, FALSE)", &expr, &error));
+        assert(ParseFilterExpression("UNKNOWN_FUNCTION(field, FALSE)", &expr, &error));
         assert(expr->kind == FilterExprKind::kCall);
         assert(expr->function_name == "unknown_function");
         assert(expr->operands[0]->kind == FilterExprKind::kField);
@@ -646,11 +710,12 @@ void test_filter_expression_parser() {
         "src_port IN (80, NULL)",
         "src_port IN (80, other_port)",
         "src_port BETWEEN lower AND 100",
+        "TIMESTAMP '2026-09-08T01:30:00Z'",
     };
     for (const auto& input : invalid) {
         std::shared_ptr<FilterExpr> expr;
         std::string error;
-        assert(!SqlParser::ParseFilterExpression(input, &expr, &error));
+        assert(!ParseFilterExpression(input, &expr, &error));
         assert(!expr && !error.empty());
     }
 
@@ -677,7 +742,7 @@ void test_filter_schema_binding() {
                     std::string* error) {
         std::shared_ptr<FilterExpr> expression;
         std::string parse_error;
-        assert(SqlParser::ParseFilterExpression(text, &expression, &parse_error));
+        assert(ParseFilterExpression(text, &expression, &parse_error));
         return BindFilterExpression(schema, expression, output, error);
     };
 
@@ -764,7 +829,7 @@ void test_filter_schema_binding() {
         });
         std::shared_ptr<FilterExpr> expression;
         std::string error;
-        assert(SqlParser::ParseFilterExpression("dup = 1", &expression, &error));
+        assert(ParseFilterExpression("dup = 1", &expression, &error));
         std::shared_ptr<const BoundFilterExpr> bound;
         assert(BindFilterExpression(duplicate_schema, expression, &bound, &error) ==
                FilterBindError::kAmbiguousField);
@@ -836,7 +901,7 @@ void test_filter_mask_evaluation() {
     auto bind = [&](const std::string& text) {
         std::shared_ptr<FilterExpr> parsed;
         std::string error;
-        assert(SqlParser::ParseFilterExpression(text, &parsed, &error));
+        assert(ParseFilterExpression(text, &parsed, &error));
         std::shared_ptr<const BoundFilterExpr> bound;
         assert(BindFilterExpression(schema, parsed, &bound, &error) ==
                FilterBindError::kNone);
@@ -1020,7 +1085,7 @@ void test_filter_record_batch() {
     auto bind = [&](const std::string& text) {
         std::shared_ptr<FilterExpr> parsed;
         std::string bind_error;
-        assert(SqlParser::ParseFilterExpression(text, &parsed, &bind_error));
+        assert(ParseFilterExpression(text, &parsed, &bind_error));
         std::shared_ptr<const BoundFilterExpr> bound;
         assert(BindFilterExpression(batch->schema(), parsed, &bound, &bind_error) ==
                FilterBindError::kNone);
@@ -1132,7 +1197,7 @@ void test_block_filter_stage() {
     auto bind = [&](const std::string& text) {
         std::shared_ptr<FilterExpr> parsed;
         std::string bind_error;
-        assert(SqlParser::ParseFilterExpression(text, &parsed, &bind_error));
+        assert(ParseFilterExpression(text, &parsed, &bind_error));
         std::shared_ptr<const BoundFilterExpr> bound;
         assert(BindFilterExpression(schema, parsed, &bound, &bind_error) ==
                FilterBindError::kNone);
@@ -1355,7 +1420,7 @@ void test_block_transform_pipeline_runner() {
     auto bind = [&](const std::string& text) {
         std::shared_ptr<FilterExpr> parsed;
         std::string bind_error;
-        assert(SqlParser::ParseFilterExpression(text, &parsed, &bind_error));
+        assert(ParseFilterExpression(text, &parsed, &bind_error));
         std::shared_ptr<const BoundFilterExpr> bound;
         assert(BindFilterExpression(schema, parsed, &bound, &bind_error) ==
                FilterBindError::kNone);
@@ -1631,7 +1696,7 @@ void test_filter_pushdown_split() {
     auto bind = [&](const std::string& text) {
         std::shared_ptr<FilterExpr> parsed;
         std::string error;
-        assert(SqlParser::ParseFilterExpression(text, &parsed, &error));
+        assert(ParseFilterExpression(text, &parsed, &error));
         std::shared_ptr<const BoundFilterExpr> bound;
         assert(BindFilterExpression(schema, parsed, &bound, &error) ==
                FilterBindError::kNone);
@@ -1809,7 +1874,7 @@ void test_filter_pushdown_negotiation() {
     });
     std::shared_ptr<FilterExpr> parsed;
     std::string error;
-    assert(SqlParser::ParseFilterExpression("id >= 42 AND enabled", &parsed, &error));
+    assert(ParseFilterExpression("id >= 42 AND enabled", &parsed, &error));
     std::shared_ptr<const BoundFilterExpr> original;
     assert(BindFilterExpression(schema, parsed, &original, &error) ==
            FilterBindError::kNone);
@@ -2049,12 +2114,24 @@ void test_statement_stage_filters() {
                "SELECT * FROM pcapfile.rdp WHERE has_layer('ipv4') AND has_layer('tcp')");
         assert(stmt.stage_filters.size() == 2);
         assert(stmt.stage_filters[0].after_stage == 0);
-        assert(stmt.stage_filters[0].expression->kind == FilterExprKind::kAnd);
-        assert(stmt.stage_filters[0].expression->operands[0]->function_name == "has_layer");
+        assert(stmt.stage_filters[0].filter_text ==
+               "has_layer('ipv4') AND has_layer('tcp')");
         assert(stmt.stage_filters[1].after_stage == 1);
-        assert(stmt.stage_filters[1].expression->kind == FilterExprKind::kCompare);
-        assert(stmt.stage_filters[1].expression->operands[0]->field_name == "protocol");
-        assert(stmt.stage_filters[1].expression->operands[1]->literal.text == "HTTP");
+        assert(stmt.stage_filters[1].filter_text == "protocol = 'HTTP'");
+    }
+
+    {
+        auto stmt = parser.Parse(
+            "SELECT * FROM pcapfile.rdp "
+            "WHERE timestamp_ns >= TIMESTAMP '2026-09-08T09:30:00.123456789+08:00' "
+            "AND tcp('192.0.2.10', 52314, '198.51.100.20', 3389) "
+            "INTO dataframe.rdp");
+        assert(stmt.error.empty());
+        assert(stmt.stage_filters.size() == 1);
+        assert(stmt.stage_filters[0].filter_text ==
+               "timestamp_ns >= TIMESTAMP '2026-09-08T09:30:00.123456789+08:00' "
+               "AND tcp('192.0.2.10', 52314, '198.51.100.20', 3389)");
+        assert(stmt.dest == "dataframe.rdp");
     }
 
     {
@@ -2070,7 +2147,7 @@ void test_statement_stage_filters() {
         assert(stmt.stage_filters[0].after_stage == 0);
         assert(stmt.stage_filters[1].after_stage == 1);
         assert(stmt.stage_filters[2].after_stage == 2);
-        assert(stmt.stage_filters[2].expression->kind == FilterExprKind::kNot);
+        assert(stmt.stage_filters[2].filter_text == "result IS NOT NULL");
         assert(stmt.dest == "dataframe.output");
     }
 
@@ -2082,8 +2159,8 @@ void test_statement_stage_filters() {
         assert(stmt.where_clause.empty());
         assert(stmt.stage_filters.size() == 1);
         assert(stmt.stage_filters[0].after_stage == 1);
-        assert(stmt.stage_filters[0].expression->operands[1]->literal.text ==
-               "USING THEN INTO WHERE");
+        assert(stmt.stage_filters[0].filter_text ==
+               "note = 'USING THEN INTO WHERE'");
     }
 
     {
@@ -2122,6 +2199,22 @@ void test_statement_stage_filters() {
     }
 
     {
+        const std::vector<std::string> deferred_filter_syntax = {
+            "ipv4 & tcp",
+            "protocol == 'HTTP'",
+        };
+        for (const auto& filter_text : deferred_filter_syntax) {
+            auto stmt = parser.Parse(
+                "SELECT * FROM pcapfile.rdp WHERE " + filter_text +
+                " INTO dataframe.output");
+            assert(stmt.error.empty());
+            assert(stmt.stage_filters.size() == 1);
+            assert(stmt.stage_filters[0].after_stage == 0);
+            assert(stmt.stage_filters[0].filter_text == filter_text);
+        }
+    }
+
+    {
         auto stmt = parser.Parse(
             "SELECT * FROM dataframe.left, dataframe.right "
             "WHERE id > 0 USING builtin.concat INTO dataframe.output");
@@ -2129,8 +2222,6 @@ void test_statement_stage_filters() {
     }
 
     const std::vector<std::string> invalid = {
-        "SELECT * FROM pcapfile.rdp WHERE ipv4 & tcp INTO dataframe.output",
-        "SELECT * FROM pcapfile.rdp WHERE protocol == 'HTTP' INTO dataframe.output",
         "SELECT * FROM pcapfile.rdp WHERE USING npm.basic INTO dataframe.output",
         "SELECT * FROM pcapfile.rdp USING npm.basic WHERE protocol = 'HTTP' "
         "WHERE score > 0 INTO dataframe.output",
@@ -2174,6 +2265,319 @@ class LegacyBlockOperatorAbiFixture final : public IBlockStreamOperator {
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>&, int64_t) override { return 0; }
     int Flush() override { return 0; }
 };
+
+class TestFilterDomainResolver final : public IFilterDomainResolverV1 {
+ public:
+    int Resolve(const FilterDomainResolveRequestV1& request,
+                FilterDomainResolveResultV1* result) const override {
+        if (result) *result = FilterDomainResolveResultV1{};
+        if (!result || request.contract_version != kFilterDomainResolverContractVersionV1 ||
+            !request.target_category || !request.target_name || !request.output_schema ||
+            !request.expression) {
+            return EINVAL;
+        }
+        if (std::string(request.target_category) != "pcapfile") return ENOTSUP;
+        result->lowered_expression = std::make_shared<FilterExpr>(*request.expression);
+        result->diagnostic = "packet domain resolved";
+        return 0;
+    }
+};
+
+class LegacyBlockStreamFactoryAbiFixture final : public IBlockStreamFactory {
+ public:
+    IBlockStreamChannel* Get(const char*, const char*) override { return nullptr; }
+    void List(std::function<void(const char*, const char*, IBlockStreamChannel*)>) override {}
+};
+
+class TestExclusiveBlockStreamReader final : public IBlockStreamChannel {
+ public:
+    explicit TestExclusiveBlockStreamReader(const BlockStreamReaderConfigV1& config)
+        : task_id_(config.task_id),
+          source_category_(config.source_category),
+          source_name_(config.source_name),
+          pushed_filter_plan_json_(config.pushed_filter_plan_json) {}
+
+    const std::string& TaskId() const { return task_id_; }
+    const std::string& PushedFilterPlanJson() const { return pushed_filter_plan_json_; }
+    bool IsCancelled() const { return cancelled_; }
+
+    const char* Category() override { return source_category_.c_str(); }
+    const char* Name() override { return source_name_.c_str(); }
+    const char* Type() override { return ChannelType::kBlockStream; }
+    const char* Schema() override { return ""; }
+    int Open() override {
+        opened_ = true;
+        return 0;
+    }
+    int Close() override {
+        opened_ = false;
+        return 0;
+    }
+    bool IsOpened() const override { return opened_; }
+    int Flush() override { return 0; }
+    BlockPollEvent PollBlock(int) override {
+        return {cancelled_ ? BlockPollEvent::kCancelled : BlockPollEvent::kEof, nullptr, 0};
+    }
+    int ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>&) override { return 0; }
+    void Cancel() override { cancelled_ = true; }
+    bool IsFinished() const override { return true; }
+
+ private:
+    std::string task_id_;
+    std::string source_category_;
+    std::string source_name_;
+    std::string pushed_filter_plan_json_;
+    bool opened_ = false;
+    bool cancelled_ = false;
+};
+
+class TestBlockStreamReaderFactory final : public IBlockStreamReaderFactoryV1 {
+ public:
+    int CreateReader(const BlockStreamReaderConfigV1& config,
+                     IBlockStreamChannel** reader) override {
+        if (!reader) return EINVAL;
+        *reader = nullptr;
+        if (config.contract_version != kBlockStreamReaderContractVersionV1 || !config.task_id ||
+            !config.source_category || !config.source_name || !config.pushed_filter_plan_json) {
+            return EINVAL;
+        }
+        if (std::string(config.source_category) != "pcapfile") return ENOTSUP;
+        *reader = new TestExclusiveBlockStreamReader(config);
+        ++live_readers;
+        return 0;
+    }
+
+    void ReleaseReader(IBlockStreamChannel* reader) override {
+        assert(reader && live_readers > 0);
+        delete reader;
+        --live_readers;
+        ++release_calls;
+    }
+
+    int live_readers = 0;
+    int release_calls = 0;
+};
+
+// ============================================================
+// Test 7.8: offline filter public contracts
+// ============================================================
+void test_offline_filter_public_contracts() {
+    printf("[TEST] offline filter public contracts...\n");
+
+    using ResolveMethod = int (IFilterDomainResolverV1::*)(
+        const FilterDomainResolveRequestV1&, FilterDomainResolveResultV1*) const;
+    const ResolveMethod resolve_method = &IFilterDomainResolverV1::Resolve;
+    using CreateReaderMethod = int (IBlockStreamReaderFactoryV1::*)(
+        const BlockStreamReaderConfigV1&, IBlockStreamChannel**);
+    const CreateReaderMethod create_reader_method = &IBlockStreamReaderFactoryV1::CreateReader;
+    using ReleaseReaderMethod = void (IBlockStreamReaderFactoryV1::*)(IBlockStreamChannel*);
+    const ReleaseReaderMethod release_reader_method = &IBlockStreamReaderFactoryV1::ReleaseReader;
+    assert(resolve_method && create_reader_method && release_reader_method);
+
+    assert(sizeof(IID_FILTER_DOMAIN_RESOLVER_V1) == sizeof(Guid));
+    assert(sizeof(IID_BLOCK_STREAM_READER_FACTORY_V1) == sizeof(Guid));
+    assert(memcmp(&IID_FILTER_DOMAIN_RESOLVER_V1,
+                  &IID_BLOCK_STREAM_READER_FACTORY_V1,
+                  sizeof(Guid)) != 0);
+    assert(memcmp(&IID_FILTER_DOMAIN_RESOLVER_V1,
+                  &IID_FILTER_PUSHDOWN_V1,
+                  sizeof(Guid)) != 0);
+    assert(memcmp(&IID_BLOCK_STREAM_READER_FACTORY_V1,
+                  &IID_BLOCK_STREAM_FACTORY,
+                  sizeof(Guid)) != 0);
+    assert(kFilterDomainSyntheticNodeIdBaseV1 == 0x80000000u);
+
+    auto input = std::make_shared<FilterExpr>();
+    input->kind = FilterExprKind::kField;
+    input->node_id = 7;
+    input->field_name = "ports_valid";
+    FilterDomainResolveRequestV1 resolve_request;
+    assert(resolve_request.contract_version == kFilterDomainResolverContractVersionV1);
+    assert(resolve_request.target_kind == FilterDomainTargetKindV1::kSource);
+    resolve_request.target_category = "pcapfile";
+    resolve_request.target_name = "rdp";
+    resolve_request.output_schema = packet::PacketSchema();
+    resolve_request.expression = input;
+
+    TestFilterDomainResolver resolver;
+    FilterDomainResolveResultV1 resolved;
+    assert(resolver.Resolve(resolve_request, &resolved) == 0);
+    assert(resolved.lowered_expression && resolved.lowered_expression.get() != input.get());
+    assert(resolved.lowered_expression->node_id == input->node_id);
+    assert(resolved.lowered_expression->field_name == input->field_name);
+    assert(input->field_name == "ports_valid" && input->operands.empty());
+    assert(!resolved.diagnostic.empty());
+
+    resolve_request.target_category = "other";
+    assert(resolver.Resolve(resolve_request, &resolved) == ENOTSUP);
+    assert(!resolved.lowered_expression && resolved.diagnostic.empty());
+
+    BlockStreamReaderConfigV1 reader_config;
+    assert(reader_config.contract_version == kBlockStreamReaderContractVersionV1);
+    assert(!reader_config.task_id && !reader_config.source_category && !reader_config.source_name);
+    assert(!reader_config.pushed_filter_plan_json);
+
+    static_assert(std::is_same_v<decltype(packet::PacketIpKey{}.ipv4_network_order), uint32_t>);
+    static_assert(std::is_same_v<decltype(packet::PacketEndpointKey{}.port), uint16_t>);
+    static_assert(std::is_same_v<decltype(packet::TransportPairKey{}.transport_protocol), uint8_t>);
+
+    packet::PacketIpKey first_ip;
+    first_ip.family = packet::AddressFamily::kIPv4;
+    first_ip.ipv4_network_order = 0x0a0200c0u;
+    packet::PacketIpKey second_ip;
+    second_ip.family = packet::AddressFamily::kIPv6;
+    second_ip.ipv6[0] = 0x20;
+    second_ip.ipv6[1] = 0x01;
+    second_ip.ipv6[15] = 0x20;
+
+    packet::TransportPairKey pair;
+    pair.transport_protocol = 6;
+    pair.first = {first_ip, 3389};
+    pair.second = {first_ip, 52314};
+    assert(pair.first.port < pair.second.port);
+    assert(pair.first.address.family == packet::AddressFamily::kIPv4);
+
+    packet::PacketFilterRule time_rule;
+    time_rule.kind = packet::PacketFilterRuleKind::kTimeRange;
+    time_rule.time_range.lower_ns = 1000000001;
+    time_rule.time_range.upper_ns = 2000000000;
+    time_rule.time_range.lower_inclusive = true;
+    assert(time_rule.time_range.lower_ns.value() == 1000000001);
+    assert(!time_rule.time_range.upper_inclusive);
+
+    packet::PacketFilterRule header_rule;
+    header_rule.kind = packet::PacketFilterRuleKind::kUnsignedRange;
+    header_rule.unsigned_range.field = packet::PacketUnsignedField::kSequence;
+    header_rule.unsigned_range.lower = 10;
+    header_rule.unsigned_range.upper = 20;
+    header_rule.unsigned_range.lower_inclusive = true;
+    header_rule.unsigned_range.upper_inclusive = true;
+
+    packet::PacketFilterRule mac_rule;
+    mac_rule.kind = packet::PacketFilterRuleKind::kMacAnyOf;
+    mac_rule.mac_keys.push_back({{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}});
+    packet::PacketFilterRule ip_rule;
+    ip_rule.kind = packet::PacketFilterRuleKind::kIpAnyOf;
+    ip_rule.ip_keys = {first_ip, second_ip};
+    packet::PacketFilterRule port_rule;
+    port_rule.kind = packet::PacketFilterRuleKind::kPortAnyOf;
+    port_rule.ports = {53, 3389};
+    packet::PacketFilterRule pair_rule;
+    pair_rule.kind = packet::PacketFilterRuleKind::kTransportPairAnyOf;
+    pair_rule.transport_pairs = {pair};
+
+    packet::PcapFilterPlan plan;
+    plan.root.kind = packet::PacketFilterRuleKind::kAnd;
+    plan.root.operands = {
+        time_rule, header_rule, mac_rule, ip_rule, port_rule, pair_rule,
+    };
+    assert(plan.version == packet::kPcapFilterPlanVersion);
+    assert(plan.endpoint_scope == packet::EndpointScope::kInnermost);
+    assert(plan.root.operands.size() == 6);
+    assert(plan.root.operands[2].mac_keys[0].bytes[5] == 0x55);
+    assert(plan.root.operands[3].ip_keys[1].ipv6[15] == 0x20);
+    assert(plan.root.operands[4].ports == std::vector<uint16_t>({53, 3389}));
+    assert(plan.root.operands[5].transport_pairs[0].transport_protocol == 6);
+
+    printf("[PASS] offline filter public contracts\n");
+}
+
+// ============================================================
+// Test 7.9: offline source reader ABI and ownership contracts
+// ============================================================
+void test_offline_filter_reader_factory_contracts() {
+    printf("[TEST] offline filter reader factory contracts...\n");
+
+    using LegacyGetMethod = IBlockStreamChannel* (IBlockStreamFactory::*)(const char*,
+                                                                          const char*);
+    using LegacyListMethod = void (IBlockStreamFactory::*)(
+        std::function<void(const char*, const char*, IBlockStreamChannel*)>);
+    const LegacyGetMethod legacy_get = &IBlockStreamFactory::Get;
+    const LegacyListMethod legacy_list = &IBlockStreamFactory::List;
+    assert(legacy_get && legacy_list);
+    static_assert(!std::is_base_of_v<IBlockStreamFactory, IBlockStreamReaderFactoryV1>);
+    static_assert(!std::is_base_of_v<IBlockStreamReaderFactoryV1, IBlockStreamFactory>);
+    LegacyBlockStreamFactoryAbiFixture legacy_factory;
+    assert(!legacy_factory.Get("pcapfile", "rdp"));
+    legacy_factory.List(nullptr);
+
+    TestBlockStreamReaderFactory provider;
+    std::string task_one = "task-one";
+    std::string category_one = "pcapfile";
+    std::string source_one = "rdp";
+    std::string plan_one = "{\"version\":1,\"root\":{\"node_id\":7}}";
+    const std::string expected_plan_one = plan_one;
+    BlockStreamReaderConfigV1 config_one;
+    config_one.task_id = task_one.c_str();
+    config_one.source_category = category_one.c_str();
+    config_one.source_name = source_one.c_str();
+    config_one.pushed_filter_plan_json = plan_one.c_str();
+    IBlockStreamChannel* reader_one = nullptr;
+    assert(provider.CreateReader(config_one, &reader_one) == 0);
+    assert(reader_one && provider.live_readers == 1);
+
+    task_one = "caller-task-changed";
+    category_one = "caller-category-changed";
+    source_one = "caller-source-changed";
+    plan_one = "caller-plan-changed";
+    auto* copied_one = dynamic_cast<TestExclusiveBlockStreamReader*>(reader_one);
+    assert(copied_one);
+    assert(copied_one->TaskId() == "task-one");
+    assert(std::string(copied_one->Category()) == "pcapfile");
+    assert(std::string(copied_one->Name()) == "rdp");
+    assert(copied_one->PushedFilterPlanJson() == expected_plan_one);
+
+    IBlockStreamChannel* reader_two = nullptr;
+    {
+        std::string task_two = "task-two";
+        std::string category_two = "pcapfile";
+        std::string source_two = "dns";
+        std::string plan_two = "{\"version\":1,\"root\":null}";
+        BlockStreamReaderConfigV1 config_two;
+        config_two.task_id = task_two.c_str();
+        config_two.source_category = category_two.c_str();
+        config_two.source_name = source_two.c_str();
+        config_two.pushed_filter_plan_json = plan_two.c_str();
+        assert(provider.CreateReader(config_two, &reader_two) == 0);
+    }
+    auto* copied_two = dynamic_cast<TestExclusiveBlockStreamReader*>(reader_two);
+    assert(copied_two && reader_two != reader_one && provider.live_readers == 2);
+    assert(copied_two->TaskId() == "task-two");
+    assert(std::string(copied_two->Category()) == "pcapfile");
+    assert(std::string(copied_two->Name()) == "dns");
+    assert(copied_two->PushedFilterPlanJson() == "{\"version\":1,\"root\":null}");
+
+    assert(reader_one->Open() == 0);
+    assert(reader_one->IsOpened() && !reader_two->IsOpened());
+    reader_one->Cancel();
+    assert(copied_one->IsCancelled() && !copied_two->IsCancelled());
+    assert(reader_one->PollBlock(0).kind == BlockPollEvent::kCancelled);
+    assert(reader_two->PollBlock(0).kind == BlockPollEvent::kEof);
+
+    BlockStreamReaderConfigV1 rejected_config;
+    rejected_config.task_id = "task-rejected";
+    rejected_config.source_category = "other";
+    rejected_config.source_name = "rdp";
+    rejected_config.pushed_filter_plan_json = "{\"version\":1,\"root\":null}";
+    auto* rejected = reinterpret_cast<IBlockStreamChannel*>(1);
+    assert(provider.CreateReader(rejected_config, &rejected) == ENOTSUP);
+    assert(!rejected && provider.live_readers == 2);
+
+    rejected_config.source_category = "pcapfile";
+    rejected_config.contract_version = kBlockStreamReaderContractVersionV1 + 1;
+    rejected = reinterpret_cast<IBlockStreamChannel*>(1);
+    assert(provider.CreateReader(rejected_config, &rejected) == EINVAL);
+    assert(!rejected && provider.live_readers == 2);
+    rejected_config.contract_version = kBlockStreamReaderContractVersionV1;
+    assert(provider.CreateReader(rejected_config, nullptr) == EINVAL);
+    assert(provider.live_readers == 2);
+
+    provider.ReleaseReader(reader_one);
+    provider.ReleaseReader(reader_two);
+    assert(provider.live_readers == 0 && provider.release_calls == 2);
+
+    printf("[PASS] offline filter reader factory contracts\n");
+}
 
 class TestBlockTransformTask final : public IBlockTransformTaskV1 {
  public:
@@ -2325,7 +2729,7 @@ void test_filter_task_session_isolation() {
     auto bind = [&](const std::string& text) {
         std::shared_ptr<FilterExpr> parsed;
         std::string bind_error;
-        assert(SqlParser::ParseFilterExpression(text, &parsed, &bind_error));
+        assert(ParseFilterExpression(text, &parsed, &bind_error));
         std::shared_ptr<const BoundFilterExpr> bound;
         assert(BindFilterExpression(schema, parsed, &bound, &bind_error) ==
                FilterBindError::kNone);
@@ -2974,6 +3378,8 @@ int main(int argc, char* argv[]) {
     test_filter_pushdown_split();
     test_filter_pushdown_negotiation();
     test_statement_stage_filters();
+    test_offline_filter_public_contracts();
+    test_offline_filter_reader_factory_contracts();
     test_stage_filter_interfaces();
     test_filter_task_session_isolation();
     test_sql_text_splitter();

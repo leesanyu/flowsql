@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#include "sql_parser.h"
+#include "filter_expression.h"
 
 namespace flowsql {
 

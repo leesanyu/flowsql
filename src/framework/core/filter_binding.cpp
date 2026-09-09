@@ -159,6 +159,7 @@ class FilterBinder {
                 case FilterLiteralKind::kBoolean:
                     type = arrow::boolean();
                     break;
+                case FilterLiteralKind::kTyped:
                 case FilterLiteralKind::kNone:
                     break;
             }

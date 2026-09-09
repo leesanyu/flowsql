@@ -1014,6 +1014,30 @@ int main() {
         pcap_protocol.Reset();
         packet_transform.Reset();
         passthrough_transform.Reset();
+        const std::string malformed_source_filter_sql =
+            "SELECT * FROM pcapfile." + channel_name +
+            " WHERE ipv4 & tcp"
+            " USING test.packet_to_protocol"
+            " THEN test.protocol_passthrough";
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq(malformed_source_filter_sql), rsp),
+                  error::BAD_REQUEST);
+        ASSERT_TRUE(rsp.find("source-stage filter syntax failed") != std::string::npos);
+        ASSERT_EQ(packet_transform.create_calls, 0);
+        ASSERT_EQ(passthrough_transform.create_calls, 0);
+
+        const std::string malformed_operator_filter_sql =
+            "SELECT * FROM pcapfile." + channel_name +
+            " WHERE captured_len >= 4"
+            " USING test.packet_to_protocol WHERE protocol == 'HTTP'"
+            " THEN test.protocol_passthrough";
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq(malformed_operator_filter_sql), rsp),
+                  error::BAD_REQUEST);
+        ASSERT_TRUE(rsp.find("operator-stage filter syntax failed") != std::string::npos);
+        ASSERT_EQ(packet_transform.create_calls, 0);
+        ASSERT_EQ(passthrough_transform.create_calls, 0);
+
         const std::string sql =
             "SELECT * FROM pcapfile." + channel_name +
             " WHERE captured_len >= 4"

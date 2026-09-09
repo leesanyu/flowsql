@@ -31,6 +31,7 @@
 #include "framework/core/fan_in_stream_channel.h"
 #include "framework/core/fan_out_stream_channel.h"
 #include "framework/core/filter_binding.h"
+#include "framework/core/filter_expression.h"
 #include "framework/core/filter_planner.h"
 #include "framework/core/json_error_builder.h"
 #include "framework/core/pipeline.h"
@@ -853,21 +854,38 @@ class SynchronousBlockTransformChainTask final : public IBlockTransformTaskV1 {
     std::string last_error_;
 };
 
-std::shared_ptr<FilterExpr> FindStageFilterExpression(
+const std::string* FindStageFilterText(
     const SqlStatement& stmt,
     uint32_t after_stage,
     bool* duplicate) {
     if (duplicate) *duplicate = false;
-    std::shared_ptr<FilterExpr> found;
+    const std::string* found = nullptr;
     for (const auto& filter : stmt.stage_filters) {
         if (filter.after_stage != after_stage) continue;
         if (found) {
             if (duplicate) *duplicate = true;
             return nullptr;
         }
-        found = filter.expression;
+        found = &filter.filter_text;
     }
     return found;
+}
+
+bool ParseStageFilter(const std::string* filter_text,
+                      uint32_t after_stage,
+                      std::shared_ptr<FilterExpr>* expression,
+                      std::string* error) {
+    if (!expression) return false;
+    expression->reset();
+    if (!filter_text) return true;
+
+    std::string parse_error;
+    if (ParseFilterExpression(*filter_text, expression, &parse_error)) return true;
+    if (error) {
+        const char* stage_name = after_stage == 0 ? "source-stage" : "operator-stage";
+        *error = std::string(stage_name) + " filter syntax failed: " + parse_error;
+    }
+    return false;
 }
 
 std::string SafeBlockTransformLastError(IBlockTransformTaskV1* task) {
@@ -904,9 +922,9 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
 
     bool duplicate_source_filter = false;
     bool duplicate_transform_filter = false;
-    auto source_expression = FindStageFilterExpression(
+    const auto* source_filter_text = FindStageFilterText(
         stmt, 0, &duplicate_source_filter);
-    auto transform_expression = FindStageFilterExpression(
+    const auto* transform_filter_text = FindStageFilterText(
         stmt, 1, &duplicate_transform_filter);
     if (duplicate_source_filter || duplicate_transform_filter) {
         if (error) *error = "block transform stage contains duplicate filters";
@@ -917,6 +935,13 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
             if (error) *error = "block transform pipeline received an unsupported filter stage";
             return EINVAL;
         }
+    }
+
+    std::shared_ptr<FilterExpr> source_expression;
+    std::shared_ptr<FilterExpr> transform_expression;
+    if (!ParseStageFilter(source_filter_text, 0, &source_expression, error) ||
+        !ParseStageFilter(transform_filter_text, 1, &transform_expression, error)) {
+        return EINVAL;
     }
 
     const auto source_schema = packet::PacketSchema();
@@ -1142,10 +1167,10 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         return EINVAL;
     }
 
-    std::vector<std::shared_ptr<FilterExpr>> stage_expressions(providers.size() + 1);
-    for (size_t stage = 0; stage < stage_expressions.size(); ++stage) {
+    std::vector<const std::string*> stage_filter_texts(providers.size() + 1);
+    for (size_t stage = 0; stage < stage_filter_texts.size(); ++stage) {
         bool duplicate = false;
-        stage_expressions[stage] = FindStageFilterExpression(
+        stage_filter_texts[stage] = FindStageFilterText(
             stmt, static_cast<uint32_t>(stage), &duplicate);
         if (duplicate) {
             if (error) *error = "block transform stage contains duplicate filters";
@@ -1153,8 +1178,16 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         }
     }
     for (const auto& filter : stmt.stage_filters) {
-        if (filter.after_stage >= stage_expressions.size()) {
+        if (filter.after_stage >= stage_filter_texts.size()) {
             if (error) *error = "block transform pipeline received an unsupported filter stage";
+            return EINVAL;
+        }
+    }
+
+    std::vector<std::shared_ptr<FilterExpr>> stage_expressions(stage_filter_texts.size());
+    for (size_t stage = 0; stage < stage_filter_texts.size(); ++stage) {
+        if (!ParseStageFilter(
+                stage_filter_texts[stage], static_cast<uint32_t>(stage), &stage_expressions[stage], error)) {
             return EINVAL;
         }
     }

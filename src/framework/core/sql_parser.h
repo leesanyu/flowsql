@@ -5,75 +5,15 @@
 #define _FLOWSQL_FRAMEWORK_CORE_SQL_PARSER_H_
 
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace flowsql {
 
-enum class FilterExprKind {
-    kField,
-    kLiteral,
-    kAnd,
-    kOr,
-    kNot,
-    kCompare,
-    kCall,
-    kIn,
-    kBetween,
-    kIsNull,
-};
-
-enum class FilterLiteralKind {
-    kNone,
-    kInteger,
-    kFloating,
-    kString,
-    kBoolean,
-};
-
-enum class FilterCompareOp {
-    kNone,
-    kEqual,
-    kNotEqual,
-    kLess,
-    kLessEqual,
-    kGreater,
-    kGreaterEqual,
-};
-
-struct FilterLiteral {
-    FilterLiteralKind kind = FilterLiteralKind::kNone;
-    // Exact numeric token, decoded string, or canonical TRUE/FALSE.
-    std::string text;
-};
-
-/**
- * Typed, schema-independent filter syntax tree.
- *
- * Invariants by kind:
- * - kField uses field_name and has no operands.
- * - kLiteral uses literal and has no operands.
- * - kAnd/kOr/kCompare have two operands; kNot/kIsNull have one.
- * - kCall uses function_name and its operands are arguments.
- * - kIn has a field followed by one or more literals.
- * - kBetween has a field followed by lower and upper literals.
- * node_id is assigned in deterministic pre-order, starting from one.
- */
-struct FilterExpr {
-    FilterExprKind kind = FilterExprKind::kLiteral;
-    uint32_t node_id = 0;
-    std::string field_name;
-    std::string function_name;
-    FilterLiteral literal;
-    FilterCompareOp compare_op = FilterCompareOp::kNone;
-    std::vector<std::shared_ptr<FilterExpr>> operands;
-};
-
-struct StageFilter {
+struct StageFilterClause {
     uint32_t after_stage = 0;
-    std::shared_ptr<FilterExpr> expression;
+    std::string filter_text;
 };
 
 struct OperatorRef {
@@ -93,7 +33,7 @@ struct SqlStatement {
     std::string dest;         // INTO 后的目标通道名（可选，空表示直接返回结果）
     std::vector<std::string> columns;  // SELECT 后的列名（空表示 *）
     std::string where_clause; // WHERE 后的过滤条件（可选，空表示无过滤）
-    std::vector<StageFilter> stage_filters;  // source stage 0，operator stage 1..N
+    std::vector<StageFilterClause> stage_filters;  // source stage 0，operator stage 1..N
     std::string sql_part;     // 完整 SQL 部分（不含 USING/WITH/INTO），数据库通道直接使用
     std::string error;        // 解析错误信息（空表示成功）
 
@@ -110,10 +50,6 @@ struct SqlStatement {
 class SqlParser {
  public:
     SqlStatement Parse(const std::string& sql);
-
-    static bool ParseFilterExpression(const std::string& expression,
-                                      std::shared_ptr<FilterExpr>* output,
-                                      std::string* error);
 
     // 验证 WHERE 子句安全性（拒绝 SQL 注入关键字）
     static bool ValidateWhereClause(const std::string& clause);
