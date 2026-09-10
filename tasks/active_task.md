@@ -1,81 +1,57 @@
 # Active Task
 
-Feature：`npm-offline-filter`
-原子任务：T2.3b resolver IID 注册与 Scheduler 当前 stage 遍历/fallback
+Feature：README SQL 过滤能力文档
+原子任务：D1 补充阶段化 WHERE 与 pcapfile 过滤示例
 状态：已完成
 
 ## 业务意图
 
-- 由 pcapfile plugin 通过 `IID_FILTER_DOMAIN_RESOLVER_V1` 暴露 T2.3a 已实现的领域 resolver，不让
-  Scheduler 依赖具体 plugin 类或 `.so` 名称。
-- Scheduler 在 source stage 和每个 transform stage 的通用 schema binding 前遍历 resolver IID；唯一 owner
-  成功时绑定完整 lowered AST，零 owner/全部 `ENOTSUP` 时保留原 AST 走通用 binder。
-- 让无算子的 `block_stream -> dataframe` 路径执行同一 source-stage resolver、binder 与纯 Arrow residual，
-  支持 Feature 主用例的直接离线过滤。
+- 在 `README.md` 中说明当前已经实现的 SQL 阶段化过滤能力，使用户能判断 `WHERE` 绑定到哪个阶段。
+- 列出通用谓词语法、SQL NULL 语义、pcapfile 的时间/地址/端口/双向 TCP/UDP 过滤，并提供可复制示例。
 
 ## Non-Goals
 
-- 不实现 pushdown 拆分、canonical packet plan、`IBlockStreamReaderFactoryV1`、任务独占 reader 或 pcapfile
-  数据面过滤；这些属于 T3/T4。
-- 不修改公共 resolver、filter AST、packet schema、channel ABI 或 parser 契约，不增加共享 channel 过滤状态。
-- 不调用 `npi::Identify()`，不修改 pcap/pcapng 解码、EOF/错误/取消和 release 生命周期。
+- 不修改 SQL parser、Scheduler、pcapfile、公共接口或任何运行时代码。
+- 不新增语法、字段、函数或 API，不将未来 `npm.basic` 能力描述为已经可用。
+- 不修改已归档规格和 product backlog，不进入后续 Feature。
 - 不读取或修改 `tasks/sprints/**`，不执行 commit/push。
 
 ## 允许修改的文件
 
 - `tasks/active_task.md`
-- `tasks/specs/feat-npm-offline-filter.md`
-- `src/channels/pcapfile/pcap_file_channel.h`
-- `src/channels/pcapfile/pcap_file_channel.cpp`
-- `src/channels/pcapfile/plugin_register.cpp`
-- `src/services/scheduler/scheduler_stream_executor.cpp`
-- `src/tests/test_scheduler_e2e/test_scheduler_e2e.cpp`
-- `src/tests/test_scheduler_e2e/test_scheduler_mutation_guard.cpp`
+- `README.md`
 
-既有累计 diff（T2.1/T2.2/T2.3a 已产生，本切片只保留、不修改）：
+现有 `npm-offline-filter` 累计代码、测试、归档和 backlog diff 只保留，不修改。
 
-- `src/channels/pcapfile/CMakeLists.txt`
-- `src/channels/pcapfile/packet_filter_domain.h`
-- `src/channels/pcapfile/packet_filter_domain.cpp`
-- `src/framework/core/filter_binding.cpp`
-- `src/tests/test_pcapfile_import/CMakeLists.txt`
-- `src/tests/test_pcapfile_import/test_pcapfile_import.cpp`
+## 验收标准与命令
 
-## 验收命令
-
-- E2E 验证动态加载的 pcapfile plugin 可通过 `IID_FILTER_DOMAIN_RESOLVER_V1` 发现，且 source
-  `TIMESTAMP` 领域表达式在直接 `pcapfile -> dataframe` 路径得到精确 residual 结果。
-- E2E 验证 source resolver 错误在读取 block 和创建 transform 执行任务前失败；既有普通 source/transform
-  filter 在无 owner 或 pcapfile resolver 返回 `ENOTSUP` 时继续由通用 binder 执行。
-- 验证唯一 owner、零 owner、owner 冲突、resolver 错误和 IID 遍历错误不会静默降级为未过滤执行。
-- `cmake --build build --target test_scheduler_e2e test_scheduler_mutation_guard -j$(nproc)`
-- `ctest --test-dir build -R '^(test_scheduler_e2e|test_scheduler_mutation_guard)$' --output-on-failure`
-- `git diff --check`
+- README 明确 source-stage `WHERE`、operator-stage `WHERE` 及其 stage 绑定规则。
+- README 列出当前通用运算符、字面量、三值逻辑和明确不支持的写法。
+- README 说明 pcapfile 可过滤的 header/decoded 字段，以及 `TIMESTAMP`、`mac`、`ip`、`port`、`tcp`、
+  `udp` 的参数和方向语义。
+- README 至少提供通用字段、时间窗口、方向中立地址/端口和 TCP/UDP endpoint pair 示例。
+- 示例仅使用当前实现和测试已经验证的 SQL 形式，不承诺协议识别、payload/BPF/正则或 TCP stream 语义。
+- `git diff --check -- README.md tasks/active_task.md`
+- `rg -n 'SQL 过滤能力|WHERE|TIMESTAMP|mac\(|ip\(|port\(|tcp\(|udp\(' README.md`
 - `git diff --name-only`
 - `git status --short --untracked-files=all`
 
 ## 时间盒与停止条件
 
-- 时间盒：30 分钟。
-- resolver 注册、当前 stage 遍历/fallback 与 direct block residual 全部通过验收后，勾选 T2.3b、T2.3 和 T2，
-  将任务标为已完成并立即停止；不自动进入 T3。
-- 若正确性必须修改公共接口、reader factory 或 pcapfile 数据面，状态记为“当前错误待修复”，不扩大本切片。
+- 时间盒：20 分钟。
+- README 内容与当前实现/测试一致，文档 diff 检查通过后，将工作台标记为已完成并立即停止。
+- 若发现文档需求依赖尚未实现的行为，只记录边界，不修改生产代码或扩大范围。
 
-## 验收结果
+## 完成证据
 
-- pcapfile plugin 已通过 `IID_FILTER_DOMAIN_RESOLVER_V1` 暴露组合持有的 resolver；Scheduler 只按 IID
-  遍历，不依赖具体类或动态库名称。
-- source stage 与每个有过滤器的 transform stage 均在通用 binding 前执行 resolver 遍历；唯一 owner 使用
-  lowered AST，零 owner/全部 `ENOTSUP` 使用原 AST，双 owner、resolver 错误和遍历错误均在首次读取前失败。
-- 无算子的 `pcapfile -> dataframe` 已使用相同 resolver、binder 和 `BlockFilterStage` residual；真实两包 pcap
-  以 `TIMESTAMP >= 1970-01-01T00:00:02Z` 精确输出 sequence 1，原 block 仍 exactly-once release。
-- 非法 `port(70000)` 在创建 transform task 和读取 block 前以 source-stage domain error 失败；普通
-  source/transform filter 的无 owner fallback 保持原结果。
-- `cmake --build build --target test_scheduler_e2e test_scheduler_mutation_guard test_pcapfile_import -j$(nproc)`：
-  通过。
-- `ctest --test-dir build -R '^(test_scheduler_e2e|test_scheduler_mutation_guard|test_pcapfile_import)$'
-  --output-on-failure`：通过（3/3）。
-- `cmake --build build --target test_framework -j$(nproc)` 与对应 CTest：通过（1/1）。
-- `git diff --check`、本切片新增行 120 列与尾随空白检查：通过；当前环境未安装 `clang-format`，工程无
-  format/lint target。
-- T2.3b、T2.3 与 T2 完成即停；未进入 T3，未实现 reader factory、pushdown 或 pcapfile 数据面过滤。
+- `README.md` 新增“SQL 过滤能力”，说明 source/operator stage 绑定规则和当前 block source/block transform
+  接入范围；明确旧 DataFrame、database、stream 及传统 operator 路径仍受各自能力约束。
+- 文档列出逻辑、比较、`IN`、`BETWEEN`、NULL、boolean、普通/类型化字面量和领域函数，并说明 SQL 三值
+  逻辑、精确下推与 Arrow residual 的结果等价性。
+- pcapfile 文档覆盖 packet header/decoded 常用字段、显式时区纳秒 `TIMESTAMP`、`mac`/`ip`/`port` 和双向
+  `tcp`/`udp` endpoint pair；包含元数据、时间窗口、方向中立组合、TCP 和 UDP 五组 SQL 示例。
+- 文档明确不支持的 `==`、`field = NULL`、位运算/BPF、比较链、payload/正则、应用识别和 TCP stream 边界。
+- `git diff --check -- README.md tasks/active_task.md`：通过。
+- README 关键标题/语法/函数检索：通过；Markdown 代码围栏共 50 个且成对；尾随空白检查通过。
+- 本任务只修改 `README.md` 和 `tasks/active_task.md`；既有 Feature 累计 diff 未被修改。
+- 纯文档任务未重复执行构建或测试，未读取/修改 `tasks/sprints/**`，未执行 commit/push。

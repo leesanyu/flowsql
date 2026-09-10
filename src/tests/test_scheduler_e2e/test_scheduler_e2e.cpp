@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -71,6 +72,7 @@ class SchedulerE2eProtocol final : public IProtocol {
  public:
     void Concurrency(int32_t) override {}
     protocol::Protocol Identify(int32_t, const uint8_t*, int32_t, const protocol::Layers*) override {
+        ++identify_calls;
         return {};
     }
     int32_t Layer(int32_t, const uint8_t* data, int32_t size, protocol::Layers* layers) override {
@@ -81,9 +83,13 @@ class SchedulerE2eProtocol final : public IProtocol {
     }
     protocol::IDictionary* Dictionary() override { return nullptr; }
 
-    void Reset() { layer_calls = 0; }
+    void Reset() {
+        layer_calls = 0;
+        identify_calls = 0;
+    }
 
     int layer_calls = 0;
+    int identify_calls = 0;
 };
 
 class SchedulerE2eBlockOperator final : public IBlockStreamOperator {
@@ -327,6 +333,93 @@ static void AppendPcapLe32(std::vector<uint8_t>* bytes, uint32_t value) {
     }
 }
 
+static void AppendPcapLe64(std::vector<uint8_t>* bytes, uint64_t value) {
+    for (int shift = 0; shift < 64; shift += 8) {
+        bytes->push_back(static_cast<uint8_t>(value >> shift));
+    }
+}
+
+struct SchedulerE2eCaptureRecord {
+    uint32_t seconds = 0;
+    uint32_t fraction = 0;
+    std::vector<uint8_t> packet;
+};
+
+static std::vector<uint8_t> MakeSchedulerE2eClassicCapture(
+    bool nanosecond,
+    const std::vector<SchedulerE2eCaptureRecord>& records) {
+    std::vector<uint8_t> bytes = nanosecond
+                                     ? std::vector<uint8_t>{0x4d, 0x3c, 0xb2, 0xa1}
+                                     : std::vector<uint8_t>{0xd4, 0xc3, 0xb2, 0xa1};
+    AppendPcapLe16(&bytes, 2);
+    AppendPcapLe16(&bytes, 4);
+    AppendPcapLe32(&bytes, 0);
+    AppendPcapLe32(&bytes, 0);
+    AppendPcapLe32(&bytes, 65535);
+    AppendPcapLe32(&bytes, 1);
+    for (const auto& record : records) {
+        AppendPcapLe32(&bytes, record.seconds);
+        AppendPcapLe32(&bytes, record.fraction);
+        AppendPcapLe32(&bytes, static_cast<uint32_t>(record.packet.size()));
+        AppendPcapLe32(&bytes, static_cast<uint32_t>(record.packet.size()));
+        bytes.insert(bytes.end(), record.packet.begin(), record.packet.end());
+    }
+    return bytes;
+}
+
+static void AppendSchedulerE2ePcapngBlock(std::vector<uint8_t>* bytes,
+                                          uint32_t type,
+                                          const std::vector<uint8_t>& body) {
+    const uint32_t total = static_cast<uint32_t>(body.size() + 12);
+    AppendPcapLe32(bytes, type);
+    AppendPcapLe32(bytes, total);
+    bytes->insert(bytes->end(), body.begin(), body.end());
+    AppendPcapLe32(bytes, total);
+}
+
+static std::vector<uint8_t> MakeSchedulerE2ePcapngCapture(
+    uint8_t decimal_resolution,
+    int64_t timestamp_offset_seconds,
+    const std::vector<std::pair<uint64_t, std::vector<uint8_t>>>& records) {
+    std::vector<uint8_t> bytes;
+    std::vector<uint8_t> section;
+    AppendPcapLe32(&section, 0x1a2b3c4d);
+    AppendPcapLe16(&section, 1);
+    AppendPcapLe16(&section, 0);
+    AppendPcapLe64(&section, std::numeric_limits<uint64_t>::max());
+    AppendSchedulerE2ePcapngBlock(&bytes, 0x0a0d0d0a, section);
+
+    std::vector<uint8_t> interface_body;
+    AppendPcapLe16(&interface_body, 1);
+    AppendPcapLe16(&interface_body, 0);
+    AppendPcapLe32(&interface_body, 65535);
+    AppendPcapLe16(&interface_body, 9);
+    AppendPcapLe16(&interface_body, 1);
+    interface_body.push_back(decimal_resolution);
+    interface_body.insert(interface_body.end(), 3, 0);
+    AppendPcapLe16(&interface_body, 14);
+    AppendPcapLe16(&interface_body, 8);
+    AppendPcapLe64(
+        &interface_body, static_cast<uint64_t>(timestamp_offset_seconds));
+    AppendPcapLe16(&interface_body, 0);
+    AppendPcapLe16(&interface_body, 0);
+    AppendSchedulerE2ePcapngBlock(&bytes, 1, interface_body);
+
+    for (const auto& record : records) {
+        std::vector<uint8_t> enhanced_packet;
+        AppendPcapLe32(&enhanced_packet, 0);
+        AppendPcapLe32(&enhanced_packet, static_cast<uint32_t>(record.first >> 32));
+        AppendPcapLe32(&enhanced_packet, static_cast<uint32_t>(record.first));
+        AppendPcapLe32(&enhanced_packet, static_cast<uint32_t>(record.second.size()));
+        AppendPcapLe32(&enhanced_packet, static_cast<uint32_t>(record.second.size()));
+        enhanced_packet.insert(
+            enhanced_packet.end(), record.second.begin(), record.second.end());
+        while ((enhanced_packet.size() & 3u) != 0) enhanced_packet.push_back(0);
+        AppendSchedulerE2ePcapngBlock(&bytes, 6, enhanced_packet);
+    }
+    return bytes;
+}
+
 static std::vector<uint8_t> MakeSchedulerE2ePcap(bool truncate_last_packet) {
     std::vector<uint8_t> bytes = {0xd4, 0xc3, 0xb2, 0xa1};
     AppendPcapLe16(&bytes, 2);
@@ -335,7 +428,8 @@ static std::vector<uint8_t> MakeSchedulerE2ePcap(bool truncate_last_packet) {
     AppendPcapLe32(&bytes, 0);
     AppendPcapLe32(&bytes, 65535);
     AppendPcapLe32(&bytes, 1);
-    const auto append_record = [&](uint32_t seconds, const std::vector<uint8_t>& packet) {
+    const auto append_record = [&](uint32_t seconds,
+                                   const std::vector<uint8_t>& packet) {
         AppendPcapLe32(&bytes, seconds);
         AppendPcapLe32(&bytes, 0);
         AppendPcapLe32(&bytes, 4);
@@ -343,7 +437,9 @@ static std::vector<uint8_t> MakeSchedulerE2ePcap(bool truncate_last_packet) {
         bytes.insert(bytes.end(), packet.begin(), packet.end());
     };
     append_record(1, {1, 2, 3, 4});
-    append_record(2, truncate_last_packet ? std::vector<uint8_t>{5} : std::vector<uint8_t>{5, 6, 7, 8});
+    append_record(
+        2, truncate_last_packet ? std::vector<uint8_t>{5}
+                                : std::vector<uint8_t>{5, 6, 7, 8});
     return bytes;
 }
 
@@ -356,7 +452,8 @@ static void WriteSchedulerE2eBinary(const std::filesystem::path& path,
 }
 
 static std::string MakePcapSourceAddRequest(const std::string& name,
-                                            const std::filesystem::path& path) {
+                                            const std::filesystem::path& path,
+                                            const char* format = "pcap") {
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     writer.StartObject();
@@ -371,7 +468,7 @@ static std::string MakePcapSourceAddRequest(const std::string& name,
     writer.Key("path");
     writer.String(path.string().c_str());
     writer.Key("format");
-    writer.String("pcap");
+    writer.String(format);
     writer.Key("batch_packets");
     writer.Uint(1);
     writer.EndObject();
@@ -389,6 +486,65 @@ static std::string MakePcapSourceRemoveRequest(const std::string& name) {
     writer.String(name.c_str());
     writer.EndObject();
     return buffer.GetString();
+}
+
+struct CaptureFilterSnapshot {
+    std::vector<int64_t> timestamps_ns;
+    std::vector<uint64_t> sequences;
+    std::vector<std::string> raw_packets;
+};
+
+static std::string MakeReq(const std::string& sql);
+
+static CaptureFilterSnapshot ExecuteCaptureFilter(
+    const fnRouterHandler& exec,
+    IChannelRegistry* registry,
+    const std::string& channel_name,
+    const std::string& dataframe_name,
+    const std::string& filter) {
+    ASSERT_TRUE(exec != nullptr && registry != nullptr);
+    std::string response;
+    const std::string sql =
+        "SELECT * FROM pcapfile." + channel_name + " WHERE " + filter +
+        " INTO dataframe." + dataframe_name;
+    ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), response), error::OK);
+    rapidjson::Document completed;
+    completed.Parse(response.c_str());
+    ASSERT_TRUE(!completed.HasParseError() && completed.IsObject());
+    ASSERT_TRUE(completed.HasMember("status") && completed["status"].IsString());
+    ASSERT_EQ(std::string(completed["status"].GetString()), "completed");
+
+    auto output = std::dynamic_pointer_cast<IDataFrameChannel>(
+        registry->Get(dataframe_name.c_str()));
+    ASSERT_TRUE(output != nullptr);
+    DataFrame frame;
+    ASSERT_EQ(output->Read(&frame), 0);
+    const auto batch = frame.ToArrow();
+    ASSERT_TRUE(batch != nullptr && batch->schema()->Equals(packet::PacketSchema(), true));
+    auto timestamp = std::dynamic_pointer_cast<arrow::Int64Array>(
+        batch->GetColumnByName("timestamp_ns"));
+    auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(
+        batch->GetColumnByName("sequence"));
+    auto raw_data = std::dynamic_pointer_cast<arrow::BinaryArray>(
+        batch->GetColumnByName("raw_data"));
+    ASSERT_TRUE(timestamp && sequence && raw_data);
+
+    CaptureFilterSnapshot snapshot;
+    for (int64_t row = 0; row < batch->num_rows(); ++row) {
+        snapshot.timestamps_ns.push_back(timestamp->Value(row));
+        snapshot.sequences.push_back(sequence->Value(row));
+        const auto bytes = raw_data->GetView(row);
+        snapshot.raw_packets.emplace_back(bytes.data(), bytes.size());
+    }
+    ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
+    return snapshot;
+}
+
+static void AssertCaptureFilterSnapshotEqual(const CaptureFilterSnapshot& left,
+                                             const CaptureFilterSnapshot& right) {
+    ASSERT_EQ(left.timestamps_ns, right.timestamps_ns);
+    ASSERT_EQ(left.sequences, right.sequences);
+    ASSERT_EQ(left.raw_packets, right.raw_packets);
 }
 
 static std::shared_ptr<arrow::Buffer> SerializeBatch(const std::shared_ptr<arrow::RecordBatch>& batch) {
@@ -805,15 +961,46 @@ int main() {
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_pcap_ok_" + suffix + ".pcap");
     const std::filesystem::path pcap_error =
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_pcap_error_" + suffix + ".pcap");
+    const std::filesystem::path pcap_micro =
+        std::filesystem::temp_directory_path() / ("flowsql_scheduler_pcap_micro_" + suffix + ".pcap");
+    const std::filesystem::path pcap_nano =
+        std::filesystem::temp_directory_path() / ("flowsql_scheduler_pcap_nano_" + suffix + ".pcap");
+    const std::filesystem::path pcapng_offset =
+        std::filesystem::temp_directory_path() / ("flowsql_scheduler_pcapng_offset_" + suffix + ".pcapng");
     std::filesystem::remove(db_path);
     std::filesystem::remove(stream_cfg);
     std::filesystem::remove(stream_meta_db);
     std::filesystem::remove(pcap_ok);
     std::filesystem::remove(pcap_error);
+    std::filesystem::remove(pcap_micro);
+    std::filesystem::remove(pcap_nano);
+    std::filesystem::remove(pcapng_offset);
     std::filesystem::create_directories(data_dir);
     std::filesystem::create_directories(operator_db_dir);
     WriteSchedulerE2eBinary(pcap_ok, MakeSchedulerE2ePcap(false));
     WriteSchedulerE2eBinary(pcap_error, MakeSchedulerE2ePcap(true));
+    WriteSchedulerE2eBinary(
+        pcap_micro,
+        MakeSchedulerE2eClassicCapture(
+            false,
+            {{3, 750000, {0x31, 0x31, 0x31, 0x31}},
+             {1, 250000, {0x32, 0x32, 0x32, 0x32}},
+             {2, 500000, {0x33, 0x33, 0x33, 0x33}}}));
+    WriteSchedulerE2eBinary(
+        pcap_nano,
+        MakeSchedulerE2eClassicCapture(
+            true,
+            {{1, 100, {0x41, 0x41, 0x41, 0x41}},
+             {1, 123456789, {0x42, 0x42, 0x42, 0x42}},
+             {1, 200000000, {0x43, 0x43, 0x43, 0x43}}}));
+    WriteSchedulerE2eBinary(
+        pcapng_offset,
+        MakeSchedulerE2ePcapngCapture(
+            9,
+            -2,
+            {{3500000000ULL, {0x51, 0x51, 0x51, 0x51}},
+             {3123456789ULL, {0x52, 0x52, 0x52, 0x52}},
+             {4500000000ULL, {0x53, 0x53, 0x53, 0x53}}}));
 
     {
         std::ofstream out(stream_cfg);
@@ -982,7 +1169,7 @@ int main() {
         ASSERT_EQ(completed["result_row_count"].GetInt64(), 1);
         ASSERT_TRUE(completed.HasMember("result_target") && completed["result_target"].IsString());
         ASSERT_EQ(std::string(completed["result_target"].GetString()), "dataframe." + dataframe_name);
-        ASSERT_EQ(pcap_protocol.layer_calls, 2);
+        ASSERT_EQ(pcap_protocol.layer_calls, 1);
 
         auto output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(dataframe_name.c_str()));
         ASSERT_TRUE(output != nullptr);
@@ -1006,6 +1193,64 @@ int main() {
                   error::OK);
         ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
     }
+    // npm-offline-filter T5.1: real capture pushed/residual equivalence.
+    {
+        const auto verify_capture = [&](const std::string& channel_name,
+                                        const std::filesystem::path& capture_path,
+                                        const char* format,
+                                        const std::string& timestamp_filter,
+                                        int64_t expected_timestamp_ns,
+                                        const std::string& expected_raw) {
+            std::string response;
+            ASSERT_EQ(stream_add("/channels/stream/add",
+                                 MakePcapSourceAddRequest(
+                                     channel_name, capture_path, format),
+                                 response),
+                      error::OK);
+
+            const std::string partial_filter =
+                timestamp_filter + " AND raw_data IS NOT NULL";
+            pcap_protocol.Reset();
+            const auto pushed = ExecuteCaptureFilter(
+                exec, registry, channel_name, channel_name + "_pushed", partial_filter);
+            ASSERT_EQ(pcap_protocol.layer_calls, 1);
+            ASSERT_EQ(pcap_protocol.identify_calls, 0);
+
+            pcap_protocol.Reset();
+            const auto residual = ExecuteCaptureFilter(
+                exec, registry, channel_name, channel_name + "_residual",
+                "NOT (NOT (" + partial_filter + "))");
+            ASSERT_EQ(pcap_protocol.layer_calls, 3);
+            ASSERT_EQ(pcap_protocol.identify_calls, 0);
+
+            AssertCaptureFilterSnapshotEqual(pushed, residual);
+            ASSERT_EQ(pushed.timestamps_ns,
+                      std::vector<int64_t>({expected_timestamp_ns}));
+            ASSERT_EQ(pushed.sequences, std::vector<uint64_t>({1}));
+            ASSERT_EQ(pushed.raw_packets, std::vector<std::string>({expected_raw}));
+
+            ASSERT_EQ(stream_remove("/channels/stream/remove",
+                                    MakePcapSourceRemoveRequest(channel_name),
+                                    response),
+                      error::OK);
+        };
+
+        verify_capture(
+            "scheduler_filter_micro", pcap_micro, "pcap",
+            "timestamp_ns >= TIMESTAMP '1970-01-01T00:00:01.250000Z' AND "
+            "timestamp_ns < TIMESTAMP '1970-01-01T00:00:01.250001Z'",
+            1250000000LL, std::string("\x32\x32\x32\x32", 4));
+        verify_capture(
+            "scheduler_filter_nano", pcap_nano, "pcap",
+            "timestamp_ns = TIMESTAMP '1970-01-01T00:00:01.123456789Z'",
+            1123456789LL, std::string("\x42\x42\x42\x42", 4));
+        verify_capture(
+            "scheduler_filter_pcapng", pcapng_offset, "pcapng",
+            "timestamp_ns = TIMESTAMP '1970-01-01T00:00:01.123456789Z'",
+            1123456789LL, std::string("\x52\x52\x52\x52", 4));
+    }
+    std::puts("[PASS] npm-offline-filter real capture pushed/residual E2E");
+
     {
         const std::string channel_name = "scheduler_pcap_transform";
         const std::string dataframe_name = "scheduler_pcap_transform";
@@ -4251,6 +4496,9 @@ int main() {
     std::filesystem::remove(stream_meta_db);
     std::filesystem::remove(pcap_ok);
     std::filesystem::remove(pcap_error);
+    std::filesystem::remove(pcap_micro);
+    std::filesystem::remove(pcap_nano);
+    std::filesystem::remove(pcapng_offset);
     std::filesystem::remove_all(data_dir);
     std::filesystem::remove_all(operator_db_dir);
 

@@ -1,6 +1,6 @@
 # Feature: NPM 离线导入过滤
 
-状态：`[-]` 进行中
+状态：`[x]` 完成
 优先级：P0
 前置 Feature：`npm-packet-contract`、`npm-offline-import`、`stage-filter-pipeline`（均已完成）
 后续 Feature：`npm-basic-analysis`、`npm-session-analysis`、`npm-protocol-analysis`
@@ -298,8 +298,39 @@ Arrow residual。协商/编译/执行错误则使任务失败，不能退化成�
   - `[x]` T2.3：实现 pcapfile domain resolver AST lowering，并锚定通用 binder 与纯 Arrow residual 结果。
     - `[x]` T2.3a：实现领域 AST lowering、通用 binary scalar binding 与纯 Arrow residual 等价性。
     - `[x]` T2.3b：注册 resolver IID 并接入 Scheduler 当前 stage 的 resolver 遍历与非 owner fallback。
-- `[ ]` T3：实现 `IBlockStreamReaderFactoryV1` 的 Scheduler 任务隔离创建/释放链路，保持旧 source 兼容与零下推
+- `[x]` T3：实现 `IBlockStreamReaderFactoryV1` 的 Scheduler 任务隔离创建/释放链路，保持旧 source 兼容与零下推
   fallback。
-- `[ ]` T4：在 pcapfile 实现 header/decoded 两级精确下推、不可变规则与并发 reader 隔离，锚定
+- `[x]` T4：在 pcapfile 实现 header/decoded 两级精确下推、不可变规则与并发 reader 隔离，锚定
   `Identify()` 零调用和生命周期。
-- `[ ]` T5：增加真实 pcap/pcapng pushed/residual 等价 E2E，执行全量回归并完成 Feature 归档。
+  - `[x]` T4.1：注册 pcapfile reader factory，实现 canonical empty plan 的配置深拷贝、独占 reader 与 plugin
+    生命周期保护，不接入 packet 规则执行。
+  - `[x]` T4.2：实现 canonical packet plan 的一次性编译及 header/decoded 纯类型化谓词，锚定规则边界和两个
+    reader 的不可变计划隔离。
+  - `[x]` T4.3：接入 source pushdown 协商与 pcapfile 两级执行，锚定 header skip、decoded drop、
+    `Identify()` 零调用及完整 residual 等价性。
+    - `[x]` T4.3a：实现 canonical node ID 索引与 candidate 子树精确可编译选择；合法 unsupported 子树保留为
+      residual，malformed/重复/未知 ID 不产生 accepted 部分结果。
+    - `[x]` T4.3b：让 pcapfile 以 `IID_FILTER_PUSHDOWN_V1` 暴露 source capability；只认领本实例拥有的 target，
+      锚定 exact/zero pushdown、非 owner 遍历和错误 diagnostic。
+    - `[x]` T4.3c：将不可变 `PcapFilterPlan` 接入 pcapfile 两级数据面；header reject 物理跳过 payload/Layer，
+      decoded reject 不进入 Arrow builder，并保持 `Identify()` 零调用及 EOF、取消、回放、背压和 release 语义。
+    - `[x]` T4.3d：接入 Scheduler block-source 的 source-stage resolver/binder/pushdown planning，将 materialized
+      pushed plan 交给独占 reader，并对未下推部分执行完整 Arrow residual；锚定 provider fallback、共享 source
+      fallback 和 exactly-once reader release。
+- `[x]` T5：增加真实 pcap/pcapng pushed/residual 等价 E2E，执行全量回归并完成 Feature 归档。
+  - `[x]` T5.1：通过动态加载的 pcapfile/Scheduler 增加 classic pcap 微秒/纳秒与 pcapng
+    `if_tsresol`/`if_tsoffset` 的 pushed/纯 Arrow residual 等价 E2E，并锚定时间戳回退不提前 EOF。
+  - `[x]` T5.2：执行标准全量构建、完整 CTest、格式与最终 diff 检查；全部绿色后归档规格并更新 backlog。
+
+## 完成证据
+
+- `cmake -B build src`：配置与生成成功。
+- `cmake --build build -j$(nproc)`：最终全量构建成功，所有 target 到达 100%。
+- `ctest --test-dir build --output-on-failure`：在允许 loopback socket 的环境中 12/12 通过，0 失败。
+- 全量回归发现并修复 Web E2E teardown 的 use-after-unload：Scheduler HTTP server 及其插件 route handlers
+  在 `PluginLoader::Unload()` 前销毁；定向 `test_pcap_web_e2e` 1/1 通过。
+- `git diff --check` 通过；新增 C++ 行均不超过 120 列。环境无 `clang-format`，CMake 无 format/lint target，
+  因而完成了人工格式与最终 diff 审查。
+- 最终审查确认：公共 framework ABI 未修改；resolver、pushdown provider 与 reader factory 均按 IID 发现；
+  共享 source 不保存任务级 pushed 状态；规划错误早于 reader/poll；direct、transform、terminal 路径均执行
+  residual；reader 和 source block 保持 exactly-once release。

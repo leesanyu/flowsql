@@ -21,6 +21,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -525,8 +526,8 @@ int main() {
     const fs::path operator_db_dir = temp.path() / "operator_catalog";
     const int web_port = ReserveLoopbackPort();
 
-    httplib::Server scheduler_http;
-    const int scheduler_port = scheduler_http.bind_to_any_port("127.0.0.1");
+    auto scheduler_http = std::make_unique<httplib::Server>();
+    const int scheduler_port = scheduler_http->bind_to_any_port("127.0.0.1");
     assert(scheduler_port > 0);
 
     PacketCounter counter;
@@ -554,28 +555,28 @@ int main() {
     assert(loader->Load(flowsql::get_absolute_process_path(), libraries, options, 6) == 0);
     assert(CountRoutes(loader, "POST", "/channels/dataframe/preview") == 1);
 
-    BindSchedulerRoute(&scheduler_http,
+    BindSchedulerRoute(scheduler_http.get(),
                        "/channels/stream/add",
                        "/channels/stream/add",
                        FindRoute(loader, "POST", "/channels/stream/add"));
-    BindSchedulerRoute(&scheduler_http,
+    BindSchedulerRoute(scheduler_http.get(),
                        "/channels/stream/query",
                        "/channels/stream/query",
                        FindRoute(loader, "POST", "/channels/stream/query"));
-    BindSchedulerRoute(&scheduler_http,
+    BindSchedulerRoute(scheduler_http.get(),
                        "/channels/stream/remove",
                        "/channels/stream/remove",
                        FindRoute(loader, "POST", "/channels/stream/remove"));
-    BindSchedulerRoute(&scheduler_http,
+    BindSchedulerRoute(scheduler_http.get(),
                        "/tasks/batch/execute",
                        "/scheduler/batch/execute",
                        FindRoute(loader, "POST", "/scheduler/batch/execute"));
-    BindSchedulerRoute(&scheduler_http,
+    BindSchedulerRoute(scheduler_http.get(),
                        "/channels/dataframe/preview",
                        "/channels/dataframe/preview",
                        FindRoute(loader, "POST", "/channels/dataframe/preview"));
-    std::thread scheduler_thread([&]() { assert(scheduler_http.listen_after_bind()); });
-    scheduler_http.wait_until_ready();
+    std::thread scheduler_thread([&]() { assert(scheduler_http->listen_after_bind()); });
+    scheduler_http->wait_until_ready();
 
     assert(loader->StartAll() == 0);
     WaitForWeb(web_port);
@@ -599,8 +600,9 @@ int main() {
     RunInvalidCapture(&web, managed_root);
 
     loader->StopAll();
-    scheduler_http.stop();
+    scheduler_http->stop();
     scheduler_thread.join();
+    scheduler_http.reset();
     loader->Unload();
     assert(EntryCount(managed_root) == 0);
 

@@ -28,6 +28,7 @@
 #include "framework/core/dataframe_channel.h"
 #include "framework/core/fan_in_stream_channel.h"
 #include "framework/core/fan_out_stream_channel.h"
+#include "framework/core/filter_planner.h"
 #include "framework/core/json_error_builder.h"
 #include "framework/core/pipeline.h"
 #include "framework/core/ring_stream_channel.h"
@@ -43,6 +44,7 @@
 #include "framework/interfaces/iblock_stream_operator.h"
 #include "framework/interfaces/iblock_stream_factory.h"
 #include "framework/interfaces/iblock_stream_manager.h"
+#include "framework/interfaces/iblock_stream_reader.h"
 #include "framework/interfaces/ibridge.h"
 #include "framework/interfaces/ioperator.h"
 #include "framework/interfaces/ioperator_catalog.h"
@@ -59,6 +61,116 @@ namespace scheduler {
 static std::shared_ptr<IChannel> MakeNonOwningChannelHolder(IChannel* ch) {
     if (!ch) return nullptr;
     return std::shared_ptr<IChannel>(ch, [](IChannel*) {});
+}
+
+static std::shared_ptr<IBlockStreamChannel> HoldExclusiveBlockReader(
+    IBlockStreamReaderFactoryV1* provider,
+    IBlockStreamChannel* reader) {
+    return std::shared_ptr<IBlockStreamChannel>(
+        reader, [provider](IBlockStreamChannel* value) {
+            try {
+                provider->ReleaseReader(value);
+            } catch (...) {
+                LOG_ERROR("IBlockStreamReaderFactoryV1::ReleaseReader threw");
+            }
+        });
+}
+
+static int CreateExclusiveBlockReader(IQuerier* querier,
+                                      const std::string& task_id,
+                                      IBlockStreamChannel* legacy_source,
+                                      const std::string& pushed_filter_plan_json,
+                                      std::shared_ptr<IBlockStreamChannel>* reader_out,
+                                      std::string* error) {
+    if (!querier || !legacy_source || pushed_filter_plan_json.empty() ||
+        !reader_out || !error) {
+        return EINVAL;
+    }
+    reader_out->reset();
+    error->clear();
+
+    const std::string source_category =
+        legacy_source->Category() ? legacy_source->Category() : "";
+    const std::string source_name = legacy_source->Name() ? legacy_source->Name() : "";
+    BlockStreamReaderConfigV1 config;
+    config.task_id = task_id.c_str();
+    config.source_category = source_category.c_str();
+    config.source_name = source_name.c_str();
+    config.pushed_filter_plan_json = pushed_filter_plan_json.c_str();
+
+    std::vector<std::shared_ptr<IBlockStreamChannel>> matches;
+    int route_error = 0;
+    try {
+        const int traverse_rc = querier->Traverse(
+            IID_BLOCK_STREAM_READER_FACTORY_V1, [&](void* value) -> int {
+                auto* provider = static_cast<IBlockStreamReaderFactoryV1*>(value);
+                if (!provider) return 0;
+
+                IBlockStreamChannel* reader = nullptr;
+                int create_rc = 0;
+                try {
+                    create_rc = provider->CreateReader(config, &reader);
+                } catch (const std::exception& ex) {
+                    if (reader) {
+                        HoldExclusiveBlockReader(provider, reader).reset();
+                    }
+                    *error = std::string("block stream reader factory threw: ") + ex.what();
+                    route_error = EFAULT;
+                    return -1;
+                } catch (...) {
+                    if (reader) {
+                        HoldExclusiveBlockReader(provider, reader).reset();
+                    }
+                    *error = "block stream reader factory threw an unknown exception";
+                    route_error = EFAULT;
+                    return -1;
+                }
+
+                if (create_rc == ENOTSUP && !reader) return 0;
+                if (create_rc != 0 || !reader) {
+                    if (reader) {
+                        HoldExclusiveBlockReader(provider, reader).reset();
+                    }
+                    if (create_rc == 0) {
+                        *error = "block stream reader factory returned a null reader";
+                        route_error = EPROTO;
+                    } else if (create_rc == ENOTSUP) {
+                        *error = "block stream reader factory returned a reader with ENOTSUP";
+                        route_error = EPROTO;
+                    } else {
+                        *error = "block stream reader factory failed with code " +
+                                 std::to_string(create_rc);
+                        route_error = create_rc;
+                    }
+                    return -1;
+                }
+
+                matches.push_back(HoldExclusiveBlockReader(provider, reader));
+                if (matches.size() > 1) {
+                    *error = "multiple block stream reader factories matched: " +
+                             source_category + "." + source_name;
+                    route_error = EEXIST;
+                    return -1;
+                }
+                return 0;
+            });
+        if (route_error != 0) return route_error;
+        if (traverse_rc != 0) {
+            *error = "block stream reader factory traversal failed with code " +
+                     std::to_string(traverse_rc);
+            return traverse_rc;
+        }
+    } catch (const std::exception& ex) {
+        *error = std::string("block stream reader factory traversal threw: ") + ex.what();
+        return EFAULT;
+    } catch (...) {
+        *error = "block stream reader factory traversal threw an unknown exception";
+        return EFAULT;
+    }
+
+    if (matches.empty()) return ENOTSUP;
+    *reader_out = std::move(matches.front());
+    return 0;
 }
 
 size_t SchedulerPlugin::TraverseBlockFactories(
@@ -840,30 +952,69 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         parsed_ops.push_back({stmt.op_category, stmt.op_name});
     }
     std::unique_ptr<void, std::function<void(void*)>> block_lease_guard(nullptr, [](void*) {});
+    std::shared_ptr<IBlockStreamChannel> exclusive_block_reader;
+    std::shared_ptr<const BoundFilterExpr> block_source_residual;
     if (source_resolved.has_block_source) {
         if (source_resolved.block_channels.size() != 1) {
             rsp = BuildErrorJson("block stream source currently supports one source");
             return error::BAD_REQUEST;
         }
         const std::string block_runtime_id = NextStreamTaskId();
-        std::string conflict_key;
-        bool blocked_by_mutation = false;
-        const int lease_rc = TryAcquireStreamTaskLeases(block_runtime_id,
-                                                        source_resolved.source_keys,
-                                                        {},
-                                                        &conflict_key,
-                                                        &blocked_by_mutation);
-        if (lease_rc != 0) {
+        BlockSourceFilterPlan source_filter_plan;
+        std::string source_plan_error;
+        const int source_plan_rc = BuildBlockSourceFilterPlan(
+            source_resolved.block_channels.front().get(), stmt,
+            &source_filter_plan, &source_plan_error);
+        if (source_plan_rc != 0) {
             rsp = BuildExecutionErrorJson(
-                blocked_by_mutation ? "block source is being modified: " + conflict_key
-                                    : "block source is in use: " + conflict_key,
-                blocked_by_mutation ? ErrorCodeId::kStreamChannelMutating : ErrorCodeId::kStreamSourceInUse,
-                ErrorStageId::kLease);
-            return error::CONFLICT;
+                source_plan_error.empty() ? "block source filter planning failed"
+                                          : source_plan_error,
+                source_plan_rc == EINVAL ? ErrorCodeId::kSqlTextInvalid
+                                         : ErrorCodeId::kOpExecFail,
+                ErrorStageId::kCapabilityCheck);
+            return source_plan_rc == EINVAL ? error::BAD_REQUEST
+                                            : error::INTERNAL_ERROR;
         }
-        block_lease_guard = std::unique_ptr<void, std::function<void(void*)>>(
-            reinterpret_cast<void*>(1),
-            [this, block_runtime_id](void*) { ReleaseStreamTaskLeases(block_runtime_id); });
+        std::string reader_error;
+        const int reader_rc = CreateExclusiveBlockReader(
+            querier_, block_runtime_id, source_resolved.block_channels.front().get(),
+            source_filter_plan.pushed_filter_plan_json,
+            &exclusive_block_reader, &reader_error);
+        if (reader_rc == 0) {
+            block_source_residual = std::move(source_filter_plan.exclusive_residual);
+            source_resolved.block_channels.front() = exclusive_block_reader;
+            input_channels.front() = exclusive_block_reader.get();
+        } else if (reader_rc == ENOTSUP) {
+            block_source_residual = std::move(source_filter_plan.shared_residual);
+            std::string conflict_key;
+            bool blocked_by_mutation = false;
+            const int lease_rc = TryAcquireStreamTaskLeases(block_runtime_id,
+                                                            source_resolved.source_keys,
+                                                            {},
+                                                            &conflict_key,
+                                                            &blocked_by_mutation);
+            if (lease_rc != 0) {
+                rsp = BuildExecutionErrorJson(
+                    blocked_by_mutation ? "block source is being modified: " + conflict_key
+                                        : "block source is in use: " + conflict_key,
+                    blocked_by_mutation ? ErrorCodeId::kStreamChannelMutating
+                                        : ErrorCodeId::kStreamSourceInUse,
+                    ErrorStageId::kLease);
+                return error::CONFLICT;
+            }
+            block_lease_guard = std::unique_ptr<void, std::function<void(void*)>>(
+                reinterpret_cast<void*>(1),
+                [this, block_runtime_id](void*) {
+                    ReleaseStreamTaskLeases(block_runtime_id);
+                });
+        } else {
+            rsp = BuildExecutionErrorJson(
+                reader_error.empty() ? "block stream reader factory failed"
+                                     : reader_error,
+                ErrorCodeId::kOpExecFail,
+                ErrorStageId::kCapabilityCheck);
+            return reader_rc == EEXIST ? error::CONFLICT : error::INTERNAL_ERROR;
+        }
     }
     if (source_resolved.has_block_source && !parsed_ops.empty()) {
         std::vector<IBlockTransformOperatorV1*> transform_providers;
@@ -933,6 +1084,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                     transform_providers,
                     dataframe_sink.get(),
                     stmt,
+                    block_source_residual,
                     &transform_terminal,
                     &rows,
                     &transform_error);
@@ -1030,8 +1182,9 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             int64_t rows = 0;
             std::string block_error;
             BlockExecutionTerminal block_terminal = BlockExecutionTerminal::kFailed;
-            const int block_rc = ExecuteBlockOperator(source_resolved.block_channels.front().get(), block_op,
-                                                      &block_terminal, &rows, &block_error);
+            const int block_rc = ExecuteBlockOperator(
+                source_resolved.block_channels.front().get(), block_op,
+                block_source_residual, &block_terminal, &rows, &block_error);
             if (block_terminal == BlockExecutionTerminal::kFailed ||
                 (block_terminal != BlockExecutionTerminal::kCancelled && block_rc != 0)) {
                 rsp = BuildExecutionErrorJson(block_error.empty() ? "block stream execution failed" : block_error,
@@ -1162,7 +1315,8 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             }
             IChannel* source = input_channels[0];
             std::string source_type(source->Type());
-            rc = ExecuteTransfer(source, sink, source_type, sink_type, stmt, &affected_rows, &exec_error);
+            rc = ExecuteTransfer(source, sink, source_type, sink_type, stmt,
+                                 block_source_residual, &affected_rows, &exec_error);
         } else {
             rc = ExecuteWithOperatorChain(Span<IChannel*>(input_channels), sink, op_chain, sink_type, stmt,
                                           &affected_rows, &exec_error);

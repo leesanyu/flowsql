@@ -7,7 +7,9 @@
 #include <framework/core/filter_binding.h>
 #include <framework/core/filter_executor.h>
 #include <framework/core/filter_expression.h>
+#include <framework/core/filter_planner.h>
 #include <framework/core/packet_codec.h>
+#include <framework/interfaces/iblock_stream_reader.h>
 
 #include <arrow/api.h>
 
@@ -171,6 +173,19 @@ std::vector<uint8_t> MakeNanosecondReplayPcap(const std::vector<uint64_t>& times
         bytes.push_back(static_cast<uint8_t>(index + 1));
     }
     return bytes;
+}
+
+std::vector<uint8_t> MakeEthernetPacket(bool target_mac) {
+    std::vector<uint8_t> packet(14, 0);
+    const std::array<uint8_t, 6> mac = target_mac
+                                           ? std::array<uint8_t, 6>{0xaa, 0xbb, 0xcc,
+                                                                    0xdd, 0xee, 0xff}
+                                           : std::array<uint8_t, 6>{0x10, 0x20, 0x30,
+                                                                    0x40, 0x50, 0x60};
+    std::copy(mac.begin(), mac.end(), packet.begin());
+    packet[12] = 0x08;
+    packet[13] = 0x00;
+    return packet;
 }
 
 void AppendPcapngBlock(std::vector<uint8_t>* out, uint32_t type,
@@ -476,6 +491,587 @@ void TestPacketDomainKeyCompilation() {
            same_pair(root.operands[3].transport_pairs[0], reverse_tcp) &&
            same_pair(root.operands[3].transport_pairs[1], udp));
     pcapfile::CanonicalizePacketFilterRuleKeys(nullptr);
+}
+
+struct PcapCanonicalFixture {
+    std::string canonical_json;
+    std::shared_ptr<const flowsql::BoundFilterExpr> bound;
+    flowsql::FilterPushdownSplit split;
+};
+
+PcapCanonicalFixture BuildPcapCanonicalFixture(const std::string& filter) {
+    std::shared_ptr<flowsql::FilterExpr> parsed;
+    std::string error;
+    assert(flowsql::ParseFilterExpression(filter, &parsed, &error));
+    assert(parsed && error.empty());
+
+    pcapfile::PcapFilterDomainResolver resolver;
+    flowsql::FilterDomainResolveRequestV1 request;
+    request.target_kind = flowsql::FilterDomainTargetKindV1::kSource;
+    request.target_category = "pcapfile";
+    request.target_name = "capture";
+    request.output_schema = packet::PacketSchema();
+    request.expression = parsed;
+    flowsql::FilterDomainResolveResultV1 resolved;
+    assert(resolver.Resolve(request, &resolved) == 0);
+    assert(resolved.lowered_expression && !resolved.diagnostic.empty());
+
+    PcapCanonicalFixture fixture;
+    assert(flowsql::BindFilterExpression(packet::PacketSchema(), resolved.lowered_expression,
+                                         &fixture.bound, &error) ==
+           flowsql::FilterBindError::kNone);
+    assert(fixture.bound && error.empty());
+    assert(flowsql::SplitFilterForPushdown(fixture.bound, {}, &fixture.split, &error) ==
+           flowsql::FilterPlanError::kNone);
+    assert(flowsql::BuildCanonicalFilterPlan(packet::PacketSchema(), fixture.bound,
+                                             &fixture.canonical_json, &error) ==
+           flowsql::FilterPlanError::kNone);
+    assert(!fixture.canonical_json.empty() && error.empty());
+    return fixture;
+}
+
+std::string BuildPcapCanonicalPlan(const std::string& filter) {
+    return BuildPcapCanonicalFixture(filter).canonical_json;
+}
+
+std::shared_ptr<const packet::PcapFilterPlan> CompilePcapFilterPlan(
+    const std::string& filter) {
+    auto plan = std::make_shared<packet::PcapFilterPlan>();
+    std::string error;
+    assert(pcapfile::CompilePcapFilterPlanJson(
+               BuildPcapCanonicalPlan(filter), plan.get(), &error) == 0);
+    assert(error.empty());
+    return plan;
+}
+
+void TestCanonicalPacketPlanCompilerAndPredicates() {
+    auto compile = [](const std::string& filter) {
+        packet::PcapFilterPlan plan;
+        std::string error = "stale";
+        assert(pcapfile::CompilePcapFilterPlanJson(BuildPcapCanonicalPlan(filter), &plan, &error) == 0);
+        assert(error.empty() && plan.version == packet::kPcapFilterPlanVersion);
+        return plan;
+    };
+    auto assign_ip = [](const std::string& text, packet::IpAddress* output) {
+        packet::PacketIpKey key;
+        std::string error;
+        assert(pcapfile::CompilePacketIpKey(text, &key, &error) == 0);
+        if (key.family == packet::AddressFamily::kIPv4) {
+            *output = packet::IPv4Address(key.ipv4_network_order);
+        } else {
+            packet::IPv6Address value;
+            std::copy(key.ipv6.begin(), key.ipv6.end(), value.bytes);
+            *output = value;
+        }
+    };
+    auto assign_mac = [](const std::string& text, packet::MacAddress* output) {
+        packet::PacketMacKey key;
+        std::string error;
+        assert(pcapfile::CompilePacketMacKey(text, &key, &error) == 0);
+        std::copy(key.bytes.begin(), key.bytes.end(), output->value.bytes);
+        output->valid = 1;
+    };
+
+    packet::PacketMeta meta;
+    packet::PacketLayerInfo layer;
+    layer.status = packet::LayerStatus::kDecoded;
+
+    packet::PcapFilterPlan empty;
+    std::string error = "stale";
+    assert(pcapfile::CompilePcapFilterPlanJson(
+               flowsql::kEmptyCanonicalFilterPlanV1, &empty, &error) == 0);
+    assert(error.empty());
+    assert(pcapfile::EvaluatePcapHeaderFilter(empty, meta) ==
+           pcapfile::PacketHeaderFilterResult::kMatch);
+    assert(pcapfile::EvaluatePcapDecodedFilter(empty, meta, layer));
+    packet::PcapFilterPlan match_all;
+    packet::PcapFilterPlan match_none;
+    assert(pcapfile::CompilePcapFilterPlanJson(
+               R"({"version":1,"root":{"node_id":1,"kind":"literal","type":"bool","nullable":false,"value":"true"}})",
+               &match_all, &error) == 0);
+    assert(pcapfile::CompilePcapFilterPlanJson(
+               R"({"version":1,"root":{"node_id":1,"kind":"literal","type":"bool","nullable":false,"value":"false"}})",
+               &match_none, &error) == 0);
+    assert(pcapfile::EvaluatePcapHeaderFilter(match_all, meta) ==
+           pcapfile::PacketHeaderFilterResult::kMatch);
+    assert(pcapfile::EvaluatePcapHeaderFilter(match_none, meta) ==
+           pcapfile::PacketHeaderFilterResult::kReject);
+
+    const auto time = compile("timestamp_ns >= 10 AND timestamp_ns < 20");
+    meta.timestamp_ns = 9;
+    assert(pcapfile::EvaluatePcapHeaderFilter(time, meta) ==
+           pcapfile::PacketHeaderFilterResult::kReject);
+    meta.timestamp_ns = 10;
+    assert(pcapfile::EvaluatePcapHeaderFilter(time, meta) ==
+           pcapfile::PacketHeaderFilterResult::kMatch);
+    meta.timestamp_ns = 19;
+    assert(pcapfile::EvaluatePcapDecodedFilter(time, meta, layer));
+    meta.timestamp_ns = 20;
+    assert(!pcapfile::EvaluatePcapDecodedFilter(time, meta, layer));
+    meta.timestamp_ns = 5;
+    assert(pcapfile::EvaluatePcapHeaderFilter(time, meta) ==
+           pcapfile::PacketHeaderFilterResult::kReject);
+    const auto time_between = compile("timestamp_ns BETWEEN 10 AND 20");
+    meta.timestamp_ns = 20;
+    assert(pcapfile::EvaluatePcapHeaderFilter(time_between, meta) ==
+           pcapfile::PacketHeaderFilterResult::kMatch);
+    meta.timestamp_ns = 21;
+    assert(pcapfile::EvaluatePcapHeaderFilter(time_between, meta) ==
+           pcapfile::PacketHeaderFilterResult::kReject);
+
+    const auto unsigned_fields = compile(
+        "captured_len >= 4 AND wire_len <= 10 AND source_id = 7 AND sequence != 9");
+    meta.captured_len = 4;
+    meta.wire_len = 10;
+    meta.source_id = 7;
+    meta.sequence = 8;
+    assert(pcapfile::EvaluatePcapHeaderFilter(unsigned_fields, meta) ==
+           pcapfile::PacketHeaderFilterResult::kMatch);
+    meta.sequence = 9;
+    assert(pcapfile::EvaluatePcapHeaderFilter(unsigned_fields, meta) ==
+           pcapfile::PacketHeaderFilterResult::kReject);
+    const auto captured_between = compile("captured_len BETWEEN 4 AND 10");
+    meta.captured_len = 10;
+    assert(pcapfile::EvaluatePcapHeaderFilter(captured_between, meta) ==
+           pcapfile::PacketHeaderFilterResult::kMatch);
+    meta.captured_len = 11;
+    assert(pcapfile::EvaluatePcapHeaderFilter(captured_between, meta) ==
+           pcapfile::PacketHeaderFilterResult::kReject);
+
+    const auto mac = compile("mac('00:11:22:33:44:55')");
+    meta = {};
+    assert(pcapfile::EvaluatePcapHeaderFilter(mac, meta) ==
+           pcapfile::PacketHeaderFilterResult::kNeedDecoded);
+    assign_mac("00:11:22:33:44:55", &layer.src_mac);
+    assert(pcapfile::EvaluatePcapDecodedFilter(mac, meta, layer));
+    layer.src_mac.valid = 0;
+    assert(!pcapfile::EvaluatePcapDecodedFilter(mac, meta, layer));
+    assign_mac("00:11:22:33:44:55", &layer.dst_mac);
+    assert(pcapfile::EvaluatePcapDecodedFilter(mac, meta, layer));
+
+    const auto ipv4 = compile("ip('192.0.2.10')");
+    layer = {};
+    layer.status = packet::LayerStatus::kDecoded;
+    assign_ip("192.0.2.10", &layer.src_ip);
+    assert(pcapfile::EvaluatePcapDecodedFilter(ipv4, meta, layer));
+    assign_ip("2001:db8::10", &layer.src_ip);
+    assert(!pcapfile::EvaluatePcapDecodedFilter(ipv4, meta, layer));
+    const auto ipv6 = compile("ip('2001:db8::10')");
+    assert(pcapfile::EvaluatePcapDecodedFilter(ipv6, meta, layer));
+
+    const auto port = compile("port(443)");
+    layer.src_port = 443;
+    layer.ports_valid = 0;
+    assert(!pcapfile::EvaluatePcapDecodedFilter(port, meta, layer));
+    layer.ports_valid = 1;
+    assert(pcapfile::EvaluatePcapDecodedFilter(port, meta, layer));
+
+    const auto tcp = compile("tcp('192.0.2.10', 52314, '198.51.100.20', 3389)");
+    layer = {};
+    layer.status = packet::LayerStatus::kDecoded;
+    layer.transport_protocol = 6;
+    layer.ports_valid = 1;
+    layer.src_port = 52314;
+    layer.dst_port = 3389;
+    assign_ip("192.0.2.10", &layer.src_ip);
+    assign_ip("198.51.100.20", &layer.dst_ip);
+    assert(pcapfile::EvaluatePcapDecodedFilter(tcp, meta, layer));
+    std::swap(layer.src_ip, layer.dst_ip);
+    std::swap(layer.src_port, layer.dst_port);
+    assert(pcapfile::EvaluatePcapDecodedFilter(tcp, meta, layer));
+    layer.src_port = 52314;
+    layer.dst_port = 3389;
+    assert(!pcapfile::EvaluatePcapDecodedFilter(tcp, meta, layer));
+    layer.ports_valid = 0;
+    assert(!pcapfile::EvaluatePcapDecodedFilter(tcp, meta, layer));
+    layer.ports_valid = 1;
+    layer.transport_protocol = 17;
+    assert(!pcapfile::EvaluatePcapDecodedFilter(tcp, meta, layer));
+    layer.transport_protocol = 6;
+    layer.src_ip = std::monostate{};
+    assert(!pcapfile::EvaluatePcapDecodedFilter(tcp, meta, layer));
+    layer.status = packet::LayerStatus::kTruncated;
+    assign_ip("198.51.100.20", &layer.src_ip);
+    assert(!pcapfile::EvaluatePcapDecodedFilter(tcp, meta, layer));
+
+    const auto udp = compile("udp('2001:db8::10', 53, '2001:db8::20', 5353)");
+    layer = {};
+    layer.status = packet::LayerStatus::kDecoded;
+    layer.transport_protocol = 17;
+    layer.ports_valid = 1;
+    layer.src_port = 5353;
+    layer.dst_port = 53;
+    assign_ip("2001:db8::20", &layer.src_ip);
+    assign_ip("2001:db8::10", &layer.dst_ip);
+    assert(pcapfile::EvaluatePcapDecodedFilter(udp, meta, layer));
+
+    const auto and_plan = compile("timestamp_ns >= 10 AND mac('00:11:22:33:44:55')");
+    meta.timestamp_ns = 9;
+    assert(pcapfile::EvaluatePcapHeaderFilter(and_plan, meta) ==
+           pcapfile::PacketHeaderFilterResult::kReject);
+    meta.timestamp_ns = 10;
+    assert(pcapfile::EvaluatePcapHeaderFilter(and_plan, meta) ==
+           pcapfile::PacketHeaderFilterResult::kNeedDecoded);
+    layer = {};
+    layer.status = packet::LayerStatus::kDecoded;
+    assign_mac("00:11:22:33:44:55", &layer.src_mac);
+    assert(pcapfile::EvaluatePcapDecodedFilter(and_plan, meta, layer));
+    meta.timestamp_ns = 9;
+    assert(!pcapfile::EvaluatePcapDecodedFilter(and_plan, meta, layer));
+    const auto or_plan = compile("timestamp_ns >= 10 OR mac('00:11:22:33:44:55')");
+    meta.timestamp_ns = 10;
+    assert(pcapfile::EvaluatePcapHeaderFilter(or_plan, meta) ==
+           pcapfile::PacketHeaderFilterResult::kMatch);
+    meta.timestamp_ns = 9;
+    assert(pcapfile::EvaluatePcapHeaderFilter(or_plan, meta) ==
+           pcapfile::PacketHeaderFilterResult::kNeedDecoded);
+    assert(pcapfile::EvaluatePcapDecodedFilter(or_plan, meta, layer));
+    layer.src_mac.valid = 0;
+    assert(!pcapfile::EvaluatePcapDecodedFilter(or_plan, meta, layer));
+    const auto not_plan = compile("NOT mac('00:11:22:33:44:55')");
+    assert(pcapfile::EvaluatePcapHeaderFilter(not_plan, meta) ==
+           pcapfile::PacketHeaderFilterResult::kNeedDecoded);
+    assign_mac("00:11:22:33:44:55", &layer.dst_mac);
+    assert(!pcapfile::EvaluatePcapDecodedFilter(not_plan, meta, layer));
+    assign_mac("aa:bb:cc:dd:ee:ff", &layer.dst_mac);
+    assert(pcapfile::EvaluatePcapDecodedFilter(not_plan, meta, layer));
+
+    packet::PcapFilterPlan rejected;
+    for (const std::string& invalid : {
+             std::string("{"), std::string("{\"version\":2,\"root\":null}"),
+             std::string("{\"version\":1,\"root\":{}}"),
+             BuildPcapCanonicalPlan("src_port = 443"),
+             BuildPcapCanonicalPlan("transport_protocol = 6"),
+             BuildPcapCanonicalPlan("src_ip_v4 = 1")}) {
+        error.clear();
+        assert(pcapfile::CompilePcapFilterPlanJson(invalid, &rejected, &error) == EINVAL);
+        assert(!error.empty());
+    }
+    assert(pcapfile::CompilePcapFilterPlanJson(
+               flowsql::kEmptyCanonicalFilterPlanV1, nullptr, &error) == EINVAL);
+}
+
+void TestPcapFilterCandidateSelection() {
+    auto select = [](const PcapCanonicalFixture& fixture,
+                     const std::vector<uint32_t>& candidates) {
+        std::vector<uint32_t> accepted = {std::numeric_limits<uint32_t>::max()};
+        std::string error = "stale";
+        assert(pcapfile::SelectCompilablePcapFilterNodes(
+                   fixture.canonical_json, candidates, &accepted, &error) == 0);
+        assert(error.empty());
+        return accepted;
+    };
+
+    const auto mixed = BuildPcapCanonicalFixture(
+        "timestamp_ns >= 10 AND src_port = 443 AND captured_len <= 64");
+    assert(mixed.split.candidate_node_ids.size() == 3);
+    const std::vector<uint32_t> requested = {
+        mixed.split.candidate_node_ids[2], mixed.split.candidate_node_ids[1],
+        mixed.split.candidate_node_ids[0]};
+    const auto requested_copy = requested;
+    const auto accepted = select(mixed, requested);
+    assert(requested == requested_copy);
+    assert((accepted == std::vector<uint32_t>{mixed.split.candidate_node_ids[2],
+                                              mixed.split.candidate_node_ids[0]}));
+
+    const auto decoded = BuildPcapCanonicalFixture("mac('00:11:22:33:44:55')");
+    assert(decoded.split.candidate_node_ids.size() == 1);
+    assert(select(decoded, decoded.split.candidate_node_ids) == decoded.split.candidate_node_ids);
+
+    const auto exact_or = BuildPcapCanonicalFixture(
+        "timestamp_ns >= 10 OR captured_len <= 64");
+    assert(exact_or.split.candidate_node_ids.size() == 1);
+    assert(select(exact_or, exact_or.split.candidate_node_ids) ==
+           exact_or.split.candidate_node_ids);
+    const auto exact_not = BuildPcapCanonicalFixture(
+        "NOT mac('00:11:22:33:44:55')");
+    assert(exact_not.split.candidate_node_ids.size() == 1);
+    assert(select(exact_not, exact_not.split.candidate_node_ids) ==
+           exact_not.split.candidate_node_ids);
+
+    const auto inexact_or = BuildPcapCanonicalFixture(
+        "timestamp_ns >= 10 OR src_port = 443");
+    assert(inexact_or.split.candidate_node_ids.size() == 1);
+    assert(select(inexact_or, inexact_or.split.candidate_node_ids).empty());
+    assert(select(inexact_or, {}).empty());
+
+    std::vector<uint32_t> rejected = {123};
+    std::string error = "stale";
+    assert(pcapfile::SelectCompilablePcapFilterNodes(
+               flowsql::kEmptyCanonicalFilterPlanV1, {}, &rejected, &error) == 0);
+    assert(rejected.empty() && error.empty());
+    assert(pcapfile::SelectCompilablePcapFilterNodes(
+               flowsql::kEmptyCanonicalFilterPlanV1, {1}, &rejected, &error) == EINVAL);
+    assert(rejected.empty() && !error.empty());
+
+    error = "stale";
+    assert(pcapfile::SelectCompilablePcapFilterNodes(
+               mixed.canonical_json,
+               {mixed.split.candidate_node_ids[0], 0}, &rejected, &error) == EINVAL);
+    assert(rejected.empty() && !error.empty());
+    error = "stale";
+    assert(pcapfile::SelectCompilablePcapFilterNodes(
+               mixed.canonical_json,
+               {mixed.split.candidate_node_ids[0], mixed.split.candidate_node_ids[0]},
+               &rejected, &error) == EINVAL);
+    assert(rejected.empty() && !error.empty());
+
+    const std::string duplicate_node_ids =
+        R"({"version":1,"root":{"node_id":1,"kind":"and","type":"bool","nullable":false,)"
+        R"("operands":[{"node_id":2,"kind":"literal","type":"bool","nullable":false,)"
+        R"("value":"true"},{"node_id":2,"kind":"literal","type":"bool","nullable":false,)"
+        R"("value":"false"}]}})";
+    for (const std::string& malformed : {std::string("{"), duplicate_node_ids}) {
+        rejected = {123};
+        error = "stale";
+        assert(pcapfile::SelectCompilablePcapFilterNodes(
+                   malformed, {}, &rejected, &error) == EINVAL);
+        assert(rejected.empty() && !error.empty());
+    }
+    assert(pcapfile::SelectCompilablePcapFilterNodes(
+               mixed.canonical_json, mixed.split.candidate_node_ids, nullptr, &error) == EINVAL);
+    assert(!error.empty());
+}
+
+void TestPcapFilterPushdownCapability() {
+    const std::string path = Temp("filter_pushdown_capability.pcap");
+    WriteFile(path, MakeClassicPcap(true, false, 0));
+
+    MockProtocol protocol;
+    DeferredProtocolQuerier querier;
+    querier.SetProtocol(&protocol);
+    pcapfile::PcapFilePlugin plugin;
+    assert(plugin.Load(&querier) == 0);
+    assert(plugin.Start() == 0);
+    assert(plugin.AddChannel(
+               "pcapfile", "pushdown",
+               "{\"path\":\"" + path + "\"}") == 0);
+
+    const auto mixed = BuildPcapCanonicalFixture(
+        "timestamp_ns >= 10 AND src_port = 443 AND captured_len <= 64");
+    assert(mixed.split.candidate_node_ids.size() == 3);
+    flowsql::FilterPushdownRequestV1 request;
+    request.target_kind = flowsql::FilterPushdownTargetKindV1::kSource;
+    request.target_category = "PCAPFILE";
+    request.target_name = "pushdown";
+    request.output_schema = packet::PacketSchema();
+    request.canonical_plan_json = mixed.canonical_json.c_str();
+    request.candidate_node_ids = {mixed.split.candidate_node_ids[2],
+                                  mixed.split.candidate_node_ids[1],
+                                  mixed.split.candidate_node_ids[0]};
+    const auto candidates_copy = request.candidate_node_ids;
+    flowsql::FilterPushdownResultV1 result;
+    result.accepted_node_ids = {std::numeric_limits<uint32_t>::max()};
+    result.diagnostic = "stale";
+    assert(plugin.EvaluatePushdown(request, &result) == 0);
+    assert((result.accepted_node_ids ==
+            std::vector<uint32_t>{mixed.split.candidate_node_ids[2],
+                                  mixed.split.candidate_node_ids[0]}));
+    assert(!result.diagnostic.empty());
+    assert(request.candidate_node_ids == candidates_copy);
+    assert(request.canonical_plan_json == mixed.canonical_json.c_str());
+    assert(request.output_schema == packet::PacketSchema());
+
+    const auto unsupported = BuildPcapCanonicalFixture("src_port = 443");
+    request.canonical_plan_json = unsupported.canonical_json.c_str();
+    request.candidate_node_ids = unsupported.split.candidate_node_ids;
+    assert(plugin.EvaluatePushdown(request, &result) == 0);
+    assert(result.accepted_node_ids.empty() && !result.diagnostic.empty());
+
+    request.target_kind = flowsql::FilterPushdownTargetKindV1::kTransform;
+    result.accepted_node_ids = {1};
+    result.diagnostic = "stale";
+    assert(plugin.EvaluatePushdown(request, &result) == ENOTSUP);
+    assert(result.accepted_node_ids.empty() && result.diagnostic.empty());
+    request.target_kind = flowsql::FilterPushdownTargetKindV1::kSource;
+    request.target_category = "other";
+    result.accepted_node_ids = {1};
+    assert(plugin.EvaluatePushdown(request, &result) == ENOTSUP);
+    assert(result.accepted_node_ids.empty());
+    request.target_category = "pcapfile";
+    request.target_name = "not-owned";
+    result.accepted_node_ids = {1};
+    assert(plugin.EvaluatePushdown(request, &result) == ENOTSUP);
+    assert(result.accepted_node_ids.empty());
+
+    request.target_name = "pushdown";
+    request.canonical_plan_json = mixed.canonical_json.c_str();
+    request.candidate_node_ids = mixed.split.candidate_node_ids;
+    request.contract_version = flowsql::kFilterPushdownContractVersionV1 + 1;
+    assert(plugin.EvaluatePushdown(request, &result) == EINVAL);
+    assert(result.accepted_node_ids.empty() && !result.diagnostic.empty());
+    request.contract_version = flowsql::kFilterPushdownContractVersionV1;
+    request.output_schema = arrow::schema({arrow::field("value", arrow::int64())});
+    assert(plugin.EvaluatePushdown(request, &result) == EINVAL);
+    assert(result.accepted_node_ids.empty() && !result.diagnostic.empty());
+    request.output_schema = packet::PacketSchema();
+    request.canonical_plan_json = "{";
+    assert(plugin.EvaluatePushdown(request, &result) == EINVAL);
+    assert(result.accepted_node_ids.empty() && !result.diagnostic.empty());
+    request.canonical_plan_json = mixed.canonical_json.c_str();
+    request.candidate_node_ids = {0};
+    assert(plugin.EvaluatePushdown(request, &result) == EINVAL);
+    assert(result.accepted_node_ids.empty() && !result.diagnostic.empty());
+    request.candidate_node_ids = {mixed.split.candidate_node_ids[0],
+                                  mixed.split.candidate_node_ids[0]};
+    assert(plugin.EvaluatePushdown(request, &result) == EINVAL);
+    assert(result.accepted_node_ids.empty() && !result.diagnostic.empty());
+    assert(plugin.EvaluatePushdown(request, nullptr) == EINVAL);
+
+    request.target_category = nullptr;
+    assert(plugin.EvaluatePushdown(request, &result) == EINVAL);
+    assert(result.accepted_node_ids.empty() && !result.diagnostic.empty());
+    request.target_category = "pcapfile";
+    request.target_name = "";
+    assert(plugin.EvaluatePushdown(request, &result) == EINVAL);
+    assert(result.accepted_node_ids.empty() && !result.diagnostic.empty());
+    request.target_name = "pushdown";
+    request.canonical_plan_json = nullptr;
+    assert(plugin.EvaluatePushdown(request, &result) == EINVAL);
+    assert(result.accepted_node_ids.empty() && !result.diagnostic.empty());
+
+    assert(plugin.RemoveChannel("pcapfile", "pushdown") == 0);
+    assert(plugin.Stop() == 0);
+    assert(plugin.Unload() == 0);
+}
+
+void TestClassicPcapTwoStageFilterDataPath() {
+    const auto target = MakeEthernetPacket(true);
+    const auto other = MakeEthernetPacket(false);
+    std::vector<uint8_t> bytes = MakeClassicHeader(true, false, 65535, 1);
+    AppendClassicRecord(&bytes, true, 3, 0, target, target.size());
+    AppendClassicRecord(&bytes, true, 1, 0, other, other.size());
+    AppendClassicRecord(&bytes, true, 2, 0, target, target.size());
+    AppendClassicRecord(&bytes, true, 2, 1, target, target.size());
+    const std::string path = Temp("classic_two_stage_filter.pcap");
+    WriteFile(path, bytes);
+
+    MockProtocol protocol;
+    pcapfile::PcapFileSourceConfig config;
+    config.path = path;
+    config.format = "pcap";
+    config.batch_packets = 2;
+    pcapfile::PcapFileChannel channel(
+        "classic_two_stage_filter", config, &protocol, {},
+        CompilePcapFilterPlan(
+            "timestamp_ns < 2500000000 AND mac('aa:bb:cc:dd:ee:ff')"));
+    assert(channel.Open() == 0);
+    const auto data = channel.PollBlock(0);
+    assert(data.kind == flowsql::BlockPollEvent::kData && data.batch);
+    assert(data.batch->num_rows() == 2);
+    auto timestamp = std::static_pointer_cast<arrow::Int64Array>(data.batch->column(0));
+    auto sequence = std::static_pointer_cast<arrow::UInt64Array>(data.batch->column(5));
+    assert(timestamp->Value(0) == 2000000000LL);
+    assert(timestamp->Value(1) == 2000001000LL);
+    assert(sequence->Value(0) == 2 && sequence->Value(1) == 3);
+    assert(protocol.layer_calls == 3);
+    assert(protocol.identify_calls == 0);
+    assert(channel.OutstandingBatchCount() == 1);
+    AssertNoBatchEvent(channel.PollBlock(0), flowsql::BlockPollEvent::kTimeout);
+    assert(channel.ReleaseBlock(data.batch) == 0);
+    AssertNoBatchEvent(channel.PollBlock(0), flowsql::BlockPollEvent::kEof);
+    AssertNoBatchEvent(channel.PollBlock(0), flowsql::BlockPollEvent::kCancelled);
+}
+
+void TestPcapngHeaderFilterDataPath() {
+    std::vector<uint8_t> bytes;
+    AppendPcapngSectionHeader(&bytes, true);
+    AppendPcapngInterface(&bytes, true, 1);
+    AppendPcapngEnhancedPacket(&bytes, true, 0, 1, MakeEthernetPacket(false));
+    AppendPcapngEnhancedPacket(&bytes, true, 0, 2, MakeEthernetPacket(true));
+    const std::string path = Temp("pcapng_header_filter.pcapng");
+    WriteFile(path, bytes);
+
+    MockProtocol protocol;
+    pcapfile::PcapFileSourceConfig config;
+    config.path = path;
+    config.format = "pcapng";
+    config.batch_packets = 8;
+    pcapfile::PcapFileChannel channel(
+        "pcapng_header_filter", config, &protocol, {},
+        CompilePcapFilterPlan("timestamp_ns >= 2000"));
+    assert(channel.Open() == 0);
+    const auto data = channel.PollBlock(0);
+    assert(data.kind == flowsql::BlockPollEvent::kData && data.batch);
+    assert(data.batch->num_rows() == 1);
+    auto timestamp = std::static_pointer_cast<arrow::Int64Array>(data.batch->column(0));
+    auto sequence = std::static_pointer_cast<arrow::UInt64Array>(data.batch->column(5));
+    assert(timestamp->Value(0) == 2000 && sequence->Value(0) == 1);
+    assert(protocol.layer_calls == 1 && protocol.identify_calls == 0);
+    assert(channel.ReleaseBlock(data.batch) == 0);
+    AssertNoBatchEvent(channel.PollBlock(0), flowsql::BlockPollEvent::kEof);
+}
+
+void TestFilteredEmptyAndSkippedErrorTerminals() {
+    std::vector<uint8_t> classic = MakeClassicHeader(true, false, 65535, 1);
+    const auto other = MakeEthernetPacket(false);
+    AppendClassicRecord(&classic, true, 1, 0, other, other.size());
+    AppendClassicRecord(&classic, true, 2, 0, other, other.size());
+    const std::string classic_path = Temp("decoded_filter_empty.pcap");
+    WriteFile(classic_path, classic);
+
+    MockProtocol decoded_protocol;
+    pcapfile::PcapFileSourceConfig classic_config;
+    classic_config.path = classic_path;
+    classic_config.format = "pcap";
+    pcapfile::PcapFileChannel decoded_channel(
+        "decoded_filter_empty", classic_config, &decoded_protocol, {},
+        CompilePcapFilterPlan("mac('aa:bb:cc:dd:ee:ff')"));
+    assert(decoded_channel.Open() == 0);
+    AssertNoBatchEvent(decoded_channel.PollBlock(0), flowsql::BlockPollEvent::kEof);
+    assert(decoded_channel.OutstandingBatchCount() == 0);
+    assert(decoded_protocol.layer_calls == 2 && decoded_protocol.identify_calls == 0);
+
+    std::vector<uint8_t> pcapng;
+    AppendPcapngSectionHeader(&pcapng, true);
+    AppendPcapngInterface(&pcapng, true, 1);
+    AppendPcapngEnhancedPacket(&pcapng, true, 0, 1, MakeEthernetPacket(true));
+    Store32(&pcapng, pcapng.size() - 4, 0, true);
+    const std::string pcapng_path = Temp("skipped_bad_trailer.pcapng");
+    WriteFile(pcapng_path, pcapng);
+
+    MockProtocol skipped_protocol;
+    pcapfile::PcapFileSourceConfig pcapng_config;
+    pcapng_config.path = pcapng_path;
+    pcapng_config.format = "pcapng";
+    pcapfile::PcapFileChannel skipped_channel(
+        "skipped_bad_trailer", pcapng_config, &skipped_protocol, {},
+        CompilePcapFilterPlan("timestamp_ns >= 2000"));
+    assert(skipped_channel.Open() == 0);
+    const auto error = skipped_channel.PollBlock(0);
+    AssertNoBatchEvent(error, flowsql::BlockPollEvent::kError);
+    assert(error.err != 0);
+    assert(skipped_protocol.layer_calls == 0 && skipped_protocol.identify_calls == 0);
+    AssertNoBatchEvent(skipped_channel.PollBlock(0),
+                       flowsql::BlockPollEvent::kCancelled);
+}
+
+void TestFilteredTimestampReplay() {
+    const std::vector<uint64_t> timestamps_ns = {
+        1000000000ULL, 1006001001ULL, 1006001002ULL};
+    const std::string path = Temp("filtered_timestamp_replay.pcap");
+    WriteFile(path, MakeNanosecondReplayPcap(timestamps_ns));
+
+    MockProtocol protocol;
+    pcapfile::PcapFileSourceConfig config;
+    config.path = path;
+    config.format = "pcap";
+    config.replay_mode = pcapfile::PcapReplayMode::kTimestamp;
+    std::vector<int64_t> waits_ns;
+    pcapfile::PcapFileChannel channel(
+        "filtered_timestamp_replay", config, &protocol,
+        [&](std::chrono::nanoseconds delay) { waits_ns.push_back(delay.count()); },
+        CompilePcapFilterPlan("sequence >= 2"));
+    assert(channel.Open() == 0);
+    const auto data = channel.PollBlock(0);
+    assert(data.kind == flowsql::BlockPollEvent::kData && data.batch);
+    assert(data.batch->num_rows() == 1);
+    auto sequence = std::static_pointer_cast<arrow::UInt64Array>(data.batch->column(5));
+    assert(sequence->Value(0) == 2);
+    assert(waits_ns == std::vector<int64_t>{6001002});
+    assert(protocol.layer_calls == 1 && protocol.identify_calls == 0);
+    assert(channel.ReleaseBlock(data.batch) == 0);
+    AssertNoBatchEvent(channel.PollBlock(0), flowsql::BlockPollEvent::kEof);
 }
 
 void TestPcapFilterDomainResolverResidual() {
@@ -1909,6 +2505,131 @@ void TestPluginDependencyLifecycle() {
     assert(missing.Unload() == 0);
 }
 
+void TestExclusiveReaderFactory() {
+    const std::string path = Temp("exclusive_reader.pcap");
+    WriteFile(path, MakeClassicPcap(true, false, 0));
+
+    MockProtocol protocol;
+    DeferredProtocolQuerier querier;
+    querier.SetProtocol(&protocol);
+    pcapfile::PcapFilePlugin plugin;
+    assert(plugin.Load(&querier) == 0);
+    assert(plugin.Start() == 0);
+    assert(plugin.AddChannel(
+               "pcapfile", "exclusive",
+               "{\"path\":\"" + path + "\",\"batch_packets\":1}") == 0);
+    auto* managed = plugin.Get("pcapfile", "exclusive");
+    assert(managed != nullptr);
+
+    std::string task_one = "reader-task-one";
+    std::string category_one = "pcapfile";
+    std::string source_one = "exclusive";
+    std::string plan_one = BuildPcapCanonicalPlan("timestamp_ns >= 10");
+    flowsql::BlockStreamReaderConfigV1 config_one;
+    config_one.task_id = task_one.c_str();
+    config_one.source_category = category_one.c_str();
+    config_one.source_name = source_one.c_str();
+    config_one.pushed_filter_plan_json = plan_one.c_str();
+    flowsql::IBlockStreamChannel* reader_one = nullptr;
+    assert(plugin.CreateReader(config_one, &reader_one) == 0);
+    assert(reader_one != nullptr && reader_one != managed && reader_one->IsOpened());
+
+    std::string plan_two = BuildPcapCanonicalPlan("timestamp_ns < 10");
+    flowsql::BlockStreamReaderConfigV1 config_two;
+    config_two.task_id = "reader-task-two";
+    config_two.source_category = "PCAPFILE";
+    config_two.source_name = "exclusive";
+    config_two.pushed_filter_plan_json = plan_two.c_str();
+    flowsql::IBlockStreamChannel* reader_two = nullptr;
+    assert(plugin.CreateReader(config_two, &reader_two) == 0);
+    assert(reader_two != nullptr && reader_two != managed && reader_two != reader_one);
+    assert(reader_two->IsOpened());
+
+    auto* typed_reader_one = dynamic_cast<pcapfile::PcapFileChannel*>(reader_one);
+    auto* typed_reader_two = dynamic_cast<pcapfile::PcapFileChannel*>(reader_two);
+    assert(typed_reader_one && typed_reader_two);
+    packet::PacketMeta plan_meta;
+    plan_meta.timestamp_ns = 10;
+    assert(typed_reader_one->EvaluateHeaderFilter(plan_meta) ==
+           pcapfile::PacketHeaderFilterResult::kMatch);
+    assert(typed_reader_two->EvaluateHeaderFilter(plan_meta) ==
+           pcapfile::PacketHeaderFilterResult::kReject);
+
+    task_one = "caller-task-mutated";
+    category_one = "caller-category-mutated";
+    source_one = "caller-source-mutated";
+    plan_one = "caller-plan-mutated";
+    plan_two = "caller-plan-two-mutated";
+    assert(typed_reader_one->EvaluateHeaderFilter(plan_meta) ==
+           pcapfile::PacketHeaderFilterResult::kMatch);
+    assert(typed_reader_two->EvaluateHeaderFilter(plan_meta) ==
+           pcapfile::PacketHeaderFilterResult::kReject);
+    assert(std::string(reader_one->Category()) == "pcapfile");
+    assert(std::string(reader_one->Name()) == "exclusive");
+    assert(plugin.RemoveChannel("pcapfile", "exclusive") == 0);
+    assert(plugin.Get("pcapfile", "exclusive") == nullptr);
+    assert(plugin.Stop() == EBUSY);
+    assert(plugin.Unload() == EBUSY);
+
+    const auto first = reader_one->PollBlock(0);
+    const auto second = reader_two->PollBlock(0);
+    assert(first.kind == flowsql::BlockPollEvent::kData && first.batch);
+    AssertNoBatchEvent(second, flowsql::BlockPollEvent::kEof);
+    auto first_sequence =
+        std::static_pointer_cast<arrow::UInt64Array>(first.batch->column(5));
+    assert(first_sequence->Value(0) == 0);
+    assert(reader_one->ReleaseBlock(first.batch) == 0);
+    reader_one->Cancel();
+    AssertNoBatchEvent(
+        reader_one->PollBlock(0), flowsql::BlockPollEvent::kCancelled);
+    AssertNoBatchEvent(
+        reader_two->PollBlock(0), flowsql::BlockPollEvent::kCancelled);
+
+    plugin.ReleaseReader(reader_one);
+    assert(plugin.Stop() == EBUSY);
+    plugin.ReleaseReader(reader_two);
+    assert(plugin.Stop() == 0);
+    assert(plugin.Unload() == 0);
+
+    pcapfile::PcapFilePlugin validation_plugin;
+    assert(validation_plugin.Load(&querier) == 0);
+    assert(validation_plugin.Start() == 0);
+    assert(validation_plugin.AddChannel(
+               "pcapfile", "validation",
+               "{\"path\":\"" + path + "\"}") == 0);
+    flowsql::BlockStreamReaderConfigV1 invalid;
+    invalid.task_id = "invalid-task";
+    invalid.source_category = "pcapfile";
+    invalid.source_name = "validation";
+    invalid.pushed_filter_plan_json = flowsql::kEmptyCanonicalFilterPlanV1;
+    auto* rejected = reinterpret_cast<flowsql::IBlockStreamChannel*>(1);
+    invalid.contract_version = flowsql::kBlockStreamReaderContractVersionV1 + 1;
+    assert(validation_plugin.CreateReader(invalid, &rejected) == EINVAL);
+    assert(rejected == nullptr);
+    invalid.contract_version = flowsql::kBlockStreamReaderContractVersionV1;
+    invalid.task_id = nullptr;
+    rejected = reinterpret_cast<flowsql::IBlockStreamChannel*>(1);
+    assert(validation_plugin.CreateReader(invalid, &rejected) == EINVAL);
+    assert(rejected == nullptr);
+    invalid.task_id = "invalid-task";
+    invalid.source_category = "other";
+    rejected = reinterpret_cast<flowsql::IBlockStreamChannel*>(1);
+    assert(validation_plugin.CreateReader(invalid, &rejected) == ENOTSUP);
+    assert(rejected == nullptr);
+    invalid.source_category = "pcapfile";
+    invalid.source_name = "missing";
+    rejected = reinterpret_cast<flowsql::IBlockStreamChannel*>(1);
+    assert(validation_plugin.CreateReader(invalid, &rejected) == ENOTSUP);
+    assert(rejected == nullptr);
+    invalid.source_name = "validation";
+    invalid.pushed_filter_plan_json = "{\"version\":1,\"root\":{}}";
+    rejected = reinterpret_cast<flowsql::IBlockStreamChannel*>(1);
+    assert(validation_plugin.CreateReader(invalid, &rejected) == EINVAL);
+    assert(rejected == nullptr);
+    assert(validation_plugin.CreateReader(invalid, nullptr) == EINVAL);
+    assert(validation_plugin.Unload() == 0);
+}
+
 void AssertDynamicPluginOrder(bool pcapfile_first) {
     flowsql::PluginLoader* loader = flowsql::PluginLoader::Single();
     loader->StopAll();
@@ -1928,6 +2649,8 @@ void AssertDynamicPluginOrder(bool pcapfile_first) {
     assert(loader->StartAll() == 0);
     assert(loader->First(flowsql::IID_PROTOCOL) != nullptr);
     assert(loader->First(flowsql::IID_BLOCK_STREAM_FACTORY) != nullptr);
+    assert(loader->First(flowsql::IID_BLOCK_STREAM_READER_FACTORY_V1) != nullptr);
+    assert(loader->First(flowsql::IID_FILTER_PUSHDOWN_V1) != nullptr);
     loader->StopAll();
     assert(loader->Unload() == 0);
 }
@@ -1995,6 +2718,13 @@ void TestPluginManager() {
 int main() {
     TestRfc3339TimestampNs();
     TestPacketDomainKeyCompilation();
+    TestCanonicalPacketPlanCompilerAndPredicates();
+    TestPcapFilterCandidateSelection();
+    TestPcapFilterPushdownCapability();
+    TestClassicPcapTwoStageFilterDataPath();
+    TestPcapngHeaderFilterDataPath();
+    TestFilteredEmptyAndSkippedErrorTerminals();
+    TestFilteredTimestampReplay();
     TestPcapFilterDomainResolverResidual();
     TestClassicPcap();
     TestClassicMagicAndEndian();
@@ -2022,6 +2752,7 @@ int main() {
     TestIncrementalReadAfterOpen();
     TestOptions();
     TestPluginDependencyLifecycle();
+    TestExclusiveReaderFactory();
     TestDynamicPluginDependencyOrders();
     TestPluginManager();
     TestCancelAndManagerBusy();

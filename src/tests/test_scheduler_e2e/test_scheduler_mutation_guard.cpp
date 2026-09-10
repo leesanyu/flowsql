@@ -22,6 +22,7 @@
 #include <framework/core/sql_parser.h>
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_manager.h>
+#include <framework/interfaces/iblock_stream_reader.h>
 #include <framework/interfaces/iblock_transform_operator.h>
 #include <framework/interfaces/ichannel.h>
 #include <framework/interfaces/ifilter_domain_resolver.h>
@@ -265,6 +266,68 @@ class SchemaBlockChannel final : public IBlockStreamChannel {
     int emitted_timeout_count_ = 0;
 };
 
+enum class ReaderFactoryBehavior {
+    kOwn,
+    kNonOwner,
+    kNonOwnerWithReader,
+    kError,
+    kNullSuccess,
+};
+
+class BlockReaderFactoryFixture final : public IBlockStreamReaderFactoryV1 {
+ public:
+    BlockReaderFactoryFixture(ReaderFactoryBehavior behavior,
+                              IBlockStreamChannel* reader = nullptr)
+        : behavior_(behavior), reader_(reader) {}
+
+    void SetReader(IBlockStreamChannel* reader) { reader_ = reader; }
+
+    int CreateReader(const BlockStreamReaderConfigV1& config,
+                     IBlockStreamChannel** reader) override {
+        ++create_calls;
+        if (!reader) return EINVAL;
+        *reader = nullptr;
+        observed_contract_version = config.contract_version;
+        task_ids.emplace_back(config.task_id ? config.task_id : "");
+        source_categories.emplace_back(
+            config.source_category ? config.source_category : "");
+        source_names.emplace_back(config.source_name ? config.source_name : "");
+        pushed_plans.emplace_back(
+            config.pushed_filter_plan_json ? config.pushed_filter_plan_json : "");
+        if (behavior_ == ReaderFactoryBehavior::kNonOwner) return ENOTSUP;
+        if (behavior_ == ReaderFactoryBehavior::kNonOwnerWithReader) {
+            *reader = reader_;
+            ++live_readers;
+            return ENOTSUP;
+        }
+        if (behavior_ == ReaderFactoryBehavior::kError) return EIO;
+        if (behavior_ == ReaderFactoryBehavior::kNullSuccess) return 0;
+        *reader = reader_;
+        ++live_readers;
+        return 0;
+    }
+
+    void ReleaseReader(IBlockStreamChannel* reader) override {
+        ASSERT_EQ(reader, reader_);
+        ASSERT_TRUE(live_readers > 0);
+        --live_readers;
+        ++release_calls;
+    }
+
+    uint32_t observed_contract_version = 0;
+    std::vector<std::string> task_ids;
+    std::vector<std::string> source_categories;
+    std::vector<std::string> source_names;
+    std::vector<std::string> pushed_plans;
+    int create_calls = 0;
+    int release_calls = 0;
+    int live_readers = 0;
+
+ private:
+    ReaderFactoryBehavior behavior_;
+    IBlockStreamChannel* reader_;
+};
+
 class SchemaBlockOperator final : public IBlockStreamOperator {
  public:
     std::string Category() override { return "test"; }
@@ -280,9 +343,10 @@ class SchemaBlockOperator final : public IBlockStreamOperator {
         schema_matches_packet = schema && schema->Equals(packet::PacketSchema());
         return schema_rc;
     }
-    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>&, int64_t) override {
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& batch, int64_t) override {
         schema_before_process = schema_calls == 1;
         ++process_calls;
+        process_input_rows.push_back(batch ? batch->num_rows() : -1);
         if (throw_on_process) throw std::runtime_error("process block failed");
         if (process_rc != 0) return process_rc;
         return process_calls >= process_stop_after ? 1 : 0;
@@ -300,6 +364,7 @@ class SchemaBlockOperator final : public IBlockStreamOperator {
     int schema_calls = 0;
     int process_calls = 0;
     int flush_calls = 0;
+    std::vector<int64_t> process_input_rows;
     bool throw_on_process = false;
     bool schema_before_process = false;
     bool schema_matches_packet = false;
@@ -504,6 +569,54 @@ class SchedulerTransformProvider final : public IBlockTransformOperatorV1,
     std::string name_;
 };
 
+class SourceFilterPushdownFixture final : public IFilterPushdownV1 {
+ public:
+    enum class Behavior {
+        kAcceptAll,
+        kAcceptFirst,
+        kAcceptNone,
+        kError,
+    };
+
+    explicit SourceFilterPushdownFixture(Behavior behavior) : behavior_(behavior) {}
+
+    int EvaluatePushdown(const FilterPushdownRequestV1& request,
+                         FilterPushdownResultV1* result) const override {
+        ++calls;
+        if (result) *result = {};
+        if (!result || request.target_kind != FilterPushdownTargetKindV1::kSource ||
+            !request.target_category || !request.target_name ||
+            std::string(request.target_category) != "pcapfile" ||
+            std::string(request.target_name) != "input") {
+            return ENOTSUP;
+        }
+        observed_schema = request.output_schema;
+        observed_candidates = request.candidate_node_ids;
+        observed_canonical_plan = request.canonical_plan_json
+                                      ? request.canonical_plan_json
+                                      : "";
+        if (behavior_ == Behavior::kError) {
+            result->diagnostic = "source pushdown fixture rejected plan";
+            return EIO;
+        }
+        if (behavior_ == Behavior::kAcceptAll) {
+            result->accepted_node_ids = request.candidate_node_ids;
+        } else if (behavior_ == Behavior::kAcceptFirst &&
+                   !request.candidate_node_ids.empty()) {
+            result->accepted_node_ids = {request.candidate_node_ids.front()};
+        }
+        return 0;
+    }
+
+    mutable int calls = 0;
+    mutable std::shared_ptr<arrow::Schema> observed_schema;
+    mutable std::vector<uint32_t> observed_candidates;
+    mutable std::string observed_canonical_plan;
+
+ private:
+    Behavior behavior_;
+};
+
 class BlockProviderQuerier final : public IQuerier {
  public:
     int Traverse(const Guid& iid, fntraverse callback) override {
@@ -525,6 +638,9 @@ class BlockProviderQuerier final : public IQuerier {
             providers = &transforms;
         } else if (SameGuid(iid, IID_FILTER_PUSHDOWN_V1)) {
             ++filter_pushdown_traverse_calls;
+            if (filter_pushdown_traverse_return_code != 0) {
+                return filter_pushdown_traverse_return_code;
+            }
             providers = &filter_pushdowns;
         } else if (SameGuid(iid, IID_FILTER_DOMAIN_RESOLVER_V1)) {
             ++filter_domain_resolver_traverse_calls;
@@ -532,6 +648,12 @@ class BlockProviderQuerier final : public IQuerier {
                 return filter_domain_resolver_traverse_return_code;
             }
             providers = &filter_domain_resolvers;
+        } else if (SameGuid(iid, IID_BLOCK_STREAM_READER_FACTORY_V1)) {
+            ++reader_factory_traverse_calls;
+            if (reader_factory_traverse_return_code != 0) {
+                return reader_factory_traverse_return_code;
+            }
+            providers = &reader_factories;
         } else {
             ++unexpected_traverse_calls;
             return 0;
@@ -557,14 +679,18 @@ class BlockProviderQuerier final : public IQuerier {
     std::vector<void*> transforms;
     std::vector<void*> filter_pushdowns;
     std::vector<void*> filter_domain_resolvers;
+    std::vector<void*> reader_factories;
     int factory_traverse_calls = 0;
     int manager_traverse_calls = 0;
     int operator_traverse_calls = 0;
     int transform_traverse_calls = 0;
     int filter_pushdown_traverse_calls = 0;
     int filter_domain_resolver_traverse_calls = 0;
+    int reader_factory_traverse_calls = 0;
     int transform_traverse_return_code = 0;
+    int filter_pushdown_traverse_return_code = 0;
     int filter_domain_resolver_traverse_return_code = 0;
+    int reader_factory_traverse_return_code = 0;
     int unexpected_traverse_calls = 0;
     int first_calls = 0;
     int block_factory_first_calls = 0;
@@ -683,9 +809,11 @@ struct SchedulerPluginTestAccessor {
                                     IBlockStreamChannel* source,
                                     IBlockStreamOperator* op,
                                     int64_t* rows_affected,
-                                    std::string* error) {
+                                    std::string* error,
+                                    const std::shared_ptr<const BoundFilterExpr>& source_residual = nullptr) {
         SchedulerPlugin::BlockExecutionTerminal terminal;
-        return plugin->ExecuteBlockOperator(source, op, &terminal, rows_affected, error);
+        return plugin->ExecuteBlockOperator(
+            source, op, source_residual, &terminal, rows_affected, error);
     }
 
     static int StartBatchRuntime(SchedulerPlugin* plugin) {
@@ -1562,6 +1690,508 @@ void TestBlockDirectTransferTimeout() {
     ASSERT_EQ(source.release_calls, 0);
 }
 
+std::shared_ptr<arrow::RecordBatch> MakePacketLengthBatch(
+    const std::vector<std::pair<uint32_t, uint32_t>>& lengths) {
+    std::vector<packet::PacketRecord> records;
+    records.reserve(lengths.size());
+    for (size_t i = 0; i < lengths.size(); ++i) {
+        auto raw = std::make_shared<std::vector<uint8_t>>(
+            lengths[i].first, static_cast<uint8_t>(i + 1));
+        packet::PacketRecord record;
+        record.meta.captured_len = lengths[i].first;
+        record.meta.wire_len = lengths[i].second;
+        record.meta.sequence = i;
+        record.raw_data.owner = raw;
+        record.raw_data.data = raw->data();
+        record.raw_data.size = lengths[i].first;
+        records.push_back(std::move(record));
+    }
+    std::shared_ptr<arrow::RecordBatch> batch;
+    std::string packet_error;
+    ASSERT_EQ(packet::EncodePacketBatch(records, &batch, &packet_error),
+              packet::PacketBatchError::kNone);
+    ASSERT_TRUE(batch != nullptr && packet_error.empty());
+    return batch;
+}
+
+void TestBlockReaderFactoryLifecycle() {
+    auto raw = std::make_shared<std::vector<uint8_t>>(
+        std::initializer_list<uint8_t>{0x01, 0x02, 0x03});
+    packet::PacketRecord record;
+    record.meta.captured_len = static_cast<uint32_t>(raw->size());
+    record.meta.wire_len = static_cast<uint32_t>(raw->size());
+    record.raw_data.owner = raw;
+    record.raw_data.data = raw->data();
+    record.raw_data.size = static_cast<uint32_t>(raw->size());
+    std::shared_ptr<arrow::RecordBatch> packet_batch;
+    std::string packet_error;
+    ASSERT_EQ(packet::EncodePacketBatch({record}, &packet_batch, &packet_error),
+              packet::PacketBatchError::kNone);
+    ASSERT_TRUE(packet_batch != nullptr && packet_error.empty());
+
+    {
+        SchemaBlockChannel legacy_source(packet_batch, 1);
+        SchemaBlockChannel first_reader(packet_batch, 1);
+        SchemaBlockChannel second_reader(packet_batch, 1);
+        TraversalBlockFactory legacy_factory(1);
+        legacy_factory.channel = &legacy_source;
+        BlockReaderFactoryFixture reader_factory(
+            ReaderFactoryBehavior::kOwn, &first_reader);
+        BlockProviderQuerier querier;
+        querier.factories = {&legacy_factory};
+        querier.reader_factories = {&reader_factory};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})",
+                      &response),
+                  error::OK);
+        ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
+        ASSERT_EQ(legacy_source.poll_calls, 0);
+        ASSERT_EQ(legacy_source.release_calls, 0);
+        ASSERT_EQ(first_reader.poll_calls, 2);
+        ASSERT_EQ(first_reader.release_calls, 1);
+        ASSERT_EQ(reader_factory.create_calls, 1);
+        ASSERT_EQ(reader_factory.release_calls, 1);
+        ASSERT_EQ(reader_factory.live_readers, 0);
+        ASSERT_EQ(reader_factory.observed_contract_version,
+                  kBlockStreamReaderContractVersionV1);
+        ASSERT_EQ(reader_factory.source_categories,
+                  std::vector<std::string>({"pcapfile"}));
+        ASSERT_EQ(reader_factory.source_names, std::vector<std::string>({"input"}));
+        ASSERT_EQ(reader_factory.pushed_plans,
+                  std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
+        ASSERT_TRUE(!reader_factory.task_ids.front().empty());
+
+        reader_factory.SetReader(&second_reader);
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input"})",
+                      &response),
+                  error::OK);
+        ASSERT_EQ(second_reader.poll_calls, 2);
+        ASSERT_EQ(second_reader.release_calls, 1);
+        ASSERT_EQ(reader_factory.create_calls, 2);
+        ASSERT_EQ(reader_factory.release_calls, 2);
+        ASSERT_EQ(reader_factory.live_readers, 0);
+        ASSERT_EQ(reader_factory.task_ids.size(), 2u);
+        ASSERT_TRUE(reader_factory.task_ids[0] != reader_factory.task_ids[1]);
+        ASSERT_EQ(querier.reader_factory_traverse_calls, 2);
+    }
+
+    {
+        SchemaBlockChannel legacy_source(packet_batch, 1);
+        TraversalBlockFactory legacy_factory(1);
+        legacy_factory.channel = &legacy_source;
+        BlockReaderFactoryFixture non_owner(ReaderFactoryBehavior::kNonOwner);
+        BlockProviderQuerier querier;
+        querier.factories = {&legacy_factory};
+        querier.reader_factories = {&non_owner};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})",
+                      &response),
+                  error::OK);
+        ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
+        ASSERT_EQ(non_owner.create_calls, 1);
+        ASSERT_EQ(non_owner.release_calls, 0);
+        ASSERT_EQ(non_owner.pushed_plans,
+                  std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
+        ASSERT_EQ(legacy_source.poll_calls, 2);
+        ASSERT_EQ(legacy_source.release_calls, 1);
+    }
+
+    for (const BlockPollEvent::Kind terminal_kind :
+         {BlockPollEvent::kCancelled, BlockPollEvent::kError}) {
+        SchemaBlockChannel legacy_source(packet_batch, 1);
+        SchemaBlockChannel exclusive_reader(packet_batch, 0);
+        exclusive_reader.terminal_kind = terminal_kind;
+        exclusive_reader.terminal_err = terminal_kind == BlockPollEvent::kError ? EIO : 0;
+        TraversalBlockFactory legacy_factory(1);
+        legacy_factory.channel = &legacy_source;
+        BlockReaderFactoryFixture reader_factory(
+            ReaderFactoryBehavior::kOwn, &exclusive_reader);
+        BlockProviderQuerier querier;
+        querier.factories = {&legacy_factory};
+        querier.reader_factories = {&reader_factory};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_TRUE(SchedulerPluginTestAccessor::HandleExecute(
+                        &plugin,
+                        R"({"sql":"SELECT * FROM pcapfile.input"})",
+                        &response) != error::OK);
+        ASSERT_EQ(legacy_source.poll_calls, 0);
+        ASSERT_EQ(exclusive_reader.poll_calls, 1);
+        ASSERT_EQ(reader_factory.release_calls, 1);
+        ASSERT_EQ(reader_factory.live_readers, 0);
+    }
+
+    {
+        SchemaBlockChannel legacy_source(packet_batch, 1);
+        SchemaBlockChannel exclusive_reader(packet_batch, 1);
+        TraversalBlockFactory legacy_factory(1);
+        legacy_factory.channel = &legacy_source;
+        BlockReaderFactoryFixture reader_factory(
+            ReaderFactoryBehavior::kOwn, &exclusive_reader);
+        BlockProviderQuerier querier;
+        querier.factories = {&legacy_factory};
+        querier.reader_factories = {&reader_factory};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_TRUE(SchedulerPluginTestAccessor::HandleExecute(
+                        &plugin,
+                        R"({"sql":"SELECT * FROM pcapfile.input WHERE missing = 1"})",
+                        &response) != error::OK);
+        ASSERT_EQ(legacy_source.poll_calls, 0);
+        ASSERT_EQ(exclusive_reader.poll_calls, 0);
+        ASSERT_EQ(reader_factory.create_calls, 0);
+        ASSERT_EQ(reader_factory.release_calls, 0);
+        ASSERT_EQ(reader_factory.live_readers, 0);
+    }
+
+    {
+        SchemaBlockChannel legacy_source(packet_batch, 1);
+        SchemaBlockChannel first_reader(packet_batch, 1);
+        SchemaBlockChannel second_reader(packet_batch, 1);
+        TraversalBlockFactory legacy_factory(1);
+        legacy_factory.channel = &legacy_source;
+        BlockReaderFactoryFixture first(ReaderFactoryBehavior::kOwn, &first_reader);
+        BlockReaderFactoryFixture second(ReaderFactoryBehavior::kOwn, &second_reader);
+        BlockProviderQuerier querier;
+        querier.factories = {&legacy_factory};
+        querier.reader_factories = {&first, &second};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input"})",
+                      &response),
+                  error::CONFLICT);
+        ASSERT_TRUE(response.find("multiple block stream reader factories") !=
+                    std::string::npos);
+        ASSERT_EQ(legacy_source.poll_calls, 0);
+        ASSERT_EQ(first_reader.poll_calls, 0);
+        ASSERT_EQ(second_reader.poll_calls, 0);
+        ASSERT_EQ(first.release_calls, 1);
+        ASSERT_EQ(second.release_calls, 1);
+        ASSERT_EQ(first.live_readers, 0);
+        ASSERT_EQ(second.live_readers, 0);
+    }
+
+    for (const ReaderFactoryBehavior behavior :
+         {ReaderFactoryBehavior::kError, ReaderFactoryBehavior::kNullSuccess}) {
+        SchemaBlockChannel legacy_source(packet_batch, 1);
+        TraversalBlockFactory legacy_factory(1);
+        legacy_factory.channel = &legacy_source;
+        BlockReaderFactoryFixture rejected(behavior);
+        BlockProviderQuerier querier;
+        querier.factories = {&legacy_factory};
+        querier.reader_factories = {&rejected};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input"})",
+                      &response),
+                  error::INTERNAL_ERROR);
+        ASSERT_TRUE(response.find("reader factory") != std::string::npos);
+        ASSERT_EQ(legacy_source.poll_calls, 0);
+        ASSERT_EQ(rejected.release_calls, 0);
+    }
+
+    {
+        SchemaBlockChannel legacy_source(packet_batch, 1);
+        SchemaBlockChannel invalid_reader(packet_batch, 1);
+        TraversalBlockFactory legacy_factory(1);
+        legacy_factory.channel = &legacy_source;
+        BlockReaderFactoryFixture rejected(
+            ReaderFactoryBehavior::kNonOwnerWithReader, &invalid_reader);
+        BlockProviderQuerier querier;
+        querier.factories = {&legacy_factory};
+        querier.reader_factories = {&rejected};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input"})",
+                      &response),
+                  error::INTERNAL_ERROR);
+        ASSERT_TRUE(response.find("reader with ENOTSUP") != std::string::npos);
+        ASSERT_EQ(legacy_source.poll_calls, 0);
+        ASSERT_EQ(invalid_reader.poll_calls, 0);
+        ASSERT_EQ(rejected.release_calls, 1);
+        ASSERT_EQ(rejected.live_readers, 0);
+    }
+
+    {
+        SchemaBlockChannel legacy_source(packet_batch, 1);
+        TraversalBlockFactory legacy_factory(1);
+        legacy_factory.channel = &legacy_source;
+        BlockProviderQuerier querier;
+        querier.factories = {&legacy_factory};
+        querier.reader_factory_traverse_return_code = EIO;
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input"})",
+                      &response),
+                  error::INTERNAL_ERROR);
+        ASSERT_TRUE(response.find("reader factory traversal failed") !=
+                    std::string::npos);
+        ASSERT_EQ(legacy_source.poll_calls, 0);
+    }
+}
+
+void TestBlockSourceFilterPlanning() {
+    const auto pushed_input = MakePacketLengthBatch({{3, 3}, {3, 5}});
+    const auto unfiltered_input = MakePacketLengthBatch({{1, 5}, {3, 5}});
+    const std::string partial_sql =
+        R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2 AND wire_len >= 4"})";
+
+    {
+        SchemaBlockChannel legacy_source(pushed_input, 1);
+        SchemaBlockChannel exclusive_reader(pushed_input, 1);
+        TraversalBlockFactory factory(1);
+        factory.channel = &legacy_source;
+        BlockReaderFactoryFixture reader_factory(
+            ReaderFactoryBehavior::kOwn, &exclusive_reader);
+        SourceFilterPushdownFixture pushdown(
+            SourceFilterPushdownFixture::Behavior::kAcceptAll);
+        BlockProviderQuerier querier;
+        querier.factories = {&factory};
+        querier.reader_factories = {&reader_factory};
+        querier.filter_pushdowns = {&pushdown};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})",
+                      &response),
+                  error::OK);
+        ASSERT_TRUE(response.find("\"rows\":2") != std::string::npos);
+        ASSERT_EQ(pushdown.calls, 1);
+        ASSERT_EQ(pushdown.observed_candidates.size(), 1u);
+        ASSERT_TRUE(pushdown.observed_schema &&
+                    pushdown.observed_schema->Equals(*packet::PacketSchema(), true));
+        ASSERT_EQ(reader_factory.pushed_plans.size(), 1u);
+        ASSERT_TRUE(reader_factory.pushed_plans[0].find(
+                        "\"field_name\":\"captured_len\"") != std::string::npos);
+        ASSERT_EQ(legacy_source.poll_calls, 0);
+        ASSERT_EQ(exclusive_reader.release_calls, 1);
+        ASSERT_EQ(reader_factory.release_calls, 1);
+        ASSERT_EQ(reader_factory.live_readers, 0);
+    }
+
+    {
+        SchemaBlockChannel legacy_source(pushed_input, 1);
+        SchemaBlockChannel exclusive_reader(pushed_input, 1);
+        TraversalBlockFactory factory(1);
+        factory.channel = &legacy_source;
+        BlockReaderFactoryFixture reader_factory(
+            ReaderFactoryBehavior::kOwn, &exclusive_reader);
+        SourceFilterPushdownFixture pushdown(
+            SourceFilterPushdownFixture::Behavior::kAcceptFirst);
+        BlockProviderQuerier querier;
+        querier.factories = {&factory};
+        querier.reader_factories = {&reader_factory};
+        querier.filter_pushdowns = {&pushdown};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin, partial_sql, &response),
+                  error::OK);
+        ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
+        ASSERT_EQ(pushdown.observed_candidates.size(), 2u);
+        ASSERT_EQ(reader_factory.pushed_plans.size(), 1u);
+        ASSERT_TRUE(reader_factory.pushed_plans[0].find(
+                        "\"field_name\":\"captured_len\"") != std::string::npos);
+        ASSERT_TRUE(reader_factory.pushed_plans[0].find(
+                        "\"field_name\":\"wire_len\"") == std::string::npos);
+        ASSERT_EQ(exclusive_reader.release_calls, 1);
+        ASSERT_EQ(reader_factory.release_calls, 1);
+    }
+
+    for (const bool has_zero_owner : {true, false}) {
+        SchemaBlockChannel legacy_source(unfiltered_input, 1);
+        SchemaBlockChannel exclusive_reader(unfiltered_input, 1);
+        TraversalBlockFactory factory(1);
+        factory.channel = &legacy_source;
+        BlockReaderFactoryFixture reader_factory(
+            ReaderFactoryBehavior::kOwn, &exclusive_reader);
+        SourceFilterPushdownFixture pushdown(
+            SourceFilterPushdownFixture::Behavior::kAcceptNone);
+        BlockProviderQuerier querier;
+        querier.factories = {&factory};
+        querier.reader_factories = {&reader_factory};
+        if (has_zero_owner) querier.filter_pushdowns = {&pushdown};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})",
+                      &response),
+                  error::OK);
+        ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
+        ASSERT_EQ(pushdown.calls, has_zero_owner ? 1 : 0);
+        ASSERT_EQ(reader_factory.pushed_plans,
+                  std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
+        ASSERT_EQ(exclusive_reader.release_calls, 1);
+        ASSERT_EQ(reader_factory.release_calls, 1);
+    }
+
+    {
+        SchemaBlockChannel legacy_source(unfiltered_input, 1);
+        TraversalBlockFactory factory(1);
+        factory.channel = &legacy_source;
+        BlockReaderFactoryFixture non_owner(ReaderFactoryBehavior::kNonOwner);
+        SourceFilterPushdownFixture pushdown(
+            SourceFilterPushdownFixture::Behavior::kAcceptFirst);
+        BlockProviderQuerier querier;
+        querier.factories = {&factory};
+        querier.reader_factories = {&non_owner};
+        querier.filter_pushdowns = {&pushdown};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin, partial_sql, &response),
+                  error::OK);
+        ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
+        ASSERT_EQ(non_owner.pushed_plans.size(), 1u);
+        ASSERT_TRUE(non_owner.pushed_plans[0] != kEmptyCanonicalFilterPlanV1);
+        ASSERT_EQ(legacy_source.poll_calls, 2);
+        ASSERT_EQ(legacy_source.release_calls, 1);
+        ASSERT_EQ(non_owner.release_calls, 0);
+    }
+
+    for (const bool traversal_error : {false, true}) {
+        SchemaBlockChannel legacy_source(unfiltered_input, 1);
+        TraversalBlockFactory factory(1);
+        factory.channel = &legacy_source;
+        BlockReaderFactoryFixture reader_factory(ReaderFactoryBehavior::kOwn);
+        SourceFilterPushdownFixture pushdown(
+            SourceFilterPushdownFixture::Behavior::kError);
+        BlockProviderQuerier querier;
+        querier.factories = {&factory};
+        querier.reader_factories = {&reader_factory};
+        querier.filter_pushdowns = {&pushdown};
+        if (traversal_error) querier.filter_pushdown_traverse_return_code = EIO;
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})",
+                      &response),
+                  error::INTERNAL_ERROR);
+        ASSERT_TRUE(response.find("pushdown") != std::string::npos);
+        ASSERT_EQ(reader_factory.create_calls, 0);
+        ASSERT_EQ(legacy_source.poll_calls, 0);
+        ASSERT_EQ(legacy_source.release_calls, 0);
+    }
+
+    {
+        SchemaBlockChannel legacy_source(unfiltered_input, 1);
+        SchemaBlockChannel exclusive_reader(unfiltered_input, 1);
+        TraversalBlockFactory factory(1);
+        factory.channel = &legacy_source;
+        BlockReaderFactoryFixture reader_factory(
+            ReaderFactoryBehavior::kOwn, &exclusive_reader);
+        BlockProviderQuerier querier;
+        querier.factories = {&factory};
+        querier.reader_factories = {&reader_factory};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input USING test.missing"})",
+                      &response),
+                  error::NOT_FOUND);
+        ASSERT_EQ(exclusive_reader.poll_calls, 0);
+        ASSERT_EQ(reader_factory.release_calls, 1);
+        ASSERT_EQ(reader_factory.live_readers, 0);
+    }
+
+    {
+        SchemaBlockChannel source(unfiltered_input, 1);
+        TraversalBlockFactory factory(1);
+        factory.channel = &source;
+        SchedulerTransformProvider provider(
+            packet::PacketSchema(), nullptr, "source_residual_transform");
+        provider.passthrough = true;
+        BlockProviderQuerier querier;
+        querier.factories = {&factory};
+        querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&provider)};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2 )"
+                      R"(USING test.source_residual_transform"})",
+                      &response),
+                  error::OK);
+        ASSERT_EQ(provider.release_calls, 1);
+        ASSERT_EQ(provider.released[0].process_input_rows_history,
+                  std::vector<int64_t>({1}));
+        ASSERT_EQ(source.release_calls, 1);
+    }
+
+    {
+        SchemaBlockChannel source(unfiltered_input, 1);
+        TraversalBlockFactory factory(1);
+        factory.channel = &source;
+        SchemaBlockOperator op;
+        op.process_stop_after = 2;
+        BlockProviderQuerier querier;
+        querier.factories = {&factory};
+        querier.operators = {&op};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2 USING test.schema_guard"})",
+                      &response),
+                  error::OK);
+        ASSERT_EQ(op.process_calls, 1);
+        ASSERT_EQ(op.process_input_rows, std::vector<int64_t>({1}));
+        ASSERT_EQ(source.release_calls, 1);
+    }
+}
+
 void TestBlockTransformSchedulerPipeline() {
     auto raw = std::make_shared<std::vector<uint8_t>>(
         std::initializer_list<uint8_t>{0x01, 0x02, 0x03});
@@ -1649,7 +2279,8 @@ void TestBlockTransformSchedulerPipeline() {
                           &plugin,
                           R"JSON({"sql":"SELECT * FROM pcapfile.input WHERE owned()"})JSON",
                           &response),
-                      error::INTERNAL_ERROR);
+                      failure_case == 1 ? error::BAD_REQUEST
+                                        : error::INTERNAL_ERROR);
             ASSERT_TRUE(response.find("domain") != std::string::npos);
             ASSERT_EQ(source.poll_calls, 0);
             ASSERT_EQ(source.release_calls, 0);
@@ -1698,9 +2329,9 @@ void TestBlockTransformSchedulerPipeline() {
     ASSERT_EQ(source.release_calls, 1);
     ASSERT_EQ(querier.transform_traverse_calls, 1);
     ASSERT_EQ(querier.operator_traverse_calls, 0);
-    ASSERT_EQ(querier.filter_pushdown_traverse_calls, 1);
+    ASSERT_EQ(querier.filter_pushdown_traverse_calls, 2);
     ASSERT_EQ(querier.filter_domain_resolver_traverse_calls, 2);
-    ASSERT_EQ(provider.pushdown_calls, 1);
+    ASSERT_EQ(provider.pushdown_calls, 2);
     ASSERT_TRUE(provider.observed_output_schema != nullptr &&
                 provider.observed_output_schema->Equals(output_schema));
     ASSERT_EQ(provider.observed_candidates, std::vector<uint32_t>({2, 5}));
@@ -1915,7 +2546,7 @@ void TestMultiBlockTransformSchedulerPipeline() {
     ASSERT_EQ(source.release_calls, 1);
     ASSERT_EQ(querier.transform_traverse_calls, 2);
     ASSERT_EQ(querier.operator_traverse_calls, 0);
-    ASSERT_EQ(querier.filter_pushdown_traverse_calls, 2);
+    ASSERT_EQ(querier.filter_pushdown_traverse_calls, 3);
     ASSERT_EQ(querier.filter_domain_resolver_traverse_calls, 3);
     ASSERT_EQ(first_provider.create_calls, 2);
     ASSERT_EQ(first_provider.release_calls, 2);
@@ -2001,6 +2632,8 @@ int main() {
     flowsql::scheduler::TestBlockOperatorPollAndRelease();
     flowsql::scheduler::TestBlockTerminalRouteAndBatchSnapshots();
     flowsql::scheduler::TestBlockDirectTransferTimeout();
+    flowsql::scheduler::TestBlockReaderFactoryLifecycle();
+    flowsql::scheduler::TestBlockSourceFilterPlanning();
     flowsql::scheduler::TestBlockTransformSchedulerPipeline();
     flowsql::scheduler::TestMultiBlockTransformSchedulerPipeline();
 

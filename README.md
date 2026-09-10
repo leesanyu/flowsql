@@ -203,6 +203,159 @@ USING builtin.passthrough_stream
 INTO dataframe.out;
 ```
 
+## SQL 过滤能力
+
+FlowSQL 的 statement 语法允许在 source 输出和每一级 operator 输出后分别写 `WHERE`。完整的类型化表达式、
+Arrow residual 和精确下推当前用于单 block source（包括 `pcapfile`）以及提供输出 Schema 的 block transform
+链路；旧 DataFrame、database 和 stream 路径继续遵守各自已有的过滤能力，不能假定都支持本节全部表达式。
+
+每个 `WHERE` 只绑定紧邻其前的数据生产阶段：`FROM` 是 stage 0，第一个 `USING` 是 stage 1，后续 `THEN`
+依次递增。字段必须存在于该阶段的输出 Arrow Schema 中；在类型化过滤链路中，未知字段、类型不兼容、未知
+函数和错误字面量会在规划或绑定阶段报错，而不会被忽略。
+
+阶段化结构如下；其中尖括号内容是结构占位符，不是可直接执行的名称：
+
+```sql
+SELECT *
+FROM <source>
+WHERE <source 输出字段条件>
+USING <operator-1> WITH <operator-1 参数>
+WHERE <operator-1 输出字段条件>
+THEN <operator-2>
+WHERE <operator-2 输出字段条件>
+INTO <destination>
+```
+
+单个阶段最多有一个 `WHERE`。多 source 查询的 source-stage 过滤对象不唯一，因此当前不支持
+`FROM source1, source2 WHERE ...`；可以在合并 operator 输出后写 operator-stage `WHERE`。operator 的
+`WITH` 参数和每一级 `WHERE` 都是可选的。operator-stage `WHERE` 当前只支持提供可绑定输出 Schema 的 block
+transform operator；不要将它用于传统 `IOperator` 或终端 `IBlockStreamOperator` 路径。
+
+### 阶段化类型过滤表达式
+
+| 能力 | 语法示例 | 说明 |
+|---|---|---|
+| 逻辑组合 | `a AND b`、`a OR b`、`NOT a`、`(a OR b)` | 优先级为括号、`NOT`、谓词、`AND`、`OR` |
+| 比较 | `size = 64`、`size != 0`、`score >= 0.8` | 支持 `=`、`!=`、`<`、`<=`、`>`、`>=` |
+| 集合 | `port IN (80, 443)`、`status NOT IN ('done', 'failed')` | `IN` 列表只能包含同类型字面量且不能为空 |
+| 范围 | `size BETWEEN 64 AND 1500`、`value NOT BETWEEN 0 AND 9` | `BETWEEN` 包含上下界 |
+| NULL | `src_port IS NULL`、`src_port IS NOT NULL` | 不支持 `field = NULL` |
+| 布尔字段 | `ports_valid`、`NOT ports_valid` | 字段本身必须是 boolean 类型 |
+| 字面量 | `-1`、`3.14`、`1e6`、`'ready'`、`TRUE` | 字符串使用单引号，内部单引号写成 `''` |
+| 类型化字面量 | `TIMESTAMP '2026-09-08T01:30:00Z'` | 需要当前阶段的领域 resolver 支持对应类型 |
+| 领域函数 | `port(443)`、`tcp('192.0.2.1', 50000, '192.0.2.2', 443)` | 只允许当前阶段已经注册的 boolean 函数 |
+
+`WHERE` 使用 SQL 三值逻辑，只保留结果为 `TRUE` 的行；`FALSE` 和 `NULL/UNKNOWN` 都会被丢弃。过滤保持
+Schema、字段值和行的相对顺序不变。provider 可以精确下推部分谓词以减少读取或解码，其余谓词继续由通用
+Arrow residual 执行，因此是否下推不会改变查询结果。
+
+旧 DataFrame 直连路径目前支持单个字段与字面量的简单比较：
+
+```sql
+SELECT *
+FROM dataframe.input
+WHERE score >= 0.8
+INTO dataframe.ready_items
+```
+
+该旧路径暂不等同于完整的阶段化类型过滤器。数据库 source 内的原生 SQL 按对应数据库 provider 的语法执行；
+stream source 的过滤则受具体 stream channel 能力和共享 source 的 `WHERE` 签名约束。
+
+当前阶段过滤不支持 `LIKE`、正则、算术、位运算、数组下标、子查询或比较链。常见错误写法包括：
+
+```sql
+WHERE protocol == HTTP          -- 应使用单个 =，字符串必须写成 'HTTP'
+WHERE src_port = NULL           -- 应写成 src_port IS NULL
+WHERE ipv4 & tcp                -- 不支持位运算或 BPF/tcpdump 简写
+WHERE 0 < captured_len < 1500   -- 不支持比较链，应拆成两个条件并用 AND 连接
+```
+
+### pcapfile 离线包过滤
+
+已经创建或上传的 `pcapfile.<name>` 通道可以在 source-stage `WHERE` 中按采集时间、包头元数据和 Layer 解码
+结果过滤，并直接写入 DataFrame。常用 packet 字段如下：
+
+| 字段 | 类型/含义 | 示例 |
+|---|---|---|
+| `timestamp_ns` | UTC epoch nanoseconds，`int64` | `timestamp_ns >= TIMESTAMP '2026-09-08T01:30:00Z'` |
+| `captured_len`、`wire_len` | 捕获长度和线上长度，`uint32` | `captured_len BETWEEN 64 AND 1500` |
+| `source_id`、`sequence` | capture 接口编号和该接口内原始包序号 | `source_id = 0 AND sequence >= 100` |
+| `link_type` | capture LINKTYPE | `link_type = 1` |
+| `transport_protocol` | IANA 传输层编号；TCP 为 6，UDP 为 17 | `transport_protocol = 6` |
+| `src_port`、`dst_port` | 可空的传输层端口 | `ports_valid AND dst_port = 443` |
+| `ports_valid` | 当前包是否具有有效传输层端口 | `ports_valid` |
+| `raw_data` | 原始捕获字节 | `raw_data IS NOT NULL` |
+
+只使用 packet 元数据的过滤示例：
+
+```sql
+SELECT *
+FROM pcapfile.capture
+WHERE captured_len BETWEEN 64 AND 1500
+  AND source_id = 0
+  AND sequence >= 100
+INTO dataframe.packet_metadata_window
+```
+
+`timestamp_ns` 的文本时间使用 `TIMESTAMP` 类型化字面量。时间必须带 `Z` 或显式 `±HH:MM` offset；小数秒
+支持 0～9 位并转换成 epoch ns。无时区本地时间、IANA zone name、leap second 或超过 9 位的小数会在任务
+执行前失败。连续时间窗口推荐写成半开区间 `[start, end)`：
+
+```sql
+SELECT *
+FROM pcapfile.rdp
+WHERE timestamp_ns >= TIMESTAMP '2026-09-08T09:30:00.123456789+08:00'
+  AND timestamp_ns <  TIMESTAMP '2026-09-08T10:00:00+08:00'
+INTO dataframe.rdp_window
+```
+
+pcapfile 还提供以下方向中立的领域函数；函数名大小写不敏感：
+
+| 函数 | 匹配语义 |
+|---|---|
+| `mac('00:11:22:33:44:55')` | source MAC 或 destination MAC 命中 |
+| `ip('192.0.2.10')` | source IP 或 destination IP 命中，支持 IPv4/IPv6 |
+| `port(3389)` | source port 或 destination port 命中，端口范围为 0～65535 |
+| `tcp(ip1, port1, ip2, port2)` | IANA protocol 6，两个 endpoint 按双向四元组精确匹配 |
+| `udp(ip1, port1, ip2, port2)` | IANA protocol 17，两个 endpoint 按双向四元组精确匹配 |
+
+方向中立的地址和端口组合示例：
+
+```sql
+SELECT *
+FROM pcapfile.capture
+WHERE mac('00:11:22:33:44:55')
+  AND ip('192.0.2.10')
+  AND port(3389)
+INTO dataframe.host_packets
+```
+
+带时间窗口的 TCP endpoint pair 示例：
+
+```sql
+SELECT *
+FROM pcapfile.rdp
+WHERE timestamp_ns >= TIMESTAMP '2026-09-08T09:30:00.123456789+08:00'
+  AND timestamp_ns <  TIMESTAMP '2026-09-08T10:00:00+08:00'
+  AND tcp('192.0.2.10', 52314, '198.51.100.20', 3389)
+INTO dataframe.rdp
+```
+
+`tcp(A, a, B, b)` 与 `tcp(B, b, A, a)` 等价，但不会把端口交叉成 `A:b, B:a`；`udp(...)` 同理。两个
+endpoint 必须使用相同 IP family。隧道报文使用最内层成功解码的 endpoint。
+
+UDP endpoint pair 示例：
+
+```sql
+SELECT *
+FROM pcapfile.dns
+WHERE udp('192.0.2.53', 53, '198.51.100.25', 53000)
+INTO dataframe.dns_pair
+```
+
+pcapfile 过滤只做链路层/网络层/传输层 Layer 解码，不执行应用协议识别；不支持 payload 内容、正则、BPF/
+tcpdump 语法，也不代表 TCP stream、重组、会话或客户端/服务端方向分析。
+
 ## SQL 任务能力矩阵（当前）
 
 | 任务类型 | SQL 数量 | 当前支持 | 提交入口 | 关键约束 | 未来规划 |

@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace flowsql::channels::pcapfile {
 
@@ -28,6 +29,32 @@ int CompileTransportPairKey(const std::string& function_name,
                             const std::string& endpoint2_port,
                             packet::TransportPairKey* output,
                             std::string* error);
+
+enum class PacketHeaderFilterResult : uint8_t {
+    kReject = 0,
+    kMatch,
+    kNeedDecoded,
+};
+
+/** Compile a version-1 canonical bound AST into an immutable, string-free packet plan. */
+int CompilePcapFilterPlanJson(const std::string& canonical_json,
+                              packet::PcapFilterPlan* output,
+                              std::string* error);
+
+/** Select candidate subtrees that can be represented exactly by PcapFilterPlan. */
+int SelectCompilablePcapFilterNodes(const std::string& canonical_json,
+                                    const std::vector<uint32_t>& candidate_node_ids,
+                                    std::vector<uint32_t>* accepted_node_ids,
+                                    std::string* error);
+
+/** Evaluate only capture-header fields, preserving unknown decoded-field predicates. */
+PacketHeaderFilterResult EvaluatePcapHeaderFilter(const packet::PcapFilterPlan& plan,
+                                                  const packet::PacketMeta& meta);
+
+/** Evaluate the complete typed predicate after packet layer decoding. */
+bool EvaluatePcapDecodedFilter(const packet::PcapFilterPlan& plan,
+                               const packet::PacketMeta& meta,
+                               const packet::PacketLayerInfo& layer);
 
 /** Recursively sort and deduplicate the typed key vectors in a packet rule tree. */
 void CanonicalizePacketFilterRuleKeys(packet::PacketFilterRule* rule);

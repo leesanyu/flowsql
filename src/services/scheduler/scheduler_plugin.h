@@ -41,6 +41,7 @@ class IBlockStreamFactory;
 class IBlockStreamManager;
 class IOperator;
 struct SqlStatement;
+struct BoundFilterExpr;
 
 namespace scheduler {
 
@@ -144,8 +145,18 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
         kCancelled,
         kFailed,
     };
+    struct BlockSourceFilterPlan {
+        std::string pushed_filter_plan_json;
+        std::shared_ptr<const BoundFilterExpr> exclusive_residual;
+        std::shared_ptr<const BoundFilterExpr> shared_residual;
+    };
+    int BuildBlockSourceFilterPlan(IBlockStreamChannel* source,
+                                   const SqlStatement& stmt,
+                                   BlockSourceFilterPlan* plan,
+                                   std::string* error);
     int ExecuteBlockOperator(IBlockStreamChannel* source,
                              IBlockStreamOperator* op,
+                             const std::shared_ptr<const BoundFilterExpr>& source_residual,
                              BlockExecutionTerminal* terminal,
                              int64_t* rows_affected,
                              std::string* error);
@@ -153,6 +164,7 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
                                       const std::vector<IBlockTransformOperatorV1*>& providers,
                                       IDataFrameChannel* sink,
                                       const SqlStatement& stmt,
+                                      const std::shared_ptr<const BoundFilterExpr>& source_residual,
                                       BlockExecutionTerminal* terminal,
                                       int64_t* rows_affected,
                                       std::string* error);
@@ -160,6 +172,7 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
                                             IBlockTransformOperatorV1* provider,
                                             IDataFrameChannel* sink,
                                             const SqlStatement& stmt,
+                                            const std::shared_ptr<const BoundFilterExpr>& source_residual,
                                             BlockExecutionTerminal* terminal,
                                             int64_t* rows_affected,
                                             std::string* error);
@@ -167,7 +180,9 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
     // 执行路径
     int ExecuteTransfer(IChannel* source, IChannel* sink,
                         const std::string& source_type, const std::string& sink_type,
-                        const SqlStatement& stmt, int64_t* rows_affected = nullptr,
+                        const SqlStatement& stmt,
+                        const std::shared_ptr<const BoundFilterExpr>& source_residual = nullptr,
+                        int64_t* rows_affected = nullptr,
                         std::string* error = nullptr);
 
     int ExecuteWithOperator(IChannel* source, IChannel* sink, IOperator* op,

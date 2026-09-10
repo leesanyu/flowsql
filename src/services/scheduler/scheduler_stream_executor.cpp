@@ -466,11 +466,23 @@ IBlockTransformOperatorV1* SchedulerPlugin::FindBlockTransformOperator(
 
 int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source,
                                            IBlockStreamOperator* op,
+                                           const std::shared_ptr<const BoundFilterExpr>& source_residual,
                                            BlockExecutionTerminal* terminal,
                                            int64_t* rows_affected,
                                            std::string* error) {
     if (terminal) *terminal = BlockExecutionTerminal::kFailed;
     if (!source || !op) return EINVAL;
+    BlockFilterStage source_filter(source_residual);
+    if (source_residual) {
+        std::shared_ptr<arrow::Schema> filtered_schema;
+        std::string filter_error;
+        const auto open_rc = source_filter.Open(
+            packet::PacketSchema(), &filtered_schema, &filter_error);
+        if (open_rc != FilterEvalError::kNone) {
+            if (error) *error = "source-stage residual Open failed: " + filter_error;
+            return EINVAL;
+        }
+    }
     std::shared_ptr<arrow::Schema> schema;
     int64_t rows = 0;
     bool schema_ready = false;
@@ -482,7 +494,7 @@ int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source,
                 if (error) *error = "block operator received empty data batch";
                 return EINVAL;
             }
-            const int64_t batch_rows = event.batch->num_rows();
+            int64_t batch_rows = event.batch->num_rows();
             int rc = 0;
             bool schema_failed = false;
             try {
@@ -498,7 +510,23 @@ int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source,
                         schema_failed = !schema_ready;
                     }
                 }
-                if (rc == 0) rc = op->ProcessBlock(event.batch, 0);
+                std::shared_ptr<arrow::RecordBatch> output_batch = event.batch;
+                if (rc == 0 && source_residual) {
+                    BlockTransformOutputV1 filtered;
+                    std::string filter_error;
+                    const auto eval_rc = source_filter.ProcessBlock(
+                        event.batch, 0, &filtered, &filter_error);
+                    if (eval_rc != FilterEvalError::kNone || !filtered.batch) {
+                        if (error) *error = "source-stage residual failed: " + filter_error;
+                        rc = EINVAL;
+                    } else {
+                        output_batch = std::move(filtered.batch);
+                        batch_rows = output_batch->num_rows();
+                    }
+                }
+                if (rc == 0 && (!source_residual || batch_rows > 0)) {
+                    rc = op->ProcessBlock(output_batch, 0);
+                }
             } catch (const std::exception& ex) {
                 rc = EFAULT;
                 schema_failed = !schema_ready;
@@ -1037,11 +1065,94 @@ std::string SafeBlockTransformLastError(IBlockTransformTaskV1* task) {
 
 }  // namespace
 
+int SchedulerPlugin::BuildBlockSourceFilterPlan(
+    IBlockStreamChannel* source,
+    const SqlStatement& stmt,
+    BlockSourceFilterPlan* plan,
+    std::string* error) {
+    if (plan) *plan = BlockSourceFilterPlan{};
+    if (error) error->clear();
+    if (!source || !plan || !error) return EINVAL;
+    plan->pushed_filter_plan_json = kEmptyCanonicalFilterPlanV1;
+
+    bool duplicate_source_filter = false;
+    const auto* source_filter_text = FindStageFilterText(
+        stmt, 0, &duplicate_source_filter);
+    if (duplicate_source_filter) {
+        *error = "block source contains duplicate filters";
+        return EINVAL;
+    }
+    std::shared_ptr<FilterExpr> source_expression;
+    if (!ParseStageFilter(source_filter_text, 0, &source_expression, error)) {
+        return EINVAL;
+    }
+    if (!source_expression) return 0;
+
+    const auto source_schema = packet::PacketSchema();
+    std::shared_ptr<const BoundFilterExpr> bound_source_filter;
+    const int filter_rc = ResolveAndBindStageFilter(
+        querier_, FilterDomainTargetKindV1::kSource,
+        source->Category() ? source->Category() : "",
+        source->Name() ? source->Name() : "", source_schema, source_expression,
+        "source-stage", &bound_source_filter, error);
+    if (filter_rc != 0) return filter_rc;
+
+    FilterPushdownTarget target;
+    target.kind = FilterPushdownTargetKindV1::kSource;
+    target.category = source->Category() ? source->Category() : "";
+    target.name = source->Name() ? source->Name() : "";
+    target.output_schema = source_schema;
+    FilterPushdownNegotiation negotiation;
+    std::string plan_error;
+    const auto negotiate_rc = NegotiateFilterPushdown(
+        querier_, target, bound_source_filter, &negotiation, &plan_error);
+    if (negotiate_rc != FilterPlanError::kNone) {
+        *error = "source-stage filter pushdown negotiation failed: " + plan_error;
+        return negotiate_rc == FilterPlanError::kInvalidArgument ||
+                       negotiate_rc == FilterPlanError::kInvalidBoundExpression ||
+                       negotiate_rc == FilterPlanError::kCanonicalPlanError
+                   ? EINVAL
+                   : EIO;
+    }
+
+    FilterTaskSessionPlan exclusive_plan;
+    const auto exclusive_rc = MaterializeFilterTaskSessionPlan(
+        source_schema, bound_source_filter, negotiation,
+        FilterTaskIsolation::kExclusive, &exclusive_plan, &plan_error);
+    if (exclusive_rc != FilterPlanError::kNone) {
+        *error = "source-stage exclusive filter task planning failed: " + plan_error;
+        return exclusive_rc == FilterPlanError::kInvalidArgument ||
+                       exclusive_rc == FilterPlanError::kInvalidBoundExpression ||
+                       exclusive_rc == FilterPlanError::kCanonicalPlanError
+                   ? EINVAL
+                   : EIO;
+    }
+    FilterTaskSessionPlan shared_plan;
+    const auto shared_rc = MaterializeFilterTaskSessionPlan(
+        source_schema, bound_source_filter, negotiation,
+        FilterTaskIsolation::kSharedSource, &shared_plan, &plan_error);
+    if (shared_rc != FilterPlanError::kNone) {
+        *error = "source-stage shared filter task planning failed: " + plan_error;
+        return shared_rc == FilterPlanError::kInvalidArgument ||
+                       shared_rc == FilterPlanError::kInvalidBoundExpression ||
+                       shared_rc == FilterPlanError::kCanonicalPlanError
+                   ? EINVAL
+                   : EIO;
+    }
+
+    plan->pushed_filter_plan_json =
+        std::move(exclusive_plan.pushed_filter_plan_json);
+    plan->exclusive_residual = std::move(exclusive_plan.residual_expression);
+    plan->shared_residual = std::move(shared_plan.residual_expression);
+    return 0;
+}
+
 int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
     IBlockStreamChannel* source,
     IBlockTransformOperatorV1* provider,
     IDataFrameChannel* sink,
     const SqlStatement& stmt,
+    const std::shared_ptr<const BoundFilterExpr>& source_residual,
     BlockExecutionTerminal* terminal,
     int64_t* rows_affected,
     std::string* error) {
@@ -1058,13 +1169,10 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
         return EINVAL;
     }
 
-    bool duplicate_source_filter = false;
     bool duplicate_transform_filter = false;
-    const auto* source_filter_text = FindStageFilterText(
-        stmt, 0, &duplicate_source_filter);
     const auto* transform_filter_text = FindStageFilterText(
         stmt, 1, &duplicate_transform_filter);
-    if (duplicate_source_filter || duplicate_transform_filter) {
+    if (duplicate_transform_filter) {
         if (error) *error = "block transform stage contains duplicate filters";
         return EINVAL;
     }
@@ -1075,23 +1183,12 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
         }
     }
 
-    std::shared_ptr<FilterExpr> source_expression;
     std::shared_ptr<FilterExpr> transform_expression;
-    if (!ParseStageFilter(source_filter_text, 0, &source_expression, error) ||
-        !ParseStageFilter(transform_filter_text, 1, &transform_expression, error)) {
+    if (!ParseStageFilter(transform_filter_text, 1, &transform_expression, error)) {
         return EINVAL;
     }
 
     const auto source_schema = packet::PacketSchema();
-    std::shared_ptr<const BoundFilterExpr> source_residual;
-    if (source_expression) {
-        const int filter_rc = ResolveAndBindStageFilter(
-            querier_, FilterDomainTargetKindV1::kSource,
-            source->Category() ? source->Category() : "",
-            source->Name() ? source->Name() : "", source_schema, source_expression,
-            "source-stage", &source_residual, error);
-        if (filter_rc != 0) return filter_rc;
-    }
 
     const auto& params = !stmt.operator_with_params.empty()
                              ? stmt.operator_with_params.front()
@@ -1233,7 +1330,7 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
     config.source = source;
     config.source_schema = source_schema;
     config.transform = runner_task;
-    config.source_residual = std::move(source_residual);
+    config.source_residual = source_residual;
     config.transform_residual = transform_filter_plan.residual_expression;
     config.output_consumer = [appendable_sink](const BlockTransformOutputV1& output) {
         if (!output.batch) return EINVAL;
@@ -1267,6 +1364,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     const std::vector<IBlockTransformOperatorV1*>& providers,
     IDataFrameChannel* sink,
     const SqlStatement& stmt,
+    const std::shared_ptr<const BoundFilterExpr>& source_residual,
     BlockExecutionTerminal* terminal,
     int64_t* rows_affected,
     std::string* error) {
@@ -1276,6 +1374,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
             providers.front(),
             sink,
             stmt,
+            source_residual,
             terminal,
             rows_affected,
             error);
@@ -1305,7 +1404,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     }
 
     std::vector<const std::string*> stage_filter_texts(providers.size() + 1);
-    for (size_t stage = 0; stage < stage_filter_texts.size(); ++stage) {
+    for (size_t stage = 1; stage < stage_filter_texts.size(); ++stage) {
         bool duplicate = false;
         stage_filter_texts[stage] = FindStageFilterText(
             stmt, static_cast<uint32_t>(stage), &duplicate);
@@ -1322,7 +1421,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     }
 
     std::vector<std::shared_ptr<FilterExpr>> stage_expressions(stage_filter_texts.size());
-    for (size_t stage = 0; stage < stage_filter_texts.size(); ++stage) {
+    for (size_t stage = 1; stage < stage_filter_texts.size(); ++stage) {
         if (!ParseStageFilter(
                 stage_filter_texts[stage], static_cast<uint32_t>(stage), &stage_expressions[stage], error)) {
             return EINVAL;
@@ -1330,16 +1429,6 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     }
 
     const auto source_schema = packet::PacketSchema();
-    std::shared_ptr<const BoundFilterExpr> source_residual;
-    if (stage_expressions[0]) {
-        const int filter_rc = ResolveAndBindStageFilter(
-            querier_, FilterDomainTargetKindV1::kSource,
-            source->Category() ? source->Category() : "",
-            source->Name() ? source->Name() : "", source_schema,
-            stage_expressions[0], "source-stage", &source_residual, error);
-        if (filter_rc != 0) return filter_rc;
-    }
-
     struct StagePlan {
         IBlockTransformOperatorV1* provider = nullptr;
         std::string with_params_json;
@@ -1541,7 +1630,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     config.source = source;
     config.source_schema = source_schema;
     config.transform = &chain_task;
-    config.source_residual = std::move(source_residual);
+    config.source_residual = source_residual;
     config.output_consumer = [appendable_sink](const BlockTransformOutputV1& output) {
         if (!output.batch) return EINVAL;
         DataFrame frame;
@@ -1623,34 +1712,18 @@ static std::shared_ptr<DataFrameChannel> ApplyDataFrameFilter(
 int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
                                       const std::string& source_type,
                                       const std::string& sink_type,
-                                      const SqlStatement& stmt, int64_t* rows_affected,
+                                      const SqlStatement& stmt,
+                                      const std::shared_ptr<const BoundFilterExpr>& source_residual,
+                                      int64_t* rows_affected,
                                       std::string* error) {
     if (source_type == ChannelType::kBlockStream && sink_type == ChannelType::kDataFrame) {
         auto* src = dynamic_cast<IBlockStreamChannel*>(source);
         auto* dst = dynamic_cast<IDataFrameChannel*>(sink);
         if (!src || !dst) return -1;
 
-        bool duplicate_source_filter = false;
-        const auto* source_filter_text = FindStageFilterText(
-            stmt, 0, &duplicate_source_filter);
-        if (duplicate_source_filter) {
-            if (error) *error = "block source contains duplicate filters";
-            return EINVAL;
-        }
-        std::shared_ptr<FilterExpr> source_expression;
-        if (!ParseStageFilter(source_filter_text, 0, &source_expression, error)) {
-            return EINVAL;
-        }
         const auto source_schema = packet::PacketSchema();
-        std::shared_ptr<const BoundFilterExpr> source_residual;
-        const int filter_rc = ResolveAndBindStageFilter(
-            querier_, FilterDomainTargetKindV1::kSource,
-            src->Category() ? src->Category() : "", src->Name() ? src->Name() : "",
-            source_schema, source_expression, "source-stage", &source_residual, error);
-        if (filter_rc != 0) return filter_rc;
-
         BlockFilterStage source_filter(source_residual);
-        if (source_expression) {
+        if (source_residual) {
             std::shared_ptr<arrow::Schema> filtered_schema;
             std::string filter_error;
             const auto open_rc = source_filter.Open(
@@ -1672,7 +1745,7 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
                 int rc = 0;
                 std::shared_ptr<arrow::RecordBatch> output_batch = event.batch;
                 try {
-                    if (source_expression) {
+                    if (source_residual) {
                         BlockTransformOutputV1 filtered;
                         std::string filter_error;
                         const auto eval_rc = source_filter.ProcessBlock(
