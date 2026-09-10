@@ -1,6 +1,7 @@
 project(flowsql_pcapfile)
 
 add_library(${PROJECT_NAME} SHARED
+    packet_filter_domain.cpp
     pcap_file_channel.cpp
     plugin_register.cpp
 )

@@ -23,6 +23,8 @@
 #include <utility>
 #include <vector>
 
+#include "packet_filter_domain.h"
+
 namespace flowsql::channels::pcapfile {
 
 enum class PcapReplayMode { kFast, kTimestamp };
@@ -93,7 +95,8 @@ class PcapFileChannel final : public IBlockStreamChannel {
 
 class PcapFilePlugin final : public IPlugin,
                              public IBlockStreamFactory,
-                             public IBlockStreamManager {
+                             public IBlockStreamManager,
+                             public IFilterDomainResolverV1 {
  public:
     int Option(const char* arg) override;
     int Load(IQuerier* querier) override;
@@ -107,6 +110,8 @@ class PcapFilePlugin final : public IPlugin,
     int ModifyChannel(const std::string& type, const std::string& name, const std::string& option) override;
     int RemoveChannel(const std::string& type, const std::string& name) override;
     void QueryChannels(std::function<void(const std::string&, const std::string&, const std::string&, const std::string&)> callback) override;
+    int Resolve(const FilterDomainResolveRequestV1& request,
+                FilterDomainResolveResultV1* result) const override;
 
  private:
     static std::string MakeKey(const std::string& type, const std::string& name);
@@ -116,6 +121,7 @@ class PcapFilePlugin final : public IPlugin,
 
     IQuerier* querier_ = nullptr;
     IProtocol* protocol_ = nullptr;
+    PcapFilterDomainResolver filter_domain_resolver_;
     std::string plugin_option_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::string> options_;

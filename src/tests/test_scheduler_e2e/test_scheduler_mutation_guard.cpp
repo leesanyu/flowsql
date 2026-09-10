@@ -16,6 +16,7 @@
 #include <vector>
 
 #include <framework/core/filter_planner.h>
+#include <framework/core/filter_expression.h>
 #include <framework/core/packet_codec.h>
 #include <framework/core/ring_stream_channel.h>
 #include <framework/core/sql_parser.h>
@@ -23,6 +24,7 @@
 #include <framework/interfaces/iblock_stream_manager.h>
 #include <framework/interfaces/iblock_transform_operator.h>
 #include <framework/interfaces/ichannel.h>
+#include <framework/interfaces/ifilter_domain_resolver.h>
 #include <framework/interfaces/ifilter_pushdown.h>
 #include <services/scheduler/scheduler_plugin.h>
 
@@ -73,6 +75,50 @@ class DummyChannel : public IChannel {
 bool SameGuid(const Guid& left, const Guid& right) {
     return !(left < right) && !(right < left);
 }
+
+enum class DomainResolverBehavior {
+    kNonOwner,
+    kOwnAsTrue,
+    kError,
+};
+
+class DomainResolverFixture final : public IFilterDomainResolverV1 {
+ public:
+    explicit DomainResolverFixture(DomainResolverBehavior behavior) : behavior_(behavior) {}
+
+    int Resolve(const FilterDomainResolveRequestV1& request,
+                FilterDomainResolveResultV1* result) const override {
+        ++calls;
+        if (result) *result = {};
+        if (!result || !request.expression) return EINVAL;
+        observed_kind = request.target_kind;
+        observed_category = request.target_category ? request.target_category : "";
+        observed_name = request.target_name ? request.target_name : "";
+        observed_schema = request.output_schema;
+        if (behavior_ == DomainResolverBehavior::kNonOwner) return ENOTSUP;
+        if (behavior_ == DomainResolverBehavior::kError) {
+            result->diagnostic = "fixture rejected domain expression";
+            return EINVAL;
+        }
+
+        auto expression = std::make_shared<FilterExpr>();
+        expression->kind = FilterExprKind::kLiteral;
+        expression->node_id = request.expression->node_id;
+        expression->literal = {FilterLiteralKind::kBoolean, {}, "TRUE"};
+        result->lowered_expression = std::move(expression);
+        result->diagnostic = "fixture owned domain expression";
+        return 0;
+    }
+
+    mutable int calls = 0;
+    mutable FilterDomainTargetKindV1 observed_kind = FilterDomainTargetKindV1::kTransform;
+    mutable std::string observed_category;
+    mutable std::string observed_name;
+    mutable std::shared_ptr<arrow::Schema> observed_schema;
+
+ private:
+    DomainResolverBehavior behavior_;
+};
 
 class TraversalBlockFactory final : public IBlockStreamFactory {
  public:
@@ -480,6 +526,12 @@ class BlockProviderQuerier final : public IQuerier {
         } else if (SameGuid(iid, IID_FILTER_PUSHDOWN_V1)) {
             ++filter_pushdown_traverse_calls;
             providers = &filter_pushdowns;
+        } else if (SameGuid(iid, IID_FILTER_DOMAIN_RESOLVER_V1)) {
+            ++filter_domain_resolver_traverse_calls;
+            if (filter_domain_resolver_traverse_return_code != 0) {
+                return filter_domain_resolver_traverse_return_code;
+            }
+            providers = &filter_domain_resolvers;
         } else {
             ++unexpected_traverse_calls;
             return 0;
@@ -504,12 +556,15 @@ class BlockProviderQuerier final : public IQuerier {
     std::vector<void*> operators;
     std::vector<void*> transforms;
     std::vector<void*> filter_pushdowns;
+    std::vector<void*> filter_domain_resolvers;
     int factory_traverse_calls = 0;
     int manager_traverse_calls = 0;
     int operator_traverse_calls = 0;
     int transform_traverse_calls = 0;
     int filter_pushdown_traverse_calls = 0;
+    int filter_domain_resolver_traverse_calls = 0;
     int transform_traverse_return_code = 0;
+    int filter_domain_resolver_traverse_return_code = 0;
     int unexpected_traverse_calls = 0;
     int first_calls = 0;
     int block_factory_first_calls = 0;
@@ -1522,6 +1577,85 @@ void TestBlockTransformSchedulerPipeline() {
               packet::PacketBatchError::kNone);
     ASSERT_TRUE(packet_batch != nullptr && packet_error.empty());
 
+    {
+        SchemaBlockChannel source(packet_batch, 1);
+        TraversalBlockFactory factory(1);
+        factory.channel = &source;
+        DomainResolverFixture resolver(DomainResolverBehavior::kOwnAsTrue);
+        BlockProviderQuerier querier;
+        querier.factories = {&factory};
+        querier.filter_domain_resolvers = {&resolver};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"JSON({"sql":"SELECT * FROM pcapfile.input WHERE owned()"})JSON",
+                      &response),
+                  error::OK);
+        ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
+        ASSERT_EQ(resolver.calls, 1);
+        ASSERT_EQ(resolver.observed_kind, FilterDomainTargetKindV1::kSource);
+        ASSERT_EQ(resolver.observed_category, "pcapfile");
+        ASSERT_EQ(resolver.observed_name, "input");
+        ASSERT_TRUE(resolver.observed_schema != nullptr &&
+                    resolver.observed_schema->Equals(*packet::PacketSchema(), true));
+        ASSERT_EQ(querier.filter_domain_resolver_traverse_calls, 1);
+        ASSERT_EQ(source.poll_calls, 2);
+        ASSERT_EQ(source.release_calls, 1);
+    }
+    {
+        SchemaBlockChannel source(packet_batch, 1);
+        TraversalBlockFactory factory(1);
+        factory.channel = &source;
+        DomainResolverFixture resolver(DomainResolverBehavior::kNonOwner);
+        BlockProviderQuerier querier;
+        querier.factories = {&factory};
+        querier.filter_domain_resolvers = {&resolver};
+        SchedulerPlugin plugin;
+        ASSERT_EQ(plugin.Load(&querier), 0);
+        std::string response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})",
+                      &response),
+                  error::OK);
+        ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
+        ASSERT_EQ(resolver.calls, 1);
+        ASSERT_EQ(source.poll_calls, 2);
+        ASSERT_EQ(source.release_calls, 1);
+    }
+    {
+        DomainResolverFixture first(DomainResolverBehavior::kOwnAsTrue);
+        DomainResolverFixture second(DomainResolverBehavior::kOwnAsTrue);
+        DomainResolverFixture rejected(DomainResolverBehavior::kError);
+        for (int failure_case = 0; failure_case < 3; ++failure_case) {
+            SchemaBlockChannel source(packet_batch, 1);
+            TraversalBlockFactory factory(1);
+            factory.channel = &source;
+            BlockProviderQuerier querier;
+            querier.factories = {&factory};
+            if (failure_case == 0) {
+                querier.filter_domain_resolvers = {&first, &second};
+            } else if (failure_case == 1) {
+                querier.filter_domain_resolvers = {&rejected};
+            } else {
+                querier.filter_domain_resolver_traverse_return_code = EIO;
+            }
+            SchedulerPlugin plugin;
+            ASSERT_EQ(plugin.Load(&querier), 0);
+            std::string response;
+            ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                          &plugin,
+                          R"JSON({"sql":"SELECT * FROM pcapfile.input WHERE owned()"})JSON",
+                          &response),
+                      error::INTERNAL_ERROR);
+            ASSERT_TRUE(response.find("domain") != std::string::npos);
+            ASSERT_EQ(source.poll_calls, 0);
+            ASSERT_EQ(source.release_calls, 0);
+        }
+    }
+
     auto output_schema = arrow::schema({
         arrow::field("score", arrow::int32(), false),
         arrow::field("protocol", arrow::utf8(), false),
@@ -1565,6 +1699,7 @@ void TestBlockTransformSchedulerPipeline() {
     ASSERT_EQ(querier.transform_traverse_calls, 1);
     ASSERT_EQ(querier.operator_traverse_calls, 0);
     ASSERT_EQ(querier.filter_pushdown_traverse_calls, 1);
+    ASSERT_EQ(querier.filter_domain_resolver_traverse_calls, 2);
     ASSERT_EQ(provider.pushdown_calls, 1);
     ASSERT_TRUE(provider.observed_output_schema != nullptr &&
                 provider.observed_output_schema->Equals(output_schema));
@@ -1781,6 +1916,7 @@ void TestMultiBlockTransformSchedulerPipeline() {
     ASSERT_EQ(querier.transform_traverse_calls, 2);
     ASSERT_EQ(querier.operator_traverse_calls, 0);
     ASSERT_EQ(querier.filter_pushdown_traverse_calls, 2);
+    ASSERT_EQ(querier.filter_domain_resolver_traverse_calls, 3);
     ASSERT_EQ(first_provider.create_calls, 2);
     ASSERT_EQ(first_provider.release_calls, 2);
     ASSERT_EQ(first_provider.live_tasks, 0);

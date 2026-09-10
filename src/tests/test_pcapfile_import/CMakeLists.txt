@@ -2,6 +2,7 @@ project(test_pcapfile_import)
 
 add_executable(${PROJECT_NAME}
     test_pcapfile_import.cpp
+    ${CMAKE_SOURCE_DIR}/channels/pcapfile/packet_filter_domain.cpp
     ${CMAKE_SOURCE_DIR}/channels/pcapfile/pcap_file_channel.cpp
     ${CMAKE_SOURCE_DIR}/plugins/npi/packet_decoder.cpp
 )

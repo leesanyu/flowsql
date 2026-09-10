@@ -2,11 +2,18 @@
 // Licensed under the MIT License.
 
 #include <channels/pcapfile/pcap_file_channel.h>
+#include <channels/pcapfile/packet_filter_domain.h>
 #include <common/loader.hpp>
+#include <framework/core/filter_binding.h>
+#include <framework/core/filter_executor.h>
+#include <framework/core/filter_expression.h>
 #include <framework/core/packet_codec.h>
 
 #include <arrow/api.h>
 
+#include <arpa/inet.h>
+
+#include <algorithm>
 #include <cassert>
 #include <cerrno>
 #include <chrono>
@@ -14,13 +21,16 @@
 #include <cstdio>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace pcapfile = flowsql::channels::pcapfile;
+namespace packet = flowsql::packet;
 
 namespace {
 
@@ -270,6 +280,412 @@ void AssertPcapngSourceError(const char* suffix, const std::vector<uint8_t>& byt
     const auto after_error = channel.PollBlock(0);
     AssertNoBatchEvent(after_error, flowsql::BlockPollEvent::kCancelled);
     assert(after_error.err == ECANCELED);
+}
+
+void TestRfc3339TimestampNs() {
+    struct ValidCase {
+        const char* text;
+        int64_t expected;
+    };
+    const ValidCase valid[] = {
+        {"1970-01-01T00:00:00Z", 0},
+        {"1970-01-01t00:00:00z", 0},
+        {"1970-01-01T00:00:00.123Z", 123000000},
+        {"1970-01-01T00:00:00.123456Z", 123456000},
+        {"1970-01-01T00:00:00.123456789Z", 123456789},
+        {"2026-09-08T09:30:00.123456789+08:00", 1788831000123456789LL},
+        {"2026-09-07T20:00:00.123-05:30", 1788831000123000000LL},
+        {"2024-02-29T00:00:00+00:00", 1709164800000000000LL},
+        {"1969-12-31T23:59:59.5Z", -500000000},
+        {"2262-04-11T23:47:16.854775807Z", std::numeric_limits<int64_t>::max()},
+        {"1677-09-21T00:12:43.145224192Z", std::numeric_limits<int64_t>::min()},
+    };
+    for (const auto& test : valid) {
+        int64_t output = 1;
+        std::string error = "stale";
+        assert(pcapfile::ParseRfc3339TimestampNs(test.text, &output, &error) == 0);
+        assert(output == test.expected);
+        assert(error.empty());
+    }
+
+    const char* invalid[] = {
+        "",
+        "2026-09-08T01:30:00",
+        "2026-09-08T01:30:00.",
+        "2026-09-08T01:30:00.1234567890Z",
+        "2026-09-08T01:30:60Z",
+        "2023-02-29T00:00:00Z",
+        "0000-01-01T00:00:00Z",
+        "2026-13-01T00:00:00Z",
+        "2026-09-08T24:00:00Z",
+        "2026-09-08T01:60:00Z",
+        "2026-09-08T01:30:00+24:00",
+        "2026-09-08T01:30:00+00:60",
+        "2026-09-08 01:30:00Z",
+        "2026-09-08T01:30:00Europe/Shanghai",
+        "2026-09-08T01:30:00Ztrailing",
+    };
+    for (const char* text : invalid) {
+        int64_t output = 99;
+        std::string error;
+        assert(pcapfile::ParseRfc3339TimestampNs(text, &output, &error) == EINVAL);
+        assert(output == 0);
+        assert(!error.empty());
+    }
+
+    for (const char* text : {"2262-04-11T23:47:16.854775808Z",
+                             "1677-09-21T00:12:43.145224191Z"}) {
+        int64_t output = 99;
+        std::string error;
+        assert(pcapfile::ParseRfc3339TimestampNs(text, &output, &error) == EOVERFLOW);
+        assert(output == 0);
+        assert(!error.empty());
+    }
+
+    std::string error;
+    assert(pcapfile::ParseRfc3339TimestampNs("1970-01-01T00:00:00Z", nullptr, &error) == EINVAL);
+    assert(!error.empty());
+}
+
+void TestPacketDomainKeyCompilation() {
+    auto same_ip = [](const packet::PacketIpKey& lhs, const packet::PacketIpKey& rhs) {
+        return lhs.family == rhs.family && lhs.ipv4_network_order == rhs.ipv4_network_order &&
+               lhs.ipv6 == rhs.ipv6;
+    };
+    auto same_endpoint = [&](const packet::PacketEndpointKey& lhs,
+                             const packet::PacketEndpointKey& rhs) {
+        return same_ip(lhs.address, rhs.address) && lhs.port == rhs.port;
+    };
+    auto same_pair = [&](const packet::TransportPairKey& lhs,
+                         const packet::TransportPairKey& rhs) {
+        return lhs.transport_protocol == rhs.transport_protocol && same_endpoint(lhs.first, rhs.first) &&
+               same_endpoint(lhs.second, rhs.second);
+    };
+
+    std::string error = "stale";
+    packet::PacketMacKey mac;
+    assert(pcapfile::CompilePacketMacKey("00:11:22:aB:CD:ef", &mac, &error) == 0);
+    assert(error.empty());
+    const std::array<uint8_t, 6> expected_mac = {0x00, 0x11, 0x22, 0xab, 0xcd, 0xef};
+    assert(mac.bytes == expected_mac);
+    packet::PacketMacKey same_mac;
+    assert(pcapfile::CompilePacketMacKey("00:11:22:AB:cd:EF", &same_mac, &error) == 0);
+    assert(same_mac.bytes == mac.bytes);
+    for (const char* invalid : {"00:11:22:33:44", "00:11:22:33:44:5g", "0:11:22:33:44:55",
+                                "00-11-22-33-44-55"}) {
+        mac.bytes.fill(0xff);
+        assert(pcapfile::CompilePacketMacKey(invalid, &mac, &error) == EINVAL);
+        assert(mac.bytes == packet::PacketMacKey{}.bytes && !error.empty());
+    }
+
+    packet::PacketIpKey ipv4;
+    assert(pcapfile::CompilePacketIpKey("192.0.2.10", &ipv4, &error) == 0);
+    assert(ipv4.family == packet::AddressFamily::kIPv4);
+    assert(ipv4.ipv4_network_order == inet_addr("192.0.2.10"));
+    assert(ipv4.ipv6 == packet::PacketIpKey{}.ipv6);
+
+    packet::PacketIpKey ipv6;
+    packet::PacketIpKey expanded_ipv6;
+    assert(pcapfile::CompilePacketIpKey("2001:db8::20", &ipv6, &error) == 0);
+    assert(pcapfile::CompilePacketIpKey("2001:0DB8:0:0:0:0:0:20", &expanded_ipv6, &error) == 0);
+    assert(ipv6.family == packet::AddressFamily::kIPv6 && same_ip(ipv6, expanded_ipv6));
+    assert(ipv6.ipv6[0] == 0x20 && ipv6.ipv6[1] == 0x01 && ipv6.ipv6[2] == 0x0d &&
+           ipv6.ipv6[3] == 0xb8 && ipv6.ipv6[15] == 0x20);
+    assert(ipv6.ipv4_network_order == 0);
+    for (const char* invalid : {"", "192.0.2.999", "192.0.2.1/24", "2001:db8::1%eth0"}) {
+        ipv4.family = packet::AddressFamily::kIPv6;
+        ipv4.ipv4_network_order = 1;
+        ipv4.ipv6.fill(1);
+        assert(pcapfile::CompilePacketIpKey(invalid, &ipv4, &error) == EINVAL);
+        assert(same_ip(ipv4, packet::PacketIpKey{}) && !error.empty());
+    }
+
+    uint16_t port = 1;
+    assert(pcapfile::CompilePacketPort("0", &port, &error) == 0 && port == 0);
+    assert(pcapfile::CompilePacketPort("65535", &port, &error) == 0 && port == 65535);
+    for (const char* invalid : {"", "-1", "+1", "01x", "65536", "18446744073709551616"}) {
+        port = 99;
+        assert(pcapfile::CompilePacketPort(invalid, &port, &error) == EINVAL);
+        assert(port == 0 && !error.empty());
+    }
+
+    packet::TransportPairKey tcp;
+    packet::TransportPairKey reverse_tcp;
+    packet::TransportPairKey crossed_ports;
+    packet::TransportPairKey udp;
+    assert(pcapfile::CompileTransportPairKey(
+               "TcP", "192.0.2.10", "52314", "198.51.100.20", "3389", &tcp, &error) == 0);
+    assert(pcapfile::CompileTransportPairKey(
+               "tcp", "198.51.100.20", "3389", "192.0.2.10", "52314", &reverse_tcp, &error) == 0);
+    assert(same_pair(tcp, reverse_tcp));
+    assert(tcp.transport_protocol == 6 && tcp.first.address.ipv4_network_order == inet_addr("192.0.2.10") &&
+           tcp.first.port == 52314 && tcp.second.address.ipv4_network_order == inet_addr("198.51.100.20") &&
+           tcp.second.port == 3389);
+    assert(pcapfile::CompileTransportPairKey(
+               "tcp", "192.0.2.10", "3389", "198.51.100.20", "52314", &crossed_ports, &error) == 0);
+    assert(!same_pair(tcp, crossed_ports));
+    packet::TransportPairKey same_address;
+    packet::TransportPairKey reverse_same_address;
+    assert(pcapfile::CompileTransportPairKey(
+               "tcp", "192.0.2.10", "443", "192.0.2.10", "80", &same_address, &error) == 0);
+    assert(pcapfile::CompileTransportPairKey(
+               "tcp", "192.0.2.10", "80", "192.0.2.10", "443", &reverse_same_address, &error) == 0);
+    assert(same_pair(same_address, reverse_same_address) && same_address.first.port == 80 &&
+           same_address.second.port == 443);
+    assert(pcapfile::CompileTransportPairKey(
+               "UDP", "2001:db8::20", "0", "2001:db8::10", "65535", &udp, &error) == 0);
+    assert(udp.transport_protocol == 17 && udp.first.address.ipv6[15] == 0x10 &&
+           udp.first.port == 65535 && udp.second.address.ipv6[15] == 0x20 && udp.second.port == 0);
+
+    for (const auto& invalid : std::vector<std::array<std::string, 5>>{
+             {"sctp", "192.0.2.1", "1", "192.0.2.2", "2"},
+             {"tcp", "192.0.2.1", "1", "2001:db8::2", "2"},
+             {"udp", "invalid", "1", "192.0.2.2", "2"},
+             {"tcp", "192.0.2.1", "65536", "192.0.2.2", "2"}}) {
+        tcp.transport_protocol = 99;
+        assert(pcapfile::CompileTransportPairKey(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4],
+                                                 &tcp, &error) == EINVAL);
+        assert(same_pair(tcp, packet::TransportPairKey{}) && !error.empty());
+    }
+
+    packet::PacketMacKey high_mac;
+    assert(pcapfile::CompilePacketMacKey("ff:00:00:00:00:00", &high_mac, &error) == 0);
+    packet::PacketIpKey high_ipv4;
+    assert(pcapfile::CompilePacketIpKey("198.51.100.20", &high_ipv4, &error) == 0);
+    packet::TransportPairKey noncanonical_tcp = reverse_tcp;
+    std::swap(noncanonical_tcp.first, noncanonical_tcp.second);
+
+    packet::PacketFilterRule root;
+    root.kind = packet::PacketFilterRuleKind::kAnd;
+    root.operands.resize(4);
+    root.operands[0].kind = packet::PacketFilterRuleKind::kMacAnyOf;
+    root.operands[0].mac_keys = {high_mac, same_mac, same_mac};
+    root.operands[1].kind = packet::PacketFilterRuleKind::kIpAnyOf;
+    root.operands[1].ip_keys = {ipv6, high_ipv4, ipv4, ipv4};
+    root.operands[2].kind = packet::PacketFilterRuleKind::kPortAnyOf;
+    root.operands[2].ports = {65535, 443, 0, 443};
+    root.operands[3].kind = packet::PacketFilterRuleKind::kTransportPairAnyOf;
+    root.operands[3].transport_pairs = {udp, noncanonical_tcp, reverse_tcp};
+    pcapfile::CanonicalizePacketFilterRuleKeys(&root);
+    assert(root.operands[0].mac_keys.size() == 2 && root.operands[0].mac_keys[0].bytes == same_mac.bytes &&
+           root.operands[0].mac_keys[1].bytes == high_mac.bytes);
+    assert(root.operands[1].ip_keys.size() == 3 && same_ip(root.operands[1].ip_keys[0], ipv4) &&
+           same_ip(root.operands[1].ip_keys[1], high_ipv4) && same_ip(root.operands[1].ip_keys[2], ipv6));
+    assert(root.operands[2].ports == std::vector<uint16_t>({0, 443, 65535}));
+    assert(root.operands[3].transport_pairs.size() == 2 &&
+           same_pair(root.operands[3].transport_pairs[0], reverse_tcp) &&
+           same_pair(root.operands[3].transport_pairs[1], udp));
+    pcapfile::CanonicalizePacketFilterRuleKeys(nullptr);
+}
+
+void TestPcapFilterDomainResolverResidual() {
+    pcapfile::PcapFilterDomainResolver resolver;
+    const auto schema = packet::PacketSchema();
+
+    auto parse = [](const std::string& text) {
+        std::shared_ptr<flowsql::FilterExpr> expression;
+        std::string error;
+        assert(flowsql::ParseFilterExpression(text, &expression, &error));
+        assert(expression && error.empty());
+        return expression;
+    };
+    auto resolve = [&](const std::shared_ptr<flowsql::FilterExpr>& expression) {
+        flowsql::FilterDomainResolveRequestV1 request;
+        request.target_kind = flowsql::FilterDomainTargetKindV1::kSource;
+        request.target_category = "pcapfile";
+        request.target_name = "capture";
+        request.output_schema = schema;
+        request.expression = expression;
+        flowsql::FilterDomainResolveResultV1 result;
+        assert(resolver.Resolve(request, &result) == 0);
+        assert(result.lowered_expression && !result.diagnostic.empty());
+        return result.lowered_expression;
+    };
+    auto bind = [&](const std::string& text) {
+        auto lowered = resolve(parse(text));
+        std::shared_ptr<const flowsql::BoundFilterExpr> bound;
+        std::string error;
+        assert(flowsql::BindFilterExpression(schema, lowered, &bound, &error) ==
+               flowsql::FilterBindError::kNone);
+        assert(bound && error.empty());
+        return bound;
+    };
+
+    const std::string main_filter =
+        "timestamp_ns >= TIMESTAMP '2026-09-08T09:30:00.123456789+08:00' AND "
+        "timestamp_ns < TIMESTAMP '2026-09-08T01:30:00.123456793Z' AND "
+        "tcp('192.0.2.10', 52314, '198.51.100.20', 3389)";
+    auto original = parse(main_filter);
+    const uint32_t original_root_id = original->node_id;
+    bool original_has_call = false;
+    bool original_has_typed = false;
+    std::set<uint32_t> replaced_root_ids;
+    std::function<void(const std::shared_ptr<const flowsql::FilterExpr>&)> inspect_original;
+    inspect_original = [&](const std::shared_ptr<const flowsql::FilterExpr>& node) {
+        assert(node);
+        original_has_call = original_has_call || node->kind == flowsql::FilterExprKind::kCall;
+        original_has_typed = original_has_typed ||
+                             (node->kind == flowsql::FilterExprKind::kLiteral &&
+                              node->literal.kind == flowsql::FilterLiteralKind::kTyped);
+        if (node->kind == flowsql::FilterExprKind::kCall ||
+            (node->kind == flowsql::FilterExprKind::kLiteral &&
+             node->literal.kind == flowsql::FilterLiteralKind::kTyped)) {
+            replaced_root_ids.insert(node->node_id);
+        }
+        for (const auto& operand : node->operands) inspect_original(operand);
+    };
+    inspect_original(original);
+    assert(original_has_call && original_has_typed);
+
+    auto lowered = resolve(original);
+    assert(lowered.get() != original.get() && lowered->node_id == original_root_id);
+    original_has_call = false;
+    original_has_typed = false;
+    inspect_original(original);
+    assert(original_has_call && original_has_typed);
+
+    std::set<uint32_t> lowered_ids;
+    size_t synthetic_count = 0;
+    std::function<void(const std::shared_ptr<const flowsql::FilterExpr>&)> inspect_lowered;
+    inspect_lowered = [&](const std::shared_ptr<const flowsql::FilterExpr>& node) {
+        assert(node && node->kind != flowsql::FilterExprKind::kCall);
+        assert(node->kind != flowsql::FilterExprKind::kLiteral ||
+               node->literal.kind != flowsql::FilterLiteralKind::kTyped);
+        assert(node->node_id != 0 && lowered_ids.insert(node->node_id).second);
+        if (node->node_id >= flowsql::kFilterDomainSyntheticNodeIdBaseV1) ++synthetic_count;
+        for (const auto& operand : node->operands) inspect_lowered(operand);
+    };
+    inspect_lowered(lowered);
+    assert(synthetic_count != 0);
+    for (uint32_t node_id : replaced_root_ids) assert(lowered_ids.count(node_id) == 1);
+
+    std::vector<std::shared_ptr<std::vector<uint8_t>>> byte_owners;
+    std::vector<packet::PacketRecord> records;
+    auto add_record = [&](int64_t timestamp_ns, uint64_t sequence, const std::string& src_ip,
+                          uint16_t src_port, const std::string& dst_ip, uint16_t dst_port,
+                          uint8_t protocol, bool ports_valid, const std::string& src_mac,
+                          const std::string& dst_mac) {
+        auto bytes = std::make_shared<std::vector<uint8_t>>(1, static_cast<uint8_t>(sequence));
+        byte_owners.push_back(bytes);
+
+        packet::PacketRecord record;
+        record.meta.timestamp_ns = timestamp_ns;
+        record.meta.captured_len = 1;
+        record.meta.wire_len = 1;
+        record.meta.link_type = 1;
+        record.meta.sequence = sequence;
+        record.raw_data.owner = bytes;
+        record.raw_data.data = bytes->data();
+        record.raw_data.size = 1;
+        record.layer.status = packet::LayerStatus::kDecoded;
+        record.layer.endpoint_scope = packet::EndpointScope::kInnermost;
+        record.layer.transport_protocol = protocol;
+        record.layer.src_port = src_port;
+        record.layer.dst_port = dst_port;
+        record.layer.ports_valid = ports_valid;
+
+        auto assign_ip = [](const std::string& text, packet::IpAddress* output) {
+            packet::PacketIpKey key;
+            std::string error;
+            assert(pcapfile::CompilePacketIpKey(text, &key, &error) == 0);
+            if (key.family == packet::AddressFamily::kIPv4) {
+                *output = packet::IPv4Address(key.ipv4_network_order);
+            } else {
+                packet::IPv6Address value;
+                std::copy(key.ipv6.begin(), key.ipv6.end(), value.bytes);
+                *output = value;
+            }
+        };
+        assign_ip(src_ip, &record.layer.src_ip);
+        assign_ip(dst_ip, &record.layer.dst_ip);
+
+        auto assign_mac = [](const std::string& text, packet::MacAddress* output) {
+            packet::PacketMacKey key;
+            std::string error;
+            assert(pcapfile::CompilePacketMacKey(text, &key, &error) == 0);
+            std::copy(key.bytes.begin(), key.bytes.end(), output->value.bytes);
+            output->valid = 1;
+        };
+        assign_mac(src_mac, &record.layer.src_mac);
+        assign_mac(dst_mac, &record.layer.dst_mac);
+        records.push_back(std::move(record));
+    };
+
+    constexpr int64_t kStart = 1788831000123456789LL;
+    const char* target_mac = "00:11:22:33:44:55";
+    const char* other_mac = "aa:bb:cc:dd:ee:ff";
+    add_record(kStart, 1, "192.0.2.10", 52314, "198.51.100.20", 3389, 6, true,
+               target_mac, other_mac);
+    add_record(kStart + 1, 2, "198.51.100.20", 3389, "192.0.2.10", 52314, 6, true,
+               other_mac, target_mac);
+    add_record(kStart + 2, 3, "192.0.2.10", 3389, "198.51.100.20", 52314, 6, true,
+               other_mac, other_mac);
+    add_record(kStart + 3, 4, "192.0.2.10", 52314, "198.51.100.20", 3389, 6, false,
+               other_mac, other_mac);
+    add_record(kStart + 4, 5, "2001:db8::20", 0, "2001:db8::10", 65535, 17, true,
+               other_mac, other_mac);
+
+    std::shared_ptr<arrow::RecordBatch> batch;
+    std::string error;
+    assert(packet::EncodePacketBatch(records, &batch, &error) == packet::PacketBatchError::kNone);
+    assert(batch && batch->num_rows() == 5 && error.empty());
+
+    auto expect_sequences = [&](const std::string& text, const std::vector<uint64_t>& expected) {
+        std::shared_ptr<arrow::RecordBatch> filtered;
+        assert(flowsql::FilterRecordBatch(batch, bind(text), &filtered, &error) ==
+               flowsql::FilterEvalError::kNone);
+        assert(filtered && error.empty() && filtered->num_rows() == static_cast<int64_t>(expected.size()));
+        auto sequence = std::static_pointer_cast<arrow::UInt64Array>(
+            filtered->GetColumnByName("sequence"));
+        for (size_t index = 0; index < expected.size(); ++index) {
+            assert(sequence->Value(static_cast<int64_t>(index)) == expected[index]);
+        }
+    };
+    expect_sequences(main_filter, {1, 2});
+    expect_sequences("mac('00:11:22:33:44:55')", {1, 2});
+    expect_sequences("ip('198.51.100.20')", {1, 2, 3, 4});
+    expect_sequences("ip('2001:db8::10')", {5});
+    expect_sequences("port(3389)", {1, 2, 3});
+    expect_sequences("tcp('192.0.2.10', 52314, '198.51.100.20', 3389)", {1, 2});
+    expect_sequences("udp('2001:db8::10', 65535, '2001:db8::20', 0)", {5});
+
+    flowsql::FilterDomainResolveRequestV1 request;
+    request.target_kind = flowsql::FilterDomainTargetKindV1::kSource;
+    request.target_category = "other";
+    request.target_name = "capture";
+    request.output_schema = schema;
+    request.expression = original;
+    flowsql::FilterDomainResolveResultV1 result;
+    result.lowered_expression = original;
+    result.diagnostic = "stale";
+    assert(resolver.Resolve(request, &result) == ENOTSUP);
+    assert(!result.lowered_expression && result.diagnostic.empty());
+    request.target_category = "pcapfile";
+    request.target_kind = flowsql::FilterDomainTargetKindV1::kTransform;
+    assert(resolver.Resolve(request, &result) == ENOTSUP);
+    request.target_kind = flowsql::FilterDomainTargetKindV1::kSource;
+    request.contract_version = 99;
+    assert(resolver.Resolve(request, &result) == EINVAL);
+    assert(!result.lowered_expression && !result.diagnostic.empty());
+
+    request.contract_version = flowsql::kFilterDomainResolverContractVersionV1;
+    request.target_name = "";
+    assert(resolver.Resolve(request, &result) == EINVAL);
+    assert(!result.lowered_expression && !result.diagnostic.empty());
+    request.target_name = "capture";
+    request.output_schema = arrow::schema({arrow::field("timestamp_ns", arrow::int64())});
+    assert(resolver.Resolve(request, &result) == EINVAL);
+    assert(!result.lowered_expression && !result.diagnostic.empty());
+    request.output_schema = schema;
+    for (const char* invalid : {"timestamp_ns >= TIMESTAMP '2026-09-08T01:30:00'",
+                                "captured_len = TIMESTAMP '1970-01-01T00:00:00Z'",
+                                "mac('bad')", "ip('bad')", "port(65536)", "port('80')",
+                                "tcp('192.0.2.1', 1, '2001:db8::2', 2)",
+                                "tcp('192.0.2.1', 1)", "unknown_packet_function(1)"}) {
+        request.expression = parse(invalid);
+        assert(resolver.Resolve(request, &result) != 0);
+        assert(!result.lowered_expression && !result.diagnostic.empty());
+    }
 }
 
 void TestClassicPcap() {
@@ -1577,6 +1993,9 @@ void TestPluginManager() {
 }  // namespace
 
 int main() {
+    TestRfc3339TimestampNs();
+    TestPacketDomainKeyCompilation();
+    TestPcapFilterDomainResolverResidual();
     TestClassicPcap();
     TestClassicMagicAndEndian();
     TestClassicFieldsAndFileOrder();

@@ -36,6 +36,7 @@
 #include <framework/interfaces/idatabase_factory.h>
 #include <framework/interfaces/ichannel_registry.h>
 #include <framework/interfaces/idataframe_channel.h>
+#include <framework/interfaces/ifilter_domain_resolver.h>
 #include <framework/interfaces/ioperator.h>
 #include <framework/interfaces/ioperator_registry.h>
 #include <framework/interfaces/irouter_handle.h>
@@ -872,10 +873,13 @@ int main() {
     auto* registry = static_cast<IChannelRegistry*>(loader->First(IID_CHANNEL_REGISTRY));
     auto* stream_factory = static_cast<IStreamFactory*>(loader->First(IID_STREAM_FACTORY));
     auto* op_registry = static_cast<IOperatorRegistry*>(loader->First(IID_OPERATOR_REGISTRY));
+    auto* filter_domain_resolver = static_cast<IFilterDomainResolverV1*>(
+        loader->First(IID_FILTER_DOMAIN_RESOLVER_V1));
     ASSERT_TRUE(factory != nullptr);
     ASSERT_TRUE(registry != nullptr);
     ASSERT_TRUE(stream_factory != nullptr);
     ASSERT_TRUE(op_registry != nullptr);
+    ASSERT_TRUE(filter_domain_resolver != nullptr);
     auto* db = dynamic_cast<IDatabaseChannel*>(factory->Get("sqlite", "local"));
     ASSERT_TRUE(db != nullptr);
 
@@ -960,8 +964,10 @@ int main() {
                   error::OK);
 
         pcap_protocol.Reset();
-        const std::string sql = "SELECT * FROM pcapfile." + channel_name +
-                                " INTO dataframe." + dataframe_name;
+        const std::string sql =
+            "SELECT * FROM pcapfile." + channel_name +
+            " WHERE timestamp_ns >= TIMESTAMP '1970-01-01T00:00:02Z'"
+            " INTO dataframe." + dataframe_name;
         ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
         rapidjson::Document completed;
         completed.Parse(rsp.c_str());
@@ -971,9 +977,9 @@ int main() {
         ASSERT_TRUE(completed.HasMember("status") && completed["status"].IsString());
         ASSERT_EQ(std::string(completed["status"].GetString()), "completed");
         ASSERT_TRUE(completed.HasMember("rows") && completed["rows"].IsInt64());
-        ASSERT_EQ(completed["rows"].GetInt64(), 2);
+        ASSERT_EQ(completed["rows"].GetInt64(), 1);
         ASSERT_TRUE(completed.HasMember("result_row_count") && completed["result_row_count"].IsInt64());
-        ASSERT_EQ(completed["result_row_count"].GetInt64(), 2);
+        ASSERT_EQ(completed["result_row_count"].GetInt64(), 1);
         ASSERT_TRUE(completed.HasMember("result_target") && completed["result_target"].IsString());
         ASSERT_EQ(std::string(completed["result_target"].GetString()), "dataframe." + dataframe_name);
         ASSERT_EQ(pcap_protocol.layer_calls, 2);
@@ -984,17 +990,15 @@ int main() {
         ASSERT_EQ(output->Read(&packets), 0);
         const auto packet_batch = packets.ToArrow();
         ASSERT_TRUE(packet_batch != nullptr);
-        ASSERT_EQ(packet_batch->num_rows(), 2);
+        ASSERT_EQ(packet_batch->num_rows(), 1);
         ASSERT_TRUE(packet_batch->schema()->Equals(packet::PacketSchema(), true));
         auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(
             packet_batch->GetColumnByName("sequence"));
         auto raw_data = std::dynamic_pointer_cast<arrow::BinaryArray>(
             packet_batch->GetColumnByName("raw_data"));
         ASSERT_TRUE(sequence != nullptr && raw_data != nullptr);
-        ASSERT_EQ(sequence->Value(0), 0);
-        ASSERT_EQ(sequence->Value(1), 1);
-        ASSERT_EQ(std::string(raw_data->GetView(0)), std::string("\x01\x02\x03\x04", 4));
-        ASSERT_EQ(std::string(raw_data->GetView(1)), std::string("\x05\x06\x07\x08", 4));
+        ASSERT_EQ(sequence->Value(0), 1);
+        ASSERT_EQ(std::string(raw_data->GetView(0)), std::string("\x05\x06\x07\x08", 4));
 
         ASSERT_EQ(stream_remove("/channels/stream/remove",
                                 MakePcapSourceRemoveRequest(channel_name),
@@ -1014,6 +1018,17 @@ int main() {
         pcap_protocol.Reset();
         packet_transform.Reset();
         passthrough_transform.Reset();
+        const std::string invalid_domain_filter_sql =
+            "SELECT * FROM pcapfile." + channel_name +
+            " WHERE port(70000)"
+            " USING test.packet_to_protocol";
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq(invalid_domain_filter_sql), rsp),
+                  error::BAD_REQUEST);
+        ASSERT_TRUE(rsp.find("source-stage filter domain resolution failed") !=
+                    std::string::npos);
+        ASSERT_EQ(packet_transform.create_calls, 0);
+
         const std::string malformed_source_filter_sql =
             "SELECT * FROM pcapfile." + channel_name +
             " WHERE ipv4 & tcp"

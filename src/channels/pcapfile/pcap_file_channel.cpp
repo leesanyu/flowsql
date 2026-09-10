@@ -873,6 +873,11 @@ int PcapFilePlugin::Stop() {
     return StopChannelsLocked();
 }
 
+int PcapFilePlugin::Resolve(const FilterDomainResolveRequestV1& request,
+                            FilterDomainResolveResultV1* result) const {
+    return filter_domain_resolver_.Resolve(request, result);
+}
+
 int PcapFilePlugin::StopChannelsLocked() {
     for (const auto& item : channels_) {
         if (item.second && item.second->IsBusy()) return EBUSY;

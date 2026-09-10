@@ -175,23 +175,44 @@ class FilterBinder {
         if (expression->literal.kind == FilterLiteralKind::kBoolean) {
             scalar_text = scalar_text == "TRUE" ? "true" : "false";
         }
-        auto scalar_result = arrow::Scalar::Parse(type, scalar_text);
-        if (!scalar_result.ok()) {
-            const FilterBindError code =
-                (arrow::is_integer(*type) || arrow::is_floating(*type))
-                                             ? FilterBindError::kLiteralOutOfRange
-                                             : FilterBindError::kTypeMismatch;
-            return Fail(code,
-                        "invalid literal for Arrow type " + type->ToString() + ": " +
-                            scalar_result.status().ToString(),
-                        expression->node_id);
+        std::shared_ptr<arrow::Scalar> scalar;
+        if (IsBinaryType(*type)) {
+            if (type->id() == arrow::Type::FIXED_SIZE_BINARY) {
+                const auto byte_width =
+                    static_cast<const arrow::FixedSizeBinaryType&>(*type).byte_width();
+                if (scalar_text.size() != static_cast<size_t>(byte_width)) {
+                    return Fail(FilterBindError::kTypeMismatch,
+                                "binary literal length does not match Arrow type " +
+                                    type->ToString(),
+                                expression->node_id);
+                }
+                scalar = std::make_shared<arrow::FixedSizeBinaryScalar>(
+                    arrow::Buffer::FromString(scalar_text), type);
+            } else if (type->id() == arrow::Type::LARGE_BINARY) {
+                scalar = std::make_shared<arrow::LargeBinaryScalar>(scalar_text, type);
+            } else {
+                scalar = std::make_shared<arrow::BinaryScalar>(scalar_text, type);
+            }
+        } else {
+            auto scalar_result = arrow::Scalar::Parse(type, scalar_text);
+            if (!scalar_result.ok()) {
+                const FilterBindError code =
+                    (arrow::is_integer(*type) || arrow::is_floating(*type))
+                                                 ? FilterBindError::kLiteralOutOfRange
+                                                 : FilterBindError::kTypeMismatch;
+                return Fail(code,
+                            "invalid literal for Arrow type " + type->ToString() + ": " +
+                                scalar_result.status().ToString(),
+                            expression->node_id);
+            }
+            scalar = *scalar_result;
         }
 
         auto bound = std::make_shared<BoundFilterExpr>();
         bound->kind = expression->kind;
         bound->node_id = expression->node_id;
         bound->value_type = type;
-        bound->literal = *scalar_result;
+        bound->literal = std::move(scalar);
         *output = std::move(bound);
         return FilterBindError::kNone;
     }
@@ -204,6 +225,7 @@ class FilterBinder {
                    literal_kind == FilterLiteralKind::kFloating;
         }
         if (IsStringType(type)) return literal_kind == FilterLiteralKind::kString;
+        if (IsBinaryType(type)) return literal_kind == FilterLiteralKind::kString;
         if (type.id() == arrow::Type::BOOL) return literal_kind == FilterLiteralKind::kBoolean;
         return false;
     }

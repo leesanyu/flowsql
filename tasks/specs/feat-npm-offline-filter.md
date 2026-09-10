@@ -291,8 +291,13 @@ Arrow residual。协商/编译/执行错误则使任务失败，不能退化成�
   - `[x]` T1.2：冻结 packet domain resolver、类型化 packet rule 与 source task reader 公共头文件，不接入
     provider/runtime。
   - `[x]` T1.3：增加接口 ABI、配置深拷贝和两个独占 reader fixture，保持既有接口不变。
-- `[ ]` T2：实现时间与 packet domain binder/compiler 及 Arrow residual，证明所有文本只解析一次且无下推时
+- `[x]` T2：实现时间与 packet domain binder/compiler 及 Arrow residual，证明所有文本只解析一次且无下推时
   结果正确。
+  - `[x]` T2.1：实现 RFC3339 显式时区到 epoch ns 的一次性编译，锚定 ns 精度、日历校验与 `int64_t` 边界。
+  - `[x]` T2.2：实现 MAC、IP、port 与 TCP/UDP endpoint pair 的类型化编译、去重和 canonical 排序。
+  - `[x]` T2.3：实现 pcapfile domain resolver AST lowering，并锚定通用 binder 与纯 Arrow residual 结果。
+    - `[x]` T2.3a：实现领域 AST lowering、通用 binary scalar binding 与纯 Arrow residual 等价性。
+    - `[x]` T2.3b：注册 resolver IID 并接入 Scheduler 当前 stage 的 resolver 遍历与非 owner fallback。
 - `[ ]` T3：实现 `IBlockStreamReaderFactoryV1` 的 Scheduler 任务隔离创建/释放链路，保持旧 source 兼容与零下推
   fallback。
 - `[ ]` T4：在 pcapfile 实现 header/decoded 两级精确下推、不可变规则与并发 reader 隔离，锚定

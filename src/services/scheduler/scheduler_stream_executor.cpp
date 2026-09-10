@@ -53,6 +53,7 @@
 #include "framework/interfaces/istream_manager.h"
 #include "framework/interfaces/iblock_stream_channel.h"
 #include "framework/interfaces/iblock_stream_factory.h"
+#include "framework/interfaces/ifilter_domain_resolver.h"
 #include "scheduler_json_codec.h"
 #include "scheduler_internal_utils.h"
 
@@ -888,6 +889,143 @@ bool ParseStageFilter(const std::string* filter_text,
     return false;
 }
 
+int ResolveFilterDomain(IQuerier* querier,
+                        FilterDomainTargetKindV1 target_kind,
+                        const std::string& target_category,
+                        const std::string& target_name,
+                        const std::shared_ptr<arrow::Schema>& output_schema,
+                        const std::shared_ptr<FilterExpr>& expression,
+                        std::shared_ptr<FilterExpr>* resolved_expression,
+                        std::string* error) {
+    if (resolved_expression) resolved_expression->reset();
+    if (error) error->clear();
+    if (!resolved_expression || !output_schema || !expression || target_category.empty() ||
+        target_name.empty()) {
+        if (error) *error = "filter domain resolver request is incomplete";
+        return EIO;
+    }
+    if (!querier) {
+        *resolved_expression = expression;
+        return 0;
+    }
+
+    FilterDomainResolveRequestV1 request;
+    request.target_kind = target_kind;
+    request.target_category = target_category.c_str();
+    request.target_name = target_name.c_str();
+    request.output_schema = output_schema;
+    request.expression = expression;
+
+    size_t owner_count = 0;
+    int resolution_error = 0;
+    std::string resolution_diagnostic;
+    const int traversal_rc = querier->Traverse(
+        IID_FILTER_DOMAIN_RESOLVER_V1,
+        [&](void* value) -> int {
+            auto* resolver = static_cast<IFilterDomainResolverV1*>(value);
+            if (!resolver) {
+                resolution_error = EIO;
+                resolution_diagnostic =
+                    "filter domain resolver discovery returned a null provider";
+                return -1;
+            }
+
+            FilterDomainResolveResultV1 result;
+            int rc = 0;
+            try {
+                rc = resolver->Resolve(request, &result);
+            } catch (const std::exception& ex) {
+                resolution_error = EIO;
+                resolution_diagnostic =
+                    "filter domain resolver threw: " + std::string(ex.what());
+                return -1;
+            } catch (...) {
+                resolution_error = EIO;
+                resolution_diagnostic = "filter domain resolver threw an unknown exception";
+                return -1;
+            }
+            if (rc == ENOTSUP) {
+                if (result.lowered_expression) {
+                    resolution_error = EIO;
+                    resolution_diagnostic =
+                        "non-owner filter domain resolver returned an expression";
+                    return -1;
+                }
+                return 0;
+            }
+            if (rc != 0) {
+                resolution_error = rc == ENOMEM || rc == EFAULT ? EIO : EINVAL;
+                resolution_diagnostic =
+                    result.diagnostic.empty()
+                        ? "filter domain resolver rejected the expression with code " +
+                              std::to_string(rc)
+                        : std::move(result.diagnostic);
+                return -1;
+            }
+            if (!result.lowered_expression) {
+                resolution_error = EIO;
+                resolution_diagnostic =
+                    "owning filter domain resolver returned no expression";
+                return -1;
+            }
+            if (owner_count != 0) {
+                resolution_error = EIO;
+                resolution_diagnostic =
+                    "multiple filter domain resolvers accepted the current stage";
+                return -1;
+            }
+            ++owner_count;
+            *resolved_expression = std::move(result.lowered_expression);
+            return 0;
+        });
+    if (resolution_error != 0) {
+        resolved_expression->reset();
+        if (error) *error = std::move(resolution_diagnostic);
+        return resolution_error;
+    }
+    if (traversal_rc != 0) {
+        resolved_expression->reset();
+        if (error) {
+            *error = "filter domain resolver traversal failed with code " +
+                     std::to_string(traversal_rc);
+        }
+        return EIO;
+    }
+    if (owner_count == 0) *resolved_expression = expression;
+    return 0;
+}
+
+int ResolveAndBindStageFilter(IQuerier* querier,
+                              FilterDomainTargetKindV1 target_kind,
+                              const std::string& target_category,
+                              const std::string& target_name,
+                              const std::shared_ptr<arrow::Schema>& output_schema,
+                              const std::shared_ptr<FilterExpr>& expression,
+                              const std::string& stage_label,
+                              std::shared_ptr<const BoundFilterExpr>* bound_expression,
+                              std::string* error) {
+    if (bound_expression) bound_expression->reset();
+    if (!expression) return 0;
+
+    std::shared_ptr<FilterExpr> resolved_expression;
+    std::string detail;
+    const int resolve_rc = ResolveFilterDomain(
+        querier, target_kind, target_category, target_name, output_schema, expression,
+        &resolved_expression, &detail);
+    if (resolve_rc != 0) {
+        if (error) *error = stage_label + " filter domain resolution failed: " + detail;
+        return resolve_rc;
+    }
+
+    const auto bind_rc = BindFilterExpression(
+        output_schema, resolved_expression, bound_expression, &detail);
+    if (bind_rc != FilterBindError::kNone) {
+        if (error) *error = stage_label + " filter binding failed: " + detail;
+        return EINVAL;
+    }
+    return 0;
+}
+
 std::string SafeBlockTransformLastError(IBlockTransformTaskV1* task) {
     if (!task) return "";
     try {
@@ -947,13 +1085,12 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
     const auto source_schema = packet::PacketSchema();
     std::shared_ptr<const BoundFilterExpr> source_residual;
     if (source_expression) {
-        std::string bind_error;
-        const auto bind_rc = BindFilterExpression(
-            source_schema, source_expression, &source_residual, &bind_error);
-        if (bind_rc != FilterBindError::kNone) {
-            if (error) *error = "source-stage filter binding failed: " + bind_error;
-            return EINVAL;
-        }
+        const int filter_rc = ResolveAndBindStageFilter(
+            querier_, FilterDomainTargetKindV1::kSource,
+            source->Category() ? source->Category() : "",
+            source->Name() ? source->Name() : "", source_schema, source_expression,
+            "source-stage", &source_residual, error);
+        if (filter_rc != 0) return filter_rc;
     }
 
     const auto& params = !stmt.operator_with_params.empty()
@@ -1033,14 +1170,14 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
         probe.reset();
 
         std::shared_ptr<const BoundFilterExpr> bound_transform_filter;
-        const auto bind_rc = BindFilterExpression(
-            planned_output_schema,
-            transform_expression,
-            &bound_transform_filter,
-            &plan_error);
-        if (bind_rc != FilterBindError::kNone) {
-            if (error) *error = "operator-stage filter binding failed: " + plan_error;
-            return EINVAL;
+        const int filter_rc = ResolveAndBindStageFilter(
+            querier_, FilterDomainTargetKindV1::kTransform,
+            stmt.operators.front().category, stmt.operators.front().name,
+            planned_output_schema, transform_expression, "operator-stage",
+            &bound_transform_filter, &plan_error);
+        if (filter_rc != 0) {
+            if (error) *error = plan_error;
+            return filter_rc;
         }
 
         FilterPushdownTarget target;
@@ -1195,16 +1332,12 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     const auto source_schema = packet::PacketSchema();
     std::shared_ptr<const BoundFilterExpr> source_residual;
     if (stage_expressions[0]) {
-        std::string bind_error;
-        const auto bind_rc = BindFilterExpression(
-            source_schema,
-            stage_expressions[0],
-            &source_residual,
-            &bind_error);
-        if (bind_rc != FilterBindError::kNone) {
-            if (error) *error = "source-stage filter binding failed: " + bind_error;
-            return EINVAL;
-        }
+        const int filter_rc = ResolveAndBindStageFilter(
+            querier_, FilterDomainTargetKindV1::kSource,
+            source->Category() ? source->Category() : "",
+            source->Name() ? source->Name() : "", source_schema,
+            stage_expressions[0], "source-stage", &source_residual, error);
+        if (filter_rc != 0) return filter_rc;
     }
 
     struct StagePlan {
@@ -1311,17 +1444,16 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
 
         if (stage_expressions[i + 1]) {
             std::shared_ptr<const BoundFilterExpr> bound_filter;
-            const auto bind_rc = BindFilterExpression(
-                plan.output_schema,
-                stage_expressions[i + 1],
-                &bound_filter,
-                &plan_error);
-            if (bind_rc != FilterBindError::kNone) {
-                if (error) {
-                    *error = "transform stage " + std::to_string(i + 1) +
-                             " filter binding failed: " + plan_error;
-                }
-                return EINVAL;
+            const std::string stage_label =
+                "transform stage " + std::to_string(i + 1);
+            const int filter_rc = ResolveAndBindStageFilter(
+                querier_, FilterDomainTargetKindV1::kTransform,
+                stmt.operators[i].category, stmt.operators[i].name,
+                plan.output_schema, stage_expressions[i + 1], stage_label,
+                &bound_filter, &plan_error);
+            if (filter_rc != 0) {
+                if (error) *error = plan_error;
+                return filter_rc;
             }
 
             FilterPushdownTarget target;
@@ -1497,9 +1629,36 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
         auto* src = dynamic_cast<IBlockStreamChannel*>(source);
         auto* dst = dynamic_cast<IDataFrameChannel*>(sink);
         if (!src || !dst) return -1;
-        if (!stmt.where_clause.empty()) {
-            if (error) *error = "WHERE is not supported for direct block source transfer";
-            return -1;
+
+        bool duplicate_source_filter = false;
+        const auto* source_filter_text = FindStageFilterText(
+            stmt, 0, &duplicate_source_filter);
+        if (duplicate_source_filter) {
+            if (error) *error = "block source contains duplicate filters";
+            return EINVAL;
+        }
+        std::shared_ptr<FilterExpr> source_expression;
+        if (!ParseStageFilter(source_filter_text, 0, &source_expression, error)) {
+            return EINVAL;
+        }
+        const auto source_schema = packet::PacketSchema();
+        std::shared_ptr<const BoundFilterExpr> source_residual;
+        const int filter_rc = ResolveAndBindStageFilter(
+            querier_, FilterDomainTargetKindV1::kSource,
+            src->Category() ? src->Category() : "", src->Name() ? src->Name() : "",
+            source_schema, source_expression, "source-stage", &source_residual, error);
+        if (filter_rc != 0) return filter_rc;
+
+        BlockFilterStage source_filter(source_residual);
+        if (source_expression) {
+            std::shared_ptr<arrow::Schema> filtered_schema;
+            std::string filter_error;
+            const auto open_rc = source_filter.Open(
+                source_schema, &filtered_schema, &filter_error);
+            if (open_rc != FilterEvalError::kNone) {
+                if (error) *error = "source-stage residual Open failed: " + filter_error;
+                return EINVAL;
+            }
         }
         int64_t rows = 0;
         bool wrote = false;
@@ -1511,14 +1670,30 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
                     return -1;
                 }
                 int rc = 0;
-                const int64_t batch_rows = event.batch->num_rows();
+                std::shared_ptr<arrow::RecordBatch> output_batch = event.batch;
                 try {
-                    DataFrame frame;
-                    frame.FromArrow(event.batch);
-                    if (auto* appendable = dynamic_cast<IAppendableDataFrameChannel*>(dst)) {
-                        rc = appendable->Append(&frame);
-                    } else if (!wrote) {
-                        rc = dst->Write(&frame);
+                    if (source_expression) {
+                        BlockTransformOutputV1 filtered;
+                        std::string filter_error;
+                        const auto eval_rc = source_filter.ProcessBlock(
+                            event.batch, 0, &filtered, &filter_error);
+                        if (eval_rc != FilterEvalError::kNone || !filtered.batch) {
+                            if (error) {
+                                *error = "source-stage residual failed: " + filter_error;
+                            }
+                            rc = EINVAL;
+                        } else {
+                            output_batch = std::move(filtered.batch);
+                        }
+                    }
+                    if (rc == 0) {
+                        DataFrame frame;
+                        frame.FromArrow(output_batch);
+                        if (auto* appendable = dynamic_cast<IAppendableDataFrameChannel*>(dst)) {
+                            rc = appendable->Append(&frame);
+                        } else if (!wrote) {
+                            rc = dst->Write(&frame);
+                        }
                     }
                 } catch (const std::exception& ex) {
                     if (error) *error = ex.what();
@@ -1538,11 +1713,11 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
                     return -1;
                 }
                 if (rc != 0) {
-                    if (error) *error = "write block source batch failed";
-                    return -1;
+                    if (error && error->empty()) *error = "write block source batch failed";
+                    return rc;
                 }
                 wrote = true;
-                rows += batch_rows;
+                rows += output_batch->num_rows();
                 continue;
             }
             if (event.kind == BlockPollEvent::kTimeout) continue;
