@@ -20,6 +20,8 @@ constexpr const char* kWebPlugin = "libflowsql_web.so";
 constexpr const char* kRouterPlugin = "libflowsql_router.so";
 constexpr const char* kNpiPlugin =
     "libflowsql_npi.so:{\"ldfile\":\"/opt/flowsql/config/protocols.yml\"}";
+constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
+constexpr const char* kPcapFileDbPath = "/opt/flowsql/uploads/.meta/pcapfile.db";
 
 bool Expect(bool condition, const std::string& message) {
     if (condition) return true;
@@ -154,6 +156,7 @@ bool TestCompose() {
     const std::string web_option = PluginOption(web_plugins, kWebPlugin);
     const std::string router_option = PluginOption(web_plugins, kRouterPlugin);
     const std::string scheduler_plugins = CommandArgument(scheduler_command, "--plugins");
+    const std::string pcapfile_option = PluginOption(scheduler_plugins, kPcapFilePlugin);
 
     ok = Expect(gateway_command.IsSequence(), "Gateway command must use an argv sequence") && ok;
     ok = Expect(gateway_plugins == kGatewayPlugin, "Gateway plugin must not receive a config path as its option") &&
@@ -189,7 +192,15 @@ bool TestCompose() {
                 "Scheduler must mount pcap-uploads at the shared absolute path") &&
          ok;
     ok = Contains(scheduler_plugins, kNpiPlugin, "Scheduler must load NPI with the absolute protocol path") && ok;
-    ok = Contains(scheduler_plugins, "libflowsql_pcapfile.so", "Scheduler must load the pcapfile provider") && ok;
+    ok = Expect(!PluginSpec(scheduler_plugins, kPcapFilePlugin).empty(),
+                "Scheduler must load the pcapfile provider") &&
+         ok;
+    ok = Expect(pcapfile_option == std::string("db_path=") + kPcapFileDbPath,
+                "Docker pcapfile metadata must persist inside the capture named volume") &&
+         ok;
+    ok = Expect(pcapfile_option.rfind("db_path=/opt/flowsql/uploads/", 0) == 0,
+                "Docker pcapfile database must be covered by the Scheduler capture mount") &&
+         ok;
     ok = Expect(scheduler_plugins.find("libflowsql_example.so") == std::string::npos,
                 "Scheduler must not reference the absent example plugin") &&
          ok;

@@ -87,6 +87,21 @@ LD_LIBRARY_PATH=. ./flowsql --config ../../config/deploy-multi.yaml
 
 启动后浏览器访问 `http://127.0.0.1:8081` 进入管理界面。
 
+### PCAP 文件通道持久化
+
+正式部署中的 `pcapfile` 插件会持久化已经创建或上传的离线通道配置。SQL 任务执行完成以及插件 `Stop()`
+只释放任务 reader 或关闭运行期文件句柄，不删除基础通道记录；服务重启后会按原逻辑名称、规范化文件路径和
+回放参数恢复通道，后续 SQL 会为该通道创建新的 reader 并从文件开头读取。只有用户显式删除通道时，Scheduler
+才移除持久记录；上传目录中的受管 PCAP 文件继续由 Web 按既有安全校验和删除顺序负责。
+
+单进程和 Guardian 配置使用 `db_path=./meta/flowsql_meta.db`。该相对路径以 FlowSQL 运行目录为基准；使用
+`start.sh` 时实际位于 `build/output/meta/flowsql_meta.db`。Docker 配置使用
+`/opt/flowsql/uploads/.meta/pcapfile.db`，数据库和上传文件都位于 `pcap-uploads` named volume，不写入容器
+临时层。迁移或备份 Docker 部署时应把该 named volume 作为一个整体处理，避免数据库记录与 PCAP 文件分离。
+
+没有配置 `db_path` 的嵌入式或测试实例仍使用易失模式；这种模式下通道不会跨进程重启恢复，不建议用于正式
+部署。
+
 ### 前端构建
 
 ```bash

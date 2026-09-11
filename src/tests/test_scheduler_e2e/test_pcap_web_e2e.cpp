@@ -206,6 +206,117 @@ void BindSchedulerRoute(httplib::Server* server,
     });
 }
 
+class WebE2ERuntime {
+ public:
+    WebE2ERuntime(flowsql::PluginLoader* loader,
+                  PacketCounter* counter,
+                  fs::path upload_dir,
+                  fs::path dataframe_dir,
+                  fs::path operator_db_dir,
+                  fs::path pcapfile_db)
+        : loader_(loader),
+          counter_(counter),
+          upload_dir_(std::move(upload_dir)),
+          dataframe_dir_(std::move(dataframe_dir)),
+          operator_db_dir_(std::move(operator_db_dir)),
+          pcapfile_db_(std::move(pcapfile_db)) {}
+
+    ~WebE2ERuntime() { assert(!running_); }
+
+    void Start() {
+        assert(loader_ != nullptr);
+        assert(counter_ != nullptr);
+        assert(!running_);
+
+        web_port_ = ReserveLoopbackPort();
+        scheduler_http_ = std::make_unique<httplib::Server>();
+        const int scheduler_port = scheduler_http_->bind_to_any_port("127.0.0.1");
+        assert(scheduler_port > 0);
+
+        loader_->Regist(flowsql::IID_BLOCK_STREAM_OPERATOR, counter_);
+        const char* libraries[] = {
+            "libflowsql_npi.so",
+            "libflowsql_pcapfile.so",
+            "libflowsql_scheduler.so",
+            "libflowsql_builtin.so",
+            "libflowsql_catalog.so",
+            "libflowsql_web.so",
+        };
+        const std::string npi_option =
+            std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\"}";
+        const std::string pcapfile_option = "db_path=" + pcapfile_db_.string();
+        const std::string web_option =
+            "host=127.0.0.1;port=" + std::to_string(web_port_) +
+            ";db_path=:memory:;upload_dir=" + upload_dir_.string() +
+            ";gateway=127.0.0.1:" + std::to_string(scheduler_port);
+        const std::string catalog_option =
+            "data_dir=" + dataframe_dir_.string() +
+            ";operator_db_dir=" + operator_db_dir_.string();
+        const char* options[] = {
+            npi_option.c_str(), pcapfile_option.c_str(), nullptr, nullptr, catalog_option.c_str(), web_option.c_str()};
+        assert(loader_->Load(flowsql::get_absolute_process_path(), libraries, options, 6) == 0);
+        assert(CountRoutes(loader_, "POST", "/channels/dataframe/preview") == 1);
+
+        BindSchedulerRoute(scheduler_http_.get(),
+                           "/channels/stream/add",
+                           "/channels/stream/add",
+                           FindRoute(loader_, "POST", "/channels/stream/add"));
+        BindSchedulerRoute(scheduler_http_.get(),
+                           "/channels/stream/query",
+                           "/channels/stream/query",
+                           FindRoute(loader_, "POST", "/channels/stream/query"));
+        BindSchedulerRoute(scheduler_http_.get(),
+                           "/channels/stream/remove",
+                           "/channels/stream/remove",
+                           FindRoute(loader_, "POST", "/channels/stream/remove"));
+        BindSchedulerRoute(scheduler_http_.get(),
+                           "/tasks/batch/execute",
+                           "/scheduler/batch/execute",
+                           FindRoute(loader_, "POST", "/scheduler/batch/execute"));
+        BindSchedulerRoute(scheduler_http_.get(),
+                           "/channels/dataframe/preview",
+                           "/channels/dataframe/preview",
+                           FindRoute(loader_, "POST", "/channels/dataframe/preview"));
+        scheduler_thread_ = std::thread([this]() { assert(scheduler_http_->listen_after_bind()); });
+        scheduler_http_->wait_until_ready();
+
+        assert(loader_->StartAll() == 0);
+        WaitForWeb(web_port_);
+        web_ = std::make_unique<httplib::Client>("127.0.0.1", web_port_);
+        web_->set_read_timeout(20);
+        running_ = true;
+    }
+
+    void Stop() {
+        assert(running_);
+        web_.reset();
+        loader_->StopAll();
+        scheduler_http_->stop();
+        scheduler_thread_.join();
+        scheduler_http_.reset();
+        assert(loader_->Unload() == 0);
+        running_ = false;
+    }
+
+    httplib::Client* web() const {
+        assert(running_);
+        return web_.get();
+    }
+
+ private:
+    flowsql::PluginLoader* loader_ = nullptr;
+    PacketCounter* counter_ = nullptr;
+    fs::path upload_dir_;
+    fs::path dataframe_dir_;
+    fs::path operator_db_dir_;
+    fs::path pcapfile_db_;
+    int web_port_ = 0;
+    std::unique_ptr<httplib::Server> scheduler_http_;
+    std::thread scheduler_thread_;
+    std::unique_ptr<httplib::Client> web_;
+    bool running_ = false;
+};
+
 httplib::Result UploadCapture(httplib::Client* client,
                               const std::string& channel_name,
                               const std::string& format,
@@ -312,6 +423,30 @@ bool QueryContainsChannel(httplib::Client* client,
         return true;
     }
     return false;
+}
+
+int64_t ExecuteCapture(httplib::Client* client,
+                       PacketCounter* counter,
+                       const std::string& channel_name,
+                       const std::string& forbidden_path = {}) {
+    const auto execute = client->Post("/api/tasks/batch/execute",
+                                      ExecuteRequest(channel_name),
+                                      "application/json");
+    assert(execute && execute->status == 200);
+    if (!forbidden_path.empty()) assert(execute->body.find(forbidden_path) == std::string::npos);
+
+    rapidjson::Document response;
+    response.Parse(execute->body.c_str());
+    assert(!response.HasParseError() && response.IsObject());
+    assert(response.HasMember("status") && response["status"].IsString());
+    assert(std::string(response["status"].GetString()) == "completed");
+    assert(response.HasMember("rows") && response["rows"].IsInt64());
+    assert(response["rows"].GetInt64() > 0);
+    assert(response["rows"].GetInt64() == counter->rows_seen);
+    assert(counter->schema_calls == 1);
+    assert(counter->process_calls > 0);
+    assert(counter->flush_calls == 1);
+    return response["rows"].GetInt64();
 }
 
 void AssertPacketPreview(httplib::Client* client,
@@ -429,21 +564,7 @@ void RunSuccessfulCapture(httplib::Client* client,
     assert(upload->body.find(managed_file.string()) == std::string::npos);
     assert(QueryContainsChannel(client, channel_name, managed_file.string()));
 
-    const auto execute = client->Post("/api/tasks/batch/execute",
-                                      ExecuteRequest(channel_name),
-                                      "application/json");
-    assert(execute && execute->status == 200);
-    rapidjson::Document execute_response;
-    execute_response.Parse(execute->body.c_str());
-    assert(!execute_response.HasParseError() && execute_response.IsObject());
-    assert(execute_response.HasMember("status") && execute_response["status"].IsString());
-    assert(std::string(execute_response["status"].GetString()) == "completed");
-    assert(execute_response.HasMember("rows") && execute_response["rows"].IsInt64());
-    assert(execute_response["rows"].GetInt64() > 0);
-    assert(execute_response["rows"].GetInt64() == counter->rows_seen);
-    assert(counter->schema_calls == 1);
-    assert(counter->process_calls > 0);
-    assert(counter->flush_calls == 1);
+    ExecuteCapture(client, counter, channel_name, managed_file.string());
 
     assert(QueryContainsChannel(client, channel_name, managed_file.string()));
     const auto removed = client->Post("/api/channels/stream/remove",
@@ -516,6 +637,57 @@ void RunDataFrameCapture(httplib::Client* client,
     AssertPacketPreview(client, name, last_page, 2, total_rows, last_page_rows);
 }
 
+struct PersistedCapture {
+    fs::path managed_file;
+    int64_t rows = 0;
+};
+
+PersistedCapture UploadPersistentCapture(httplib::Client* client,
+                                         PacketCounter* counter,
+                                         const fs::path& managed_root,
+                                         const fs::path& fixture,
+                                         const std::string& channel_name) {
+    const std::string content = ReadBinary(fixture);
+    assert(!content.empty());
+    const auto upload = UploadCapture(client,
+                                      channel_name,
+                                      "pcapng",
+                                      fixture.filename().string(),
+                                      content);
+    assert(upload && upload->status == 200);
+    assert(EntryCount(managed_root) == 1);
+
+    PersistedCapture result;
+    result.managed_file = OnlyEntry(managed_root);
+    assert(result.managed_file.is_absolute());
+    assert(ReadBinary(result.managed_file) == content);
+    assert(upload->body.find(result.managed_file.string()) == std::string::npos);
+    assert(QueryContainsChannel(client, channel_name, result.managed_file.string()));
+    result.rows = ExecuteCapture(client, counter, channel_name, result.managed_file.string());
+    assert(QueryContainsChannel(client, channel_name, result.managed_file.string()));
+    return result;
+}
+
+void VerifyRestoredCaptureAndRemove(httplib::Client* client,
+                                    PacketCounter* counter,
+                                    const fs::path& managed_root,
+                                    const std::string& channel_name,
+                                    const PersistedCapture& capture) {
+    assert(fs::exists(capture.managed_file));
+    assert(QueryContainsChannel(client, channel_name, capture.managed_file.string()));
+    assert(ExecuteCapture(client, counter, channel_name, capture.managed_file.string()) == capture.rows);
+    assert(QueryContainsChannel(client, channel_name, capture.managed_file.string()));
+
+    const auto removed = client->Post("/api/channels/stream/remove",
+                                      ChannelRequest(channel_name),
+                                      "application/json");
+    assert(removed && removed->status == 200);
+    assert(removed->body.find(capture.managed_file.string()) == std::string::npos);
+    assert(!fs::exists(capture.managed_file));
+    assert(EntryCount(managed_root) == 0);
+    assert(!QueryContainsChannel(client, channel_name));
+}
+
 }  // namespace
 
 int main() {
@@ -524,88 +696,70 @@ int main() {
     const fs::path managed_root = upload_dir / "pcapfile";
     const fs::path dataframe_dir = temp.path() / "dataframes";
     const fs::path operator_db_dir = temp.path() / "operator_catalog";
-    const int web_port = ReserveLoopbackPort();
-
-    auto scheduler_http = std::make_unique<httplib::Server>();
-    const int scheduler_port = scheduler_http->bind_to_any_port("127.0.0.1");
-    assert(scheduler_port > 0);
+    const fs::path pcapfile_db = temp.path() / "pcapfile.db";
 
     PacketCounter counter;
     flowsql::PluginLoader* loader = flowsql::PluginLoader::Single();
-    loader->Regist(flowsql::IID_BLOCK_STREAM_OPERATOR, &counter);
 
-    const char* libraries[] = {
-        "libflowsql_npi.so",
-        "libflowsql_pcapfile.so",
-        "libflowsql_scheduler.so",
-        "libflowsql_builtin.so",
-        "libflowsql_catalog.so",
-        "libflowsql_web.so",
-    };
-    const std::string npi_option =
-        std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\"}";
-    const std::string web_option =
-        "host=127.0.0.1;port=" + std::to_string(web_port) +
-        ";db_path=:memory:;upload_dir=" + upload_dir.string() +
-        ";gateway=127.0.0.1:" + std::to_string(scheduler_port);
-    const std::string catalog_option =
-        "data_dir=" + dataframe_dir.string() + ";operator_db_dir=" + operator_db_dir.string();
-    const char* options[] = {
-        npi_option.c_str(), nullptr, nullptr, nullptr, catalog_option.c_str(), web_option.c_str()};
-    assert(loader->Load(flowsql::get_absolute_process_path(), libraries, options, 6) == 0);
-    assert(CountRoutes(loader, "POST", "/channels/dataframe/preview") == 1);
-
-    BindSchedulerRoute(scheduler_http.get(),
-                       "/channels/stream/add",
-                       "/channels/stream/add",
-                       FindRoute(loader, "POST", "/channels/stream/add"));
-    BindSchedulerRoute(scheduler_http.get(),
-                       "/channels/stream/query",
-                       "/channels/stream/query",
-                       FindRoute(loader, "POST", "/channels/stream/query"));
-    BindSchedulerRoute(scheduler_http.get(),
-                       "/channels/stream/remove",
-                       "/channels/stream/remove",
-                       FindRoute(loader, "POST", "/channels/stream/remove"));
-    BindSchedulerRoute(scheduler_http.get(),
-                       "/tasks/batch/execute",
-                       "/scheduler/batch/execute",
-                       FindRoute(loader, "POST", "/scheduler/batch/execute"));
-    BindSchedulerRoute(scheduler_http.get(),
-                       "/channels/dataframe/preview",
-                       "/channels/dataframe/preview",
-                       FindRoute(loader, "POST", "/channels/dataframe/preview"));
-    std::thread scheduler_thread([&]() { assert(scheduler_http->listen_after_bind()); });
-    scheduler_http->wait_until_ready();
-
-    assert(loader->StartAll() == 0);
-    WaitForWeb(web_port);
+    WebE2ERuntime first_runtime(loader,
+                                &counter,
+                                upload_dir,
+                                dataframe_dir,
+                                operator_db_dir,
+                                pcapfile_db);
+    first_runtime.Start();
     assert(fs::is_directory(managed_root));
-
-    httplib::Client web("127.0.0.1", web_port);
-    web.set_read_timeout(20);
-    RunSuccessfulCapture(&web,
+    RunSuccessfulCapture(first_runtime.web(),
                          &counter,
                          managed_root,
                          FLOWSQL_PCAP_FIXTURE_PATH,
                          "pcap",
                          "web_pcap");
-    RunSuccessfulCapture(&web,
+    RunSuccessfulCapture(first_runtime.web(),
                          &counter,
                          managed_root,
                          FLOWSQL_PCAPNG_FIXTURE_PATH,
                          "pcapng",
                          "web_pcapng");
-    RunDataFrameCapture(&web, managed_root, FLOWSQL_PCAPNG_FIXTURE_PATH);
-    RunInvalidCapture(&web, managed_root);
+    RunDataFrameCapture(first_runtime.web(), managed_root, FLOWSQL_PCAPNG_FIXTURE_PATH);
+    RunInvalidCapture(first_runtime.web(), managed_root);
 
-    loader->StopAll();
-    scheduler_http->stop();
-    scheduler_thread.join();
-    scheduler_http.reset();
-    loader->Unload();
+    const std::string persistent_name = "web_persistent";
+    const PersistedCapture capture = UploadPersistentCapture(first_runtime.web(),
+                                                             &counter,
+                                                             managed_root,
+                                                             FLOWSQL_PCAPNG_FIXTURE_PATH,
+                                                             persistent_name);
+    first_runtime.Stop();
+    assert(fs::exists(pcapfile_db));
+    assert(fs::exists(capture.managed_file));
+
+    WebE2ERuntime restored_runtime(loader,
+                                   &counter,
+                                   upload_dir,
+                                   dataframe_dir,
+                                   operator_db_dir,
+                                   pcapfile_db);
+    restored_runtime.Start();
+    VerifyRestoredCaptureAndRemove(restored_runtime.web(),
+                                   &counter,
+                                   managed_root,
+                                   persistent_name,
+                                   capture);
+    restored_runtime.Stop();
+    assert(fs::exists(pcapfile_db));
+
+    WebE2ERuntime deleted_runtime(loader,
+                                  &counter,
+                                  upload_dir,
+                                  dataframe_dir,
+                                  operator_db_dir,
+                                  pcapfile_db);
+    deleted_runtime.Start();
+    assert(!QueryContainsChannel(deleted_runtime.web(), persistent_name, capture.managed_file.string()));
+    deleted_runtime.Stop();
     assert(EntryCount(managed_root) == 0);
 
-    std::cout << "Web upload, Scheduler consumption, DataFrame preview, and managed delete E2E passed\n";
+    std::cout << "Web upload, persistence reload, repeated SQL, managed delete, and delete reload E2E passed\n";
     return 0;
 }

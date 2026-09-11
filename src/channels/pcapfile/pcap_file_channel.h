@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "packet_filter_domain.h"
+#include "pcap_file_channel_store.h"
 
 namespace flowsql::channels::pcapfile {
 
@@ -146,6 +147,9 @@ class PcapFilePlugin final : public IPlugin,
     IProtocol* protocol_ = nullptr;
     PcapFilterDomainResolver filter_domain_resolver_;
     std::string plugin_option_;
+    std::string db_path_;
+    PcapFileChannelStore store_;
+    bool store_open_ = false;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::string> options_;
     std::unordered_map<std::string, std::shared_ptr<PcapFileChannel>> channels_;

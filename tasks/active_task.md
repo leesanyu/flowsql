@@ -1,19 +1,21 @@
 # Active Task
 
 Feature：PCAP 文件通道持久化（`pcapfile-channel-persistence`）
-原子任务：T0 建立 Feature 入口与精益规格
+原子任务：T3.3 执行全量回归、Feature Diff 审查与归档收口
 状态：已完成
 
 ## 业务意图
 
-- 将 `pcapfile` 通道配置跨进程重启恢复能力加入顶层需求池，并冻结最小持久化契约和原子任务边界。
-- 明确上传文件、Scheduler 通道元数据、运行期 reader 和受管删除之间的所有权与失败语义。
+- 用标准 CMake 入口重新配置并全量构建，执行完整 CTest 和前端生产构建，确认 T0～T3.2 的累积实现满足
+  Feature DoD 且没有破坏既有功能。
+- 只审查本 Feature 的完整未提交 Diff；全部验收通过后完成 T3/T3.3、backlog 状态和规格归档，形成可提交状态。
 
 ## Non-Goals
 
-- 不修改任何 C++、前端、CMake、部署配置或运行时数据。
-- 不回写已归档的 `npm-offline-import` / `npm-offline-import-web` 规格，不改变其历史完成状态。
-- 不实现目录扫描猜测逻辑通道名，不扩展公共 block stream ABI、packet Schema 或 SQL 语义。
+- 不新增功能、测试场景、接口、配置项、依赖或文档章节。
+- 不修改已经通过原子验收的生产代码、测试、配置和 README；若全量回归发现 P0/P1 阻塞缺陷，先记录证据并
+  重新切分允许修改文件，不在收口任务中顺手修复。
+- 不处理与本 Feature 无关的历史失败、代码风味或低优先级建议。
 - 不读取或修改 `tasks/sprints/**`，不执行 commit/push。
 
 ## 允许修改的文件
@@ -21,36 +23,39 @@ Feature：PCAP 文件通道持久化（`pcapfile-channel-persistence`）
 - `tasks/active_task.md`
 - `tasks/product_backlog.md`
 - `tasks/specs/feat-pcapfile-channel-persistence.md`
+- `tasks/archive/feat-pcapfile-channel-persistence.md`
 
-已有 SQL 结果展示修复的生产代码与测试 diff 只保留，不修改。
+Feature 的生产代码、CMake、部署配置、README 和测试 diff 仅做只读审查，不修改。
 
 ## 验收标准与命令
 
-- 顶层需求池新增唯一的 `pcapfile-channel-persistence` P0 进行中条目，并链接新规格。
-- 规格不超过精益设计所需范围，包含业务意图、Non-Goals、核心数据契约、两条主链路、故障语义和 4 个原子任务。
-- 规格冻结 Scheduler 侧 SQLite 持久化、可选 `db_path` 兼容策略、生产配置要求和独立表名。
-- 规格明确 SQL 任务只释放独占 reader，不删除基础通道；服务重启后按原名称与规范化 option 恢复。
-- 规格明确缺失/损坏文件使插件启动失败，删除成功后不得再次恢复，并覆盖原生/Guardian/Docker 部署。
-- `git diff --check -- tasks/active_task.md tasks/product_backlog.md tasks/specs/feat-pcapfile-channel-persistence.md`
-- `rg -n 'pcapfile-channel-persistence|pcapfile_channel_store|db_path|重启|缺失|损坏' tasks/product_backlog.md tasks/specs/feat-pcapfile-channel-persistence.md`
+- `npm run build`（工作目录 `src/frontend`）通过，且不产生需提交的前端源代码或构建资产 diff。
+- `cmake -B build src`
+- `cmake --build build -j$(nproc)`
+- `ctest --test-dir build --output-on-failure`
+- `git diff --check`
+- 完整 Diff 仅包含本 Feature 的持久层、插件生命周期、部署路径、README、测试和任务文档；无越界改动、死代码
+  或未经测试支撑的抽象。
+- 所有验收通过后，T3/T3.3 和 Feature 状态标记完成，backlog 改为完成并链接归档规格，规格移入 `tasks/archive/`。
 - `git diff --name-only`
 - `git status --short --untracked-files=all`
 
 ## 时间盒与停止条件
 
-- 时间盒：20 分钟。
-- Feature 入口与规格满足验收后，将本工作台标记为已完成并立即停止，不自动实施 T1。
-- 若规格需要改变公共 ABI、Web 文件所有权或引入目录扫描，则停止并重新收敛，不扩大本任务范围。
+- 时间盒：30 分钟。
+- 全量构建、完整 CTest、前端构建和 Diff 审查全部通过后完成归档并立即停止，不执行 commit/push。
+- 若回归失败，状态只能记录为“当前错误待修复”或“被明确问题阻塞”；不得扩大文件范围或归档未通过的 Feature。
 
 ## 完成证据
 
-- `tasks/product_backlog.md` 新增 P0 进行中 Feature `pcapfile-channel-persistence`，且唯一链接到新规格。
-- 新规格冻结 Scheduler 侧私有 SQLite 表 `pcapfile_channel_store`、可选 `db_path` 兼容模式以及原生、Guardian、
-  Docker 的生产持久路径。
-- 规格明确 SQLite 是重启恢复唯一真相；SQL completed 只释放任务 reader，显式删除才移除持久记录和基础通道。
-- 规格包含上传/执行/重启恢复与显式删除/失败恢复两条主链路，并采用缺失或损坏文件导致全量启动失败、禁止
-  部分恢复的严格策略。
-- T0～T3 共 4 个原子任务已冻结；本次只完成 T0，没有实施持久层或插件生命周期代码。
-- 三个允许文件的 `git diff --check` 和关键契约检索均通过；未读取/修改 `tasks/sprints/**`，未执行构建、测试、
-  commit 或 push。
-- 既有 SQL 结果展示修复的 `Tasks.vue`、`taskResult.js` 和 `taskResult.test.js` diff 原样保留，未在本任务修改。
+- `npm run build`（`src/frontend`）通过，Vite 完成 1522 个模块的生产构建；仅有既有的大 chunk 提示，未产生新的
+  受版本控制前端差异。
+- `cmake -B build src` 使用标准入口配置成功；`cmake --build build -j$(nproc)` 全量构建到 100%，所有 target
+  成功生成。挂载文件系统报告小于 0.2 秒的 `Clock skew` 提示，但没有编译错误或缺失 target。
+- `ctest --test-dir build --output-on-failure` 在允许本地 loopback socket 的执行环境中运行：12/12 通过，0 失败，
+  总耗时 46.43 秒。
+- Feature 完整 Diff 已审查：SQLite 动态值均使用绑定参数，持久写入/恢复/删除顺序符合规格，原生、Guardian 和
+  Docker 路径一致，真实 Web E2E 覆盖重载恢复、重复 SQL、脱敏和删除后不恢复；无新增公共 ABI 或越界实现。
+- `git diff --check` 通过，新增 C++ 行均不超过 120 列；环境未提供 `clang-format` 可执行文件。
+- T3/T3.3 和 Feature 状态已完成，backlog 已链接归档规格，规格已移入 `tasks/archive/`；未读取或修改
+  `tasks/sprints/**`，未执行 commit 或 push。

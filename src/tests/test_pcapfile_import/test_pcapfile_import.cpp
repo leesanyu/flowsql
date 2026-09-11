@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <channels/pcapfile/pcap_file_channel.h>
+#include <channels/pcapfile/pcap_file_channel_store.h>
 #include <channels/pcapfile/packet_filter_domain.h>
 #include <common/loader.hpp>
 #include <framework/core/filter_binding.h>
@@ -12,6 +13,7 @@
 #include <framework/interfaces/iblock_stream_reader.h>
 
 #include <arrow/api.h>
+#include <sqlite3.h>
 
 #include <arpa/inet.h>
 
@@ -21,6 +23,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <limits>
@@ -2566,8 +2569,8 @@ void TestExclusiveReaderFactory() {
            pcapfile::PacketHeaderFilterResult::kReject);
     assert(std::string(reader_one->Category()) == "pcapfile");
     assert(std::string(reader_one->Name()) == "exclusive");
-    assert(plugin.RemoveChannel("pcapfile", "exclusive") == 0);
-    assert(plugin.Get("pcapfile", "exclusive") == nullptr);
+    assert(plugin.RemoveChannel("pcapfile", "exclusive") == EBUSY);
+    assert(plugin.Get("pcapfile", "exclusive") == managed);
     assert(plugin.Stop() == EBUSY);
     assert(plugin.Unload() == EBUSY);
 
@@ -2587,7 +2590,11 @@ void TestExclusiveReaderFactory() {
 
     plugin.ReleaseReader(reader_one);
     assert(plugin.Stop() == EBUSY);
+    assert(plugin.RemoveChannel("pcapfile", "exclusive") == EBUSY);
     plugin.ReleaseReader(reader_two);
+    assert(plugin.Get("pcapfile", "exclusive") == managed);
+    assert(plugin.RemoveChannel("pcapfile", "exclusive") == 0);
+    assert(plugin.Get("pcapfile", "exclusive") == nullptr);
     assert(plugin.Stop() == 0);
     assert(plugin.Unload() == 0);
 
@@ -2713,6 +2720,640 @@ void TestPluginManager() {
     plugin.Unload();
 }
 
+void AssertPcapFileChannelStoreSchema(const std::string& db_path) {
+    sqlite3* db = nullptr;
+    assert(sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nullptr) == SQLITE_OK);
+
+    sqlite3_stmt* statement = nullptr;
+    assert(sqlite3_prepare_v2(db,
+                              "SELECT sql FROM sqlite_master "
+                              "WHERE type='table' AND name='pcapfile_channel_store';",
+                              -1, &statement, nullptr) == SQLITE_OK);
+    assert(sqlite3_step(statement) == SQLITE_ROW);
+    const auto* schema_text = sqlite3_column_text(statement, 0);
+    assert(schema_text != nullptr);
+    const std::string schema(reinterpret_cast<const char*>(schema_text));
+    assert(schema.find("pcapfile_channel_store") != std::string::npos);
+    assert(schema.find("CHECK(type = 'pcapfile')") != std::string::npos);
+    sqlite3_finalize(statement);
+
+    statement = nullptr;
+    assert(sqlite3_prepare_v2(db, "PRAGMA journal_mode;", -1, &statement, nullptr) == SQLITE_OK);
+    assert(sqlite3_step(statement) == SQLITE_ROW);
+    const auto* journal_mode = sqlite3_column_text(statement, 0);
+    assert(journal_mode != nullptr);
+    assert(std::string(reinterpret_cast<const char*>(journal_mode)) == "wal");
+    sqlite3_finalize(statement);
+    assert(sqlite3_close(db) == SQLITE_OK);
+}
+
+void TestPcapFileChannelStore() {
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path root =
+        std::filesystem::path("/tmp") / ("flowsql_pcapfile_channel_store_" + std::to_string(unique));
+    const std::filesystem::path directory_db_path = root / "directory.sqlite";
+    const std::filesystem::path db_path = root / "nested" / "pcapfile.sqlite";
+
+    pcapfile::PcapFileChannelStore store;
+    std::string error;
+    std::vector<pcapfile::PcapFileChannelRecord> records = {{"sentinel", "sentinel", "sentinel"}};
+    assert(store.LoadAll(&records, &error) == ENODEV);
+    assert(!error.empty());
+    assert(records.size() == 1 && records[0].type == "sentinel");
+
+    const pcapfile::PcapFileChannelRecord closed_record = {"pcapfile", "closed", "{}"};
+    error.clear();
+    assert(store.Insert(closed_record, &error) == ENODEV);
+    assert(!error.empty());
+    error.clear();
+    assert(store.Update(closed_record, &error) == ENODEV);
+    assert(!error.empty());
+    error.clear();
+    assert(store.Erase(closed_record.type, closed_record.name, &error) == ENODEV);
+    assert(!error.empty());
+
+    error.clear();
+    assert(store.Open("", &error) == EINVAL);
+    assert(!error.empty());
+
+    assert(std::filesystem::create_directories(directory_db_path));
+    error.clear();
+    assert(store.Open(directory_db_path.string(), &error) != 0);
+    assert(!error.empty());
+
+    error = "stale error";
+    assert(store.Open(db_path.string(), &error) == 0);
+    assert(error.empty());
+    assert(std::filesystem::is_regular_file(db_path));
+    AssertPcapFileChannelStoreSchema(db_path.string());
+
+    records.clear();
+    error = "stale error";
+    assert(store.LoadAll(&records, &error) == 0);
+    assert(error.empty());
+    assert(records.empty());
+
+    const pcapfile::PcapFileChannelRecord zeta = {
+        "pcapfile", "zeta", "{\"path\":\"/tmp/zeta.pcap\",\"format\":\"pcap\"}"};
+    const pcapfile::PcapFileChannelRecord quoted = {
+        "pcapfile", "capture'); DROP TABLE pcapfile_channel_store; --",
+        "{\"path\":\"/tmp/it's-a-capture.pcap\",\"format\":\"pcap\",\"batch_packets\":2}"};
+    assert(store.Insert(zeta, &error) == 0);
+    assert(store.Insert(quoted, &error) == 0);
+    error.clear();
+    assert(store.Insert(quoted, &error) == EEXIST);
+    assert(!error.empty());
+
+    error.clear();
+    assert(store.Insert({"other", "invalid-type", "{}"}, &error) != 0);
+    assert(!error.empty());
+
+    records.clear();
+    assert(store.LoadAll(&records, &error) == 0);
+    assert(records.size() == 2);
+    assert(records[0].type == quoted.type);
+    assert(records[0].name == quoted.name);
+    assert(records[0].option == quoted.option);
+    assert(records[1].type == zeta.type);
+    assert(records[1].name == zeta.name);
+    assert(records[1].option == zeta.option);
+
+    pcapfile::PcapFileChannelRecord updated = quoted;
+    updated.option =
+        "{\"path\":\"/tmp/it's-updated.pcapng\",\"format\":\"pcapng\",\"batch_packets\":4}";
+    assert(store.Update(updated, &error) == 0);
+    error.clear();
+    assert(store.Update({"pcapfile", "missing", "{}"}, &error) == ENOENT);
+    assert(!error.empty());
+
+    assert(store.Erase(zeta.type, zeta.name, &error) == 0);
+    error.clear();
+    assert(store.Erase(zeta.type, zeta.name, &error) == ENOENT);
+    assert(!error.empty());
+
+    store.Close();
+    store.Close();
+    error.clear();
+    assert(store.LoadAll(&records, &error) == ENODEV);
+    assert(!error.empty());
+
+    error = "stale error";
+    assert(store.Open(db_path.string(), &error) == 0);
+    assert(error.empty());
+    records.clear();
+    assert(store.LoadAll(&records, &error) == 0);
+    assert(records.size() == 1);
+    assert(records[0].type == updated.type);
+    assert(records[0].name == updated.name);
+    assert(records[0].option == updated.option);
+    store.Close();
+
+    assert(std::filesystem::remove(db_path));
+    std::filesystem::remove(db_path.string() + "-wal");
+    std::filesystem::remove(db_path.string() + "-shm");
+    assert(std::filesystem::remove(db_path.parent_path()));
+    assert(std::filesystem::remove(directory_db_path));
+    assert(std::filesystem::remove(root));
+}
+
+void TestPcapFilePluginPersistentStartupRecovery() {
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path root =
+        std::filesystem::path("/tmp") / ("flowsql_pcapfile_recovery_" + std::to_string(unique));
+    const std::filesystem::path db_path = root / "meta" / "pcapfile.sqlite";
+    const std::filesystem::path first_path = root / "first.pcap";
+    const std::filesystem::path second_path = root / "second.pcap";
+    assert(std::filesystem::create_directories(root));
+    WriteFile(first_path.string(), MakeClassicPcap(true, false, 0));
+    WriteFile(second_path.string(), MakeClassicPcap(true, false, 0));
+
+    const pcapfile::PcapFileChannelRecord first = {
+        "pcapfile", "first",
+        "{\"path\":\"" + first_path.string() +
+            "\",\"format\":\"pcap\",\"batch_packets\":1,\"replay_mode\":\"fast\","
+            "\"replay_speed_milli\":1000}"};
+    const pcapfile::PcapFileChannelRecord second = {
+        "pcapfile", "second",
+        "{\"path\":\"" + second_path.string() +
+            "\",\"format\":\"pcap\",\"batch_packets\":2,\"replay_mode\":\"fast\","
+            "\"replay_speed_milli\":1000}"};
+    pcapfile::PcapFileChannelStore seed;
+    std::string error;
+    assert(seed.Open(db_path.string(), &error) == 0);
+    assert(seed.Insert(second, &error) == 0);
+    assert(seed.Insert(first, &error) == 0);
+    seed.Close();
+
+    MockProtocol protocol;
+    DeferredProtocolQuerier querier;
+    querier.SetProtocol(&protocol);
+    pcapfile::PcapFilePlugin plugin;
+    const std::string plugin_option = "ignored=value;db_path=" + db_path.string() + ";unused=value";
+    assert(plugin.Option(plugin_option.c_str()) == 0);
+    assert(plugin.Load(&querier) == 0);
+    assert(plugin.Start() == 0);
+    auto* first_channel = dynamic_cast<pcapfile::PcapFileChannel*>(plugin.Get("pcapfile", "first"));
+    assert(first_channel != nullptr && first_channel->IsOpened());
+    assert(plugin.Get("pcapfile", "second") != nullptr);
+    std::map<std::string, std::string> recovered_options;
+    plugin.QueryChannels([&](const std::string& type, const std::string& name, const std::string& option,
+                             const std::string&) {
+        assert(type == "pcapfile");
+        recovered_options[name] = option;
+    });
+    assert(recovered_options.size() == 2);
+    assert(recovered_options["first"] == first.option);
+    assert(recovered_options["second"] == second.option);
+
+    const auto first_batch = first_channel->PollBlock(0);
+    assert(first_batch.kind == flowsql::BlockPollEvent::kData && first_batch.batch);
+    assert(first_channel->ReleaseBlock(first_batch.batch) == 0);
+    assert(plugin.Stop() == 0);
+    assert(!first_channel->IsOpened());
+    assert(plugin.Get("pcapfile", "first") == first_channel);
+    assert(plugin.Start() == 0);
+    auto* same_instance_restart = plugin.Get("pcapfile", "first");
+    assert(same_instance_restart != nullptr && same_instance_restart->IsOpened());
+    assert(plugin.Unload() == 0);
+    assert(plugin.Get("pcapfile", "first") == nullptr);
+
+    pcapfile::PcapFilePlugin restarted;
+    assert(restarted.Option(("db_path=" + db_path.string()).c_str()) == 0);
+    assert(restarted.Load(&querier) == 0);
+    assert(restarted.Start() == 0);
+    auto* restarted_channel = restarted.Get("pcapfile", "first");
+    assert(restarted_channel != nullptr && restarted_channel->IsOpened());
+    const auto restarted_batch = restarted_channel->PollBlock(0);
+    assert(restarted_batch.kind == flowsql::BlockPollEvent::kData && restarted_batch.batch);
+    assert(restarted_channel->ReleaseBlock(restarted_batch.batch) == 0);
+    assert(restarted.Unload() == 0);
+
+    WriteFile(second_path.string(), {0x00, 0x01, 0x02});
+    pcapfile::PcapFilePlugin corrupt_capture;
+    assert(corrupt_capture.Option(("db_path=" + db_path.string()).c_str()) == 0);
+    assert(corrupt_capture.Load(&querier) == 0);
+    assert(corrupt_capture.Start() != 0);
+    assert(corrupt_capture.Get("pcapfile", "first") == nullptr);
+    assert(corrupt_capture.Unload() == 0);
+    WriteFile(second_path.string(), MakeClassicPcap(true, false, 0));
+
+    pcapfile::PcapFileChannelStore verify;
+    assert(verify.Open(db_path.string(), &error) == 0);
+    std::vector<pcapfile::PcapFileChannelRecord> records;
+    assert(verify.LoadAll(&records, &error) == 0);
+    assert(records.size() == 2);
+    verify.Close();
+
+    pcapfile::PcapFilePlugin explicit_volatile;
+    assert(explicit_volatile.Option(("db_path=" + (root / "not-a-db").string()).c_str()) == 0);
+    assert(explicit_volatile.Option("db_path=") == 0);
+    assert(explicit_volatile.Load(&querier) == 0);
+    assert(explicit_volatile.Start() == 0);
+    assert(explicit_volatile.Unload() == 0);
+
+    const std::filesystem::path directory_db_path = root / "directory.sqlite";
+    assert(std::filesystem::create_directory(directory_db_path));
+    pcapfile::PcapFilePlugin invalid_store;
+    assert(invalid_store.Option(("db_path=" + directory_db_path.string()).c_str()) == 0);
+    assert(invalid_store.Load(&querier) == 0);
+    assert(invalid_store.Start() != 0);
+    assert(invalid_store.Get("pcapfile", "first") == nullptr);
+    assert(invalid_store.Unload() == 0);
+
+    assert(std::filesystem::remove(db_path));
+    std::filesystem::remove(db_path.string() + "-wal");
+    std::filesystem::remove(db_path.string() + "-shm");
+    assert(std::filesystem::remove(db_path.parent_path()));
+    assert(std::filesystem::remove(directory_db_path));
+    assert(std::filesystem::remove(first_path));
+    assert(std::filesystem::remove(second_path));
+    assert(std::filesystem::remove(root));
+}
+
+void TestPcapFilePluginStrictStartupRecovery() {
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path root =
+        std::filesystem::path("/tmp") / ("flowsql_pcapfile_strict_recovery_" + std::to_string(unique));
+    const std::filesystem::path db_path = root / "pcapfile.sqlite";
+    const std::filesystem::path valid_path = root / "valid.pcap";
+    const std::filesystem::path missing_path = root / "missing.pcap";
+    assert(std::filesystem::create_directories(root));
+    WriteFile(valid_path.string(), MakeClassicPcap(true, false, 0));
+
+    const auto option_for = [](const std::filesystem::path& path) {
+        return "{\"path\":\"" + path.string() +
+               "\",\"format\":\"pcap\",\"batch_packets\":1,\"replay_mode\":\"fast\","
+               "\"replay_speed_milli\":1000}";
+    };
+    pcapfile::PcapFileChannelStore seed;
+    std::string error;
+    assert(seed.Open(db_path.string(), &error) == 0);
+    assert(seed.Insert({"pcapfile", "a-valid", option_for(valid_path)}, &error) == 0);
+    assert(seed.Insert({"pcapfile", "z-missing", option_for(missing_path)}, &error) == 0);
+    seed.Close();
+
+    MockProtocol protocol;
+    DeferredProtocolQuerier querier;
+    querier.SetProtocol(&protocol);
+    pcapfile::PcapFilePlugin plugin;
+    assert(plugin.Option(("db_path=" + db_path.string()).c_str()) == 0);
+    assert(plugin.Load(&querier) == 0);
+    assert(plugin.Start() != 0);
+    assert(plugin.Get("pcapfile", "a-valid") == nullptr);
+    int visible = 0;
+    plugin.List([&](const char*, const char*, flowsql::IBlockStreamChannel*) { ++visible; });
+    assert(visible == 0);
+
+    WriteFile(missing_path.string(), MakeClassicPcap(true, false, 0));
+    assert(plugin.Start() == 0);
+    assert(plugin.Get("pcapfile", "a-valid") != nullptr);
+    assert(plugin.Get("pcapfile", "z-missing") != nullptr);
+    assert(plugin.Unload() == 0);
+
+    assert(seed.Open(db_path.string(), &error) == 0);
+    assert(seed.Update({"pcapfile", "z-missing", "{}"}, &error) == 0);
+    seed.Close();
+    pcapfile::PcapFilePlugin malformed;
+    assert(malformed.Option(("db_path=" + db_path.string()).c_str()) == 0);
+    assert(malformed.Load(&querier) == 0);
+    assert(malformed.Start() != 0);
+    assert(malformed.Get("pcapfile", "a-valid") == nullptr);
+    assert(malformed.Unload() == 0);
+
+    assert(seed.Open(db_path.string(), &error) == 0);
+    assert(seed.Erase("pcapfile", "z-missing", &error) == 0);
+    assert(seed.Insert({"pcapfile", "", option_for(valid_path)}, &error) == 0);
+    seed.Close();
+    pcapfile::PcapFilePlugin unnamed;
+    assert(unnamed.Option(("db_path=" + db_path.string()).c_str()) == 0);
+    assert(unnamed.Load(&querier) == 0);
+    assert(unnamed.Start() == EINVAL);
+    assert(unnamed.Get("pcapfile", "a-valid") == nullptr);
+    assert(unnamed.Unload() == 0);
+
+    assert(std::filesystem::remove(db_path));
+    std::filesystem::remove(db_path.string() + "-wal");
+    std::filesystem::remove(db_path.string() + "-shm");
+    assert(std::filesystem::remove(valid_path));
+    assert(std::filesystem::remove(missing_path));
+    assert(std::filesystem::remove(root));
+}
+
+std::vector<pcapfile::PcapFileChannelRecord> LoadPcapFileChannelRecords(
+    const std::filesystem::path& db_path) {
+    pcapfile::PcapFileChannelStore store;
+    std::string error;
+    assert(store.Open(db_path.string(), &error) == 0);
+    std::vector<pcapfile::PcapFileChannelRecord> records;
+    assert(store.LoadAll(&records, &error) == 0);
+    store.Close();
+    return records;
+}
+
+void ExecutePcapFileChannelStoreSql(const std::filesystem::path& db_path,
+                                    const char* sql) {
+    sqlite3* db = nullptr;
+    assert(sqlite3_open_v2(db_path.string().c_str(), &db,
+                           SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                           nullptr) == SQLITE_OK);
+    char* error = nullptr;
+    assert(sqlite3_exec(db, sql, nullptr, nullptr, &error) == SQLITE_OK);
+    assert(error == nullptr);
+    assert(sqlite3_close(db) == SQLITE_OK);
+}
+
+void RemovePcapFilePersistenceFixture(const std::filesystem::path& root,
+                                      const std::filesystem::path& db_path,
+                                      const std::vector<std::filesystem::path>& captures) {
+    assert(std::filesystem::remove(db_path));
+    std::filesystem::remove(db_path.string() + "-wal");
+    std::filesystem::remove(db_path.string() + "-shm");
+    for (const auto& capture : captures) assert(std::filesystem::remove(capture));
+    assert(std::filesystem::remove(root));
+}
+
+void TestPcapFilePluginPersistentAddModify() {
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path root =
+        std::filesystem::path("/tmp") / ("flowsql_pcapfile_add_modify_" + std::to_string(unique));
+    const std::filesystem::path db_path = root / "pcapfile.sqlite";
+    const std::filesystem::path first_path = root / "first.pcap";
+    const std::filesystem::path second_path = root / "second.pcap";
+    assert(std::filesystem::create_directories(root));
+    WriteFile(first_path.string(), MakeClassicPcap(true, false, 0));
+    WriteFile(second_path.string(), MakeClassicPcap(true, false, 0));
+
+    MockProtocol protocol;
+    DeferredProtocolQuerier querier;
+    querier.SetProtocol(&protocol);
+    pcapfile::PcapFilePlugin plugin;
+    assert(plugin.Option(("db_path=" + db_path.string()).c_str()) == 0);
+    assert(plugin.Load(&querier) == 0);
+    assert(plugin.Start() == 0);
+
+    const std::string add_option =
+        "{\"batch_packets\":3,\"format\":\"PCAP\",\"path\":\"" +
+        first_path.string() + "\"}";
+    const std::string normalized_add =
+        "{\"path\":\"" + first_path.string() +
+        "\",\"format\":\"pcap\",\"batch_packets\":3,\"replay_mode\":\"fast\","
+        "\"replay_speed_milli\":1000}";
+    assert(plugin.AddChannel("PCAPFILE", "managed", add_option) == 0);
+    auto* before_modify = plugin.Get("pcapfile", "managed");
+    assert(before_modify != nullptr && before_modify->IsOpened());
+    auto records = LoadPcapFileChannelRecords(db_path);
+    assert(records.size() == 1);
+    assert(records[0].type == "pcapfile");
+    assert(records[0].name == "managed");
+    assert(records[0].option == normalized_add);
+
+    const std::string modify_option =
+        "{\"path\":\"" + second_path.string() +
+        "\",\"format\":\"PCAP\",\"batch_packets\":1,\"replay_mode\":\"TIMESTAMP\","
+        "\"replay_speed_milli\":2000}";
+    const std::string normalized_modify =
+        "{\"path\":\"" + second_path.string() +
+        "\",\"format\":\"pcap\",\"batch_packets\":1,\"replay_mode\":\"timestamp\","
+        "\"replay_speed_milli\":2000}";
+    assert(plugin.ModifyChannel("pcapfile", "managed", modify_option) == 0);
+    auto* after_modify = plugin.Get("pcapfile", "managed");
+    assert(after_modify != nullptr && after_modify != before_modify);
+    records = LoadPcapFileChannelRecords(db_path);
+    assert(records.size() == 1 && records[0].option == normalized_modify);
+    std::string visible_option;
+    plugin.QueryChannels([&](const std::string&, const std::string& name,
+                             const std::string& option, const std::string&) {
+        if (name == "managed") visible_option = option;
+    });
+    assert(visible_option == normalized_modify);
+    const auto modified_batch = after_modify->PollBlock(0);
+    assert(modified_batch.kind == flowsql::BlockPollEvent::kData && modified_batch.batch);
+    assert(after_modify->ReleaseBlock(modified_batch.batch) == 0);
+    assert(plugin.Unload() == 0);
+
+    pcapfile::PcapFilePlugin restarted;
+    assert(restarted.Option(("db_path=" + db_path.string()).c_str()) == 0);
+    assert(restarted.Load(&querier) == 0);
+    assert(restarted.Start() == 0);
+    auto* recovered = restarted.Get("pcapfile", "managed");
+    assert(recovered != nullptr && recovered->IsOpened());
+    const auto recovered_batch = recovered->PollBlock(0);
+    assert(recovered_batch.kind == flowsql::BlockPollEvent::kData && recovered_batch.batch);
+    assert(recovered->ReleaseBlock(recovered_batch.batch) == 0);
+    assert(restarted.Unload() == 0);
+
+    RemovePcapFilePersistenceFixture(root, db_path, {first_path, second_path});
+}
+
+void TestPcapFilePluginPersistentAddFailureDoesNotPublish() {
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path root =
+        std::filesystem::path("/tmp") / ("flowsql_pcapfile_add_failure_" + std::to_string(unique));
+    const std::filesystem::path db_path = root / "pcapfile.sqlite";
+    const std::filesystem::path capture_path = root / "capture.pcap";
+    assert(std::filesystem::create_directories(root));
+    WriteFile(capture_path.string(), MakeClassicPcap(true, false, 0));
+
+    MockProtocol protocol;
+    DeferredProtocolQuerier querier;
+    querier.SetProtocol(&protocol);
+    pcapfile::PcapFilePlugin plugin;
+    assert(plugin.Option(("db_path=" + db_path.string()).c_str()) == 0);
+    assert(plugin.Load(&querier) == 0);
+    assert(plugin.Start() == 0);
+    ExecutePcapFileChannelStoreSql(
+        db_path,
+        "CREATE TRIGGER fail_pcapfile_insert BEFORE INSERT ON pcapfile_channel_store "
+        "BEGIN SELECT RAISE(ABORT, 'forced insert failure'); END;");
+
+    const std::string option = "{\"path\":\"" + capture_path.string() + "\"}";
+    assert(plugin.AddChannel("pcapfile", "rejected", option) != 0);
+    assert(plugin.Get("pcapfile", "rejected") == nullptr);
+    int visible = 0;
+    plugin.List([&](const char*, const char*, flowsql::IBlockStreamChannel*) { ++visible; });
+    assert(visible == 0);
+    assert(LoadPcapFileChannelRecords(db_path).empty());
+    assert(plugin.Unload() == 0);
+
+    RemovePcapFilePersistenceFixture(root, db_path, {capture_path});
+}
+
+void TestPcapFilePluginPersistentModifyFailureKeepsOldChannel() {
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path root =
+        std::filesystem::path("/tmp") / ("flowsql_pcapfile_modify_failure_" + std::to_string(unique));
+    const std::filesystem::path db_path = root / "pcapfile.sqlite";
+    const std::filesystem::path old_path = root / "old.pcap";
+    const std::filesystem::path next_path = root / "next.pcap";
+    assert(std::filesystem::create_directories(root));
+    WriteFile(old_path.string(), MakeClassicPcap(true, false, 0));
+    WriteFile(next_path.string(), MakeClassicPcap(true, false, 0));
+
+    MockProtocol protocol;
+    DeferredProtocolQuerier querier;
+    querier.SetProtocol(&protocol);
+    pcapfile::PcapFilePlugin plugin;
+    assert(plugin.Option(("db_path=" + db_path.string()).c_str()) == 0);
+    assert(plugin.Load(&querier) == 0);
+    assert(plugin.Start() == 0);
+    const std::string old_option = "{\"path\":\"" + old_path.string() + "\",\"batch_packets\":1}";
+    assert(plugin.AddChannel("pcapfile", "stable", old_option) == 0);
+    auto* old_channel = plugin.Get("pcapfile", "stable");
+    assert(old_channel != nullptr && old_channel->IsOpened());
+    std::string normalized_old;
+    plugin.QueryChannels([&](const std::string&, const std::string& name,
+                             const std::string& option, const std::string&) {
+        if (name == "stable") normalized_old = option;
+    });
+    ExecutePcapFileChannelStoreSql(
+        db_path,
+        "CREATE TRIGGER fail_pcapfile_update BEFORE UPDATE ON pcapfile_channel_store "
+        "BEGIN SELECT RAISE(ABORT, 'forced update failure'); END;");
+
+    const std::string next_option = "{\"path\":\"" + next_path.string() + "\",\"batch_packets\":2}";
+    assert(plugin.ModifyChannel("pcapfile", "stable", next_option) != 0);
+    assert(plugin.Get("pcapfile", "stable") == old_channel);
+    assert(old_channel->IsOpened());
+    std::string visible_option;
+    plugin.QueryChannels([&](const std::string&, const std::string& name,
+                             const std::string& option, const std::string&) {
+        if (name == "stable") visible_option = option;
+    });
+    assert(visible_option == normalized_old);
+    const auto records = LoadPcapFileChannelRecords(db_path);
+    assert(records.size() == 1);
+    assert(records[0].name == "stable");
+    assert(records[0].option == normalized_old);
+    const auto old_batch = old_channel->PollBlock(0);
+    assert(old_batch.kind == flowsql::BlockPollEvent::kData && old_batch.batch);
+    assert(old_channel->ReleaseBlock(old_batch.batch) == 0);
+    assert(plugin.Unload() == 0);
+
+    RemovePcapFilePersistenceFixture(root, db_path, {old_path, next_path});
+}
+
+void TestPcapFilePluginPersistentRemoveAndReaderLifecycle() {
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path root =
+        std::filesystem::path("/tmp") / ("flowsql_pcapfile_remove_" + std::to_string(unique));
+    const std::filesystem::path db_path = root / "pcapfile.sqlite";
+    const std::filesystem::path capture_path = root / "capture.pcap";
+    assert(std::filesystem::create_directories(root));
+    WriteFile(capture_path.string(), MakeClassicPcap(true, false, 0));
+
+    MockProtocol protocol;
+    DeferredProtocolQuerier querier;
+    querier.SetProtocol(&protocol);
+    pcapfile::PcapFilePlugin plugin;
+    assert(plugin.Option(("db_path=" + db_path.string()).c_str()) == 0);
+    assert(plugin.Load(&querier) == 0);
+    assert(plugin.Start() == 0);
+    const std::string option =
+        "{\"path\":\"" + capture_path.string() + "\",\"batch_packets\":1}";
+    assert(plugin.AddChannel("pcapfile", "removable", option) == 0);
+    auto* base = plugin.Get("pcapfile", "removable");
+    assert(base != nullptr && base->IsOpened());
+    assert(LoadPcapFileChannelRecords(db_path).size() == 1);
+
+    const auto base_batch = base->PollBlock(0);
+    assert(base_batch.kind == flowsql::BlockPollEvent::kData && base_batch.batch);
+    assert(plugin.RemoveChannel("pcapfile", "removable") == EBUSY);
+    assert(plugin.Get("pcapfile", "removable") == base);
+    assert(LoadPcapFileChannelRecords(db_path).size() == 1);
+    assert(base->ReleaseBlock(base_batch.batch) == 0);
+
+    flowsql::BlockStreamReaderConfigV1 reader_config;
+    reader_config.task_id = "persistent-remove-reader";
+    reader_config.source_category = "pcapfile";
+    reader_config.source_name = "removable";
+    reader_config.pushed_filter_plan_json = flowsql::kEmptyCanonicalFilterPlanV1;
+    flowsql::IBlockStreamChannel* reader = nullptr;
+    assert(plugin.CreateReader(reader_config, &reader) == 0);
+    assert(reader != nullptr);
+    assert(plugin.RemoveChannel("pcapfile", "removable") == EBUSY);
+    assert(plugin.Get("pcapfile", "removable") == base);
+    assert(LoadPcapFileChannelRecords(db_path).size() == 1);
+    const auto reader_batch = reader->PollBlock(0);
+    assert(reader_batch.kind == flowsql::BlockPollEvent::kData && reader_batch.batch);
+    assert(reader->ReleaseBlock(reader_batch.batch) == 0);
+    plugin.ReleaseReader(reader);
+
+    assert(plugin.Get("pcapfile", "removable") == base);
+    assert(LoadPcapFileChannelRecords(db_path).size() == 1);
+    flowsql::IBlockStreamChannel* second_reader = nullptr;
+    reader_config.task_id = "persistent-remove-reader-two";
+    assert(plugin.CreateReader(reader_config, &second_reader) == 0);
+    assert(second_reader != nullptr);
+    const auto second_reader_batch = second_reader->PollBlock(0);
+    assert(second_reader_batch.kind == flowsql::BlockPollEvent::kData &&
+           second_reader_batch.batch);
+    assert(second_reader->ReleaseBlock(second_reader_batch.batch) == 0);
+    plugin.ReleaseReader(second_reader);
+    assert(LoadPcapFileChannelRecords(db_path).size() == 1);
+
+    assert(plugin.RemoveChannel("PCAPFILE", "removable") == 0);
+    assert(plugin.Get("pcapfile", "removable") == nullptr);
+    assert(LoadPcapFileChannelRecords(db_path).empty());
+    assert(std::filesystem::is_regular_file(capture_path));
+    assert(plugin.Unload() == 0);
+
+    pcapfile::PcapFilePlugin restarted;
+    assert(restarted.Option(("db_path=" + db_path.string()).c_str()) == 0);
+    assert(restarted.Load(&querier) == 0);
+    assert(restarted.Start() == 0);
+    assert(restarted.Get("pcapfile", "removable") == nullptr);
+    int visible = 0;
+    restarted.List([&](const char*, const char*, flowsql::IBlockStreamChannel*) { ++visible; });
+    assert(visible == 0);
+    assert(restarted.Unload() == 0);
+
+    RemovePcapFilePersistenceFixture(root, db_path, {capture_path});
+}
+
+void TestPcapFilePluginPersistentRemoveFailureKeepsOldChannel() {
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path root =
+        std::filesystem::path("/tmp") / ("flowsql_pcapfile_remove_failure_" + std::to_string(unique));
+    const std::filesystem::path db_path = root / "pcapfile.sqlite";
+    const std::filesystem::path capture_path = root / "capture.pcap";
+    assert(std::filesystem::create_directories(root));
+    WriteFile(capture_path.string(), MakeClassicPcap(true, false, 0));
+
+    MockProtocol protocol;
+    DeferredProtocolQuerier querier;
+    querier.SetProtocol(&protocol);
+    pcapfile::PcapFilePlugin plugin;
+    assert(plugin.Option(("db_path=" + db_path.string()).c_str()) == 0);
+    assert(plugin.Load(&querier) == 0);
+    assert(plugin.Start() == 0);
+    const std::string option = "{\"path\":\"" + capture_path.string() + "\"}";
+    assert(plugin.AddChannel("pcapfile", "stable", option) == 0);
+    auto* old_channel = plugin.Get("pcapfile", "stable");
+    assert(old_channel != nullptr && old_channel->IsOpened());
+    const auto before = LoadPcapFileChannelRecords(db_path);
+    assert(before.size() == 1);
+    ExecutePcapFileChannelStoreSql(
+        db_path,
+        "CREATE TRIGGER fail_pcapfile_delete BEFORE DELETE ON pcapfile_channel_store "
+        "BEGIN SELECT RAISE(ABORT, 'forced delete failure'); END;");
+
+    assert(plugin.RemoveChannel("pcapfile", "stable") != 0);
+    assert(plugin.Get("pcapfile", "stable") == old_channel);
+    assert(old_channel->IsOpened());
+    const auto after = LoadPcapFileChannelRecords(db_path);
+    assert(after.size() == 1);
+    assert(after[0].type == before[0].type);
+    assert(after[0].name == before[0].name);
+    assert(after[0].option == before[0].option);
+    const auto event = old_channel->PollBlock(0);
+    assert(event.kind == flowsql::BlockPollEvent::kData && event.batch);
+    assert(old_channel->ReleaseBlock(event.batch) == 0);
+    assert(std::filesystem::is_regular_file(capture_path));
+    assert(plugin.Unload() == 0);
+
+    RemovePcapFilePersistenceFixture(root, db_path, {capture_path});
+}
+
 }  // namespace
 
 int main() {
@@ -2756,6 +3397,14 @@ int main() {
     TestDynamicPluginDependencyOrders();
     TestPluginManager();
     TestCancelAndManagerBusy();
+    TestPcapFileChannelStore();
+    TestPcapFilePluginPersistentStartupRecovery();
+    TestPcapFilePluginStrictStartupRecovery();
+    TestPcapFilePluginPersistentAddModify();
+    TestPcapFilePluginPersistentAddFailureDoesNotPublish();
+    TestPcapFilePluginPersistentModifyFailureKeepsOldChannel();
+    TestPcapFilePluginPersistentRemoveAndReaderLifecycle();
+    TestPcapFilePluginPersistentRemoveFailureKeepsOldChannel();
     std::puts("[PASS] pcapfile import");
     return 0;
 }

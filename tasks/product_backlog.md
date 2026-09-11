@@ -16,7 +16,7 @@
 | [x] | NPM 数据包 DataFrame 查看 (`npm-packet-dataframe-view`) | P0 | 支持将有限 `pcapfile` 数据包原样写入命名 DataFrame，并通过 Web 安全查看截断的 hex 报文内容。 | [归档](archive/feat-npm-packet-dataframe-view.md) |
 | [x] | FlowSQL 阶段化过滤管线 (`stage-filter-pipeline`) | P0 | 支持 source 与每级 operator 输出的类型化 WHERE，以 Arrow 统一执行并允许 channel/operator 做精确谓词下推。 | [归档](archive/feat-stage-filter-pipeline.md) |
 | [x] | NPM 离线导入过滤 (`npm-offline-filter`) | P0 | 支持离线文件按带时区纳秒时间、MAC、IP、端口及默认双向 TCP/UDP endpoint pair 过滤，以类型化不可变规则实现任务隔离的 pcapfile 精确下推；不执行协议或应用识别。 | [归档](archive/feat-npm-offline-filter.md) |
-| [-] | PCAP 文件通道持久化 (`pcapfile-channel-persistence`) | P0 | 将 `pcapfile` 通道的规范化配置持久化到 Scheduler 侧 SQLite，并在服务重启后按原名称恢复可重复执行的离线 source。 | [规格](specs/feat-pcapfile-channel-persistence.md) |
+| [x] | PCAP 文件通道持久化 (`pcapfile-channel-persistence`) | P0 | 将 `pcapfile` 通道的规范化配置持久化到 Scheduler 侧 SQLite，并在服务重启后按原名称恢复可重复执行的离线 source。 | [归档](archive/feat-pcapfile-channel-persistence.md) |
 | [ ] | NPM 基础分析算子 (`npm-basic-analysis`) | P0 | 实现 `npm.basic`，将 packet 转换为可编排的标准化包级/流级事实数据，提供协议、方向和基础流量指标。 | 待创建 |
 | [ ] | NPM TCP/UDP 会话性能分析 (`npm-session-analysis`) | P1 | 基于五元组构建 TCP/UDP 会话状态，产出连接、时延、重传、吞吐、丢包和会话超时等网络性能指标。 | 待创建 |
 | [ ] | NPM 应用协议分析 (`npm-protocol-analysis`) | P1 | 在协议识别基础上增加 DNS、HTTP、TLS、ICMP 等应用/事务实体解析，统一输出可查询的协议分析结果。 | 待创建 |

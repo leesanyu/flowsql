@@ -4,11 +4,12 @@ add_executable(${PROJECT_NAME}
     test_pcapfile_import.cpp
     ${CMAKE_SOURCE_DIR}/channels/pcapfile/packet_filter_domain.cpp
     ${CMAKE_SOURCE_DIR}/channels/pcapfile/pcap_file_channel.cpp
+    ${CMAKE_SOURCE_DIR}/channels/pcapfile/pcap_file_channel_store.cpp
     ${CMAKE_SOURCE_DIR}/plugins/npi/packet_decoder.cpp
 )
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR})
 target_compile_options(${PROJECT_NAME} PRIVATE -UNDEBUG)
-add_thirddepen(${PROJECT_NAME} arrow rapidjson)
+add_thirddepen(${PROJECT_NAME} arrow rapidjson sqlite)
 add_dependencies(${PROJECT_NAME} flowsql_common flowsql_npi flowsql_pcapfile)
 target_link_libraries(${PROJECT_NAME} flowsql_common)
 target_compile_definitions(${PROJECT_NAME} PRIVATE

@@ -3,6 +3,7 @@
 
 #include "pcap_file_channel.h"
 
+#include <common/log.h>
 #include <framework/core/packet_codec.h>
 #include <plugins/npi/packet_decoder.h>
 
@@ -898,6 +899,18 @@ bool PcapFileChannel::IsBusy() const {
 
 int PcapFilePlugin::Option(const char* arg) {
     plugin_option_ = arg ? arg : "";
+    db_path_.clear();
+    size_t begin = 0;
+    while (begin < plugin_option_.size()) {
+        size_t end = plugin_option_.find(';', begin);
+        if (end == std::string::npos) end = plugin_option_.size();
+        const size_t equal = plugin_option_.find('=', begin);
+        if (equal != std::string::npos && equal < end &&
+            plugin_option_.compare(begin, equal - begin, "db_path") == 0) {
+            db_path_ = plugin_option_.substr(equal + 1, end - equal - 1);
+        }
+        begin = end < plugin_option_.size() ? end + 1 : end;
+    }
     return 0;
 }
 
@@ -916,7 +929,53 @@ int PcapFilePlugin::Start() {
         if (!protocol_) protocol_ = static_cast<IProtocol*>(value);
         return 0;
     });
-    return protocol_ ? 0 : ENODEV;
+    if (!protocol_) return ENODEV;
+    if (db_path_.empty()) return 0;
+
+    std::string error;
+    if (!store_open_) {
+        const int open_rc = store_.Open(db_path_, &error);
+        if (open_rc != 0) {
+            LOG_ERROR("PcapFilePlugin::Start: open store failed: %s", error.c_str());
+            protocol_ = nullptr;
+            return open_rc;
+        }
+        store_open_ = true;
+    }
+
+    std::vector<PcapFileChannelRecord> records;
+    const int load_rc = store_.LoadAll(&records, &error);
+    if (load_rc != 0) {
+        LOG_ERROR("PcapFilePlugin::Start: load store failed: %s", error.c_str());
+        protocol_ = nullptr;
+        return load_rc;
+    }
+
+    std::unordered_map<std::string, std::string> restored_options;
+    std::unordered_map<std::string, std::shared_ptr<PcapFileChannel>> restored_channels;
+    for (const auto& record : records) {
+        if (record.type != "pcapfile" || record.name.empty()) {
+            LOG_ERROR("PcapFilePlugin::Start: invalid persisted channel identity: %s.%s",
+                      record.type.c_str(), record.name.c_str());
+            protocol_ = nullptr;
+            return EINVAL;
+        }
+        const std::string key = MakeKey(record.type, record.name);
+        std::shared_ptr<PcapFileChannel> channel;
+        const int build_rc = BuildChannel(record.name, record.option, &channel, &error);
+        if (build_rc != 0) {
+            LOG_ERROR("PcapFilePlugin::Start: restore %s.%s failed: %s", record.type.c_str(),
+                      record.name.c_str(), error.c_str());
+            protocol_ = nullptr;
+            return build_rc;
+        }
+        restored_options.emplace(key, channel->Option());
+        restored_channels.emplace(key, std::move(channel));
+    }
+
+    options_ = std::move(restored_options);
+    channels_ = std::move(restored_channels);
+    return 0;
 }
 
 int PcapFilePlugin::Unload() {
@@ -925,6 +984,8 @@ int PcapFilePlugin::Unload() {
     if (stop_rc != 0) return stop_rc;
     channels_.clear();
     options_.clear();
+    store_.Close();
+    store_open_ = false;
     protocol_ = nullptr;
     querier_ = nullptr;
     return 0;
@@ -1096,12 +1157,21 @@ int PcapFilePlugin::AddChannel(const std::string& type, const std::string& name,
     if (Lower(type) != "pcapfile") return ENOTSUP;
     if (name.empty()) return EINVAL;
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!db_path_.empty() && !store_open_) return ENODEV;
     const std::string key = MakeKey(type, name);
     if (channels_.find(key) != channels_.end()) return EEXIST;
     std::shared_ptr<PcapFileChannel> channel;
     std::string error;
     const int rc = BuildChannel(name, option, &channel, &error);
     if (rc != 0) return rc;
+    if (store_open_) {
+        const int insert_rc = store_.Insert({"pcapfile", name, channel->Option()}, &error);
+        if (insert_rc != 0) {
+            LOG_ERROR("PcapFilePlugin::AddChannel: persist pcapfile.%s failed: %s",
+                      name.c_str(), error.c_str());
+            return insert_rc;
+        }
+    }
     options_[key] = channel->Option();
     channels_[key] = std::move(channel);
     return 0;
@@ -1110,6 +1180,7 @@ int PcapFilePlugin::AddChannel(const std::string& type, const std::string& name,
 int PcapFilePlugin::ModifyChannel(const std::string& type, const std::string& name, const std::string& option) {
     if (Lower(type) != "pcapfile") return ENOTSUP;
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!db_path_.empty() && !store_open_) return ENODEV;
     const std::string key = MakeKey(type, name);
     auto it = channels_.find(key);
     if (it == channels_.end()) return ENOENT;
@@ -1118,8 +1189,29 @@ int PcapFilePlugin::ModifyChannel(const std::string& type, const std::string& na
     std::string error;
     const int rc = BuildChannel(name, option, &next, &error);
     if (rc != 0) return rc;
+    const std::string old_option = options_[key];
+    if (store_open_) {
+        const int update_rc = store_.Update({"pcapfile", name, next->Option()}, &error);
+        if (update_rc != 0) {
+            LOG_ERROR("PcapFilePlugin::ModifyChannel: persist pcapfile.%s failed: %s",
+                      name.c_str(), error.c_str());
+            return update_rc;
+        }
+    }
     const int close_rc = it->second->Close();
-    if (close_rc != 0) return close_rc;
+    if (close_rc != 0) {
+        if (store_open_) {
+            std::string rollback_error;
+            const int rollback_rc =
+                store_.Update({"pcapfile", name, old_option}, &rollback_error);
+            if (rollback_rc != 0) {
+                LOG_ERROR("PcapFilePlugin::ModifyChannel: rollback pcapfile.%s failed: %s",
+                          name.c_str(), rollback_error.c_str());
+                return rollback_rc;
+            }
+        }
+        return close_rc;
+    }
     it->second = std::move(next);
     options_[key] = it->second->Option();
     return 0;
@@ -1128,12 +1220,33 @@ int PcapFilePlugin::ModifyChannel(const std::string& type, const std::string& na
 int PcapFilePlugin::RemoveChannel(const std::string& type, const std::string& name) {
     if (Lower(type) != "pcapfile") return ENOTSUP;
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!db_path_.empty() && !store_open_) return ENODEV;
     const std::string key = MakeKey(type, name);
     auto it = channels_.find(key);
     if (it == channels_.end()) return ENOENT;
+    for (const auto& reader : readers_) {
+        if (MakeKey(reader.second.source_category, reader.second.source_name) == key) {
+            return EBUSY;
+        }
+    }
     if (it->second->IsBusy()) return EBUSY;
     const int close_rc = it->second->Close();
     if (close_rc != 0) return close_rc;
+    if (store_open_) {
+        std::string error;
+        const int erase_rc = store_.Erase("pcapfile", name, &error);
+        if (erase_rc != 0) {
+            const int reopen_rc = it->second->Open();
+            if (reopen_rc != 0) {
+                LOG_ERROR("PcapFilePlugin::RemoveChannel: persist pcapfile.%s failed: %s; reopen failed: %d",
+                          name.c_str(), error.c_str(), reopen_rc);
+                return reopen_rc;
+            }
+            LOG_ERROR("PcapFilePlugin::RemoveChannel: persist pcapfile.%s failed: %s",
+                      name.c_str(), error.c_str());
+            return erase_rc;
+        }
+    }
     channels_.erase(it);
     options_.erase(key);
     return 0;

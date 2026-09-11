@@ -63,7 +63,7 @@ services:
       - --port
       - "18803"
       - --plugins
-      - 'libflowsql_router.so,libflowsql_npi.so:{"ldfile":"/opt/flowsql/config/protocols.yml"},libflowsql_pcapfile.so,libflowsql_scheduler.so,libflowsql_bridge.so,libflowsql_database.so'
+      - 'libflowsql_router.so,libflowsql_npi.so:{"ldfile":"/opt/flowsql/config/protocols.yml"},libflowsql_pcapfile.so:db_path=/opt/flowsql/uploads/.meta/pcapfile.db,libflowsql_scheduler.so,libflowsql_bridge.so,libflowsql_database.so'
       - --option
       - "host=0.0.0.0;port=18803;gateway=gateway:18800;config_file=../config/flowsql.yml"
     expose:

@@ -1,6 +1,6 @@
 # Feature: PCAP 文件通道持久化
 
-状态：`[-]` 进行中
+状态：`[x]` 已完成
 优先级：P0
 前置 Feature：`npm-offline-import-web`、`npm-offline-filter`（均已完成）
 
@@ -118,12 +118,24 @@ class PcapFileChannelStore {
 ## 原子任务
 
 - `[x]` T0：建立 Feature 入口，冻结 SQLite Schema、插件配置、所有权、一致性、严格恢复和任务拆分；不修改代码。
-- `[ ]` T1：先实现并测试私有 `PcapFileChannelStore`，覆盖建表、绑定参数、Insert/Update/Erase、重复/缺失键、
+- `[x]` T1：先实现并测试私有 `PcapFileChannelStore`，覆盖建表、绑定参数、Insert/Update/Erase、重复/缺失键、
   重开数据库和 SQLite 失败；只提供持久层，不接入插件生命周期。
-- `[ ]` T2：将存储接入 `PcapFilePlugin` 的 Option/Start/Stop/Unload 与 Add/Modify/Remove，测试易失兼容、数据库
+- `[x]` T2：将存储接入 `PcapFilePlugin` 的 Option/Start/Stop/Unload 与 Add/Modify/Remove，测试易失兼容、数据库
   失败回滚、全量或零恢复、缺失/损坏文件启动失败、无部分发布以及 SQL reader 释放不删除基础记录。
-- `[ ]` T3：更新原生/Guardian/Docker 持久路径和文档，扩展真实 Web E2E 覆盖“上传 → SQL completed →
+  - `[x]` T2.1：解析可选 `db_path`，接入 Start/Stop/Unload，测试易失兼容、数据库重开、全量或零恢复以及
+    缺失/损坏记录启动失败；不持久化管理写请求。
+  - `[x]` T2.2：持久化 Add/Modify，测试规范化 option、成功一致性，以及数据库 Insert/Update 失败时不发布或
+    不替换运行期通道。
+  - `[x]` T2.3：持久化 Remove，测试数据库/运行期补偿、active reader/batch 保护、SQL reader 释放不删除基础
+    记录，以及显式删除后重启不恢复。
+- `[x]` T3：更新原生/Guardian/Docker 持久路径和文档，扩展真实 Web E2E 覆盖“上传 → SQL completed →
   Stop/Unload → 重新加载 → 原名再次执行 → 显式删除 → 再重启不恢复”，并完成部署与相关全量回归。
+  - `[x]` T3.1：为单进程、Guardian 和 Docker 的 pcapfile 插件配置持久 `db_path`，用部署契约测试冻结路径、
+    named volume 所有权和运行目录语义，并在 README 说明重启/删除行为。
+  - `[x]` T3.2：扩展真实 Web E2E，覆盖上传后 SQL completed、插件 Stop/Unload/重新加载、原名再次执行、
+    显式删除以及再次加载不恢复，并确认外部响应不泄露绝对路径。
+  - `[x]` T3.3：执行标准配置、全量构建与完整 CTest，审查 Feature 全部 diff，完成 backlog、规格归档和工作台
+    收口。
 
 ## 测试锚点与验收
 

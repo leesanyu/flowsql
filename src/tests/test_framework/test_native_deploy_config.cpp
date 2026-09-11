@@ -16,6 +16,7 @@ constexpr const char* kUploadRoot = "/tmp/flowsql/uploads";
 constexpr const char* kNpiPlugin = "libflowsql_npi.so";
 constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
 constexpr const char* kNpiOption = "{\"ldfile\":\"./config/protocols.yml\"}";
+constexpr const char* kPcapFileOption = "db_path=./meta/flowsql_meta.db";
 
 bool Expect(bool condition, const std::string& message) {
     if (condition) return true;
@@ -51,9 +52,15 @@ bool ExpectSchedulerProviders(const flowsql::gateway::ServiceConfig& service, co
         ok = Expect(PluginOption(*npi) == kNpiOption, deployment + " must preserve the complete NPI JSON option") &&
              ok;
     }
-    ok = Expect(FindPlugin(service, kPcapFilePlugin) != nullptr,
+    const std::string* pcapfile = FindPlugin(service, kPcapFilePlugin);
+    ok = Expect(pcapfile != nullptr,
                 deployment + " Scheduler process must load the pcapfile provider") &&
          ok;
+    if (pcapfile) {
+        ok = Expect(PluginOption(*pcapfile) == kPcapFileOption,
+                    deployment + " pcapfile must persist in the runtime meta database") &&
+             ok;
+    }
     return ok;
 }
 
@@ -184,6 +191,31 @@ bool TestStartScriptFrontendBuildOption() {
     return ok;
 }
 
+bool TestPcapFilePersistenceDocumentation() {
+    const std::filesystem::path repository_root =
+        std::filesystem::path(FLOWSQL_DEPLOY_SINGLE_PATH).parent_path().parent_path();
+    const std::string readme = ReadFile(repository_root / "README.md");
+
+    bool ok = Expect(readme.find("PCAP 文件通道持久化") != std::string::npos,
+                     "README must document pcapfile persistence");
+    ok = Expect(readme.find(kPcapFileOption) != std::string::npos,
+                "README must document the native pcapfile database path") &&
+         ok;
+    ok = Expect(readme.find("/opt/flowsql/uploads/.meta/pcapfile.db") != std::string::npos,
+                "README must document the Docker pcapfile database path") &&
+         ok;
+    ok = Expect(readme.find("SQL 任务执行完成") != std::string::npos,
+                "README must explain that completed SQL does not remove the base channel") &&
+         ok;
+    ok = Expect(readme.find("显式删除通道") != std::string::npos,
+                "README must distinguish explicit channel deletion") &&
+         ok;
+    ok = Expect(readme.find("pcap-uploads") != std::string::npos,
+                "README must identify the Docker persistence volume") &&
+         ok;
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -192,6 +224,7 @@ int main() {
     ok = TestRuntimeAssets() && ok;
     ok = TestStartScriptRuntimeLayout() && ok;
     ok = TestStartScriptFrontendBuildOption() && ok;
+    ok = TestPcapFilePersistenceDocumentation() && ok;
     if (!ok) return 1;
     std::cout << "Native deployment contract tests passed\n";
     return 0;
