@@ -416,7 +416,13 @@
             <el-option label="PCAPNG" value="pcapng" />
           </el-select>
         </el-form-item>
-        <el-form-item label="每批数据包数">
+        <el-form-item label="回放模式">
+          <el-select v-model="pcapForm.replay_mode" :disabled="pcapSubmitting" style="width:100%">
+            <el-option label="最快速度" value="fast" />
+            <el-option label="按时间戳" value="timestamp" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="pcapForm.replay_mode === 'fast'" label="每批数据包数">
           <el-input-number
             v-model="pcapForm.batch_packets"
             :disabled="pcapSubmitting"
@@ -427,23 +433,16 @@
             style="width:100%"
           />
         </el-form-item>
-        <el-form-item label="回放模式">
-          <el-select v-model="pcapForm.replay_mode" :disabled="pcapSubmitting" style="width:100%">
-            <el-option label="最快速度" value="fast" />
-            <el-option label="按时间戳" value="timestamp" />
+        <el-form-item v-else label="回放倍速">
+          <el-select v-model="pcapForm.replay_speed" :disabled="pcapSubmitting" style="width:100%">
+            <el-option
+              v-for="speed in PCAP_REPLAY_SPEEDS"
+              :key="speed"
+              :label="`${speed} 倍`"
+              :value="speed"
+            />
           </el-select>
-        </el-form-item>
-        <el-form-item label="回放速度">
-          <el-input-number
-            v-model="pcapForm.replay_speed_milli"
-            :disabled="pcapSubmitting"
-            :min="1"
-            :max="4294967295"
-            :precision="0"
-            controls-position="right"
-            style="width:100%"
-          />
-          <div class="form-hint">1000 表示 1 倍速，仅时间戳回放模式生效</div>
+          <div class="form-hint">按相邻数据包的时间戳间隔回放</div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -463,6 +462,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { Search, Loading } from '@element-plus/icons-vue'
 import api, {
+  PCAP_REPLAY_SPEEDS,
   PCAP_UPLOAD_DEFAULTS,
   formatPreviewCell,
   isPacketRawPreviewValue,
@@ -840,6 +840,8 @@ const handlePcapFileSelected = (event) => {
 const isValidPcapUploadInteger = (value) =>
   Number.isInteger(value) && value >= 1 && value <= 4294967295
 
+const isValidPcapReplaySpeed = (value) => PCAP_REPLAY_SPEEDS.includes(value)
+
 const submitPcapUpload = async () => {
   if (pcapSubmitting.value) return
   const name = pcapForm.value.name.trim()
@@ -851,9 +853,14 @@ const submitPcapUpload = async () => {
     ElMessage.warning('请选择 .pcap 或 .pcapng 文件')
     return
   }
-  if (!isValidPcapUploadInteger(pcapForm.value.batch_packets) ||
-      !isValidPcapUploadInteger(pcapForm.value.replay_speed_milli)) {
-    ElMessage.warning('批大小和回放速度必须是有效正整数')
+  if (pcapForm.value.replay_mode === 'fast' &&
+      !isValidPcapUploadInteger(pcapForm.value.batch_packets)) {
+    ElMessage.warning('每批数据包数必须是有效正整数')
+    return
+  }
+  if (pcapForm.value.replay_mode === 'timestamp' &&
+      !isValidPcapReplaySpeed(pcapForm.value.replay_speed)) {
+    ElMessage.warning('请选择有效的回放倍速')
     return
   }
 

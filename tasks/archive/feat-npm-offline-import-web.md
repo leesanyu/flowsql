@@ -6,8 +6,11 @@
 
 ## 业务意图
 
-用户可在 Web 通道管理页面选择一个本地 `.pcap`/`.pcapng` 文件，配置通道名称与回放参数，
+用户可在 Web 通道管理页面选择一个本地 `.pcap`/`.pcapng` 文件，配置通道名称与当前回放模式实际生效的参数，
 一次提交完成“上传文件 + 创建 `pcapfile` source 通道”。浏览器不需要、也不能填写服务器文件路径。
+
+页面默认选择“最快速度”并只显示“每批数据包数”；切换为“按时间戳”后，同一表单位置只显示字面含义的
+“回放倍速”。页面不向用户暴露后端千分倍率单位。
 
 本 Feature 只补齐用户入口、受管文件存储和生产部署链路；文件格式解析、packet 字段、有限流、
 回放、EOF 和 Scheduler block source 执行继续复用已完成的 `npm-offline-import` 契约。
@@ -56,6 +59,28 @@ Content-Type: multipart/form-data
 | `batch_packets` | uint32 | 否 | `256` | 大于 0 |
 | `replay_mode` | string | 否 | `fast` | `fast\|timestamp` |
 | `replay_speed_milli` | uint32 | 否 | `1000` | 大于 0 |
+
+上表是稳定的 multipart 线协议，不等同于页面展示模型。页面默认 `replay_mode=fast`，并按模式互斥展示和校验：
+
+| 页面回放模式 | 同一动态参数位置 | 页面默认/选项 | 线协议行为 |
+| --- | --- | --- | --- |
+| 最快速度 | 仅显示“每批数据包数” | 默认 `256`，正整数 | `batch_packets` 生效；隐藏的倍速保持兼容默认值并发送 `replay_speed_milli=1000`，运行时不生效 |
+| 按时间戳 | 仅显示“回放倍速” | 默认 `1` 倍；仅可选 `0.001/0.01/0.1/1/10/100/1000` 倍 | 通道固定每批 1 个 packet，隐藏的 `batch_packets` 运行时不生效；字面倍速乘以 1000 后发送 |
+
+倍率转换必须使用以下精确映射，避免把后端内部的千分倍率暴露给用户：
+
+| 页面回放倍速 | `replay_speed_milli` |
+| ---: | ---: |
+| `0.001` | `1` |
+| `0.01` | `10` |
+| `0.1` | `100` |
+| `1` | `1000` |
+| `10` | `10000` |
+| `100` | `100000` |
+| `1000` | `1000000` |
+
+前端仍按固定 multipart 形状发送 `batch_packets` 和 `replay_speed_milli`；只校验当前模式实际生效且可见的参数。
+Web/C++ 继续只接收正整数 `replay_speed_milli`，不新增浮点字段或迁移既有通道配置。
 
 单文件默认上限为 1 GiB，可由 WebPlugin 的 `pcap_upload_max_bytes` 配置覆盖。超过限制返回 HTTP 413，
 且不得保留临时文件。Web 必须分块写入磁盘，禁止把完整 capture 读入单个 `std::string` 或 JSON/Base64。
@@ -139,7 +164,12 @@ struct ManagedCaptureRef {
 
 ## 页面契约
 
-- Stream 通道区域新增“上传 PCAP”入口，打开专用表单：文件、通道名称、格式、batch 大小、回放模式和速度。
+- Stream 通道区域提供“上传 PCAP”入口，打开专用表单：文件、通道名称、格式、回放模式，以及一个位于模式
+  下方的动态参数位置。
+- 默认“最快速度”，动态位置仅显示“每批数据包数”；选择“按时间戳”后，同一位置替换为“回放倍速”，
+  两个参数不得同时显示。
+- 回放倍速以 `0.001/0.01/0.1/1/10/100/1000` 的字面倍率下拉选项呈现，默认 `1` 倍；页面不得显示
+  `1000 表示 1 倍速` 或要求用户理解 `replay_speed_milli`。
 - 文件选择限制为 `.pcap,.pcapng`；提交期间禁用重复提交，并展示后端返回的中文可读错误。
 - 创建成功后关闭对话框并刷新现有 Stream 通道列表；`pcapfile` 行显示为 `source` 和有限流状态。
 - `pcapfile` 行隐藏不适用的通用“编辑”和“重置”，保留删除；删除走受管文件清理语义。
@@ -149,7 +179,8 @@ struct ManagedCaptureRef {
 
 ### 上传成功并创建通道
 
-1. 用户在 Channels 页面选择文件、填写名称和回放参数并提交 multipart 请求。
+1. 用户在 Channels 页面选择文件、填写名称和格式；默认最快模式填写批大小，或切换时间戳模式选择字面回放
+   倍率。前端将字面倍率精确转换为 `replay_speed_milli` 后提交 multipart 请求。
 2. Web 校验字段和大小，在受管目录分块写入临时文件，完成后原子重命名。
 3. Web 以绝对受管路径构造小型 `pcapfile` source JSON，经 Gateway 的现有控制面调用 Scheduler。
 4. Scheduler 进程内 NPI 已完成 `Load()`，`PcapFilePlugin::Start()` 已绑定 `IID_PROTOCOL`；插件校验文件头并
@@ -193,7 +224,9 @@ struct ManagedCaptureRef {
     成功并释放句柄后再安全删除受管文件，删除失败时保留文件与通道状态。
   - `[x]` T3.4：过滤 Web 对外查询/列表中的 `pcapfile` 路径与 `option/options/option_json` 敏感字段；普通 Stream、
     DataFrame 和 Database 响应保持不变，完成后勾选 T3。
-- `[x]` T4：实现前端上传 API 与专用对话框，刷新列表并限制 `pcapfile` 的编辑/重置操作；执行前端构建。
+- `[x]` T4：实现前端上传 API 与专用对话框，刷新列表并限制 `pcapfile` 的编辑/重置操作；默认最快模式只显示
+  批大小，时间戳模式在同一位置只显示七档字面倍速，由请求构造层兼容转换为 `replay_speed_milli`；执行前端
+  API 单测和生产构建。
 - `[x]` T5：补齐生产部署、真实消费闭环、文档和全量回归。按以下原子切片执行，全部完成后才勾选 T5：
   - `[x]` T5.1：补齐原生单进程/Guardian 配置中的 NPI、协议文件、pcapfile provider 和宿主机绝对上传目录；
     构建后同步 `protocols.yml`，以配置解析测试锚定插件 option 和 Web/Scheduler 路径契约。
@@ -209,6 +242,8 @@ struct ManagedCaptureRef {
 | 验收面 | 必测断言 |
 | --- | --- |
 | HTTP 契约 | multipart 必填字段、默认值、非法 enum/整数、扩展名、重名与 HTTP/JSON 错误映射稳定 |
+| 页面回放参数 | 默认最快模式只显示并校验批大小；时间戳模式同一位置只显示并校验七档字面倍速；两参数互斥显示 |
+| 倍率兼容转换 | `0.001/0.01/0.1/1/10/100/1000` 倍精确发送为 `1/10/100/1000/10000/100000/1000000`，字段仍为 `replay_speed_milli` |
 | 平面隔离 | 上传路由仅存在于 Web 8081 的外部 server，不出现在 `EnumApiRoutes`；Gateway/Router 不接收文件体 |
 | 文件所有权 | 分块落盘；成功前只存在 `.part`；超限/中断/写入失败/通道创建失败不遗留文件 |
 | 路径安全 | 客户端文件名不能逃逸受管根；只删除规范路径位于受管根内的文件；所有 Web 响应不暴露绝对路径 |
@@ -218,7 +253,8 @@ struct ManagedCaptureRef {
 
 ## 完成出口
 
-1. T1～T5 全部完成，浏览器无需服务器路径即可上传单个 pcap/pcapng 并创建 `pcapfile` source。
+1. T1～T5 全部完成，浏览器无需服务器路径即可上传单个 pcap/pcapng 并创建 `pcapfile` source；页面只展示
+   当前回放模式实际生效的批大小或字面倍速参数。
 2. 大文件按块落盘；失败回滚、受管删除和路径逃逸测试全部通过。
 3. 插件生命周期批次执行，pcapfile 在 Start 阶段绑定已 Load 的 NPI，非零失败、回滚和外部入口激活门禁
    生效；正式单进程、Guardian 和 Docker 均加载 NPI、协议定义和 pcapfile provider，Web/Scheduler 对同一

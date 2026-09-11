@@ -8,11 +8,13 @@ import {
   PCAP_UPLOAD_DEFAULTS,
   PCAP_UPLOAD_PATH,
   PCAP_UPLOAD_REQUEST_CONFIG,
+  PCAP_REPLAY_SPEEDS,
   buildPcapUploadFormData,
   formatPreviewCell,
   isPacketRawPreviewValue,
   isSupportedPcapFile,
-  pcapUploadErrorMessage
+  pcapUploadErrorMessage,
+  replaySpeedToMilli
 } from './index.js'
 
 class RecordingFormData {
@@ -36,7 +38,7 @@ test('PCAP upload FormData keeps scalar fields before the file part', () => {
     ['format', PCAP_UPLOAD_DEFAULTS.format],
     ['batch_packets', String(PCAP_UPLOAD_DEFAULTS.batch_packets)],
     ['replay_mode', PCAP_UPLOAD_DEFAULTS.replay_mode],
-    ['replay_speed_milli', String(PCAP_UPLOAD_DEFAULTS.replay_speed_milli)],
+    ['replay_speed_milli', '1000'],
     ['file', file]
   ])
 })
@@ -50,7 +52,7 @@ test('PCAP upload FormData serializes explicit values as multipart text', () => 
       format: 'pcapng',
       batch_packets: 512,
       replay_mode: 'timestamp',
-      replay_speed_milli: 2000
+      replay_speed: 10
     },
     () => new RecordingFormData()
   )
@@ -60,9 +62,18 @@ test('PCAP upload FormData serializes explicit values as multipart text', () => 
     ['format', 'pcapng'],
     ['batch_packets', '512'],
     ['replay_mode', 'timestamp'],
-    ['replay_speed_milli', '2000']
+    ['replay_speed_milli', '10000']
   ])
   assert.deepEqual(form.parts.at(-1), ['file', file])
+})
+
+test('PCAP replay speed uses literal multipliers and maps exactly to the backend unit', () => {
+  assert.equal(PCAP_UPLOAD_DEFAULTS.replay_speed, 1)
+  assert.deepEqual(PCAP_REPLAY_SPEEDS, [0.001, 0.01, 0.1, 1, 10, 100, 1000])
+  assert.deepEqual(
+    PCAP_REPLAY_SPEEDS.map(replaySpeedToMilli),
+    [1, 10, 100, 1000, 10000, 100000, 1000000]
+  )
 })
 
 test('PCAP file selection accepts only pcap and pcapng extensions', () => {

@@ -26,8 +26,12 @@ export const PCAP_UPLOAD_DEFAULTS = Object.freeze({
   format: 'auto',
   batch_packets: 256,
   replay_mode: 'fast',
-  replay_speed_milli: 1000
+  replay_speed: 1
 })
+
+export const PCAP_REPLAY_SPEEDS = Object.freeze([0.001, 0.01, 0.1, 1, 10, 100, 1000])
+
+export const replaySpeedToMilli = (speed) => Math.round(Number(speed) * 1000)
 
 export const PCAP_UPLOAD_PATH = '/api/channels/pcapfile/upload'
 export const PCAP_UPLOAD_REQUEST_CONFIG = Object.freeze({ timeout: 0 })
@@ -42,7 +46,7 @@ export const buildPcapUploadFormData = (file, fields = {}, createFormData = () =
   form.append('format', String(values.format))
   form.append('batch_packets', String(values.batch_packets))
   form.append('replay_mode', String(values.replay_mode))
-  form.append('replay_speed_milli', String(values.replay_speed_milli))
+  form.append('replay_speed_milli', String(replaySpeedToMilli(values.replay_speed)))
   form.append('file', file)
   return form
 }
