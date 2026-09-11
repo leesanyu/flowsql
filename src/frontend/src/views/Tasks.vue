@@ -172,6 +172,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { CaretRight, Refresh } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import api from '../api'
+import { formatTaskResult } from '../utils/taskResult.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const router = useRouter()
@@ -422,58 +423,6 @@ const syncActiveStreamTaskStatuses = async (rows) => {
       error_message: next.error_message
     }
   })
-}
-
-const formatTaskResult = (result, runningMessage = '') => {
-  if (Array.isArray(result.data)) {
-    if (result.status === 'completed' && result.data.length === 0) {
-      return {
-        columns: [],
-        rows: [],
-        message: `执行完成（${result.rows || 0} 行，${result.cols || 0} 列）`
-      }
-    }
-    const rows = result.data
-    const columns = rows.length > 0 && typeof rows[0] === 'object' && rows[0] !== null
-      ? Object.keys(rows[0])
-      : []
-    return { columns, rows }
-  }
-  if (result.status === 'completed' && result.data) {
-    if (result.data.columns && result.data.data) {
-      const rows = result.data.data.map(row => {
-        const obj = {}
-        result.data.columns.forEach((col, idx) => {
-          obj[col] = row[idx]
-        })
-        return obj
-      })
-      return {
-        columns: result.data.columns,
-        rows
-      }
-    }
-    return {
-      columns: [],
-      rows: [],
-      message: `执行完成（${result.rows || 0} 行已写入）`
-    }
-  }
-  if (result.status === 'failed') {
-    return { error: result.error || '执行失败' }
-  }
-  if (result.status === 'pending' || result.status === 'running') {
-    return {
-      columns: [],
-      rows: [],
-      message: runningMessage || `任务执行中（${result.status}）`
-    }
-  }
-  return {
-    columns: [],
-    rows: [],
-    message: `任务状态：${result.status || 'unknown'}`
-  }
 }
 
 const executeSQL = async () => {
