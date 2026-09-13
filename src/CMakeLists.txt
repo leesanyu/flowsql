@@ -51,6 +51,7 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/channels ${CMAKE_BINARY_DIR}/channels)
 # Stage 1: 框架核心
 add_subdirectory(${CMAKE_SOURCE_DIR}/framework ${CMAKE_BINARY_DIR}/framework)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_packet_contract ${CMAKE_BINARY_DIR}/test_packet_contract)
+add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_npm_basic ${CMAKE_BINARY_DIR}/test_npm_basic)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_pcapfile_import ${CMAKE_BINARY_DIR}/test_pcapfile_import)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_framework ${CMAKE_BINARY_DIR}/test_framework)
 
