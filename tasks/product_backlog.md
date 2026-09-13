@@ -18,11 +18,11 @@
 | [x] | NPM 离线导入过滤 (`npm-offline-filter`) | P0 | 支持离线文件按带时区纳秒时间、MAC、IP、端口及默认双向 TCP/UDP endpoint pair 过滤，以类型化不可变规则实现任务隔离的 pcapfile 精确下推；不执行协议或应用识别。 | [归档](archive/feat-npm-offline-filter.md) |
 | [x] | PCAP 文件通道持久化 (`pcapfile-channel-persistence`) | P0 | 将 `pcapfile` 通道的规范化配置持久化到 Scheduler 侧 SQLite，并在服务重启后按原名称恢复可重复执行的离线 source。 | [归档](archive/feat-pcapfile-channel-persistence.md) |
 | [-] | NPM 基础分析与模块组合 (`npm-basic-analysis`) | P0 | 同一 `npm.basic` 引擎消费离线/实时 packet，统一会话、有限采样识别和模块组合；离线 EOF 及时收口，实时依赖时间驱动输出周期快照，明确有界内存、过载和性能契约。 | [规格](specs/feat-npm-basic-analysis.md) |
-| [ ] | 流式算子时间驱动 (`stream-time-drive`) | P0 | 在保留 V1 ABI 的前提下提供可选版本化时间通知，覆盖无包/繁忙调度、链式传播、输出背压与取消；正常 EOF 立即单次终结，支撑 NPM 等有状态算子。 | 待创建；需求见 [NPM 规格](specs/feat-npm-basic-analysis.md) |
-| [ ] | NPM TCP/UDP 会话性能分析 (`npm-session-analysis`) | P1 | 依赖 `npm-basic-analysis`，作为同一 NPM 算子的可选模块复用会话 ID、方向、协议标签及生命周期，计算连接、时延、重传和吞吐等性能指标；丢包指标仅在具有可观测依据时提供，不重复建立会话。 | 待创建；基础契约见 [Basic](specs/feat-npm-basic-analysis.md) |
-| [ ] | NPM 应用协议分析 (`npm-protocol-analysis`) | P1 | 依赖 `npm-basic-analysis`，作为同一 NPM 算子的可选模块按需重组、增量解析 DNS、HTTP、TLS、ICMP 等协议/事务；独立于完整性能分析，约束跨包缓存并标记不完整结果，协议识别成功后仍持续解析。 | 待创建；基础契约见 [Basic](specs/feat-npm-basic-analysis.md) |
-| [ ] | NPM 结果存储与查询 (`npm-result-query`) | P1 | 将 packet、flow、session、protocol 结果写入存储通道；支持实时累计快照的版本更新/最新值查询、持续写入及保留策略，避免重复求和和内存结果无限增长。 | 待创建；实时约束见 [NPM 规格](specs/feat-npm-basic-analysis.md) |
-| [ ] | NPM 实时采集通道抽象 (`npm-capture-contract`) | P1 | 定义采集源生命周期、观测域与队列身份、批次包数/字节/等待上限、时间进度/空闲确认/积压、缓冲归还和丢包/背压统计，供不同后端统一接入 NPM。 | 待创建；消费约束见 [NPM 规格](specs/feat-npm-basic-analysis.md) |
+| [ ] | 流式算子时间驱动 (`stream-time-drive`) | P0 | 在保留 V1 ABI 的前提下提供可选版本化时间通知，覆盖无包/繁忙调度、链式传播、输出背压与取消；正常 EOF 立即单次终结，支撑 NPM 等有状态算子。 | 待创建 |
+| [ ] | NPM TCP/UDP 会话性能分析 (`npm-session-analysis`) | P1 | 依赖 `npm-basic-analysis`，作为同一 NPM 算子的可选模块复用会话 ID、方向、协议标签及生命周期，计算连接、时延、重传和吞吐等性能指标；丢包指标仅在具有可观测依据时提供，不重复建立会话。 | 待创建 |
+| [ ] | NPM 应用协议分析 (`npm-protocol-analysis`) | P1 | 依赖 `npm-basic-analysis`，作为同一 NPM 算子的可选模块按需重组、增量解析 DNS、HTTP、TLS、ICMP 等协议/事务；独立于完整性能分析，约束跨包缓存并标记不完整结果，协议识别成功后仍持续解析。 | 待创建 |
+| [ ] | NPM 结果存储与查询 (`npm-result-query`) | P1 | 将 packet、flow、session、protocol 结果写入存储通道；支持实时累计快照的版本更新/最新值查询、持续写入及保留策略，避免重复求和和内存结果无限增长。 | 待创建 |
+| [ ] | NPM 实时采集通道抽象 (`npm-capture-contract`) | P1 | 定义采集源生命周期、观测域与队列身份、批次包数/字节/等待上限、时间进度/空闲确认/积压、缓冲归还和丢包/背压统计，供不同后端统一接入 NPM。 | 待创建 |
 | [ ] | NPM Linux 实时采集后端 (`npm-linux-capture-backends`) | P1 | 在统一采集契约下提供 AF_PACKET、PF_RING Classic、AF_XDP copy/generic-SKB 三种后端，统一配置、生命周期、过滤、时间戳和丢包/吞吐统计；不包含 PF_RING ZC 与 AF_XDP native zero-copy。 | 待创建 |
 | [ ] | NPM AF_XDP Native Zero-Copy (`npm-af-xdp-native-zerocopy`) | P2 | 提供 native XDP + AF_XDP zero-copy 能力，覆盖驱动/内核能力探测、队列与 RSS、UMEM、显式降级策略和硬件性能验证。 | 待创建 |
 | [ ] | NPM DPDK 运行环境与设备管理 (`npm-dpdk-runtime`) | P2 | 提供 DPDK EAL、hugepage、PCI/VFIO、NUMA、核心绑定、设备发现、能力探测和启动诊断；不包含 NPM 分析和跨进程数据面。 | 待创建 |
