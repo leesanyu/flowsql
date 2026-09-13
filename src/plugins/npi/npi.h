@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_PLUGINS_PROTOCOL_NPI_NPI_H_
 #define _FLOWSQL_PLUGINS_PROTOCOL_NPI_NPI_H_
@@ -12,6 +7,11 @@
 #include <common/guid.h>
 #include <common/typedef.h>
 #include <common/iplugin.h>
+
+#include <cstdint>
+#include <mutex>
+#include <vector>
+
 #include "iprotocol.h"
 
 namespace flowsql {
@@ -23,7 +23,7 @@ class Engine;
 class Config;
 }  // namespace protocol
 
-class NetworkProtocolIdentify : public IPlugin, public IProtocol {
+class NetworkProtocolIdentify : public IPlugin, public IProtocol, public IProtocolPipelinePoolV1 {
  public:
     NetworkProtocolIdentify();
     ~NetworkProtocolIdentify();
@@ -47,10 +47,22 @@ class NetworkProtocolIdentify : public IPlugin, public IProtocol {
 
     virtual protocol::IDictionary* Dictionary();
 
+    // IProtocolPipelinePoolV1
+    ProtocolPipelinePoolError Acquire(int32_t* pipeno) override;
+    ProtocolPipelinePoolError Release(int32_t pipeno) override;
+    int32_t Capacity() const override;
+    IProtocol* Protocol() override;
+
  protected:
     protocol::Config* config_ = nullptr;
     protocol::NetworkLayer* layer_ = nullptr;
     protocol::Engine* engine_ = nullptr;
+
+ private:
+    mutable std::mutex pipeline_mutex_;
+    int32_t pipeline_capacity_ = 1;
+    bool pipeline_available_ = false;
+    std::vector<uint8_t> pipeline_leased_;
 };
 
 }  // namespace flowsql

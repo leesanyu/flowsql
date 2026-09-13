@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_PLUGINS_PROTOCOL_NPI_IPROTOCOL_H_
 #define _FLOWSQL_PLUGINS_PROTOCOL_NPI_IPROTOCOL_H_
@@ -19,6 +14,10 @@
 namespace flowsql {
 // {8F701981-9915-42BE-8126-186FE17449F3}
 const Guid IID_PROTOCOL = {0x8f701981, 0x9915, 0x42be, {0x81, 0x26, 0x18, 0x6f, 0xe1, 0x74, 0x49, 0xf3}};
+
+// {3F58B334-71DA-449B-B65D-E1AE77E7A7A5}
+const Guid IID_PROTOCOL_PIPELINE_POOL_V1 = {
+    0x3f58b334, 0x71da, 0x449b, {0xb6, 0x5d, 0xe1, 0xae, 0x77, 0xe7, 0xa7, 0xa5}};
 
 namespace protocol {
 
@@ -183,6 +182,42 @@ interface IProtocol {
      * @return 词典接口指针（非拥有语义）。
      */
     virtual protocol::IDictionary* Dictionary() = 0;
+};
+
+constexpr int32_t kProtocolPipelineMaxCapacityV1 = 16;
+
+enum class ProtocolPipelinePoolError : int32_t {
+    kNone = 0,
+    kNullOutput = -1,
+    kUnavailable = -2,
+    kExhausted = -3,
+    kInvalidPipeline = -4,
+    kNotLeased = -5,
+};
+
+/**
+ * @brief NPI pipeline 独占租约池 V1。
+ *
+ * Acquire/Release 可并发调用。成功 Acquire 的 pipeno 在 Release 前只属于一个调用方；调用方不得在租约释放后
+ * 继续使用该 pipeno。插件生命周期回调与业务调用的串行关系沿用 IPlugin 契约。
+ */
+interface IProtocolPipelinePoolV1 {
+    virtual ~IProtocolPipelinePoolV1() = default;
+
+    /**
+     * @brief 独占租用一个已分配 scratch 的 pipeline。
+     * @param pipeno 成功时写入 `[0, Capacity())` 内编号；失败时保持不变。
+     */
+    virtual ProtocolPipelinePoolError Acquire(int32_t* pipeno) = 0;
+
+    /** @brief 释放本 pool 当前已租出的 pipeline。 */
+    virtual ProtocolPipelinePoolError Release(int32_t pipeno) = 0;
+
+    /** @brief 返回 Option 阶段冻结的 pipeline 容量。 */
+    virtual int32_t Capacity() const = 0;
+
+    /** @brief 返回与 pipeline scratch 同属一个插件实例的协议接口，非拥有语义。 */
+    virtual IProtocol* Protocol() = 0;
 };
 
 }  // namespace flowsql

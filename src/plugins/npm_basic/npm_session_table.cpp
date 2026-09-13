@@ -3,6 +3,8 @@
 
 #include "npm_session_table.h"
 
+#include "npm_task_budget.h"
+
 #include <common/network/netbase.h>
 
 #include <algorithm>
@@ -10,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <utility>
 
 namespace flowsql::npm {
@@ -136,6 +139,8 @@ NpmSessionView NpmSessionSnapshot::View() const {
     view.wire_bytes_ab = wire_bytes_ab;
     view.wire_bytes_ba = wire_bytes_ba;
     view.protocol_status = protocol_status;
+    view.protocol_id = protocol_id;
+    view.protocol_sub_id = protocol_sub_id;
     return view;
 }
 
@@ -143,7 +148,16 @@ NpmSessionTable::NpmSessionTable(uint64_t max_active_sessions)
     : NpmSessionTable(ConfigWithSessionLimit(max_active_sessions)) {}
 
 NpmSessionTable::NpmSessionTable(const NpmAnalysisConfig& config)
-    : config_(config), max_active_sessions_(config.max_active_sessions) {}
+    : NpmSessionTable(config, std::make_shared<NpmTaskBudget>(config)) {}
+
+NpmSessionTable::NpmSessionTable(const NpmAnalysisConfig& config, std::shared_ptr<INpmTaskBudget> budget)
+    : config_(config), max_active_sessions_(config.max_active_sessions), budget_(std::move(budget)) {
+    if (!budget_) budget_ = std::make_shared<NpmTaskBudget>(config);
+}
+
+NpmSessionTable::~NpmSessionTable() {
+    ReleaseSession(tracked_session_bytes_);
+}
 
 NpmSessionView NpmSessionTable::MakeView(const SessionMap::value_type& entry) {
     NpmSessionView view;
@@ -155,7 +169,9 @@ NpmSessionView NpmSessionTable::MakeView(const SessionMap::value_type& entry) {
     view.packets_ba = entry.second.packets_ba;
     view.wire_bytes_ab = entry.second.wire_bytes_ab;
     view.wire_bytes_ba = entry.second.wire_bytes_ba;
-    view.protocol_status = NpmProtocolStatus::kPending;
+    view.protocol_status = entry.second.protocol_status;
+    view.protocol_id = entry.second.protocol_id;
+    view.protocol_sub_id = entry.second.protocol_sub_id;
     return view;
 }
 
@@ -170,9 +186,37 @@ NpmSessionSnapshot NpmSessionTable::MakeSnapshot(const SessionMap::value_type& e
     snapshot.packets_ba = entry.second.packets_ba;
     snapshot.wire_bytes_ab = entry.second.wire_bytes_ab;
     snapshot.wire_bytes_ba = entry.second.wire_bytes_ba;
-    snapshot.protocol_status = NpmProtocolStatus::kPending;
+    snapshot.protocol_status = entry.second.protocol_status;
+    if (snapshot.protocol_status == NpmProtocolStatus::kPending) {
+        snapshot.protocol_status = NpmProtocolStatus::kUnknown;
+    }
+    snapshot.protocol_id = entry.second.protocol_id;
+    snapshot.protocol_sub_id = entry.second.protocol_sub_id;
     snapshot.end_reason = reason;
     return snapshot;
+}
+
+uint64_t NpmSessionTable::EstimateTrackedBytes(const NpmSessionKey& key) noexcept {
+    constexpr uint64_t fixed_bytes = sizeof(SessionMap::value_type) + sizeof(DeadlineMap::value_type) +
+                                     8 * sizeof(void*);
+    const uint64_t namespace_bytes = static_cast<uint64_t>(key.input_namespace.size());
+    if (namespace_bytes >= (std::numeric_limits<uint64_t>::max() - fixed_bytes) / 2) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return fixed_bytes + 2 * (namespace_bytes + 1);
+}
+
+NpmBudgetError NpmSessionTable::ReserveSession(uint64_t bytes) {
+    const auto result = budget_->Reserve(NpmBudgetCategory::kSessionState, bytes);
+    if (result == NpmBudgetError::kNone) tracked_session_bytes_ += bytes;
+    return result;
+}
+
+void NpmSessionTable::ReleaseSession(uint64_t bytes) noexcept {
+    if (bytes == 0) return;
+    if (budget_->Release(NpmBudgetCategory::kSessionState, bytes) == NpmBudgetError::kNone) {
+        tracked_session_bytes_ -= bytes;
+    }
 }
 
 NpmSessionTableError NpmSessionTable::Observe(const NpmSessionPacketBinding& binding,
@@ -194,88 +238,181 @@ NpmSessionTableError NpmSessionTable::Observe(const NpmSessionPacketBinding& bin
         (!iterator->second.initial_syn_observed || iterator->second.initial_syn_direction != binding.direction ||
          iterator->second.initial_syn_sequence != binding.tcp.sequence);
 
-    if (iterator == sessions_.end() || tuple_reuse) {
-        if (iterator == sessions_.end() && sessions_.size() >= max_active_sessions_) {
+    const bool new_key = iterator == sessions_.end();
+    if (new_key || tuple_reuse) {
+        if (new_key && sessions_.size() >= max_active_sessions_) {
             return NpmSessionTableError::kSessionLimitExceeded;
         }
         if (next_session_id_ == 0) return NpmSessionTableError::kSessionIdExhausted;
 
-        NpmSessionObserveResult result;
-        if (tuple_reuse) {
-            result.ended_sessions.push_back(MakeSnapshot(*iterator, NpmSessionEndReason::kTupleReuse));
-            deadlines_.erase(DeadlineKey{iterator->second.idle_deadline_ns, iterator->second.session_id});
-            sessions_.erase(iterator);
+        const uint64_t charge = new_key ? EstimateTrackedBytes(binding.key) : iterator->second.tracked_bytes;
+        bool reserved = false;
+        if (new_key) {
+            if (ReserveSession(charge) != NpmBudgetError::kNone) {
+                return NpmSessionTableError::kSessionBudgetExceeded;
+            }
+            reserved = true;
         }
 
-        State state;
-        state.session_id = next_session_id_;
-        state.first_ns = meta.timestamp_ns;
-        state.last_ns = meta.timestamp_ns;
-        state.idle_deadline_ns = SaturatingAdd(meta.timestamp_ns, IdleTimeout(config_, binding.key));
-        if (bare_syn) {
-            state.initial_syn_observed = true;
-            state.initial_syn_direction = binding.direction;
-            state.initial_syn_sequence = binding.tcp.sequence;
-        }
-        if (is_tcp && binding.tcp.fin) {
-            state.fin_ab = binding.direction == NpmPacketDirection::kAToB;
-            state.fin_ba = binding.direction == NpmPacketDirection::kBToA;
-        }
-        CountPacket(binding,
-                    meta,
-                    &state.packets_ab,
-                    &state.packets_ba,
-                    &state.wire_bytes_ab,
-                    &state.wire_bytes_ba);
-        iterator = sessions_.emplace(binding.key, state).first;
-        deadlines_.emplace(DeadlineKey{state.idle_deadline_ns, state.session_id}, iterator->first);
-        ++next_session_id_;
+        try {
+            NpmSessionObserveResult result;
+            if (tuple_reuse) {
+                result.ended_sessions.push_back(MakeSnapshot(*iterator, NpmSessionEndReason::kTupleReuse));
+            }
 
-        if (is_tcp && (binding.tcp.rst || (state.fin_ab && state.fin_ba))) {
-            result.ended_sessions.push_back(MakeSnapshot(*iterator, NpmSessionEndReason::kClosed));
-            deadlines_.erase(DeadlineKey{state.idle_deadline_ns, state.session_id});
-            sessions_.erase(iterator);
-        } else {
+            State state;
+            state.session_id = next_session_id_;
+            state.first_ns = meta.timestamp_ns;
+            state.last_ns = meta.timestamp_ns;
+            state.idle_deadline_ns = SaturatingAdd(meta.timestamp_ns, IdleTimeout(config_, binding.key));
+            state.tracked_bytes = charge;
+            if (bare_syn) {
+                state.initial_syn_observed = true;
+                state.initial_syn_direction = binding.direction;
+                state.initial_syn_sequence = binding.tcp.sequence;
+            }
+            if (is_tcp && binding.tcp.fin) {
+                state.fin_ab = binding.direction == NpmPacketDirection::kAToB;
+                state.fin_ba = binding.direction == NpmPacketDirection::kBToA;
+            }
+            CountPacket(binding,
+                        meta,
+                        &state.packets_ab,
+                        &state.packets_ba,
+                        &state.wire_bytes_ab,
+                        &state.wire_bytes_ba);
+
+            const bool closed = is_tcp && (binding.tcp.rst || (state.fin_ab && state.fin_ba));
+            if (closed) {
+                SessionMap::value_type staged_entry(binding.key, state);
+                result.ended_sessions.push_back(MakeSnapshot(staged_entry, NpmSessionEndReason::kClosed));
+                if (tuple_reuse) {
+                    deadlines_.erase(DeadlineKey{iterator->second.idle_deadline_ns, iterator->second.session_id});
+                    sessions_.erase(iterator);
+                }
+                ReleaseSession(charge);
+                reserved = false;
+                ++next_session_id_;
+                *output = std::move(result);
+                return NpmSessionTableError::kNone;
+            }
+
+            if (new_key) {
+                iterator = sessions_.emplace(binding.key, state).first;
+                try {
+                    deadlines_.emplace(DeadlineKey{state.idle_deadline_ns, state.session_id}, iterator->first);
+                } catch (const std::bad_alloc&) {
+                    sessions_.erase(iterator);
+                    throw;
+                }
+                reserved = false;
+            } else {
+                deadlines_.emplace(DeadlineKey{state.idle_deadline_ns, state.session_id}, iterator->first);
+                deadlines_.erase(DeadlineKey{iterator->second.idle_deadline_ns, iterator->second.session_id});
+                iterator->second = state;
+            }
+
+            ++next_session_id_;
             result.has_active_session = true;
             result.active_session = MakeView(*iterator);
+            *output = std::move(result);
+            return NpmSessionTableError::kNone;
+        } catch (const std::bad_alloc&) {
+            if (reserved) ReleaseSession(charge);
+            return NpmSessionTableError::kAllocationFailed;
         }
-        *output = std::move(result);
-        return NpmSessionTableError::kNone;
-    } else {
-        State& state = iterator->second;
-        state.first_ns = std::min(state.first_ns, meta.timestamp_ns);
-        if (meta.timestamp_ns > state.last_ns) {
-            deadlines_.erase(DeadlineKey{state.idle_deadline_ns, state.session_id});
-            state.last_ns = meta.timestamp_ns;
-            state.idle_deadline_ns = SaturatingAdd(state.last_ns, IdleTimeout(config_, iterator->first));
-            deadlines_.emplace(DeadlineKey{state.idle_deadline_ns, state.session_id}, iterator->first);
-        }
-        CountPacket(binding,
-                    meta,
-                    &state.packets_ab,
-                    &state.packets_ba,
-                    &state.wire_bytes_ab,
-                    &state.wire_bytes_ba);
-        if (is_tcp && binding.tcp.fin) {
-            if (binding.direction == NpmPacketDirection::kAToB) {
-                state.fin_ab = true;
-            } else {
-                state.fin_ba = true;
-            }
+    }
+
+    State state = iterator->second;
+    state.first_ns = std::min(state.first_ns, meta.timestamp_ns);
+    const bool deadline_changed = meta.timestamp_ns > state.last_ns;
+    const DeadlineKey old_deadline{state.idle_deadline_ns, state.session_id};
+    if (deadline_changed) {
+        state.last_ns = meta.timestamp_ns;
+        state.idle_deadline_ns = SaturatingAdd(state.last_ns, IdleTimeout(config_, iterator->first));
+    }
+    CountPacket(binding,
+                meta,
+                &state.packets_ab,
+                &state.packets_ba,
+                &state.wire_bytes_ab,
+                &state.wire_bytes_ba);
+    if (is_tcp && binding.tcp.fin) {
+        if (binding.direction == NpmPacketDirection::kAToB) {
+            state.fin_ab = true;
+        } else {
+            state.fin_ba = true;
         }
     }
 
     NpmSessionObserveResult result;
-    const State& state = iterator->second;
     if (is_tcp && (binding.tcp.rst || (state.fin_ab && state.fin_ba))) {
-        result.ended_sessions.push_back(MakeSnapshot(*iterator, NpmSessionEndReason::kClosed));
-        deadlines_.erase(DeadlineKey{state.idle_deadline_ns, state.session_id});
+        try {
+            SessionMap::value_type staged_entry(iterator->first, state);
+            result.ended_sessions.push_back(MakeSnapshot(staged_entry, NpmSessionEndReason::kClosed));
+        } catch (const std::bad_alloc&) {
+            return NpmSessionTableError::kAllocationFailed;
+        }
+        const uint64_t charge = iterator->second.tracked_bytes;
+        deadlines_.erase(old_deadline);
         sessions_.erase(iterator);
+        ReleaseSession(charge);
     } else {
+        if (deadline_changed) {
+            const DeadlineKey new_deadline{state.idle_deadline_ns, state.session_id};
+            if (new_deadline != old_deadline) {
+                try {
+                    deadlines_.emplace(new_deadline, iterator->first);
+                } catch (const std::bad_alloc&) {
+                    return NpmSessionTableError::kAllocationFailed;
+                }
+                deadlines_.erase(old_deadline);
+            }
+        }
+        iterator->second = state;
         result.has_active_session = true;
         result.active_session = MakeView(*iterator);
     }
     *output = std::move(result);
+    return NpmSessionTableError::kNone;
+}
+
+NpmSessionTableError NpmSessionTable::SampleProtocol(const NpmSessionKey& key,
+                                                     uint64_t session_id,
+                                                     const NpmPacketView& packet,
+                                                     packet::IPacketProtocolIdentifier& identifier,
+                                                     NpmSessionView* output) {
+    if (!output) return NpmSessionTableError::kNullOutput;
+    auto iterator = sessions_.find(key);
+    if (iterator == sessions_.end()) return NpmSessionTableError::kNotFound;
+
+    State& state = iterator->second;
+    if (state.session_id != session_id) return NpmSessionTableError::kSessionInstanceMismatch;
+    if (state.protocol_status != NpmProtocolStatus::kPending || packet.payload.empty()) {
+        *output = MakeView(*iterator);
+        return NpmSessionTableError::kNone;
+    }
+    if (packet.payload.data == nullptr || packet.layer == nullptr) {
+        return NpmSessionTableError::kInvalidPacketView;
+    }
+
+    const auto identified = identifier.Identify(packet.packet, *packet.layer);
+    ++state.payload_samples;
+    if (identified.status == packet::ProtocolStatus::kIdentified && identified.id != 0) {
+        state.protocol_status = NpmProtocolStatus::kIdentified;
+        state.protocol_id = identified.id;
+        if (identified.sub_id != 0) {
+            state.protocol_sub_id = identified.sub_id;
+        } else {
+            state.protocol_sub_id.reset();
+        }
+    } else if (state.payload_samples >= config_.payload_sample_packets) {
+        state.protocol_status = NpmProtocolStatus::kUnknown;
+        state.protocol_id.reset();
+        state.protocol_sub_id.reset();
+    }
+
+    *output = MakeView(*iterator);
     return NpmSessionTableError::kNone;
 }
 
@@ -325,11 +462,37 @@ NpmCaptureProgressResult NpmSessionTable::AdvanceCaptureProgress(const NpmCaptur
         const auto session = sessions_.find(deadline->second);
         if (session != sessions_.end()) {
             result.ended_sessions.push_back(MakeSnapshot(*session, NpmSessionEndReason::kIdleTimeout));
+            const uint64_t charge = session->second.tracked_bytes;
             sessions_.erase(session);
+            ReleaseSession(charge);
         }
         deadline = deadlines_.erase(deadline);
     }
     return result;
+}
+
+NpmSessionTableError NpmSessionTable::FinishAllAtEof(std::vector<NpmSessionSnapshot>* output) {
+    if (output == nullptr) return NpmSessionTableError::kNullOutput;
+
+    try {
+        std::vector<NpmSessionSnapshot> snapshots;
+        snapshots.reserve(sessions_.size());
+        for (const auto& session : sessions_) {
+            snapshots.push_back(MakeSnapshot(session, NpmSessionEndReason::kEof));
+        }
+        std::sort(snapshots.begin(), snapshots.end(), [](const auto& left, const auto& right) {
+            return left.session_id < right.session_id;
+        });
+
+        const uint64_t tracked_bytes = tracked_session_bytes_;
+        sessions_.clear();
+        deadlines_.clear();
+        ReleaseSession(tracked_bytes);
+        *output = std::move(snapshots);
+        return NpmSessionTableError::kNone;
+    } catch (const std::bad_alloc&) {
+        return NpmSessionTableError::kAllocationFailed;
+    }
 }
 
 int NotifyNpmSessionEnd(const std::vector<NpmSessionSnapshot>& ended_sessions,
