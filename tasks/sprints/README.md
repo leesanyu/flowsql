@@ -18,7 +18,7 @@
 | Phase 3 | Sprint 8-11 | Catalog、算子目录、Pipeline、C++ 算子插件 | 统一算子/通道注册管理，增强 Pipeline 和插件扩展 |
 | Phase 4 | Sprint 12-18 | 流式架构、任务编排、可视化 | 建立流式执行路径、任务 DAG 和运行态可视化 |
 | Phase 5 | Sprint 19-21 | Baseline 插件与算法生命周期 | 从基线算法设计到 BaselineA / BaselineB 实现收口 |
-| Phase 6 | Sprint 22+ | Packet 数据面、pcapfile、NPM | 面向网络流量分析的内生数据源与 NPM 能力建设 |
+| Phase 6 | Sprint 22+ | Packet 数据面、pcapfile、NPM | 面向网络流量分析的内生数据源与 NPM 能力建设，将以新的开发模式展开，不在此处进行跟踪 |
 
 ## Phase 1：框架与基础数据能力
 
@@ -58,13 +58,7 @@
 
 ## Phase 6：网络流量数据面与 NPM
 
-后续 Sprint 建议从这里开始命名和归档：
-
-- `sprint22-packet-data-plane`：`packet.v1`、`PacketBatchView`、`IBlockStreamChannel` 数据面契约。
-- `sprint23-pcapfile-validation`：`pcapfile` 多文件读取、时间戳归并和验证回放。
-- `sprint24-npm-core`：`NpmCore`、`npm.basic` 和 flow / session 事实表。
-
-实际 Sprint 范围以 `tasks/product_backlog.md` 和对应 sprint 的 `planning.md` 为准。
+- 此后的规划与实施不再采用sprint模式，规划与任务不再在本文档以及本目录中呈现。
 
 ## Sprint 设计文档规范
 
