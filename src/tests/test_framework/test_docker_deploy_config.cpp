@@ -21,6 +21,8 @@ constexpr const char* kRouterPlugin = "libflowsql_router.so";
 constexpr const char* kNpiPlugin =
     "libflowsql_npi.so:{\"ldfile\":\"/opt/flowsql/config/protocols.yml\"}";
 constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
+constexpr const char* kNpmBasicPlugin = "libflowsql_npm_basic.so";
+constexpr const char* kSchedulerPlugin = "libflowsql_scheduler.so";
 constexpr const char* kPcapFileDbPath = "/opt/flowsql/uploads/.meta/pcapfile.db";
 
 bool Expect(bool condition, const std::string& message) {
@@ -194,6 +196,20 @@ bool TestCompose() {
     ok = Contains(scheduler_plugins, kNpiPlugin, "Scheduler must load NPI with the absolute protocol path") && ok;
     ok = Expect(!PluginSpec(scheduler_plugins, kPcapFilePlugin).empty(),
                 "Scheduler must load the pcapfile provider") &&
+         ok;
+    ok = Expect(!PluginSpec(scheduler_plugins, kNpmBasicPlugin).empty(),
+                "Scheduler must load the npm.basic provider") &&
+         ok;
+    ok = Expect(PluginOption(scheduler_plugins, kNpmBasicPlugin).empty(),
+                "Docker npm.basic must not receive an option") &&
+         ok;
+    const size_t npi_index = scheduler_plugins.find(kNpiPlugin);
+    const size_t pcapfile_index = scheduler_plugins.find(kPcapFilePlugin);
+    const size_t npm_basic_index = scheduler_plugins.find(kNpmBasicPlugin);
+    const size_t scheduler_index = scheduler_plugins.find(kSchedulerPlugin);
+    ok = Expect(npi_index < pcapfile_index && pcapfile_index < npm_basic_index &&
+                    npm_basic_index < scheduler_index && scheduler_index != std::string::npos,
+                "Docker must load NPI, pcapfile and npm.basic before Scheduler in dependency order") &&
          ok;
     ok = Expect(pcapfile_option == std::string("db_path=") + kPcapFileDbPath,
                 "Docker pcapfile metadata must persist inside the capture named volume") &&

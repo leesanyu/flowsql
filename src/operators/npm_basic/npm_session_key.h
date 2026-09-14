@@ -1,8 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#ifndef _FLOWSQL_PLUGINS_NPM_BASIC_NPM_SESSION_KEY_H_
-#define _FLOWSQL_PLUGINS_NPM_BASIC_NPM_SESSION_KEY_H_
+#ifndef _FLOWSQL_OPERATORS_NPM_BASIC_NPM_SESSION_KEY_H_
+#define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_SESSION_KEY_H_
 
 #include "npm_analysis_contract.h"
 
@@ -53,4 +53,4 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
 
 }  // namespace flowsql::npm
 
-#endif  // _FLOWSQL_PLUGINS_NPM_BASIC_NPM_SESSION_KEY_H_
+#endif  // _FLOWSQL_OPERATORS_NPM_BASIC_NPM_SESSION_KEY_H_

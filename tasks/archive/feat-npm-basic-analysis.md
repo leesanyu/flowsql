@@ -1,24 +1,26 @@
 # Feature: NPM 基础分析与模块组合
 
-状态：`[-]` 实施中，T0～T2、T3.1～T3.3、T3.4.1～T3.4.3.1 已完成，T3.4.3.2 待开始；
+状态：`[x]` 已完成；离线生产能力与实时任务内引擎已交付，生产实时接线归后续 Feature；
 优先级：P0。
 前置：[packet 契约](../archive/feat-npm-packet-contract.md)、[阶段化管线](../archive/feat-stage-filter-pipeline.md)。
-后续：`npm-session-analysis`、`npm-protocol-analysis`。
-生产实时完整链路依赖：`stream-time-drive`、`npm-capture-contract`、`npm-result-query`；基础引擎可先用模拟持续源验收。
+后续：`npm-basic-realtime-integration`、`npm-session-analysis`、`npm-protocol-analysis`。
+生产实时接线归 `npm-basic-realtime-integration`，依赖本 Feature、`stream-time-drive` 与
+`npm-capture-contract`；实时结果持久化/最新版本查询归 `npm-result-query`。
 
 ## Non-Goals
 
 - 本 Feature 不实现 RTT/重传等性能算法、TCP/IP 重组、应用交易解析、完整报文或正文存储。
 - 不新增全局模块框架、第二套插件加载器、任意模块 DAG、异步分支、热插拔或多结果表输出。
 - 不实现实时采集后端、多核执行器或无限保留的内存结果表；时间驱动扩展由独立框架 Feature 提供。
+- 不把模拟维护入口接入生产 Scheduler/source；生产实时 SQL 由后续 `npm-basic-realtime-integration` 交付。
 - 不通过 `basic(raw) → session(raw) → protocol(raw)` 传递并长期保留原始包；不修改既有框架 ABI。
 - 首版会话结果覆盖可安全提取端点的 TCP/UDP；其他协议、缺少完整传输头的分片及畸形包不生成会话行。
   不实现隧道身份提取；遇到无法区分隧道上下文的封装流量明确报错，不按内层五元组合并。
 
 ## 业务意图与讨论结论
 
-以 `npm.basic` 统一消费离线/实时 packet，在一个任务内完成会话归属、有限采样识别、基础统计和模块调用。
-按能力与配置选择运行策略，不按通道名分支；离线 EOF 立即收口，实时输出依赖后续时间驱动能力。
+以 `npm.basic` 任务内引擎统一处理离线/实时 packet 的会话归属、有限采样识别、基础统计和模块调用。
+本 Feature 交付离线生产 provider，并用模拟时间/采集事实验证实时引擎；生产实时接线由后续 Feature 完成。
 
 | 层次/Feature | 职责与依赖 |
 | --- | --- |
@@ -113,7 +115,8 @@ owner。模块创建时注入任务级 `INpmTaskBudget`，私有状态按 `kModu
 
 包时间用于指标，单调时钟用于调度。实时 Open 必须具备单调时间、采集进度、源空闲确认和积压状态；缺少
 任一能力即拒绝，Poll timeout 不冒充进度。版本化通知由 `stream-time-drive` 提供，源事实由
-`npm-capture-contract` 提供；`eof` 仅表示输入结束，不表示 TCP 正常关闭。
+`npm-capture-contract` 提供，`npm-basic-realtime-integration` 负责生产适配；`eof` 仅表示输入结束，
+不表示 TCP 正常关闭。
 
 ### 输出与内存
 
@@ -145,8 +148,9 @@ owner。模块创建时注入任务级 `INpmTaskBudget`，私有状态按 `kModu
 
 1. **离线**：Open → packet 批次内会话归属/计数/采样识别/模块回调 → 按事件时间维护 → 返回精简结果，
    释放输入 → EOF 立即 Flush 剩余会话（`end_reason=eof`）→ 排空结果并完成，不等待会话自然超时。
-2. **在线**：Open 校验持续源及时间驱动能力 → 同样的 packet 处理 → 无包/繁忙时均串行检查定时维护，
-   输出带版本的快照并继续采集 → 源正常结束时按 EOF 收口；Cancel/错误直接异常清理，不做正常 Flush。
+2. **生产在线（后续接线必须满足）**：Open 校验持续源及时间驱动能力 → 同样的 packet 处理 → 无包/繁忙时
+   均串行检查定时维护，输出带版本的快照并继续采集 → 源正常结束时按 EOF 收口；Cancel/错误直接异常清理，
+   不做正常 Flush。
 
 协议过滤作用于算子结果，不下推到原包以免丢失识别前的会话数据；周期模式过滤的是各版本快照。
 
@@ -173,7 +177,7 @@ WHERE protocol = 'HTTP' INTO dataframe.basic_metrics`（映射值需与实际输
   - `[x]` T2.2 接入真实 NPI 与词典
     - `[x]` T2.2.1 实现版本化 pipeline pool 和独占租约。
     - `[x]` T2.2.2 实现按 IID 获取的任务级 RAII 协议上下文。
-- `[ ]` T3 算子与有界输出
+- `[x]` T3 算子与有界输出
   - `[x]` T3.1 实现固定 Packet RecordBatch 借用解码。
   - `[x]` T3.2 实现 Basic 结果投影与 Arrow 编码
     - `[x]` T3.2.1 投影会话、协议标签和 revision。
@@ -187,21 +191,33 @@ WHERE protocol = 'HTTP' INTO dataframe.basic_metrics`（映射值需与实际输
     - `[x]` T3.3.3 统一结果收集与 EOF 排空
       - `[x]` T3.3.3.1 收集模块/基础结果并统一预算化编码。
       - `[x]` T3.3.3.2 单次 EOF Flush 和终态约束。
-  - `[ ]` T3.4 完成 `npm.basic` 离线 provider
+  - `[x]` T3.4 完成 `npm.basic` 离线 provider
     - `[x]` T3.4.1 解析并复制 `WITH` 任务配置。
     - `[x]` T3.4.2 创建固定 Schema 和任务私有 Open runtime
       - `[x]` T3.4.2.1 创建共享、线程安全的任务预算账本。
       - `[x]` T3.4.2.2 原子聚合 NPI、会话、结果和 EOF 资源；不含处理期预算接线。
-    - `[ ]` T3.4.3 完成处理期预算与离线 Process/Flush runtime
+    - `[x]` T3.4.3 完成处理期预算与离线 Process/Flush runtime
       - `[x]` T3.4.3.1 将活动会话/deadline 接入共享 `kSessionState` 预算。
-      - `[ ]` T3.4.3.2 按实际 Arrow 字节借用输入并处理、排空一个离线 batch。
-      - `[ ]` T3.4.3.3 将正常 EOF 接入 runtime，失败不得伪装完整或重试。
-    - `[ ]` T3.4.4 实现并发 Cancel、稳定 LastError 和资源终结。
-    - `[ ]` T3.4.5 接入完整 task/provider 与生产插件
-      - `[ ]` T3.4.5.1 接入五个完整 task 方法、配置复制和 provider owner。
-      - `[ ]` T3.4.5.2 注册 IID、生成 `.so` 并验证插件生命周期。
-  - `[ ]` T3.5 接入版本化时间驱动与周期快照；依赖 `stream-time-drive` 和 `npm-capture-contract`。
-- `[ ]` T4 集成收口：离线 SQL、实时模拟、任务隔离、慢 sink/预算、性能基线、文档及全量回归。
+      - `[x]` T3.4.3.2 按实际 Arrow 字节借用输入并处理、排空一个离线 batch。
+      - `[x]` T3.4.3.3 将正常 EOF 接入 runtime，失败不得伪装完整或重试。
+    - `[x]` T3.4.4 实现并发 Cancel、稳定 LastError 和资源终结。
+    - `[x]` T3.4.5 接入完整 task/provider 与生产插件
+      - `[x]` T3.4.5.1 接入五个完整 task 方法、配置复制和 provider owner。
+      - `[x]` T3.4.5.2 注册 IID、生成 `.so` 并验证插件生命周期。
+  - `[x]` T3.5 实现版本化实时引擎原语与模拟时间验收
+    - `[x]` T3.5.1 输出稳定有序的活动会话借用视图。
+    - `[x]` T3.5.2 以模拟时间和采集事实驱动周期维护与版本化输出。
+- `[x]` T4 集成收口
+  - `[x]` T4.1 验证 pcapfile → npm.basic → dataframe 离线 SQL 主链路。
+  - `[x]` T4.2 验证实时模拟、任务隔离及慢 sink/预算边界。
+  - `[x]` T4.3 完成性能基线、文档、标准部署接线与 Feature 全量回归。
 
-实施期只运行当前叶子的 `test_npm_basic`；Feature 收口才执行全量构建和完整 CTest。实时采集后端、持久化和
-多核执行分别归 `npm-capture-contract`、`npm-result-query` 与后续 Feature，不在 T3/T4 内补做。
+实施期只运行 `active_task.md` 冻结的定向 target；Feature 收口才执行全量构建和完整 CTest。生产实时适配、
+实时采集后端、持久化和多核执行分别归 `npm-basic-realtime-integration`、`npm-capture-contract`、
+`npm-result-query` 与后续 Feature，不在 T3/T4 内补做。
+
+## 完成证据
+
+- 默认基准处理 51,200 包并产生 51,200 行；吞吐仅作机器相关观测，不作为跨环境门槛。
+- 完整构建零 Error，CTest 13/13 通过；离线 Scheduler E2E 和三套标准部署契约均已覆盖。
+- 生产实时适配未混入本 Feature，由 `npm-basic-realtime-integration` 在两个前置 Feature 完成后交付。

@@ -15,6 +15,8 @@ namespace {
 constexpr const char* kUploadRoot = "/tmp/flowsql/uploads";
 constexpr const char* kNpiPlugin = "libflowsql_npi.so";
 constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
+constexpr const char* kNpmBasicPlugin = "libflowsql_npm_basic.so";
+constexpr const char* kSchedulerPlugin = "libflowsql_scheduler.so";
 constexpr const char* kNpiOption = "{\"ldfile\":\"./config/protocols.yml\"}";
 constexpr const char* kPcapFileOption = "db_path=./meta/flowsql_meta.db";
 
@@ -61,6 +63,28 @@ bool ExpectSchedulerProviders(const flowsql::gateway::ServiceConfig& service, co
                     deployment + " pcapfile must persist in the runtime meta database") &&
              ok;
     }
+    const std::string* npm_basic = FindPlugin(service, kNpmBasicPlugin);
+    ok = Expect(npm_basic != nullptr,
+                deployment + " Scheduler process must load the npm.basic provider") &&
+         ok;
+    if (npm_basic) {
+        ok = Expect(PluginOption(*npm_basic).empty(), deployment + " npm.basic must not receive an option") && ok;
+    }
+    const auto plugin_index = [&](const char* library) {
+        return static_cast<size_t>(std::distance(
+            service.plugins.begin(),
+            std::find_if(service.plugins.begin(), service.plugins.end(), [&](const auto& plugin) {
+                return plugin == library || plugin.rfind(std::string(library) + ":", 0) == 0;
+            })));
+    };
+    const size_t npi_index = plugin_index(kNpiPlugin);
+    const size_t pcapfile_index = plugin_index(kPcapFilePlugin);
+    const size_t npm_basic_index = plugin_index(kNpmBasicPlugin);
+    const size_t scheduler_index = plugin_index(kSchedulerPlugin);
+    ok = Expect(npi_index < pcapfile_index && pcapfile_index < npm_basic_index &&
+                    npm_basic_index < scheduler_index && scheduler_index < service.plugins.size(),
+                deployment + " must load NPI, pcapfile and npm.basic before Scheduler in dependency order") &&
+         ok;
     return ok;
 }
 
@@ -153,6 +177,9 @@ bool TestStartScriptRuntimeLayout() {
          ok;
     ok = Expect(std::filesystem::is_regular_file(runtime_root / "config/protocols.yml"),
                 "start.sh runtime must contain the staged NPI protocol definition") &&
+         ok;
+    ok = Expect(std::filesystem::is_regular_file(runtime_root / kNpmBasicPlugin),
+                "start.sh runtime must contain the npm.basic provider") &&
          ok;
     return ok;
 }

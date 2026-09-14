@@ -371,6 +371,73 @@ INTO dataframe.dns_pair
 pcapfile 过滤只做链路层/网络层/传输层 Layer 解码，不执行应用协议识别；不支持 payload 内容、正则、BPF/
 tcpdump 语法，也不代表 TCP stream、重组、会话或客户端/服务端方向分析。
 
+### npm.basic 离线会话基础分析
+
+`npm.basic` 消费固定 Packet RecordBatch，对端点完整的 TCP/UDP 进行双向会话归属、基础计数和有限 payload
+采样识别，输出会话结果，不保留 `raw_data`；它不提供 RTT/重传算法、TCP 重组或应用交易解析。不能区分隧道
+上下文的封装流量会明确报错，不按内层五元组合并。
+
+部署前必须在 Scheduler **同一进程**加载 `libflowsql_npi.so`、`libflowsql_pcapfile.so` 和
+`libflowsql_npm_basic.so`。NPI 的 JSON option 必须包含指向可读协议词典的 `ldfile`，例如原生运行目录中的
+`{"ldfile":"./config/protocols.yml"}`，Docker 中为 `/opt/flowsql/config/protocols.yml`。
+仓库提供的原生单进程、Guardian 和 Docker Scheduler 配置均已默认加载上述三个插件，可直接执行以下离线
+SQL；自定义部署也必须保持三个插件位于同一 Scheduler 进程。
+
+对已经创建或上传的离线通道执行：
+
+```sql
+SELECT *
+FROM pcapfile.capture
+USING npm.basic
+WITH input_namespace='pcapfile.capture',
+     source_domains='0:7'
+INTO dataframe.basic_metrics
+```
+
+`input_namespace` 和 `source_domains` 必填。后者为十进制 `source_id:observation_domain_id` 显式映射，以分号
+分隔，例如 `'0:7;1:7;2:8'`：接口 0、1 归同一观测域，接口 2 隔离。映射必须覆盖实际输入的 source ID；
+未知来源报错，不按队列号或哈希自动生成观测域。不同 namespace 或观测域的相同五元组不会合并。
+默认 `run_mode='offline'`、`result_mode='final'`；其他配置及范围见
+[NPM 基础分析契约](tasks/archive/feat-npm-basic-analysis.md#核心契约)。
+
+输出是固定 22 列 `npm_basic_result`，包括 session ID、规范化 A/B 端点、起止时间、双向包数/wire bytes、
+识别状态及协议 ID/名称、`revision`、`observed_at`、`is_final` 和 `end_reason`，不包含原始包。
+metadata 为 `flowsql.entity=npm_basic_result`、`flowsql.schema_version=1`、`flowsql.timestamp_unit=ns`；
+结果中的时间均为 Unix epoch 纳秒。最终行不再是 `pending`；`unknown` 的协议 ID/名称为空。
+`session_id` 只在任务内唯一，跨任务关联需结合任务标识；同一任务/会话的多个 revision 是累计快照，不能
+直接求和，最新版本查询及持久化归后续 `npm-result-query`。
+
+离线正常 EOF 立即结束剩余会话并排空结果，不等待 idle timeout。最终 `end_reason` 明确区分 `closed`、
+`idle_timeout`、`tuple_reuse` 和 `eof`；`eof` 不代表 TCP 正常关闭。取消或读取错误只异常清理，不输出伪装
+完整的正常 EOF 结果。协议条件应放在 `USING npm.basic ... WITH ...` 后的结果阶段，例如
+`WHERE protocol = 'HTTP'`，不能用原包预过滤代替会话识别而丢失识别前计数。
+
+生产实时 SQL 尚不可用：周期维护、revision 和慢 sink 预算已通过模拟 runtime 测试，但生产时间通知与采集
+事实接线仍等待 `stream-time-drive` 和 `npm-capture-contract`。模拟时间入口不是生产实时能力。
+
+#### 基础引擎性能基线
+
+```bash
+cmake -B build src
+cmake --build build --target benchmark_npm_basic -j$(nproc)
+build/output/benchmark_npm_basic          # 默认 512 行 × 100 次
+build/output/benchmark_npm_basic 1024 100 # 可指定批大小与次数
+```
+
+基准动态加载真实 NPI/Basic 插件，先通过现有 source-stage Layer decoder 构造已解码的完整
+Ethernet/IPv4/TCP RST 批次并重复消费，每包生成一个 `closed` 最终会话。
+计时包含 `ProcessBlock`、结果正确性检查和输出 owner 释放，不包含输入编码、插件加载、Open、预热和 EOF。
+空 payload 不调用协议识别，source-stage Layer 解码也在计时外，因此该数值只是借用已缓存层路径、会话
+创建终结和 Arrow 输出基线，不代表 Layer 解码、应用识别、长期活动会话、PCAP 文件 I/O、Scheduler 或
+DataFrame 落盘吞吐。程序在插件日志后输出固定列 CSV：
+
+```text
+packets,batch_rows,iterations,wall_ms,packets_per_second,output_rows
+```
+
+行数、session ID、最终 revision/结束语义或 Schema 校验失败时返回非零；机器相关吞吐不设硬阈值，也不加入
+CTest。比较结果时应保持相同机器、编译配置和输入规模。
+
 ## SQL 任务能力矩阵（当前）
 
 | 任务类型 | SQL 数量 | 当前支持 | 提交入口 | 关键约束 | 未来规划 |

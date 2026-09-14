@@ -70,18 +70,28 @@ using namespace flowsql;
 
 class SchedulerE2eProtocol final : public IProtocol {
  public:
-    void Concurrency(int32_t) override {}
-    protocol::Protocol Identify(int32_t, const uint8_t*, int32_t, const protocol::Layers*) override {
-        ++identify_calls;
-        return {};
+    void Concurrency(int32_t number) override {
+        if (delegate_) delegate_->Concurrency(number);
     }
-    int32_t Layer(int32_t, const uint8_t* data, int32_t size, protocol::Layers* layers) override {
+    protocol::Protocol Identify(int32_t pipeno,
+                                const uint8_t* data,
+                                int32_t size,
+                                const protocol::Layers* layers) override {
+        ++identify_calls;
+        return delegate_ ? delegate_->Identify(pipeno, data, size, layers) : protocol::Protocol{};
+    }
+    int32_t Layer(int32_t pipeno, const uint8_t* data, int32_t size, protocol::Layers* layers) override {
         ++layer_calls;
         if (!data || size <= 0 || !layers) return -1;
+        if (delegate_) return delegate_->Layer(pipeno, data, size, layers);
         *layers = {};
         return 0;
     }
-    protocol::IDictionary* Dictionary() override { return nullptr; }
+    protocol::IDictionary* Dictionary() override {
+        return delegate_ ? delegate_->Dictionary() : nullptr;
+    }
+
+    void SetDelegate(IProtocol* delegate) { delegate_ = delegate; }
 
     void Reset() {
         layer_calls = 0;
@@ -90,6 +100,9 @@ class SchedulerE2eProtocol final : public IProtocol {
 
     int layer_calls = 0;
     int identify_calls = 0;
+
+ private:
+    IProtocol* delegate_ = nullptr;
 };
 
 class SchedulerE2eBlockOperator final : public IBlockStreamOperator {
@@ -441,6 +454,59 @@ static std::vector<uint8_t> MakeSchedulerE2ePcap(bool truncate_last_packet) {
         2, truncate_last_packet ? std::vector<uint8_t>{5}
                                 : std::vector<uint8_t>{5, 6, 7, 8});
     return bytes;
+}
+
+static std::vector<uint8_t> MakeSchedulerE2eTcpRstPacket() {
+    return {
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0x08, 0x00,
+        0x45, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x40, 0x06, 0x00, 0x00, 0xc0, 0x00,
+        0x02, 0x01, 0xc6, 0x33, 0x64, 0x02, 0xa0, 0x28, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x68,
+        0x00, 0x00, 0x00, 0x00, 0x50, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+}
+
+static void AssertSchedulerE2eNpmBasicSchema(const std::shared_ptr<arrow::Schema>& schema) {
+    struct ExpectedField {
+        const char* name;
+        arrow::Type::type type;
+        bool nullable;
+    };
+    const std::vector<ExpectedField> expected = {
+        {"session_id", arrow::Type::UINT64, false},
+        {"observation_domain_id", arrow::Type::UINT64, false},
+        {"revision", arrow::Type::UINT64, false},
+        {"observed_at", arrow::Type::INT64, false},
+        {"is_final", arrow::Type::BOOL, false},
+        {"ip_family", arrow::Type::UINT8, false},
+        {"transport_protocol", arrow::Type::UINT8, false},
+        {"a_ip", arrow::Type::STRING, false},
+        {"b_ip", arrow::Type::STRING, false},
+        {"a_port", arrow::Type::UINT16, false},
+        {"b_port", arrow::Type::UINT16, false},
+        {"first_ns", arrow::Type::INT64, false},
+        {"last_ns", arrow::Type::INT64, false},
+        {"packets_ab", arrow::Type::UINT64, false},
+        {"packets_ba", arrow::Type::UINT64, false},
+        {"wire_bytes_ab", arrow::Type::UINT64, false},
+        {"wire_bytes_ba", arrow::Type::UINT64, false},
+        {"protocol_status", arrow::Type::STRING, false},
+        {"protocol_id", arrow::Type::UINT16, true},
+        {"protocol_sub_id", arrow::Type::UINT16, true},
+        {"protocol", arrow::Type::STRING, true},
+        {"end_reason", arrow::Type::STRING, true},
+    };
+    ASSERT_TRUE(schema != nullptr);
+    ASSERT_EQ(schema->num_fields(), static_cast<int>(expected.size()));
+    for (size_t index = 0; index < expected.size(); ++index) {
+        const auto& actual = schema->field(static_cast<int>(index));
+        ASSERT_EQ(actual->name(), expected[index].name);
+        ASSERT_EQ(actual->type()->id(), expected[index].type);
+        ASSERT_EQ(actual->nullable(), expected[index].nullable);
+    }
+    ASSERT_TRUE(schema->metadata() != nullptr);
+    ASSERT_EQ(schema->metadata()->Get("flowsql.entity").ValueOrDie(), "npm_basic_result");
+    ASSERT_EQ(schema->metadata()->Get("flowsql.schema_version").ValueOrDie(), "1");
+    ASSERT_EQ(schema->metadata()->Get("flowsql.timestamp_unit").ValueOrDie(), "ns");
 }
 
 static void WriteSchedulerE2eBinary(const std::filesystem::path& path,
@@ -967,6 +1033,8 @@ int main() {
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_pcap_nano_" + suffix + ".pcap");
     const std::filesystem::path pcapng_offset =
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_pcapng_offset_" + suffix + ".pcapng");
+    const std::filesystem::path pcap_npm_basic =
+        std::filesystem::temp_directory_path() / ("flowsql_scheduler_npm_basic_" + suffix + ".pcap");
     std::filesystem::remove(db_path);
     std::filesystem::remove(stream_cfg);
     std::filesystem::remove(stream_meta_db);
@@ -975,6 +1043,7 @@ int main() {
     std::filesystem::remove(pcap_micro);
     std::filesystem::remove(pcap_nano);
     std::filesystem::remove(pcapng_offset);
+    std::filesystem::remove(pcap_npm_basic);
     std::filesystem::create_directories(data_dir);
     std::filesystem::create_directories(operator_db_dir);
     WriteSchedulerE2eBinary(pcap_ok, MakeSchedulerE2ePcap(false));
@@ -1001,6 +1070,9 @@ int main() {
             {{3500000000ULL, {0x51, 0x51, 0x51, 0x51}},
              {3123456789ULL, {0x52, 0x52, 0x52, 0x52}},
              {4500000000ULL, {0x53, 0x53, 0x53, 0x53}}}));
+    WriteSchedulerE2eBinary(
+        pcap_npm_basic,
+        MakeSchedulerE2eClassicCapture(false, {{1, 0, MakeSchedulerE2eTcpRstPacket()}}));
 
     {
         std::ofstream out(stream_cfg);
@@ -1045,14 +1117,32 @@ int main() {
     loader->Regist(IID_BLOCK_STREAM_OPERATOR, &block_operator);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &packet_transform);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &passthrough_transform);
-    const char* libs[] = {"libflowsql_database.so", "libflowsql_builtin.so", "libflowsql_catalog.so",
-                          "libflowsql_pcapfile.so", "libflowsql_scheduler.so", "libflowsql_stream.so"};
+    const char* libs[] = {
+        "libflowsql_database.so", "libflowsql_builtin.so",   "libflowsql_catalog.so",
+        "libflowsql_npi.so",      "libflowsql_pcapfile.so",  "libflowsql_npm_basic.so",
+        "libflowsql_scheduler.so", "libflowsql_stream.so",
+    };
     std::string db_opt = "type=sqlite;name=local;path=" + db_path.string();
     std::string catalog_opt = "data_dir=" + data_dir.string() + ";operator_db_dir=" + operator_db_dir.string();
+    std::string npi_opt =
+        std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\",\"concurrency\":2}";
     std::string stream_opt = "config_file=" + stream_cfg.string() + ";db_path=" + stream_meta_db.string();
-    const char* opts[] = {db_opt.c_str(), nullptr, catalog_opt.c_str(), nullptr, nullptr, stream_opt.c_str()};
-    ASSERT_EQ(loader->Load(get_absolute_process_path(), libs, opts, 6), 0);
+    const char* opts[] = {db_opt.c_str(),      nullptr, catalog_opt.c_str(), npi_opt.c_str(),
+                          nullptr,             nullptr, nullptr,             stream_opt.c_str()};
+    ASSERT_EQ(loader->Load(get_absolute_process_path(), libs, opts, 8), 0);
     std::puts("[INFO] plugins loaded");
+
+    IProtocol* npi_protocol = nullptr;
+    loader->Traverse(IID_PROTOCOL, [&](void* value) {
+        auto* candidate = static_cast<IProtocol*>(value);
+        if (candidate != &pcap_protocol) {
+            npi_protocol = candidate;
+            return -1;
+        }
+        return 0;
+    });
+    ASSERT_TRUE(npi_protocol != nullptr);
+    pcap_protocol.SetDelegate(npi_protocol);
     ASSERT_EQ(loader->StartAll(), 0);
     std::puts("[INFO] plugins started");
 
@@ -1382,6 +1472,130 @@ int main() {
                   error::OK);
         ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
     }
+    // npm-basic-analysis T4.1: real pcapfile -> npm.basic -> dataframe.
+    {
+        const std::string channel_name = "scheduler_npm_basic";
+        const std::string dataframe_name = "scheduler_npm_basic";
+        std::string rsp;
+        ASSERT_EQ(stream_add("/channels/stream/add",
+                             MakePcapSourceAddRequest(channel_name, pcap_npm_basic),
+                             rsp),
+                  error::OK);
+
+        pcap_protocol.Reset();
+        const std::string input_namespace = "pcapfile." + channel_name;
+        const std::string sql =
+            "SELECT * FROM " + input_namespace +
+            " USING npm.basic WITH input_namespace='" + input_namespace +
+            "',source_domains='0:77' INTO dataframe." + dataframe_name;
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
+
+        rapidjson::Document completed;
+        completed.Parse(rsp.c_str());
+        ASSERT_TRUE(!completed.HasParseError() && completed.IsObject());
+        ASSERT_TRUE(completed.HasMember("status") && completed["status"].IsString());
+        ASSERT_EQ(std::string(completed["status"].GetString()), "completed");
+        ASSERT_TRUE(completed.HasMember("rows") && completed["rows"].IsInt64());
+        ASSERT_EQ(completed["rows"].GetInt64(), 1);
+        ASSERT_TRUE(completed.HasMember("result_row_count") &&
+                    completed["result_row_count"].IsInt64());
+        ASSERT_EQ(completed["result_row_count"].GetInt64(), 1);
+        ASSERT_TRUE(completed.HasMember("result_target") &&
+                    completed["result_target"].IsString());
+        ASSERT_EQ(std::string(completed["result_target"].GetString()),
+                  "dataframe." + dataframe_name);
+        ASSERT_EQ(pcap_protocol.layer_calls, 1);
+
+        auto output = std::dynamic_pointer_cast<IDataFrameChannel>(
+            registry->Get(dataframe_name.c_str()));
+        ASSERT_TRUE(output != nullptr);
+        DataFrame result;
+        ASSERT_EQ(output->Read(&result), 0);
+        const auto batch = result.ToArrow();
+        ASSERT_TRUE(batch != nullptr);
+        ASSERT_EQ(batch->num_rows(), 1);
+        AssertSchedulerE2eNpmBasicSchema(batch->schema());
+
+        const auto session_id = std::dynamic_pointer_cast<arrow::UInt64Array>(
+            batch->GetColumnByName("session_id"));
+        const auto domain = std::dynamic_pointer_cast<arrow::UInt64Array>(
+            batch->GetColumnByName("observation_domain_id"));
+        const auto revision = std::dynamic_pointer_cast<arrow::UInt64Array>(
+            batch->GetColumnByName("revision"));
+        const auto observed_at = std::dynamic_pointer_cast<arrow::Int64Array>(
+            batch->GetColumnByName("observed_at"));
+        const auto is_final = std::dynamic_pointer_cast<arrow::BooleanArray>(
+            batch->GetColumnByName("is_final"));
+        const auto ip_family = std::dynamic_pointer_cast<arrow::UInt8Array>(
+            batch->GetColumnByName("ip_family"));
+        const auto transport = std::dynamic_pointer_cast<arrow::UInt8Array>(
+            batch->GetColumnByName("transport_protocol"));
+        ASSERT_TRUE(session_id && domain && revision && observed_at && is_final && ip_family && transport);
+        ASSERT_EQ(session_id->Value(0), 1);
+        ASSERT_EQ(domain->Value(0), 77);
+        ASSERT_EQ(revision->Value(0), 1);
+        ASSERT_EQ(observed_at->Value(0), 1'000'000'000);
+        ASSERT_TRUE(is_final->Value(0));
+        ASSERT_EQ(ip_family->Value(0), 4);
+        ASSERT_EQ(transport->Value(0), 6);
+
+        const auto a_ip = std::dynamic_pointer_cast<arrow::StringArray>(
+            batch->GetColumnByName("a_ip"));
+        const auto b_ip = std::dynamic_pointer_cast<arrow::StringArray>(
+            batch->GetColumnByName("b_ip"));
+        const auto a_port = std::dynamic_pointer_cast<arrow::UInt16Array>(
+            batch->GetColumnByName("a_port"));
+        const auto b_port = std::dynamic_pointer_cast<arrow::UInt16Array>(
+            batch->GetColumnByName("b_port"));
+        const auto first_ns = std::dynamic_pointer_cast<arrow::Int64Array>(
+            batch->GetColumnByName("first_ns"));
+        const auto last_ns = std::dynamic_pointer_cast<arrow::Int64Array>(
+            batch->GetColumnByName("last_ns"));
+        ASSERT_TRUE(a_ip && b_ip && a_port && b_port && first_ns && last_ns);
+        ASSERT_EQ(a_ip->GetString(0), "192.0.2.1");
+        ASSERT_EQ(b_ip->GetString(0), "198.51.100.2");
+        ASSERT_EQ(a_port->Value(0), 41000);
+        ASSERT_EQ(b_port->Value(0), 443);
+        ASSERT_EQ(first_ns->Value(0), 1'000'000'000);
+        ASSERT_EQ(last_ns->Value(0), 1'000'000'000);
+
+        const auto packets_ab = std::dynamic_pointer_cast<arrow::UInt64Array>(
+            batch->GetColumnByName("packets_ab"));
+        const auto packets_ba = std::dynamic_pointer_cast<arrow::UInt64Array>(
+            batch->GetColumnByName("packets_ba"));
+        const auto wire_bytes_ab = std::dynamic_pointer_cast<arrow::UInt64Array>(
+            batch->GetColumnByName("wire_bytes_ab"));
+        const auto wire_bytes_ba = std::dynamic_pointer_cast<arrow::UInt64Array>(
+            batch->GetColumnByName("wire_bytes_ba"));
+        const auto protocol_status = std::dynamic_pointer_cast<arrow::StringArray>(
+            batch->GetColumnByName("protocol_status"));
+        const auto protocol_id = std::dynamic_pointer_cast<arrow::UInt16Array>(
+            batch->GetColumnByName("protocol_id"));
+        const auto protocol_sub_id = std::dynamic_pointer_cast<arrow::UInt16Array>(
+            batch->GetColumnByName("protocol_sub_id"));
+        const auto protocol_name = std::dynamic_pointer_cast<arrow::StringArray>(
+            batch->GetColumnByName("protocol"));
+        const auto end_reason = std::dynamic_pointer_cast<arrow::StringArray>(
+            batch->GetColumnByName("end_reason"));
+        ASSERT_TRUE(packets_ab && packets_ba && wire_bytes_ab && wire_bytes_ba && protocol_status &&
+                    protocol_id && protocol_sub_id && protocol_name && end_reason);
+        ASSERT_EQ(packets_ab->Value(0), 1);
+        ASSERT_EQ(packets_ba->Value(0), 0);
+        ASSERT_EQ(wire_bytes_ab->Value(0), MakeSchedulerE2eTcpRstPacket().size());
+        ASSERT_EQ(wire_bytes_ba->Value(0), 0);
+        ASSERT_EQ(protocol_status->GetString(0), "unknown");
+        ASSERT_TRUE(protocol_id->IsNull(0));
+        ASSERT_TRUE(protocol_sub_id->IsNull(0));
+        ASSERT_TRUE(protocol_name->IsNull(0));
+        ASSERT_EQ(end_reason->GetString(0), "closed");
+
+        ASSERT_EQ(stream_remove("/channels/stream/remove",
+                                MakePcapSourceRemoveRequest(channel_name),
+                                rsp),
+                  error::OK);
+        ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
+    }
+    std::puts("[PASS] npm-basic-analysis offline SQL E2E");
     {
         const std::string channel_name = "scheduler_pcap_error";
         std::string rsp;
@@ -4499,6 +4713,7 @@ int main() {
     std::filesystem::remove(pcap_micro);
     std::filesystem::remove(pcap_nano);
     std::filesystem::remove(pcapng_offset);
+    std::filesystem::remove(pcap_npm_basic);
     std::filesystem::remove_all(data_dir);
     std::filesystem::remove_all(operator_db_dir);
 

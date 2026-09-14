@@ -1,8 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#ifndef _FLOWSQL_PLUGINS_NPM_BASIC_NPM_ANALYSIS_CONTRACT_H_
-#define _FLOWSQL_PLUGINS_NPM_BASIC_NPM_ANALYSIS_CONTRACT_H_
+#ifndef _FLOWSQL_OPERATORS_NPM_BASIC_NPM_ANALYSIS_CONTRACT_H_
+#define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_ANALYSIS_CONTRACT_H_
 
 #include <common/typedef.h>
 #include <framework/interfaces/ipacket.h>
@@ -292,4 +292,4 @@ NpmTimeCapabilityError ValidateNpmTimeCapabilities(const NpmAnalysisConfig& conf
 
 }  // namespace flowsql::npm
 
-#endif  // _FLOWSQL_PLUGINS_NPM_BASIC_NPM_ANALYSIS_CONTRACT_H_
+#endif  // _FLOWSQL_OPERATORS_NPM_BASIC_NPM_ANALYSIS_CONTRACT_H_

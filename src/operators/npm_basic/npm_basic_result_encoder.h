@@ -1,8 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#ifndef _FLOWSQL_PLUGINS_NPM_BASIC_NPM_BASIC_RESULT_ENCODER_H_
-#define _FLOWSQL_PLUGINS_NPM_BASIC_NPM_BASIC_RESULT_ENCODER_H_
+#ifndef _FLOWSQL_OPERATORS_NPM_BASIC_NPM_BASIC_RESULT_ENCODER_H_
+#define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_BASIC_RESULT_ENCODER_H_
 
 #include "npm_analysis_contract.h"
 
@@ -42,4 +42,4 @@ NpmBasicEncodeError EncodeNpmBasicResultsWithBudget(
 
 }  // namespace flowsql::npm
 
-#endif  // _FLOWSQL_PLUGINS_NPM_BASIC_NPM_BASIC_RESULT_ENCODER_H_
+#endif  // _FLOWSQL_OPERATORS_NPM_BASIC_NPM_BASIC_RESULT_ENCODER_H_

@@ -100,7 +100,7 @@ target_compile_definitions(test_native_deploy_config PRIVATE
     FLOWSQL_NPI_PROTOCOLS_OUTPUT_PATH="${CMAKE_BINARY_DIR}/output/config/protocols.yml"
 )
 target_compile_options(test_native_deploy_config PRIVATE -UNDEBUG)
-add_dependencies(test_native_deploy_config flowsql)
+add_dependencies(test_native_deploy_config flowsql flowsql_npm_basic)
 set_target_properties(test_native_deploy_config PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
@@ -123,6 +123,7 @@ add_dependencies(test_docker_deploy_config
     flowsql_bridge
     flowsql_database
     flowsql_npi
+    flowsql_npm_basic
     flowsql_pcapfile
 )
 set_target_properties(test_docker_deploy_config PROPERTIES

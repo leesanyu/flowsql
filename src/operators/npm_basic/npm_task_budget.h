@@ -1,8 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#ifndef _FLOWSQL_PLUGINS_NPM_BASIC_NPM_TASK_BUDGET_H_
-#define _FLOWSQL_PLUGINS_NPM_BASIC_NPM_TASK_BUDGET_H_
+#ifndef _FLOWSQL_OPERATORS_NPM_BASIC_NPM_TASK_BUDGET_H_
+#define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_TASK_BUDGET_H_
 
 #include "npm_analysis_contract.h"
 
@@ -32,4 +32,4 @@ class NpmTaskBudget final : public INpmTaskBudget {
 
 }  // namespace flowsql::npm
 
-#endif  // _FLOWSQL_PLUGINS_NPM_BASIC_NPM_TASK_BUDGET_H_
+#endif  // _FLOWSQL_OPERATORS_NPM_BASIC_NPM_TASK_BUDGET_H_

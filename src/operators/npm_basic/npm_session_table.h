@@ -1,8 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#ifndef _FLOWSQL_PLUGINS_NPM_BASIC_NPM_SESSION_TABLE_H_
-#define _FLOWSQL_PLUGINS_NPM_BASIC_NPM_SESSION_TABLE_H_
+#ifndef _FLOWSQL_OPERATORS_NPM_BASIC_NPM_SESSION_TABLE_H_
+#define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_SESSION_TABLE_H_
 
 #include "npm_session_key.h"
 
@@ -108,6 +108,9 @@ class NpmSessionTable {
     /** Returns a borrowed snapshot view without updating the session. */
     NpmSessionTableError Find(const NpmSessionKey& key, NpmSessionView* output) const;
 
+    /** Returns active borrowed views ordered by session ID; valid until the next table mutation. */
+    NpmSessionTableError SnapshotActive(std::vector<NpmSessionView>* output) const;
+
     /** Advances event time explicitly and returns owned snapshots for sessions retired as idle. */
     NpmCaptureProgressResult AdvanceCaptureProgress(const NpmCaptureProgressUpdate& update);
 
@@ -168,4 +171,4 @@ int NotifyNpmSessionEnd(const std::vector<NpmSessionSnapshot>& ended_sessions,
 
 }  // namespace flowsql::npm
 
-#endif  // _FLOWSQL_PLUGINS_NPM_BASIC_NPM_SESSION_TABLE_H_
+#endif  // _FLOWSQL_OPERATORS_NPM_BASIC_NPM_SESSION_TABLE_H_

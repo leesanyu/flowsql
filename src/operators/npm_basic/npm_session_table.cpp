@@ -424,6 +424,22 @@ NpmSessionTableError NpmSessionTable::Find(const NpmSessionKey& key, NpmSessionV
     return NpmSessionTableError::kNone;
 }
 
+NpmSessionTableError NpmSessionTable::SnapshotActive(std::vector<NpmSessionView>* output) const {
+    if (!output) return NpmSessionTableError::kNullOutput;
+    try {
+        std::vector<NpmSessionView> views;
+        views.reserve(sessions_.size());
+        for (const auto& session : sessions_) views.push_back(MakeView(session));
+        std::sort(views.begin(), views.end(), [](const NpmSessionView& left, const NpmSessionView& right) {
+            return left.session_id < right.session_id;
+        });
+        *output = std::move(views);
+        return NpmSessionTableError::kNone;
+    } catch (const std::bad_alloc&) {
+        return NpmSessionTableError::kAllocationFailed;
+    }
+}
+
 NpmCaptureProgressResult NpmSessionTable::AdvanceCaptureProgress(const NpmCaptureProgressUpdate& update) {
     NpmCaptureProgressResult result;
     result.watermark_initialized = watermark_initialized_;

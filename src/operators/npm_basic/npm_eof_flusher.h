@@ -1,8 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#ifndef _FLOWSQL_PLUGINS_NPM_BASIC_NPM_EOF_FLUSHER_H_
-#define _FLOWSQL_PLUGINS_NPM_BASIC_NPM_EOF_FLUSHER_H_
+#ifndef _FLOWSQL_OPERATORS_NPM_BASIC_NPM_EOF_FLUSHER_H_
+#define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_EOF_FLUSHER_H_
 
 #include "npm_basic_result_collector.h"
 
@@ -67,4 +67,4 @@ class NpmEofFlusher final {
 
 }  // namespace flowsql::npm
 
-#endif  // _FLOWSQL_PLUGINS_NPM_BASIC_NPM_EOF_FLUSHER_H_
+#endif  // _FLOWSQL_OPERATORS_NPM_BASIC_NPM_EOF_FLUSHER_H_

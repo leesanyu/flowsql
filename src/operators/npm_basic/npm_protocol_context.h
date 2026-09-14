@@ -1,8 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#ifndef _FLOWSQL_PLUGINS_NPM_BASIC_NPM_PROTOCOL_CONTEXT_H_
-#define _FLOWSQL_PLUGINS_NPM_BASIC_NPM_PROTOCOL_CONTEXT_H_
+#ifndef _FLOWSQL_OPERATORS_NPM_BASIC_NPM_PROTOCOL_CONTEXT_H_
+#define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_PROTOCOL_CONTEXT_H_
 
 #include <common/iquerier.hpp>
 #include <plugins/npi/packet_decoder.h>
@@ -60,4 +60,4 @@ class NpmProtocolContext final {
 
 }  // namespace flowsql::npm
 
-#endif  // _FLOWSQL_PLUGINS_NPM_BASIC_NPM_PROTOCOL_CONTEXT_H_
+#endif  // _FLOWSQL_OPERATORS_NPM_BASIC_NPM_PROTOCOL_CONTEXT_H_

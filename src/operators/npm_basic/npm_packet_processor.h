@@ -1,8 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#ifndef _FLOWSQL_PLUGINS_NPM_BASIC_NPM_PACKET_PROCESSOR_H_
-#define _FLOWSQL_PLUGINS_NPM_BASIC_NPM_PACKET_PROCESSOR_H_
+#ifndef _FLOWSQL_OPERATORS_NPM_BASIC_NPM_PACKET_PROCESSOR_H_
+#define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_PACKET_PROCESSOR_H_
 
 #include "npm_packet_batch_view.h"
 #include "npm_session_table.h"
@@ -76,4 +76,4 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
 
 }  // namespace flowsql::npm
 
-#endif  // _FLOWSQL_PLUGINS_NPM_BASIC_NPM_PACKET_PROCESSOR_H_
+#endif  // _FLOWSQL_OPERATORS_NPM_BASIC_NPM_PACKET_PROCESSOR_H_

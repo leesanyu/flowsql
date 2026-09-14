@@ -38,12 +38,17 @@ add_dependencies(${PROJECT_NAME}
     flowsql_catalog
     flowsql_scheduler
     flowsql_database
+    flowsql_npi
+    flowsql_npm_basic
     flowsql_pcapfile
     flowsql_stream
     flowsql_web
 )
 add_dependencies(test_scheduler_mutation_guard
     flowsql_common
+)
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    FLOWSQL_NPI_PROTOCOLS_PATH="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml"
 )
 target_link_libraries(${PROJECT_NAME} flowsql_common)
 target_link_libraries(test_scheduler_mutation_guard flowsql_common)

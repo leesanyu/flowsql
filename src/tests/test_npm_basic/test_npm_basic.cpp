@@ -3,21 +3,23 @@
 
 #include <common/network/netbase.h>
 #include <common/iplugin.h>
+#include <common/loader.hpp>
 #include <framework/core/packet_codec.h>
 #include <plugins/npi/iprotocol.h>
-#include <plugins/npm_basic/npm_analysis_contract.h>
-#include <plugins/npm_basic/npm_basic_result_collector.h>
-#include <plugins/npm_basic/npm_basic_result_encoder.h>
-#include <plugins/npm_basic/npm_basic_result_projector.h>
-#include <plugins/npm_basic/npm_basic_task_config.h>
-#include <plugins/npm_basic/npm_basic_task_runtime.h>
-#include <plugins/npm_basic/npm_eof_flusher.h>
-#include <plugins/npm_basic/npm_packet_batch_view.h>
-#include <plugins/npm_basic/npm_packet_processor.h>
-#include <plugins/npm_basic/npm_protocol_context.h>
-#include <plugins/npm_basic/npm_session_key.h>
-#include <plugins/npm_basic/npm_session_table.h>
-#include <plugins/npm_basic/npm_task_budget.h>
+#include <operators/npm_basic/npm_analysis_contract.h>
+#include <operators/npm_basic/npm_basic_result_collector.h>
+#include <operators/npm_basic/npm_basic_result_encoder.h>
+#include <operators/npm_basic/npm_basic_result_projector.h>
+#include <operators/npm_basic/npm_basic_operator.h>
+#include <operators/npm_basic/npm_basic_task_config.h>
+#include <operators/npm_basic/npm_basic_task_runtime.h>
+#include <operators/npm_basic/npm_eof_flusher.h>
+#include <operators/npm_basic/npm_packet_batch_view.h>
+#include <operators/npm_basic/npm_packet_processor.h>
+#include <operators/npm_basic/npm_protocol_context.h>
+#include <operators/npm_basic/npm_session_key.h>
+#include <operators/npm_basic/npm_session_table.h>
+#include <operators/npm_basic/npm_task_budget.h>
 
 #include <arrow/api.h>
 #include <arrow/util/byte_size.h>
@@ -116,6 +118,11 @@ class ContextProtocol final : public flowsql::IProtocol {
                                          const uint8_t*,
                                          int32_t,
                                          const flowsql::protocol::Layers*) override {
+        if (identify_entered != nullptr) identify_entered->store(true, std::memory_order_release);
+        while (release_identify != nullptr &&
+               !release_identify->load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
         identify_pipelines.push_back(pipeno);
         return {7, 8};
     }
@@ -132,6 +139,8 @@ class ContextProtocol final : public flowsql::IProtocol {
 
     int32_t layer_calls = 0;
     std::vector<int32_t> identify_pipelines;
+    std::atomic<bool>* identify_entered = nullptr;
+    std::atomic<bool>* release_identify = nullptr;
 
  private:
     flowsql::protocol::IDictionary* dictionary_ = nullptr;
@@ -172,6 +181,45 @@ class ContextPool final : public flowsql::IProtocolPipelinePoolV1 {
     flowsql::IProtocol* protocol_ = nullptr;
     flowsql::ProtocolPipelinePoolError acquire_result_;
     bool leased_ = false;
+};
+
+class DualContextPool final : public flowsql::IProtocolPipelinePoolV1 {
+ public:
+    explicit DualContextPool(flowsql::IProtocol* protocol) : protocol_(protocol) {}
+
+    flowsql::ProtocolPipelinePoolError Acquire(int32_t* pipeno) override {
+        ++acquire_calls;
+        if (pipeno == nullptr) return flowsql::ProtocolPipelinePoolError::kNullOutput;
+        for (size_t index = 0; index < leased_.size(); ++index) {
+            if (leased_[index]) continue;
+            leased_[index] = true;
+            *pipeno = static_cast<int32_t>(index);
+            return flowsql::ProtocolPipelinePoolError::kNone;
+        }
+        return flowsql::ProtocolPipelinePoolError::kExhausted;
+    }
+
+    flowsql::ProtocolPipelinePoolError Release(int32_t pipeno) override {
+        ++release_calls;
+        if (pipeno < 0 || static_cast<size_t>(pipeno) >= leased_.size()) {
+            return flowsql::ProtocolPipelinePoolError::kInvalidPipeline;
+        }
+        if (!leased_[static_cast<size_t>(pipeno)]) {
+            return flowsql::ProtocolPipelinePoolError::kNotLeased;
+        }
+        leased_[static_cast<size_t>(pipeno)] = false;
+        return flowsql::ProtocolPipelinePoolError::kNone;
+    }
+
+    int32_t Capacity() const override { return static_cast<int32_t>(leased_.size()); }
+    flowsql::IProtocol* Protocol() override { return protocol_; }
+
+    int32_t acquire_calls = 0;
+    int32_t release_calls = 0;
+
+ private:
+    flowsql::IProtocol* protocol_ = nullptr;
+    std::array<bool, 2> leased_{};
 };
 
 class CountingProtocolProxy final : public flowsql::IProtocol {
@@ -1171,6 +1219,62 @@ void TestSessionTableBidirectionalCountersAndLookup() {
     assert(found.first_ns == view.first_ns && found.last_ns == view.last_ns);
     assert(found.packets_ab == view.packets_ab && found.packets_ba == view.packets_ba);
     assert(found.wire_bytes_ab == view.wire_bytes_ab && found.wire_bytes_ba == view.wire_bytes_ba);
+}
+
+void TestSessionTableActiveSnapshotIsOrderedAndNonMutating() {
+    auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kRealtime);
+    config.max_active_sessions = 4;
+    const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}}};
+    const auto first_packet = MakeIpv4TcpPacket("192.0.2.20", 50020, "192.0.2.2", 443, {});
+    const auto second_packet = MakeIpv6UdpPacket("2001:db8::20", 53020, "2001:db8::2", 53, {});
+    flowsql::packet::PacketMeta first_meta;
+    flowsql::packet::PacketMeta second_meta;
+    const auto first = BuildBinding(domain_map, first_packet, 1, 20, 100, &first_meta);
+    const auto second = BuildBinding(domain_map, second_packet, 1, 10, 80, &second_meta);
+
+    auto budget = std::make_shared<npm::NpmTaskBudget>(config);
+    npm::NpmSessionTable table(config, budget);
+    std::vector<npm::NpmSessionView> views(1);
+    views[0].session_id = 99;
+    assert(table.SnapshotActive(nullptr) == npm::NpmSessionTableError::kNullOutput);
+    assert(table.SnapshotActive(&views) == npm::NpmSessionTableError::kNone);
+    assert(views.empty());
+
+    npm::NpmSessionView observed;
+    assert(ObserveActive(table, first, first_meta, &observed) == npm::NpmSessionTableError::kNone);
+    assert(observed.session_id == 1);
+    assert(ObserveActive(table, second, second_meta, &observed) == npm::NpmSessionTableError::kNone);
+    assert(observed.session_id == 2);
+    const auto usage_before = budget->Usage();
+    const auto tracked_before = table.tracked_bytes();
+
+    views.assign(1, npm::NpmSessionView{});
+    views[0].session_id = 99;
+    assert(table.SnapshotActive(&views) == npm::NpmSessionTableError::kNone);
+    assert(views.size() == 2);
+    assert(views[0].session_id == 1 && views[1].session_id == 2);
+    assert(views[0].key != nullptr && SameKey(*views[0].key, first.key));
+    assert(views[1].key != nullptr && SameKey(*views[1].key, second.key));
+    assert(views[0].protocol_status == npm::NpmProtocolStatus::kPending);
+    assert(views[1].protocol_status == npm::NpmProtocolStatus::kPending);
+    assert(table.size() == 2 && table.tracked_bytes() == tracked_before);
+    auto usage_after = budget->Usage();
+    assert(usage_after.session_state_bytes == usage_before.session_state_bytes);
+    assert(usage_after.module_state_bytes == usage_before.module_state_bytes);
+    assert(usage_after.input_batch_bytes == usage_before.input_batch_bytes);
+    assert(usage_after.pending_output_bytes == usage_before.pending_output_bytes);
+
+    std::vector<npm::NpmSessionView> repeated;
+    assert(table.SnapshotActive(&repeated) == npm::NpmSessionTableError::kNone);
+    assert(repeated.size() == 2);
+    assert(repeated[0].session_id == views[0].session_id && repeated[0].key == views[0].key);
+    assert(repeated[1].session_id == views[1].session_id && repeated[1].key == views[1].key);
+    assert(table.size() == 2 && table.tracked_bytes() == tracked_before);
+    usage_after = budget->Usage();
+    assert(usage_after.session_state_bytes == usage_before.session_state_bytes);
+    assert(usage_after.module_state_bytes == usage_before.module_state_bytes);
+    assert(usage_after.input_batch_bytes == usage_before.input_batch_bytes);
+    assert(usage_after.pending_output_bytes == usage_before.pending_output_bytes);
 }
 
 void TestSessionTableIsolationCapacityAndErrors() {
@@ -2247,15 +2351,22 @@ flowsql::packet::PacketRecord MakeBatchPacketRecord(const PacketFixture& fixture
     return record;
 }
 
-std::unique_ptr<npm::NpmPacketBatchView> MakeValidatedPacketBatchView(
+std::shared_ptr<arrow::RecordBatch> MakeEncodedPacketBatch(
     const std::vector<flowsql::packet::PacketRecord>& records) {
     std::shared_ptr<arrow::RecordBatch> batch;
     std::string error;
     assert(flowsql::packet::EncodePacketBatch(records, &batch, &error) ==
            flowsql::packet::PacketBatchError::kNone);
     assert(error.empty() && batch != nullptr);
+    return batch;
+}
+
+std::unique_ptr<npm::NpmPacketBatchView> MakeValidatedPacketBatchView(
+    const std::vector<flowsql::packet::PacketRecord>& records) {
+    auto batch = MakeEncodedPacketBatch(records);
 
     std::unique_ptr<npm::NpmPacketBatchView> view;
+    std::string error;
     assert(npm::NpmPacketBatchView::Create(batch, &view, &error) == npm::NpmPacketBatchError::kNone);
     assert(error.empty() && view != nullptr);
     return view;
@@ -4270,6 +4381,46 @@ npm::NpmBasicTaskConfig MakeRuntimeTaskConfig(npm::NpmRunMode mode = npm::NpmRun
     return config;
 }
 
+std::unique_ptr<npm::NpmBasicTaskRuntime> CreateRuntimeForTest(
+    const npm::NpmBasicTaskConfig& config,
+    flowsql::IQuerier* querier) {
+    std::shared_ptr<arrow::Schema> output_schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    const auto status = npm::NpmBasicTaskRuntime::Create(
+        config, querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+    assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
+    assert(output_schema != nullptr && output_schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(runtime != nullptr);
+    return runtime;
+}
+
+npm::NpmTimeCapabilities AllRealtimeTimeCapabilities() {
+    npm::NpmTimeCapabilities capabilities;
+    capabilities.monotonic_time_drive = true;
+    capabilities.capture_time_progress = true;
+    capabilities.source_idle_confirmation = true;
+    capabilities.source_backlog_state = true;
+    return capabilities;
+}
+
+std::unique_ptr<npm::NpmBasicTaskRuntime> CreateRealtimeRuntimeForTest(
+    const npm::NpmBasicTaskConfig& config,
+    flowsql::IQuerier* querier) {
+    std::shared_ptr<arrow::Schema> output_schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    const auto status = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
+        config,
+        querier,
+        flowsql::packet::PacketSchema(),
+        AllRealtimeTimeCapabilities(),
+        &output_schema,
+        &runtime);
+    assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
+    assert(output_schema != nullptr && output_schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(runtime != nullptr);
+    return runtime;
+}
+
 void TestNpmBasicTaskRuntimeCreatesExclusiveInitialState() {
     static_assert(std::is_final_v<npm::NpmBasicTaskRuntime>);
     static_assert(!std::is_copy_constructible_v<npm::NpmBasicTaskRuntime>);
@@ -4448,6 +4599,1241 @@ void TestNpmBasicTaskRuntimeRejectsOpenFailuresAtomically() {
     assert(no_dictionary_pool.acquire_calls == 0 && no_dictionary_pool.release_calls == 0);
 }
 
+void TestNpmBasicTaskRuntimeRealtimeCapabilityInjection() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    const auto config = MakeRuntimeTaskConfig(npm::NpmRunMode::kRealtime);
+    auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
+    const auto original_schema = sentinel_schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+
+    auto status = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
+        config, &querier, flowsql::packet::PacketSchema(), {}, &sentinel_schema, &runtime);
+    assert(status.error == npm::NpmBasicTaskRuntimeError::kTimeCapabilityError);
+    assert(status.time_error == npm::NpmTimeCapabilityError::kMissingMonotonicTimeDrive);
+    assert(sentinel_schema == original_schema && runtime == nullptr && pool.acquire_calls == 0);
+
+    status = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
+        config,
+        &querier,
+        flowsql::packet::PacketSchema(),
+        AllRealtimeTimeCapabilities(),
+        &sentinel_schema,
+        &runtime);
+    assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
+    assert(status.time_error == npm::NpmTimeCapabilityError::kNone);
+    assert(sentinel_schema != original_schema && sentinel_schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(runtime != nullptr && runtime->Config().analysis.run_mode == npm::NpmRunMode::kRealtime);
+    assert(pool.acquire_calls == 1 && pool.release_calls == 0);
+}
+
+npm::NpmBasicRealtimeMaintenanceInput RealtimeMaintenanceInput(
+    int64_t monotonic_now_ns,
+    int64_t observed_at_ns,
+    int64_t capture_time_ns,
+    bool packet_observed,
+    bool source_idle_confirmed,
+    bool source_backlog_known,
+    bool source_has_backlog) {
+    npm::NpmBasicRealtimeMaintenanceInput input;
+    input.monotonic_now_ns = monotonic_now_ns;
+    input.observed_at_ns = observed_at_ns;
+    input.capture_progress.capture_time_ns = capture_time_ns;
+    input.capture_progress.packet_observed = packet_observed;
+    input.capture_progress.source_idle_confirmed = source_idle_confirmed;
+    input.capture_progress.source_backlog_known = source_backlog_known;
+    input.capture_progress.source_has_backlog = source_has_backlog;
+    return input;
+}
+
+void TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions() {
+    constexpr int64_t millisecond = 1'000'000;
+    constexpr int64_t second = npm::kNpmNanosecondsPerSecond;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    auto config = MakeRuntimeTaskConfig(npm::NpmRunMode::kRealtime);
+    config.analysis.output_interval_ns = 10 * millisecond;
+    config.analysis.tcp_idle_timeout_ns = second;
+    config.analysis.udp_idle_timeout_ns = second;
+    config.analysis.out_of_order_tolerance_ns = 0;
+    auto runtime = CreateRealtimeRuntimeForTest(config, &querier);
+    auto budget = runtime->Budget();
+
+    const auto tcp = MakeIpv4TcpPacket("192.0.2.20", 50020, "192.0.2.2", 443, {});
+    const auto udp = MakeIpv6UdpPacket("2001:db8::20", 53020, "2001:db8::2", 53, {});
+    flowsql::packet::PacketMeta tcp_meta;
+    flowsql::packet::PacketMeta udp_meta;
+    const auto tcp_binding = BuildBinding(config.domains, tcp, 0, 0, 100, &tcp_meta);
+    const auto udp_binding = BuildBinding(config.domains, udp, 0, 0, 80, &udp_meta);
+    npm::NpmSessionView observed;
+    assert(ObserveActive(runtime->Sessions(), tcp_binding, tcp_meta, &observed) ==
+           npm::NpmSessionTableError::kNone);
+    assert(observed.session_id == 1);
+    assert(ObserveActive(runtime->Sessions(), udp_binding, udp_meta, &observed) ==
+           npm::NpmSessionTableError::kNone);
+    assert(observed.session_id == 2);
+    const uint64_t session_bytes = runtime->Sessions().tracked_bytes();
+
+    std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
+    auto original_output = output;
+    auto status = runtime->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(100, 1'700'000'000'000'000'000LL, 0, true, false, true, false),
+        &output);
+    assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+    assert(status.progress_disposition == npm::NpmCaptureProgressDisposition::kAdvanced);
+    assert(!status.snapshot_due && !status.emitted && output == original_output);
+    assert(runtime->Sessions().size() == 2 && runtime->Projector().tracked_sessions() == 0);
+
+    status = runtime->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(10 * millisecond,
+                                 1'700'000'000'010'000'000LL,
+                                 0,
+                                 false,
+                                 false,
+                                 true,
+                                 true),
+        &output);
+    assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+    assert(status.progress_disposition == npm::NpmCaptureProgressDisposition::kDeferredBacklogged);
+    assert(!status.snapshot_due && !status.emitted && output == original_output);
+
+    const int64_t first_due = 100 + 10 * millisecond;
+    status = runtime->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(first_due,
+                                 1'700'000'000'020'000'000LL,
+                                 0,
+                                 false,
+                                 false,
+                                 true,
+                                 true),
+        &output);
+    assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+    assert(status.snapshot_due && status.emitted);
+    assert(status.active_sessions == 2 && status.ended_sessions == 0);
+    assert(output != nullptr && output != original_output && output->num_rows() == 2);
+    const auto first_ids = BasicResultColumn<arrow::UInt64Array>(output, 0);
+    const auto first_revisions = BasicResultColumn<arrow::UInt64Array>(output, 2);
+    const auto first_observed = BasicResultColumn<arrow::Int64Array>(output, 3);
+    const auto first_final = BasicResultColumn<arrow::BooleanArray>(output, 4);
+    const auto first_reasons = BasicResultColumn<arrow::StringArray>(output, 21);
+    assert(first_ids->Value(0) == 1 && first_ids->Value(1) == 2);
+    assert(first_revisions->Value(0) == 1 && first_revisions->Value(1) == 1);
+    assert(first_observed->Value(0) == 1'700'000'000'020'000'000LL);
+    assert(first_observed->Value(1) == 1'700'000'000'020'000'000LL);
+    assert(!first_final->Value(0) && !first_final->Value(1));
+    assert(first_reasons->IsNull(0) && first_reasons->IsNull(1));
+    assert(runtime->Projector().tracked_sessions() == 2);
+    output.reset();
+    AssertTaskBudgetUsage(budget->Usage(), session_bytes, 0, 0, 0);
+
+    output = original_output;
+    status = runtime->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(first_due,
+                                 1'700'000'000'021'000'000LL,
+                                 0,
+                                 false,
+                                 false,
+                                 true,
+                                 true),
+        &output);
+    assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+    assert(!status.snapshot_due && !status.emitted && output == original_output);
+
+    tcp_meta.timestamp_ns = 500 * millisecond;
+    tcp_meta.wire_len = 110;
+    assert(ObserveActive(runtime->Sessions(), tcp_binding, tcp_meta, &observed) ==
+           npm::NpmSessionTableError::kNone);
+    assert(observed.session_id == 1 && observed.packets_ba + observed.packets_ab == 2);
+    const int64_t coalesced_due = first_due + 10 * config.analysis.output_interval_ns;
+    status = runtime->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(coalesced_due,
+                                 1'700'000'000'100'000'000LL,
+                                 500 * millisecond,
+                                 true,
+                                 false,
+                                 true,
+                                 false),
+        &output);
+    assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+    assert(status.snapshot_due && status.emitted && output->num_rows() == 2);
+    const auto second_ids = BasicResultColumn<arrow::UInt64Array>(output, 0);
+    const auto second_revisions = BasicResultColumn<arrow::UInt64Array>(output, 2);
+    const auto second_packets_ab = BasicResultColumn<arrow::UInt64Array>(output, 13);
+    const auto second_packets_ba = BasicResultColumn<arrow::UInt64Array>(output, 14);
+    assert(second_ids->Value(0) == 1 && second_ids->Value(1) == 2);
+    assert(second_revisions->Value(0) == 2 && second_revisions->Value(1) == 2);
+    assert(second_packets_ab->Value(0) + second_packets_ba->Value(0) == 2);
+    output.reset();
+    AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(), 0, 0, 0);
+
+    output = original_output;
+    status = runtime->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(coalesced_due + 1,
+                                 1'700'000'002'000'000'000LL,
+                                 2 * second,
+                                 false,
+                                 true,
+                                 true,
+                                 false),
+        &output);
+    assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+    assert(!status.snapshot_due && status.emitted);
+    assert(status.active_sessions == 0 && status.ended_sessions == 2);
+    assert(output != nullptr && output->num_rows() == 2);
+    const auto final_revisions = BasicResultColumn<arrow::UInt64Array>(output, 2);
+    const auto final_observed = BasicResultColumn<arrow::Int64Array>(output, 3);
+    const auto final_flags = BasicResultColumn<arrow::BooleanArray>(output, 4);
+    const auto final_protocol = BasicResultColumn<arrow::StringArray>(output, 17);
+    const auto final_reasons = BasicResultColumn<arrow::StringArray>(output, 21);
+    for (int64_t row = 0; row < output->num_rows(); ++row) {
+        assert(final_revisions->Value(row) == 3);
+        assert(final_observed->Value(row) == 1'700'000'002'000'000'000LL);
+        assert(final_flags->Value(row));
+        assert(final_protocol->GetString(row) == "unknown");
+        assert(final_reasons->GetString(row) == "idle_timeout");
+    }
+    assert(runtime->Sessions().size() == 0 && runtime->Projector().tracked_sessions() == 0);
+    output.reset();
+    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
+
+    output = original_output;
+    status = runtime->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(coalesced_due,
+                                 1'700'000'002'001'000'000LL,
+                                 2 * second,
+                                 false,
+                                 true,
+                                 true,
+                                 false),
+        &output);
+    assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kMonotonicTimeRegression);
+    assert(status.runtime_state == npm::NpmEofFlushState::kFailed);
+    assert(output == original_output && runtime->State() == npm::NpmEofFlushState::kFailed);
+    assert(!runtime->LastError().empty() && pool.release_calls == 1);
+}
+
+void TestNpmBasicRealtimeTaskIsolationAndSlowSinkBudget() {
+    constexpr int64_t interval_ns = 10'000'000;
+    constexpr int64_t monotonic_start_ns = 100;
+    constexpr int64_t observed_start_ns = 1'700'000'000'000'000'000LL;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    DualContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+
+    auto config_a = MakeRuntimeTaskConfig(npm::NpmRunMode::kRealtime);
+    config_a.analysis.output_interval_ns = interval_ns;
+    config_a.analysis.max_pending_output_bytes = npm::kNpmMinPendingOutputBytes;
+    config_a.domains.input_namespace = "pcapfile.live-a";
+    config_a.domains.bindings = {{0, 701}};
+    auto config_b = config_a;
+    config_b.domains.input_namespace = "pcapfile.live-b";
+    config_b.domains.bindings = {{0, 702}};
+
+    auto runtime_a = CreateRealtimeRuntimeForTest(config_a, &querier);
+    auto runtime_b = CreateRealtimeRuntimeForTest(config_b, &querier);
+    auto budget_a = runtime_a->Budget();
+    auto budget_b = runtime_b->Budget();
+    assert(pool.acquire_calls == 2 && pool.release_calls == 0);
+    assert(runtime_a->ProtocolContext().Pipeno() != runtime_b->ProtocolContext().Pipeno());
+    assert(budget_a != budget_b);
+
+    const auto packet =
+        MakeIpv4TcpPacket("192.0.2.30", 50030, "198.51.100.30", 443, {});
+    flowsql::packet::PacketMeta meta_a;
+    flowsql::packet::PacketMeta meta_b;
+    const auto binding_a = BuildBinding(config_a.domains, packet, 0, 100, 90, &meta_a);
+    const auto binding_b = BuildBinding(config_b.domains, packet, 0, 100, 110, &meta_b);
+    npm::NpmSessionView session_a;
+    npm::NpmSessionView session_b;
+    assert(ObserveActive(runtime_a->Sessions(), binding_a, meta_a, &session_a) ==
+           npm::NpmSessionTableError::kNone);
+    assert(ObserveActive(runtime_b->Sessions(), binding_b, meta_b, &session_b) ==
+           npm::NpmSessionTableError::kNone);
+    assert(session_a.session_id == 1 && session_b.session_id == 1);
+    assert(session_a.key->input_namespace == "pcapfile.live-a");
+    assert(session_b.key->input_namespace == "pcapfile.live-b");
+    assert(session_a.key->observation_domain_id == 701);
+    assert(session_b.key->observation_domain_id == 702);
+    const uint64_t session_bytes_a = runtime_a->Sessions().tracked_bytes();
+    const uint64_t session_bytes_b = runtime_b->Sessions().tracked_bytes();
+
+    std::shared_ptr<arrow::RecordBatch> slow_output_a;
+    std::shared_ptr<arrow::RecordBatch> slow_output_b;
+    auto status_a = runtime_a->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(monotonic_start_ns,
+                                 observed_start_ns,
+                                 100,
+                                 true,
+                                 false,
+                                 true,
+                                 false),
+        &slow_output_a);
+    auto status_b = runtime_b->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(monotonic_start_ns,
+                                 observed_start_ns,
+                                 100,
+                                 true,
+                                 false,
+                                 true,
+                                 false),
+        &slow_output_b);
+    assert(status_a.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+    assert(status_b.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+    assert(!status_a.emitted && !status_b.emitted && !slow_output_a && !slow_output_b);
+
+    const int64_t first_due_ns = monotonic_start_ns + interval_ns;
+    status_a = runtime_a->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(first_due_ns,
+                                 observed_start_ns + interval_ns,
+                                 100,
+                                 false,
+                                 false,
+                                 true,
+                                 true),
+        &slow_output_a);
+    status_b = runtime_b->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(first_due_ns,
+                                 observed_start_ns + interval_ns,
+                                 100,
+                                 false,
+                                 false,
+                                 true,
+                                 true),
+        &slow_output_b);
+    assert(status_a.error == npm::NpmBasicRealtimeMaintenanceError::kNone && status_a.emitted);
+    assert(status_b.error == npm::NpmBasicRealtimeMaintenanceError::kNone && status_b.emitted);
+    assert(slow_output_a && slow_output_a->num_rows() == 1);
+    assert(slow_output_b && slow_output_b->num_rows() == 1);
+    assert(BasicResultColumn<arrow::UInt64Array>(slow_output_a, 0)->Value(0) == 1);
+    assert(BasicResultColumn<arrow::UInt64Array>(slow_output_b, 0)->Value(0) == 1);
+    assert(BasicResultColumn<arrow::UInt64Array>(slow_output_a, 1)->Value(0) == 701);
+    assert(BasicResultColumn<arrow::UInt64Array>(slow_output_b, 1)->Value(0) == 702);
+    assert(BasicResultColumn<arrow::UInt64Array>(slow_output_a, 2)->Value(0) == 1);
+    assert(BasicResultColumn<arrow::UInt64Array>(slow_output_b, 2)->Value(0) == 1);
+    assert(!BasicResultColumn<arrow::BooleanArray>(slow_output_a, 4)->Value(0));
+    assert(!BasicResultColumn<arrow::BooleanArray>(slow_output_b, 4)->Value(0));
+
+    const uint64_t output_bytes_a = BasicResultBufferBytes(slow_output_a);
+    const uint64_t output_bytes_b = BasicResultBufferBytes(slow_output_b);
+    assert(output_bytes_a > 0 && output_bytes_a < config_a.analysis.max_pending_output_bytes);
+    assert(output_bytes_b > 0 && output_bytes_b < config_b.analysis.max_pending_output_bytes);
+    AssertTaskBudgetUsage(budget_a->Usage(), session_bytes_a, 0, 0, output_bytes_a);
+    AssertTaskBudgetUsage(budget_b->Usage(), session_bytes_b, 0, 0, output_bytes_b);
+
+    const uint64_t backlog_bytes = config_a.analysis.max_pending_output_bytes - output_bytes_a;
+    assert(budget_a->Reserve(npm::NpmBudgetCategory::kPendingOutput, backlog_bytes) ==
+           npm::NpmBudgetError::kNone);
+    assert(budget_a->Reserve(npm::NpmBudgetCategory::kPendingOutput, 1) ==
+           npm::NpmBudgetError::kPendingOutputLimitExceeded);
+    AssertTaskBudgetUsage(
+        budget_a->Usage(), session_bytes_a, 0, 0, config_a.analysis.max_pending_output_bytes);
+
+    auto blocked_output = MakeNpmPacketViewBatch();
+    const auto original_blocked_output = blocked_output;
+    status_a = runtime_a->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(first_due_ns + interval_ns,
+                                 observed_start_ns + 2 * interval_ns,
+                                 100,
+                                 false,
+                                 false,
+                                 true,
+                                 true),
+        &blocked_output);
+    assert(status_a.error == npm::NpmBasicRealtimeMaintenanceError::kDrainError);
+    assert(status_a.runtime_state == npm::NpmEofFlushState::kFailed);
+    assert(status_a.drain_status.error == npm::NpmBasicDrainError::kEncodeError);
+    assert(status_a.drain_status.encode_error == npm::NpmBasicEncodeError::kBudgetError);
+    assert(blocked_output == original_blocked_output);
+    assert(runtime_a->State() == npm::NpmEofFlushState::kFailed);
+    assert(!runtime_a->LastError().empty() && pool.release_calls == 1);
+    AssertTaskBudgetUsage(
+        budget_a->Usage(), 0, 0, 0, config_a.analysis.max_pending_output_bytes);
+
+    std::shared_ptr<arrow::RecordBatch> second_output_b;
+    status_b = runtime_b->DriveRealtimeMaintenance(
+        RealtimeMaintenanceInput(first_due_ns + interval_ns,
+                                 observed_start_ns + 2 * interval_ns,
+                                 100,
+                                 false,
+                                 false,
+                                 true,
+                                 true),
+        &second_output_b);
+    assert(status_b.error == npm::NpmBasicRealtimeMaintenanceError::kNone && status_b.emitted);
+    assert(status_b.runtime_state == npm::NpmEofFlushState::kOpen);
+    assert(second_output_b && second_output_b->num_rows() == 1);
+    assert(BasicResultColumn<arrow::UInt64Array>(second_output_b, 0)->Value(0) == 1);
+    assert(BasicResultColumn<arrow::UInt64Array>(second_output_b, 1)->Value(0) == 702);
+    assert(BasicResultColumn<arrow::UInt64Array>(second_output_b, 2)->Value(0) == 2);
+    assert(pool.release_calls == 1);
+    const uint64_t second_output_bytes_b = BasicResultBufferBytes(second_output_b);
+    AssertTaskBudgetUsage(
+        budget_b->Usage(), session_bytes_b, 0, 0, output_bytes_b + second_output_bytes_b);
+
+    assert(budget_a->Release(npm::NpmBudgetCategory::kPendingOutput, backlog_bytes) ==
+           npm::NpmBudgetError::kNone);
+    AssertTaskBudgetUsage(budget_a->Usage(), 0, 0, 0, output_bytes_a);
+    slow_output_a.reset();
+    AssertTaskBudgetUsage(budget_a->Usage(), 0, 0, 0, 0);
+
+    runtime_b->Cancel();
+    assert(runtime_b->State() == npm::NpmEofFlushState::kCancelled);
+    assert(pool.release_calls == 2);
+    AssertTaskBudgetUsage(
+        budget_b->Usage(), 0, 0, 0, output_bytes_b + second_output_bytes_b);
+    slow_output_b.reset();
+    second_output_b.reset();
+    AssertTaskBudgetUsage(budget_b->Usage(), 0, 0, 0, 0);
+}
+
+void TestNpmBasicTaskRuntimeProcessesAndDrainsOfflineBatch() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    std::shared_ptr<arrow::Schema> output_schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    const auto create_status = npm::NpmBasicTaskRuntime::Create(
+        MakeRuntimeTaskConfig(), &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+    assert(create_status.error == npm::NpmBasicTaskRuntimeError::kNone && runtime != nullptr);
+
+    const auto rst =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 91);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 100, 1)});
+    const uint64_t input_bytes = BasicResultBufferBytes(input);
+    std::weak_ptr<arrow::RecordBatch> input_owner = input;
+    std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
+
+    auto status = runtime->ProcessOfflineBatch(input, &output);
+    assert(status.error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(status.runtime_state == npm::NpmEofFlushState::kOpen);
+    assert(status.input_bytes == input_bytes);
+    assert(status.budget_error == npm::NpmBudgetError::kNone);
+    assert(status.batch_view_error == npm::NpmPacketBatchError::kNone);
+    assert(status.process_status.error == npm::NpmPacketBatchProcessError::kNone);
+    assert(status.drain_status.error == npm::NpmBasicDrainError::kNone);
+    assert(output != nullptr && output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(output->num_rows() == 1 && output->num_columns() == 22);
+    assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
+    assert(BasicResultColumn<arrow::StringArray>(output, 17)->GetString(0) == "unknown");
+    assert(BasicResultColumn<arrow::StringArray>(output, 21)->GetString(0) == "closed");
+    assert(runtime->Sessions().size() == 0 && runtime->Collector().pending_results() == 0);
+    assert(runtime->Projector().tracked_sessions() == 0);
+
+    const uint64_t output_bytes = BasicResultBufferBytes(output);
+    AssertTaskBudgetUsage(runtime->Budget()->Usage(), 0, 0, 0, output_bytes);
+    input.reset();
+    assert(input_owner.expired());
+    assert(BasicResultColumn<arrow::StringArray>(output, 21)->GetString(0) == "closed");
+    output.reset();
+    AssertTaskBudgetUsage(runtime->Budget()->Usage(), 0, 0, 0, 0);
+
+    auto empty_input = MakeEncodedPacketBatch({});
+    status = runtime->ProcessOfflineBatch(empty_input, &output);
+    assert(status.error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(status.runtime_state == npm::NpmEofFlushState::kOpen);
+    assert(output != nullptr && output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(output->num_rows() == 0 && output->num_columns() == 22);
+    output.reset();
+    AssertTaskBudgetUsage(runtime->Budget()->Usage(), 0, 0, 0, 0);
+}
+
+void TestNpmBasicTaskRuntimeUsesExactOfflineInputBudget() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    auto config = MakeRuntimeTaskConfig();
+    config.analysis.max_tracked_bytes = npm::kNpmMinTrackedBytes;
+    auto runtime = CreateRuntimeForTest(config, &querier);
+
+    const auto packet =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 92);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 99, 100, 2)});
+    const uint64_t input_bytes = BasicResultBufferBytes(input);
+    assert(input_bytes > 0 && input_bytes < config.analysis.max_tracked_bytes);
+    auto budget = runtime->Budget();
+    const uint64_t exact_existing_bytes = config.analysis.max_tracked_bytes - input_bytes;
+    assert(budget->Reserve(npm::NpmBudgetCategory::kModuleState, exact_existing_bytes) ==
+           npm::NpmBudgetError::kNone);
+    std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
+    auto original_output = output;
+
+    auto status = runtime->ProcessOfflineBatch(input, &output);
+    assert(status.error == npm::NpmBasicOfflineBatchError::kBatchProcessError);
+    assert(status.runtime_state == npm::NpmEofFlushState::kFailed);
+    assert(status.input_bytes == input_bytes && status.budget_error == npm::NpmBudgetError::kNone);
+    assert(status.process_status.error == npm::NpmPacketBatchProcessError::kPacketError);
+    assert(status.process_status.row == 0);
+    assert(status.process_status.packet_status.error == npm::NpmPacketProcessError::kBindingError);
+    assert(status.process_status.packet_status.binding_error ==
+           npm::NpmSessionPacketError::kUnknownSourceId);
+    assert(output == original_output && runtime->State() == npm::NpmEofFlushState::kFailed);
+    assert(!runtime->LastError().empty() && pool.release_calls == pool.acquire_calls);
+    AssertTaskBudgetUsage(budget->Usage(), 0, exact_existing_bytes, 0, 0);
+    assert(budget->Release(npm::NpmBudgetCategory::kModuleState, exact_existing_bytes) ==
+           npm::NpmBudgetError::kNone);
+    auto flush_status = runtime->FlushOffline(200, &output);
+    assert(flush_status.error == npm::NpmEofFlushError::kFailedState);
+    assert(output == original_output);
+
+    runtime.reset();
+    runtime = CreateRuntimeForTest(config, &querier);
+    budget = runtime->Budget();
+    const uint64_t overflowing_existing_bytes = exact_existing_bytes + 1;
+    assert(budget->Reserve(npm::NpmBudgetCategory::kModuleState, overflowing_existing_bytes) ==
+           npm::NpmBudgetError::kNone);
+    status = runtime->ProcessOfflineBatch(input, &output);
+    assert(status.error == npm::NpmBasicOfflineBatchError::kInputBudgetError);
+    assert(status.runtime_state == npm::NpmEofFlushState::kFailed);
+    assert(status.input_bytes == input_bytes);
+    assert(status.budget_error == npm::NpmBudgetError::kTrackedLimitExceeded);
+    assert(status.process_status.error == npm::NpmPacketBatchProcessError::kNone);
+    assert(output == original_output && runtime->State() == npm::NpmEofFlushState::kFailed);
+    assert(!runtime->LastError().empty() && pool.release_calls == pool.acquire_calls);
+    AssertTaskBudgetUsage(budget->Usage(), 0, overflowing_existing_bytes, 0, 0);
+    assert(budget->Release(npm::NpmBudgetCategory::kModuleState, overflowing_existing_bytes) ==
+           npm::NpmBudgetError::kNone);
+}
+
+void TestNpmBasicTaskRuntimeRejectsOfflineBatchFailuresAtomically() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    const auto config = MakeRuntimeTaskConfig();
+    auto runtime = CreateRuntimeForTest(config, &querier);
+
+    const auto packet =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 93);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 3)});
+    std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
+    const auto original_output = output;
+    const auto assert_failed_terminal = [&]() {
+        assert(runtime->State() == npm::NpmEofFlushState::kFailed);
+        const auto first_error = runtime->LastError();
+        assert(!first_error.empty() && pool.release_calls == pool.acquire_calls);
+        const auto retry = runtime->ProcessOfflineBatch(input, &output);
+        assert(retry.error == npm::NpmBasicOfflineBatchError::kTerminalState);
+        assert(retry.runtime_state == npm::NpmEofFlushState::kFailed);
+        const auto flush = runtime->FlushOffline(1000, &output);
+        assert(flush.error == npm::NpmEofFlushError::kFailedState);
+        runtime->Cancel();
+        assert(output == original_output && runtime->LastError() == first_error);
+    };
+    const auto reset_runtime = [&]() {
+        runtime.reset();
+        runtime = CreateRuntimeForTest(config, &querier);
+    };
+
+    auto status = runtime->ProcessOfflineBatch(nullptr, &output);
+    assert(status.error == npm::NpmBasicOfflineBatchError::kNullInput && status.input_bytes == 0);
+    assert(status.runtime_state == npm::NpmEofFlushState::kFailed && output == original_output);
+    assert_failed_terminal();
+
+    reset_runtime();
+    status = runtime->ProcessOfflineBatch(input, nullptr);
+    assert(status.error == npm::NpmBasicOfflineBatchError::kNullOutput && status.input_bytes == 0);
+    assert(status.runtime_state == npm::NpmEofFlushState::kFailed);
+    AssertTaskBudgetUsage(runtime->Budget()->Usage(), 0, 0, 0, 0);
+    assert_failed_terminal();
+
+    reset_runtime();
+    auto schema_without_metadata = arrow::schema(input->schema()->fields());
+    auto wrong_input =
+        arrow::RecordBatch::Make(schema_without_metadata, input->num_rows(), input->columns());
+    const uint64_t wrong_input_bytes = BasicResultBufferBytes(wrong_input);
+    status = runtime->ProcessOfflineBatch(wrong_input, &output);
+    assert(status.error == npm::NpmBasicOfflineBatchError::kBatchViewError);
+    assert(status.runtime_state == npm::NpmEofFlushState::kFailed);
+    assert(status.input_bytes == wrong_input_bytes);
+    assert(status.batch_view_error == npm::NpmPacketBatchError::kSchemaMismatch);
+    assert(output == original_output);
+    AssertTaskBudgetUsage(runtime->Budget()->Usage(), 0, 0, 0, 0);
+    assert_failed_terminal();
+
+    reset_runtime();
+    auto budget = runtime->Budget();
+    const uint64_t output_limit = runtime->Config().analysis.max_pending_output_bytes;
+    assert(budget->Reserve(npm::NpmBudgetCategory::kPendingOutput, output_limit) ==
+           npm::NpmBudgetError::kNone);
+    const auto rst =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 94);
+    auto drain_failure_input =
+        MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 200, 4)});
+    status = runtime->ProcessOfflineBatch(drain_failure_input, &output);
+    assert(status.error == npm::NpmBasicOfflineBatchError::kDrainError);
+    assert(status.runtime_state == npm::NpmEofFlushState::kFailed);
+    assert(status.drain_status.error == npm::NpmBasicDrainError::kEncodeError);
+    assert(status.drain_status.encode_error == npm::NpmBasicEncodeError::kBudgetError);
+    assert(output == original_output);
+    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, output_limit);
+    assert(budget->Release(npm::NpmBudgetCategory::kPendingOutput, output_limit) ==
+           npm::NpmBudgetError::kNone);
+    assert_failed_terminal();
+}
+
+void TestNpmBasicTaskRuntimeFlushesOfflineExactlyOnce() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    const auto config = MakeRuntimeTaskConfig();
+    auto runtime = CreateRuntimeForTest(config, &querier);
+    auto budget = runtime->Budget();
+
+    const auto packet =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 95);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 5)});
+    std::shared_ptr<arrow::RecordBatch> output;
+    const auto process_status = runtime->ProcessOfflineBatch(input, &output);
+    assert(process_status.error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(process_status.runtime_state == npm::NpmEofFlushState::kOpen);
+    assert(output != nullptr && output->num_rows() == 0 && runtime->Sessions().size() == 1);
+    const uint64_t session_bytes = runtime->Sessions().tracked_bytes();
+    assert(session_bytes > 0);
+    AssertTaskBudgetUsage(
+        budget->Usage(), session_bytes, 0, 0, BasicResultBufferBytes(output));
+    output.reset();
+    AssertTaskBudgetUsage(budget->Usage(), session_bytes, 0, 0, 0);
+
+    auto flush_status = runtime->FlushOffline(500, &output);
+    assert(flush_status.error == npm::NpmEofFlushError::kNone);
+    assert(runtime->State() == npm::NpmEofFlushState::kFlushed);
+    assert(runtime->LastError().empty() && pool.release_calls == 1);
+    assert(output != nullptr && output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(output->num_rows() == 1 && output->num_columns() == 22);
+    assert(BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0) == 500);
+    assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
+    assert(BasicResultColumn<arrow::StringArray>(output, 21)->GetString(0) == "eof");
+    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, BasicResultBufferBytes(output));
+
+    auto original_output = output;
+    flush_status = runtime->FlushOffline(600, &output);
+    assert(flush_status.error == npm::NpmEofFlushError::kAlreadyFlushed);
+    assert(output == original_output);
+    const auto terminal_process = runtime->ProcessOfflineBatch(input, &output);
+    assert(terminal_process.error == npm::NpmBasicOfflineBatchError::kTerminalState);
+    assert(terminal_process.runtime_state == npm::NpmEofFlushState::kFlushed);
+    assert(output == original_output);
+
+    output.reset();
+    assert(budget->Usage().pending_output_bytes > 0);
+    runtime.reset();
+    assert(pool.release_calls == 1);
+    assert(budget->Usage().pending_output_bytes > 0);
+    original_output.reset();
+    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
+
+    runtime = CreateRuntimeForTest(config, &querier);
+    flush_status = runtime->FlushOffline(700, &output);
+    assert(flush_status.error == npm::NpmEofFlushError::kNone);
+    assert(runtime->State() == npm::NpmEofFlushState::kFlushed);
+    assert(runtime->LastError().empty() && pool.release_calls == 2);
+    assert(output != nullptr && output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(output->num_rows() == 0 && output->num_columns() == 22);
+}
+
+void TestNpmBasicTaskRuntimeEofFailureIsTerminal() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    const auto config = MakeRuntimeTaskConfig();
+    auto runtime = CreateRuntimeForTest(config, &querier);
+
+    const auto packet =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 96);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 6)});
+    std::shared_ptr<arrow::RecordBatch> batch_output;
+    const auto process_status = runtime->ProcessOfflineBatch(input, &batch_output);
+    assert(process_status.error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(runtime->Sessions().size() == 1);
+    batch_output.reset();
+
+    auto budget = runtime->Budget();
+    const uint64_t output_limit = config.analysis.max_pending_output_bytes;
+    assert(budget->Reserve(npm::NpmBudgetCategory::kPendingOutput, output_limit) ==
+           npm::NpmBudgetError::kNone);
+    std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
+    const auto original_output = output;
+    auto flush_status = runtime->FlushOffline(500, &output);
+    assert(flush_status.error == npm::NpmEofFlushError::kDrainError);
+    assert(flush_status.drain_status.error == npm::NpmBasicDrainError::kEncodeError);
+    assert(flush_status.drain_status.encode_error == npm::NpmBasicEncodeError::kBudgetError);
+    assert(runtime->State() == npm::NpmEofFlushState::kFailed);
+    const auto first_error = runtime->LastError();
+    assert(!first_error.empty() && output == original_output);
+    assert(pool.release_calls == 1);
+    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, output_limit);
+
+    flush_status = runtime->FlushOffline(600, &output);
+    assert(flush_status.error == npm::NpmEofFlushError::kFailedState);
+    const auto terminal_process = runtime->ProcessOfflineBatch(input, &output);
+    assert(terminal_process.error == npm::NpmBasicOfflineBatchError::kTerminalState);
+    assert(terminal_process.runtime_state == npm::NpmEofFlushState::kFailed);
+    runtime->Cancel();
+    assert(output == original_output && runtime->LastError() == first_error);
+    assert(budget->Release(npm::NpmBudgetCategory::kPendingOutput, output_limit) ==
+           npm::NpmBudgetError::kNone);
+
+    runtime = CreateRuntimeForTest(config, &querier);
+    flush_status = runtime->FlushOffline(700, nullptr);
+    assert(flush_status.error == npm::NpmEofFlushError::kNullOutput);
+    assert(runtime->State() == npm::NpmEofFlushState::kFailed);
+    assert(runtime->LastError() == "npm.basic EOF output is null");
+    assert(pool.release_calls == 2);
+}
+
+void TestNpmBasicTaskRuntimeConcurrentCancelIsNonBlockingAndStable() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    std::atomic<bool> identify_entered{false};
+    std::atomic<bool> release_identify{false};
+    protocol.identify_entered = &identify_entered;
+    protocol.release_identify = &release_identify;
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    auto runtime = CreateRuntimeForTest(MakeRuntimeTaskConfig(), &querier);
+    auto budget = runtime->Budget();
+    assert(runtime->State() == npm::NpmEofFlushState::kOpen && runtime->LastError().empty());
+
+    const auto packet =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 97);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 7)});
+    std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
+    const auto original_output = output;
+    npm::NpmBasicOfflineBatchStatus process_status;
+    std::atomic<bool> process_finished{false};
+    std::thread worker([&]() {
+        process_status = runtime->ProcessOfflineBatch(input, &output);
+        process_finished.store(true, std::memory_order_release);
+    });
+    while (!identify_entered.load(std::memory_order_acquire)) std::this_thread::yield();
+
+    runtime->Cancel();
+    assert(runtime->State() == npm::NpmEofFlushState::kCancelled);
+    const auto cancel_error = runtime->LastError();
+    assert(!cancel_error.empty() && !process_finished.load(std::memory_order_acquire));
+    runtime->Cancel();
+    assert(runtime->LastError() == cancel_error);
+
+    release_identify.store(true, std::memory_order_release);
+    worker.join();
+    assert(process_status.error == npm::NpmBasicOfflineBatchError::kCancelled);
+    assert(process_status.runtime_state == npm::NpmEofFlushState::kCancelled);
+    assert(output == original_output && pool.release_calls == 1);
+    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
+    const auto flush_status = runtime->FlushOffline(500, &output);
+    assert(flush_status.error == npm::NpmEofFlushError::kCancelled);
+    assert(output == original_output && runtime->LastError() == cancel_error);
+}
+
+void TestNpmBasicTaskRuntimeCancelKeepsDeliveredOutputAlive() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    auto runtime = CreateRuntimeForTest(MakeRuntimeTaskConfig(), &querier);
+    auto budget = runtime->Budget();
+
+    const auto rst =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 98);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 100, 8)});
+    std::shared_ptr<arrow::RecordBatch> output;
+    const auto status = runtime->ProcessOfflineBatch(input, &output);
+    assert(status.error == npm::NpmBasicOfflineBatchError::kNone && output != nullptr);
+    const uint64_t output_bytes = BasicResultBufferBytes(output);
+    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, output_bytes);
+
+    runtime->Cancel();
+    assert(runtime->State() == npm::NpmEofFlushState::kCancelled);
+    assert(!runtime->LastError().empty() && pool.release_calls == 1);
+    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, output_bytes);
+    assert(BasicResultColumn<arrow::StringArray>(output, 21)->GetString(0) == "closed");
+    runtime.reset();
+    assert(pool.release_calls == 1);
+    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, output_bytes);
+    output.reset();
+    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
+}
+
+flowsql::BlockTransformTaskConfigV1 MakeOperatorTaskConfig(
+    const std::string& task_id,
+    const std::string& with_params_json,
+    const std::string& pushed_filter_plan_json) {
+    flowsql::BlockTransformTaskConfigV1 config;
+    config.task_id = task_id.c_str();
+    config.with_params_json = with_params_json.c_str();
+    config.pushed_filter_plan_json = pushed_filter_plan_json.c_str();
+    return config;
+}
+
+void TestNpmBasicOperatorCopiesConfigAndOwnsTasks() {
+    static_assert(std::is_final_v<npm::NpmBasicOperator>);
+    static_assert(std::is_final_v<npm::NpmBasicTask>);
+
+    npm::NpmBasicOperator provider(nullptr);
+    npm::NpmBasicOperator other_provider(nullptr);
+    assert(provider.Category() == "npm");
+    assert(provider.Name() == "basic");
+    assert(!provider.Description().empty());
+
+    std::string task_id = "task-owned-one";
+    std::string with_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    std::string filter_plan = R"({"version":1,"root":null})";
+    auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
+    flowsql::IBlockTransformTaskV1* first = nullptr;
+    assert(provider.CreateTask(config, &first) == 0 && first != nullptr);
+
+    auto* concrete = dynamic_cast<npm::NpmBasicTask*>(first);
+    assert(concrete != nullptr);
+    task_id.assign("mutated-task");
+    with_json.assign("mutated-with");
+    filter_plan.assign("mutated-plan");
+    assert(concrete->TaskId() == "task-owned-one");
+    assert(concrete->WithParamsJson() ==
+           R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})");
+    assert(concrete->PushedFilterPlanJson() == R"({"version":1,"root":null})");
+
+    other_provider.ReleaseTask(first);
+    assert(concrete->TaskId() == "task-owned-one");
+
+    task_id = "task-owned-two";
+    with_json = R"({"input_namespace":"pcapfile.other","source_domains":"1:88"})";
+    filter_plan = R"({"version":1,"root":null})";
+    config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
+    flowsql::IBlockTransformTaskV1* second = nullptr;
+    assert(provider.CreateTask(config, &second) == 0);
+    assert(second != nullptr && second != first);
+    assert(dynamic_cast<npm::NpmBasicTask*>(second)->TaskId() == "task-owned-two");
+
+    provider.ReleaseTask(nullptr);
+    provider.ReleaseTask(first);
+    provider.ReleaseTask(second);
+
+    auto* sentinel = reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1);
+    config.contract_version = flowsql::kBlockTransformContractVersionV1 + 1;
+    assert(provider.CreateTask(config, &sentinel) == EINVAL &&
+           sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
+    config.contract_version = flowsql::kBlockTransformContractVersionV1;
+    config.task_id = nullptr;
+    assert(provider.CreateTask(config, &sentinel) == EINVAL &&
+           sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
+    config.task_id = "";
+    assert(provider.CreateTask(config, &sentinel) == EINVAL &&
+           sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
+    config.task_id = "valid";
+    config.with_params_json = nullptr;
+    assert(provider.CreateTask(config, &sentinel) == EINVAL &&
+           sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
+    config.with_params_json = "{}";
+    config.pushed_filter_plan_json = "";
+    assert(provider.CreateTask(config, &sentinel) == EINVAL &&
+           sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
+    assert(provider.CreateTask(config, nullptr) == EINVAL);
+}
+
+void TestNpmBasicTaskOpenProcessAndFlush() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    npm::NpmBasicOperator provider(&querier);
+    const std::string task_id = "task-happy";
+    const std::string with_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string filter_plan = R"({"version":1,"root":null})";
+    const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
+
+    flowsql::IBlockTransformTaskV1* task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
+    auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
+    std::shared_ptr<arrow::Schema> output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    assert(output_schema && output_schema != sentinel_schema);
+    assert(output_schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(pool.acquire_calls == 1 && pool.release_calls == 0 && task->LastError().empty());
+
+    const auto packet =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpAck, 101);
+    auto first_input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 1)});
+    std::vector<flowsql::BlockTransformOutputV1> outputs;
+    assert(task->ProcessBlock(first_input, 11, &outputs) ==
+           static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+    assert(outputs.size() == 1 && outputs[0].batch != nullptr);
+    assert(outputs[0].batch->num_rows() == 0 && outputs[0].ts_ms == 11);
+    outputs.clear();
+
+    auto out_of_order_input =
+        MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 50, 2)});
+    assert(task->ProcessBlock(out_of_order_input, 22, &outputs) ==
+           static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+    assert(outputs.size() == 1 && outputs[0].batch->num_rows() == 0 &&
+           outputs[0].ts_ms == 22);
+    outputs.clear();
+
+    assert(task->Flush(&outputs) == 0);
+    assert(outputs.size() == 1 && outputs[0].batch != nullptr && outputs[0].ts_ms == 22);
+    assert(outputs[0].batch->num_rows() == 1);
+    assert(BasicResultColumn<arrow::Int64Array>(outputs[0].batch, 3)->Value(0) == 100);
+    assert(BasicResultColumn<arrow::Int64Array>(outputs[0].batch, 12)->Value(0) == 100);
+    assert(BasicResultColumn<arrow::StringArray>(outputs[0].batch, 21)->GetString(0) == "eof");
+    assert(pool.release_calls == 1 && task->LastError().empty());
+
+    auto retained_output = outputs[0].batch;
+    outputs.clear();
+    assert(task->Flush(&outputs) != 0 && outputs.empty());
+    const auto terminal_error = task->LastError();
+    assert(!terminal_error.empty());
+    task->Cancel();
+    assert(task->LastError() == terminal_error);
+    provider.ReleaseTask(task);
+    assert(retained_output->num_rows() == 1);
+    assert(BasicResultColumn<arrow::StringArray>(retained_output, 21)->GetString(0) == "eof");
+}
+
+void TestNpmBasicTaskRejectsInvalidCallsAtomically() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    npm::NpmBasicOperator provider(&querier);
+    const std::string task_id = "task-invalid";
+    const std::string filter_plan = R"({"version":1,"root":null})";
+
+    std::string with_json = "{";
+    auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
+    flowsql::IBlockTransformTaskV1* task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
+    std::shared_ptr<arrow::Schema> output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) != 0);
+    assert(output_schema == sentinel_schema);
+    const auto config_error = task->LastError();
+    assert(!config_error.empty());
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) != 0);
+    assert(output_schema == sentinel_schema && task->LastError() == config_error);
+    provider.ReleaseTask(task);
+
+    with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    const auto wrong_schema = arrow::schema({arrow::field("wrong", arrow::int64())});
+    output_schema = sentinel_schema;
+    assert(task->Open(wrong_schema, &output_schema) != 0);
+    assert(output_schema == sentinel_schema && !task->LastError().empty());
+    provider.ReleaseTask(task);
+
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    std::shared_ptr<arrow::Schema> repeated_schema = sentinel_schema;
+    assert(task->Open(nullptr, &repeated_schema) != 0);
+    assert(repeated_schema == sentinel_schema);
+    const auto repeated_error = task->LastError();
+    assert(!repeated_error.empty() && pool.release_calls == 1);
+    std::vector<flowsql::BlockTransformOutputV1> outputs;
+    assert(task->ProcessBlock(nullptr, 0, &outputs) < 0 && outputs.empty());
+    assert(task->LastError() == repeated_error);
+    provider.ReleaseTask(task);
+
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    assert(task->ProcessBlock(nullptr, 0, &outputs) < 0 && outputs.empty());
+    const auto process_error = task->LastError();
+    assert(!process_error.empty() && pool.release_calls == 2);
+    assert(task->Flush(&outputs) != 0 && outputs.empty());
+    assert(task->LastError() == process_error);
+    provider.ReleaseTask(task);
+}
+
+void TestNpmBasicTaskMethodPreconditions() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    npm::NpmBasicOperator provider(&querier);
+    const std::string task_id = "task-preconditions";
+    const std::string with_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string filter_plan = R"({"version":1,"root":null})";
+    const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
+    const auto packet =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpAck, 103);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 4)});
+    auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
+    std::vector<flowsql::BlockTransformOutputV1> outputs;
+    flowsql::IBlockTransformTaskV1* task = nullptr;
+
+    assert(provider.CreateTask(config, &task) == 0);
+    assert(task->ProcessBlock(input, 1, &outputs) < 0 && outputs.empty());
+    const auto before_open_error = task->LastError();
+    std::shared_ptr<arrow::Schema> output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) != 0);
+    assert(output_schema == sentinel_schema && task->LastError() == before_open_error);
+    provider.ReleaseTask(task);
+
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    assert(task->Flush(&outputs) != 0 && outputs.empty());
+    const auto before_open_flush_error = task->LastError();
+    output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) != 0);
+    assert(output_schema == sentinel_schema && task->LastError() == before_open_flush_error);
+    provider.ReleaseTask(task);
+
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    output_schema = sentinel_schema;
+    assert(task->Open(nullptr, &output_schema) != 0);
+    assert(output_schema == sentinel_schema && !task->LastError().empty());
+    provider.ReleaseTask(task);
+
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    assert(task->Open(flowsql::packet::PacketSchema(), nullptr) != 0);
+    assert(!task->LastError().empty());
+    provider.ReleaseTask(task);
+
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    outputs.push_back({MakeNpmPacketViewBatch(), 99});
+    assert(task->ProcessBlock(input, 2, &outputs) < 0 && outputs.empty());
+    assert(!task->LastError().empty() && pool.release_calls == 1);
+    provider.ReleaseTask(task);
+
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    outputs.push_back({MakeNpmPacketViewBatch(), 99});
+    assert(task->Flush(&outputs) != 0 && outputs.empty());
+    assert(!task->LastError().empty() && pool.release_calls == 2);
+    provider.ReleaseTask(task);
+
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    auto unknown_source = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 1, 100, 5)});
+    assert(task->ProcessBlock(unknown_source, 3, &outputs) < 0 && outputs.empty());
+    const auto runtime_error = task->LastError();
+    assert(!runtime_error.empty() && pool.release_calls == 3);
+    assert(task->ProcessBlock(input, 4, &outputs) < 0 && outputs.empty());
+    assert(task->LastError() == runtime_error);
+    provider.ReleaseTask(task);
+
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    assert(task->ProcessBlock(input, 5, nullptr) < 0);
+    assert(!task->LastError().empty() && pool.release_calls == 4);
+    provider.ReleaseTask(task);
+
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    assert(task->Flush(nullptr) != 0);
+    assert(!task->LastError().empty() && pool.release_calls == 5);
+    provider.ReleaseTask(task);
+
+    npm::NpmBasicOperator missing_dependency(nullptr);
+    task = nullptr;
+    assert(missing_dependency.CreateTask(config, &task) == 0);
+    output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) != 0);
+    assert(output_schema == sentinel_schema && !task->LastError().empty());
+    missing_dependency.ReleaseTask(task);
+}
+
+void TestNpmBasicTaskCancelBeforeOpenAndDuringProcess() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    npm::NpmBasicOperator provider(&querier);
+    const std::string task_id = "task-cancel";
+    const std::string with_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string filter_plan = R"({"version":1,"root":null})";
+    const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
+
+    flowsql::IBlockTransformTaskV1* task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    task->Cancel();
+    const auto preopen_error = task->LastError();
+    assert(!preopen_error.empty());
+    task->Cancel();
+    assert(task->LastError() == preopen_error);
+    auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
+    std::shared_ptr<arrow::Schema> output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) != 0);
+    assert(output_schema == sentinel_schema && task->LastError() == preopen_error);
+    provider.ReleaseTask(task);
+
+    std::atomic<bool> identify_entered{false};
+    std::atomic<bool> release_identify{false};
+    protocol.identify_entered = &identify_entered;
+    protocol.release_identify = &release_identify;
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0);
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    const auto packet =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 102);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 3)});
+    std::vector<flowsql::BlockTransformOutputV1> outputs;
+    std::atomic<bool> process_finished{false};
+    int process_rc = 0;
+    std::thread worker([&]() {
+        process_rc = task->ProcessBlock(input, 33, &outputs);
+        process_finished.store(true, std::memory_order_release);
+    });
+    while (!identify_entered.load(std::memory_order_acquire)) std::this_thread::yield();
+
+    task->Cancel();
+    const auto concurrent_error = task->LastError();
+    assert(!concurrent_error.empty() && !process_finished.load(std::memory_order_acquire));
+    task->Cancel();
+    assert(task->LastError() == concurrent_error);
+    release_identify.store(true, std::memory_order_release);
+    worker.join();
+    assert(process_rc < 0 && outputs.empty());
+    assert(task->LastError() == concurrent_error && pool.release_calls == 1);
+    assert(task->Flush(&outputs) != 0 && outputs.empty());
+    assert(task->LastError() == concurrent_error);
+    provider.ReleaseTask(task);
+}
+
+flowsql::IBlockTransformOperatorV1* FindDynamicNpmBasicProvider(
+    flowsql::PluginLoader* loader,
+    size_t* matches) {
+    flowsql::IBlockTransformOperatorV1* found = nullptr;
+    *matches = 0;
+    loader->Traverse(flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V1, [&](void* value) {
+        auto* provider = static_cast<flowsql::IBlockTransformOperatorV1*>(value);
+        if (provider != nullptr && provider->Category() == "npm" && provider->Name() == "basic") {
+            found = provider;
+            ++*matches;
+        }
+        return 0;
+    });
+    return found;
+}
+
+void AssertDynamicNpmBasicPluginOrder(bool npm_first) {
+    flowsql::PluginLoader* loader = flowsql::PluginLoader::Single();
+    loader->StopAll();
+    assert(loader->Unload() == 0);
+
+    const std::string npi_option =
+        std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\",\"concurrency\":2}";
+    const char* libraries[] = {
+        npm_first ? FLOWSQL_NPM_BASIC_PLUGIN_PATH : FLOWSQL_NPI_PLUGIN_PATH,
+        npm_first ? FLOWSQL_NPI_PLUGIN_PATH : FLOWSQL_NPM_BASIC_PLUGIN_PATH,
+    };
+    const char* options[] = {
+        npm_first ? nullptr : npi_option.c_str(),
+        npm_first ? npi_option.c_str() : nullptr,
+    };
+    assert(loader->Load(".", libraries, options, 2) == 0);
+
+    size_t matches = 0;
+    auto* provider = FindDynamicNpmBasicProvider(loader, &matches);
+    assert(provider != nullptr && matches == 1);
+    auto* plugin = dynamic_cast<flowsql::IPlugin*>(provider);
+    assert(plugin != nullptr);
+    bool registered_same_plugin = false;
+    size_t plugin_count = 0;
+    loader->Traverse(flowsql::IID_PLUGIN, [&](void* value) {
+        ++plugin_count;
+        if (value == plugin) registered_same_plugin = true;
+        return 0;
+    });
+    assert(plugin_count == 2 && registered_same_plugin);
+
+    const std::string task_id = npm_first ? "dynamic-npm-first" : "dynamic-npi-first";
+    const std::string with_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string filter_plan = R"({"version":1,"root":null})";
+    const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
+    auto* sentinel = reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1);
+    assert(provider->CreateTask(config, &sentinel) == EPIPE);
+    assert(sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
+
+    assert(loader->StartAll() == 0);
+    flowsql::IBlockTransformTaskV1* task = nullptr;
+    assert(provider->CreateTask(config, &task) == 0 && task != nullptr);
+    std::shared_ptr<arrow::Schema> output_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    assert(output_schema != nullptr && output_schema->Equals(*npm::NpmBasicResultSchema(), true));
+
+    const auto rst =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 104);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 100, 6)});
+    std::vector<flowsql::BlockTransformOutputV1> outputs;
+    assert(task->ProcessBlock(input, 44, &outputs) ==
+           static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+    assert(outputs.size() == 1 && outputs[0].batch != nullptr && outputs[0].ts_ms == 44);
+    assert(outputs[0].batch->num_rows() == 1);
+    assert(BasicResultColumn<arrow::StringArray>(outputs[0].batch, 21)->GetString(0) == "closed");
+    outputs.clear();
+    assert(task->Flush(&outputs) == 0);
+    assert(outputs.size() == 1 && outputs[0].batch != nullptr && outputs[0].ts_ms == 44);
+    assert(outputs[0].batch->num_rows() == 0);
+    provider->ReleaseTask(task);
+    outputs.clear();
+    output_schema.reset();
+
+    loader->StopAll();
+    sentinel = reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1);
+    assert(provider->CreateTask(config, &sentinel) == EPIPE);
+    assert(sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
+    assert(loader->Unload() == 0);
+    assert(loader->First(flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V1) == nullptr);
+}
+
+void TestNpmBasicDynamicPluginLifecycle() {
+    AssertDynamicNpmBasicPluginOrder(true);
+    AssertDynamicNpmBasicPluginOrder(false);
+
+    flowsql::PluginLoader* loader = flowsql::PluginLoader::Single();
+    const char* npm_library[] = {FLOWSQL_NPM_BASIC_PLUGIN_PATH};
+    const char* invalid_options[] = {"{}"};
+    assert(loader->Load(".", npm_library, invalid_options, 1) != 0);
+    assert(loader->First(flowsql::IID_PLUGIN) == nullptr);
+    assert(loader->First(flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V1) == nullptr);
+    assert(loader->Unload() == 0);
+
+    const char* no_options[] = {nullptr};
+    assert(loader->Load(".", npm_library, no_options, 1) == 0);
+    size_t matches = 0;
+    auto* provider = FindDynamicNpmBasicProvider(loader, &matches);
+    assert(provider != nullptr && matches == 1);
+    assert(loader->StartAll() != 0);
+
+    const std::string task_id = "missing-npi";
+    const std::string with_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string filter_plan = R"({"version":1,"root":null})";
+    const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
+    auto* sentinel = reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1);
+    assert(provider->CreateTask(config, &sentinel) == EPIPE);
+    assert(sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
+    loader->StopAll();
+    assert(loader->Unload() == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -4463,6 +5849,7 @@ int main() {
     TestSessionPacketPayloadAndInvalidInputs();
     TestSessionPacketFragmentsAndTunnelContext();
     TestSessionTableBidirectionalCountersAndLookup();
+    TestSessionTableActiveSnapshotIsOrderedAndNonMutating();
     TestSessionTableIsolationCapacityAndErrors();
     TestSessionTableBudgetReserveFailureAndStableCharge();
     TestSessionTableBudgetReleasesAllTerminalPaths();
@@ -4504,5 +5891,21 @@ int main() {
     TestNpmTaskBudgetConcurrentAccountingAndSharedLifetime();
     TestNpmBasicTaskRuntimeCreatesExclusiveInitialState();
     TestNpmBasicTaskRuntimeRejectsOpenFailuresAtomically();
+    TestNpmBasicTaskRuntimeRealtimeCapabilityInjection();
+    TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions();
+    TestNpmBasicRealtimeTaskIsolationAndSlowSinkBudget();
+    TestNpmBasicTaskRuntimeProcessesAndDrainsOfflineBatch();
+    TestNpmBasicTaskRuntimeUsesExactOfflineInputBudget();
+    TestNpmBasicTaskRuntimeRejectsOfflineBatchFailuresAtomically();
+    TestNpmBasicTaskRuntimeFlushesOfflineExactlyOnce();
+    TestNpmBasicTaskRuntimeEofFailureIsTerminal();
+    TestNpmBasicTaskRuntimeConcurrentCancelIsNonBlockingAndStable();
+    TestNpmBasicTaskRuntimeCancelKeepsDeliveredOutputAlive();
+    TestNpmBasicOperatorCopiesConfigAndOwnsTasks();
+    TestNpmBasicTaskOpenProcessAndFlush();
+    TestNpmBasicTaskRejectsInvalidCallsAtomically();
+    TestNpmBasicTaskMethodPreconditions();
+    TestNpmBasicTaskCancelBeforeOpenAndDuringProcess();
+    TestNpmBasicDynamicPluginLifecycle();
     return 0;
 }
