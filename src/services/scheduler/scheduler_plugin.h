@@ -16,14 +16,15 @@
 #include <common/error_code.h>
 #include <common/iplugin.h>
 #include <common/span.h>
-#include <framework/interfaces/irouter_handle.h>
-#include <framework/interfaces/ibridge.h>
-#include <framework/interfaces/iblock_transform_operator.h>
-#include <framework/interfaces/ischeduler_control_service.h>
-#include <framework/interfaces/istream_channel.h>
 #include <framework/interfaces/iblock_stream_channel.h>
 #include <framework/interfaces/iblock_stream_operator.h>
+#include <framework/interfaces/iblock_transform_operator.h>
+#include <framework/interfaces/ibridge.h>
+#include <framework/interfaces/icpp_operator_plugin_registry.h>
 #include <framework/interfaces/idataframe_channel.h>
+#include <framework/interfaces/irouter_handle.h>
+#include <framework/interfaces/ischeduler_control_service.h>
+#include <framework/interfaces/istream_channel.h>
 
 #include <rapidjson/document.h>
 
@@ -134,11 +135,9 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
     std::shared_ptr<IOperator> FindOperator(const std::string& category, const std::string& name);
     std::shared_ptr<IOperator> CreateOperator(const std::string& category, const std::string& name);
     IBlockStreamOperator* FindBlockOperator(const std::string& category, const std::string& name);
-    IBlockTransformOperatorV1* FindBlockTransformOperator(
-        const std::string& category,
-        const std::string& name,
-        bool* ambiguous,
-        int* traverse_error);
+    IBlockTransformOperatorV1* FindBlockTransformOperator(const std::string& category, const std::string& name,
+                                                          CppOperatorCapabilityLeaseV1* dynamic_lease, bool* ambiguous,
+                                                          int* traverse_error);
     enum class BlockExecutionTerminal {
         kCompleted,
         kStopped,

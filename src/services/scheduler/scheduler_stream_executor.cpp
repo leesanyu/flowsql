@@ -435,33 +435,56 @@ IBlockStreamOperator* SchedulerPlugin::FindBlockOperator(const std::string& cate
     return matches == 1 ? found : nullptr;
 }
 
-IBlockTransformOperatorV1* SchedulerPlugin::FindBlockTransformOperator(
-    const std::string& category,
-    const std::string& name,
-    bool* ambiguous,
-    int* traverse_error) {
+IBlockTransformOperatorV1* SchedulerPlugin::FindBlockTransformOperator(const std::string& category,
+                                                                       const std::string& name,
+                                                                       CppOperatorCapabilityLeaseV1* dynamic_lease,
+                                                                       bool* ambiguous, int* traverse_error) {
+    if (dynamic_lease) *dynamic_lease = {};
     if (ambiguous) *ambiguous = false;
     if (traverse_error) *traverse_error = 0;
-    if (!querier_) return nullptr;
+    if (!querier_ || !dynamic_lease) return nullptr;
 
     IBlockTransformOperatorV1* found = nullptr;
     size_t matches = 0;
-    const int traversal_rc = querier_->Traverse(
-        IID_BLOCK_TRANSFORM_OPERATOR_V1,
-        [&](void* value) -> int {
-            auto* candidate = static_cast<IBlockTransformOperatorV1*>(value);
-            if (!candidate || !IEquals(candidate->Category(), category) ||
-                candidate->Name() != name) {
-                return 0;
-            }
-            found = candidate;
-            ++matches;
+    int traversal_rc = querier_->Traverse(IID_BLOCK_TRANSFORM_OPERATOR_V1, [&](void* value) -> int {
+        auto* candidate = static_cast<IBlockTransformOperatorV1*>(value);
+        if (!candidate || !IEquals(candidate->Category(), category) || candidate->Name() != name) {
             return 0;
-        });
+        }
+        found = candidate;
+        ++matches;
+        return 0;
+    });
+    if (traverse_error) *traverse_error = traversal_rc;
+    if (traversal_rc != 0) return nullptr;
+
+    CppOperatorCapabilityLeaseV1 acquired_dynamic_lease;
+    bool invalid_dynamic_lease = false;
+    traversal_rc = querier_->Traverse(IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1, [&](void* value) -> int {
+        auto* registry = static_cast<ICppOperatorPluginRegistryV1*>(value);
+        if (!registry) return 0;
+
+        CppOperatorCapabilityLeaseV1 candidate_lease;
+        if (registry->Acquire(category.c_str(), name.c_str(), IID_BLOCK_TRANSFORM_OPERATOR_V1, &candidate_lease) != 0) {
+            return 0;
+        }
+        if (!candidate_lease.capability || !candidate_lease.lifetime) {
+            invalid_dynamic_lease = true;
+            return 0;
+        }
+
+        found = static_cast<IBlockTransformOperatorV1*>(candidate_lease.capability);
+        ++matches;
+        if (matches == 1) acquired_dynamic_lease = std::move(candidate_lease);
+        return 0;
+    });
+    if (traversal_rc == 0 && invalid_dynamic_lease) traversal_rc = EPROTO;
     if (traverse_error) *traverse_error = traversal_rc;
     if (traversal_rc != 0) return nullptr;
     if (ambiguous) *ambiguous = matches > 1;
-    return matches == 1 ? found : nullptr;
+    if (matches != 1) return nullptr;
+    *dynamic_lease = std::move(acquired_dynamic_lease);
+    return found;
 }
 
 int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source,

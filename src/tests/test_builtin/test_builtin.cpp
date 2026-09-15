@@ -1,35 +1,41 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <unistd.h>
+#include <atomic>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
-#include <unistd.h>
 
 #include <common/error_code.h>
-#include <framework/core/dataframe.h>
-#include <framework/core/dataframe_channel.h>
-#include <framework/core/packet_codec.h>
-#include <framework/interfaces/ibuiltin_registry.h>
-#include <framework/interfaces/ibinaddon_host.h>
-#include <framework/interfaces/ioperator.h>
-#include <framework/interfaces/ioperator_catalog.h>
-#include <framework/interfaces/ioperator_registry.h>
 #include <framework/builtin/dataframe/concat_operator.h>
 #include <framework/builtin/dataframe/hstack_operator.h>
 #include <framework/builtin/dataframe/passthrough_operator.h>
-#include <services/binaddon/binaddon_host_plugin.h>
-#include <services/catalog/catalog_plugin.h>
+#include <framework/core/dataframe.h>
+#include <framework/core/dataframe_channel.h>
+#include <framework/core/packet_codec.h>
+#include <framework/interfaces/cpp_operator_plugin_abi.h>
+#include <framework/interfaces/ibinaddon_host.h>
+#include <framework/interfaces/iblock_transform_operator.h>
+#include <framework/interfaces/ibuiltin_registry.h>
+#include <framework/interfaces/icpp_operator_plugin_registry.h>
+#include <framework/interfaces/ioperator.h>
+#include <framework/interfaces/ioperator_catalog.h>
+#include <framework/interfaces/ioperator_registry.h>
 #include <framework/interfaces/irouter_handle.h>
 #include <rapidjson/document.h>
+#include <services/binaddon/binaddon_host_plugin.h>
+#include <services/catalog/catalog_plugin.h>
 
 using namespace flowsql;
 using namespace flowsql::binaddon;
@@ -41,6 +47,10 @@ using namespace flowsql::catalog;
 
 #ifndef FIXTURE_BAD_ABI_SO_PATH
 #define FIXTURE_BAD_ABI_SO_PATH ""
+#endif
+
+#ifndef FIXTURE_CPP_V2_SO_PATH
+#define FIXTURE_CPP_V2_SO_PATH ""
 #endif
 
 #define ASSERT_TRUE(expr)                                                                   \
@@ -216,6 +226,8 @@ class TestQuerier : public IQuerier {
     IOperatorRegistry* op_registry = nullptr;
     IBinAddonHost* binaddon_host = nullptr;
     IBuiltinRegistry* builtin_registry = nullptr;
+    ICppOperatorPluginRegistryV1* cpp_operator_plugin_registry = nullptr;
+    std::atomic<int> cpp_operator_plugin_registry_queries{0};
 
     int Traverse(const Guid&, fntraverse) override { return 0; }
 
@@ -229,16 +241,45 @@ class TestQuerier : public IQuerier {
         if (memcmp(&iid, &IID_BUILTIN_REGISTRY, sizeof(Guid)) == 0) {
             return builtin_registry;
         }
+        if (memcmp(&iid, &IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1, sizeof(Guid)) == 0) {
+            cpp_operator_plugin_registry_queries.fetch_add(1, std::memory_order_relaxed);
+            return cpp_operator_plugin_registry;
+        }
         return nullptr;
     }
 };
 
+class TestCppOperatorPluginRegistry final : public ICppOperatorPluginRegistryV1 {
+ public:
+    int Acquire(const char* category, const char* name, const Guid& contract_iid,
+                CppOperatorCapabilityLeaseV1* lease) override {
+        if (!lease) return -1;
+        *lease = {};
+        if (!category || !name || std::strcmp(category, "fixture") != 0 || std::strcmp(name, "echo") != 0 ||
+            std::memcmp(&contract_iid, &IID_OPERATOR, sizeof(Guid)) != 0) {
+            return -1;
+        }
+
+        auto state = std::make_shared<State>();
+        lease->capability = &state->marker;
+        lease->lifetime = state;
+        last_state_ = state;
+        return 0;
+    }
+
+    bool LastLeaseExpired() const { return last_state_.expired(); }
+
+ private:
+    struct State {
+        int marker = 42;
+    };
+
+    std::weak_ptr<State> last_state_;
+};
+
 class TestBuiltinRegistry : public IBuiltinRegistry {
  public:
-    int FindStreamChannelType(const std::string&,
-                              StreamChannelTypeDescriptor*) override {
-        return -1;
-    }
+    int FindStreamChannelType(const std::string&, StreamChannelTypeDescriptor*) override { return -1; }
 
     void ListStreamChannelTypes(
         std::function<void(const StreamChannelTypeDescriptor&)>) override {}
@@ -426,6 +467,11 @@ static void TestOperatorRegistry() {
     ASSERT_TRUE(op != nullptr);
     ASSERT_EQ(op->Name(), std::string("passthrough"));
     delete op;
+    ASSERT_EQ(p.Register("passthrough", []() -> IOperator* { return new ConcatOperator(); }), -1);
+    op = p.Create("passthrough");
+    ASSERT_TRUE(op != nullptr);
+    ASSERT_EQ(op->Name(), std::string("passthrough"));
+    delete op;
 
     // T16
     ASSERT_TRUE(p.Create("not_exists") == nullptr);
@@ -551,13 +597,170 @@ static void TestOperatorCatalog() {
     std::puts("[PASS] T18-T23 operator catalog");
 }
 
+static void TestCppOperatorPluginContracts() {
+    std::puts("[TEST] T42 C++ operator plugin V1/V2 contracts ...");
+    ASSERT_EQ(::unsetenv("FLOWSQL_FIXTURE_CPP_OPERATOR_V2_CASE_DUPLICATE"), 0);
+
+    static_assert(std::is_standard_layout<CppOperatorDescriptorV2>::value,
+                  "V2 descriptor must have a stable field layout");
+    static_assert(std::is_trivially_copyable<CppOperatorDescriptorV2>::value,
+                  "V2 descriptor must remain a plain ABI value");
+    static_assert(std::is_same<decltype(&flowsql_create_operator), CppOperatorPluginCreateV1Fn>::value,
+                  "V1 create export and host function type must match");
+    static_assert(std::is_same<decltype(&flowsql_destroy_operator), CppOperatorPluginDestroyV1Fn>::value,
+                  "V1 destroy export and host function type must match");
+    static_assert(std::is_same<decltype(&flowsql_describe_operator), CppOperatorPluginDescribeV2Fn>::value,
+                  "V2 describe export and host function type must match");
+    static_assert(
+        std::is_same<decltype(&flowsql_create_operator_capability), CppOperatorPluginCreateCapabilityV2Fn>::value,
+        "V2 create export and host function type must match");
+    static_assert(
+        std::is_same<decltype(&flowsql_destroy_operator_capability), CppOperatorPluginDestroyCapabilityV2Fn>::value,
+        "V2 destroy export and host function type must match");
+    ASSERT_EQ(kCppOperatorDescriptorV2Size, static_cast<uint32_t>(sizeof(CppOperatorDescriptorV2)));
+    ASSERT_TRUE(std::memcmp(&IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1, &IID_OPERATOR, sizeof(Guid)) != 0);
+    ASSERT_TRUE(std::memcmp(&IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1, &IID_BLOCK_TRANSFORM_OPERATOR_V1, sizeof(Guid)) != 0);
+
+    TestCppOperatorPluginRegistry registry;
+    int stale_capability = 0;
+    CppOperatorCapabilityLeaseV1 lease;
+    lease.capability = &stale_capability;
+    lease.lifetime = std::make_shared<int>(1);
+    ASSERT_EQ(registry.Acquire("fixture", "missing", IID_OPERATOR, &lease), -1);
+    ASSERT_TRUE(lease.capability == nullptr);
+    ASSERT_TRUE(!lease.lifetime);
+    ASSERT_EQ(registry.Acquire("fixture", "echo", IID_OPERATOR, nullptr), -1);
+    ASSERT_EQ(registry.Acquire(nullptr, "echo", IID_OPERATOR, &lease), -1);
+    ASSERT_EQ(registry.Acquire("fixture", nullptr, IID_OPERATOR, &lease), -1);
+    ASSERT_EQ(registry.Acquire("other", "echo", IID_OPERATOR, &lease), -1);
+    ASSERT_EQ(registry.Acquire("fixture", "echo", IID_OPERATOR, &lease), 0);
+    ASSERT_TRUE(lease.capability != nullptr);
+    ASSERT_EQ(*static_cast<int*>(lease.capability), 42);
+    ASSERT_TRUE(lease.lifetime != nullptr);
+    ASSERT_TRUE(!registry.LastLeaseExpired());
+    auto retained_lease = lease;
+    ASSERT_EQ(registry.Acquire("fixture", "echo", IID_BLOCK_TRANSFORM_OPERATOR_V1, &lease), -1);
+    ASSERT_TRUE(lease.capability == nullptr);
+    ASSERT_TRUE(!lease.lifetime);
+    ASSERT_TRUE(!registry.LastLeaseExpired());
+    retained_lease = {};
+    ASSERT_TRUE(registry.LastLeaseExpired());
+
+    const std::string v1_path = FIXTURE_CPP_SO_PATH;
+    ASSERT_TRUE(!v1_path.empty());
+    void* v1_handle = dlopen(v1_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    ASSERT_TRUE(v1_handle != nullptr);
+    auto* v1_abi =
+        reinterpret_cast<CppOperatorPluginAbiVersionFn>(dlsym(v1_handle, kCppOperatorPluginAbiVersionSymbol));
+    auto* v1_count = reinterpret_cast<CppOperatorPluginCountFn>(dlsym(v1_handle, kCppOperatorPluginCountSymbol));
+    auto* v1_create = reinterpret_cast<CppOperatorPluginCreateV1Fn>(dlsym(v1_handle, kCppOperatorPluginCreateV1Symbol));
+    auto* v1_destroy =
+        reinterpret_cast<CppOperatorPluginDestroyV1Fn>(dlsym(v1_handle, kCppOperatorPluginDestroyV1Symbol));
+    ASSERT_TRUE(v1_abi != nullptr);
+    ASSERT_TRUE(v1_count != nullptr);
+    ASSERT_TRUE(v1_create != nullptr);
+    ASSERT_TRUE(v1_destroy != nullptr);
+    ASSERT_EQ(v1_abi(), kCppOperatorPluginAbiVersionV1);
+    ASSERT_EQ(v1_count(), 1);
+    ASSERT_TRUE(dlsym(v1_handle, kCppOperatorPluginDescribeV2Symbol) == nullptr);
+    ASSERT_TRUE(dlsym(v1_handle, kCppOperatorPluginCreateCapabilityV2Symbol) == nullptr);
+    ASSERT_TRUE(dlsym(v1_handle, kCppOperatorPluginDestroyCapabilityV2Symbol) == nullptr);
+    IOperator* v1_operator = v1_create(0);
+    ASSERT_TRUE(v1_operator != nullptr);
+    ASSERT_EQ(v1_operator->Category(), std::string("cppdemo"));
+    ASSERT_EQ(v1_operator->Name(), std::string("echo"));
+    v1_destroy(v1_operator);
+    ASSERT_EQ(dlclose(v1_handle), 0);
+
+    const std::string v2_path = FIXTURE_CPP_V2_SO_PATH;
+    ASSERT_TRUE(!v2_path.empty());
+    void* v2_handle = dlopen(v2_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    ASSERT_TRUE(v2_handle != nullptr);
+    auto* v2_abi =
+        reinterpret_cast<CppOperatorPluginAbiVersionFn>(dlsym(v2_handle, kCppOperatorPluginAbiVersionSymbol));
+    auto* v2_count = reinterpret_cast<CppOperatorPluginCountFn>(dlsym(v2_handle, kCppOperatorPluginCountSymbol));
+    auto* v2_describe =
+        reinterpret_cast<CppOperatorPluginDescribeV2Fn>(dlsym(v2_handle, kCppOperatorPluginDescribeV2Symbol));
+    auto* v2_create = reinterpret_cast<CppOperatorPluginCreateCapabilityV2Fn>(
+        dlsym(v2_handle, kCppOperatorPluginCreateCapabilityV2Symbol));
+    auto* v2_destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityV2Fn>(
+        dlsym(v2_handle, kCppOperatorPluginDestroyCapabilityV2Symbol));
+    ASSERT_TRUE(v2_abi != nullptr);
+    ASSERT_TRUE(v2_count != nullptr);
+    ASSERT_TRUE(v2_describe != nullptr);
+    ASSERT_TRUE(v2_create != nullptr);
+    ASSERT_TRUE(v2_destroy != nullptr);
+    ASSERT_EQ(v2_abi(), kCppOperatorPluginAbiVersionV2);
+    ASSERT_EQ(v2_count(), 2);
+    ASSERT_TRUE(dlsym(v2_handle, kCppOperatorPluginCreateV1Symbol) == nullptr);
+    ASSERT_TRUE(dlsym(v2_handle, "flowsql_stream_operator_count") == nullptr);
+    ASSERT_TRUE(dlsym(v2_handle, "flowsql_block_transform_operator_count") == nullptr);
+
+    CppOperatorDescriptorV2 classic{};
+    classic.struct_size = kCppOperatorDescriptorV2Size;
+    ASSERT_EQ(v2_describe(0, &classic), 0);
+    ASSERT_EQ(std::string(classic.category), std::string("fixture"));
+    ASSERT_EQ(std::string(classic.name), std::string("echo"));
+    ASSERT_EQ(std::string(classic.description), std::string("V2 fixture classic operator"));
+    ASSERT_TRUE(std::memcmp(&classic.contract_iid, &IID_OPERATOR, sizeof(Guid)) == 0);
+
+    CppOperatorDescriptorV2 transform{};
+    transform.struct_size = kCppOperatorDescriptorV2Size;
+    ASSERT_EQ(v2_describe(1, &transform), 0);
+    ASSERT_EQ(std::string(transform.category), std::string("fixture"));
+    ASSERT_EQ(std::string(transform.name), std::string("transform"));
+    ASSERT_EQ(std::string(transform.description), std::string("V2 fixture block transform operator"));
+    ASSERT_TRUE(std::memcmp(&transform.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR_V1, sizeof(Guid)) == 0);
+
+    CppOperatorDescriptorV2 undersized{};
+    undersized.struct_size = kCppOperatorDescriptorV2Size - 1;
+    ASSERT_EQ(v2_describe(0, &undersized), -1);
+    ASSERT_TRUE(undersized.category == nullptr);
+    ASSERT_EQ(v2_describe(0, nullptr), -1);
+    transform = {};
+    transform.struct_size = kCppOperatorDescriptorV2Size;
+    ASSERT_EQ(v2_describe(-1, &transform), -1);
+    ASSERT_EQ(v2_describe(v2_count(), &transform), -1);
+
+    TestQuerier querier;
+    ASSERT_TRUE(v2_create(0, nullptr) == nullptr);
+    ASSERT_TRUE(v2_create(-1, &querier) == nullptr);
+    ASSERT_TRUE(v2_create(v2_count(), &querier) == nullptr);
+    void* classic_capability = v2_create(0, &querier);
+    ASSERT_TRUE(classic_capability != nullptr);
+    auto* classic_operator = static_cast<IOperator*>(classic_capability);
+    ASSERT_EQ(classic_operator->Category(), std::string("fixture"));
+    ASSERT_EQ(classic_operator->Name(), std::string("echo"));
+    ASSERT_EQ(classic_operator->Work(nullptr, nullptr), 0);
+    v2_destroy(0, classic_capability);
+
+    void* transform_capability = v2_create(1, &querier);
+    ASSERT_TRUE(transform_capability != nullptr);
+    auto* transform_operator = static_cast<IBlockTransformOperatorV1*>(transform_capability);
+    ASSERT_EQ(transform_operator->Category(), std::string("fixture"));
+    ASSERT_EQ(transform_operator->Name(), std::string("transform"));
+    BlockTransformTaskConfigV1 config;
+    IBlockTransformTaskV1* task = nullptr;
+    ASSERT_EQ(transform_operator->CreateTask(config, &task), 0);
+    ASSERT_TRUE(task != nullptr);
+    transform_operator->ReleaseTask(task);
+    v2_destroy(1, transform_capability);
+    v2_destroy(0, nullptr);
+    ASSERT_EQ(dlclose(v2_handle), 0);
+
+    std::puts("[PASS] T42 C++ operator plugin V1/V2 contracts");
+}
+
 static void TestCppPluginLifecycle() {
     std::puts("[TEST] T42-T48 cpp plugin lifecycle ...");
     const std::string fixture_so = FIXTURE_CPP_SO_PATH;
+    const std::string fixture_v2_so = FIXTURE_CPP_V2_SO_PATH;
     const std::string bad_abi_so = FIXTURE_BAD_ABI_SO_PATH;
     ASSERT_TRUE(!fixture_so.empty());
+    ASSERT_TRUE(!fixture_v2_so.empty());
     ASSERT_TRUE(!bad_abi_so.empty());
     ASSERT_TRUE(std::filesystem::exists(fixture_so));
+    ASSERT_TRUE(std::filesystem::exists(fixture_v2_so));
     ASSERT_TRUE(std::filesystem::exists(bad_abi_so));
 
     const std::string dir = MakeTempDir("cpp_plugin");
@@ -568,6 +771,7 @@ static void TestCppPluginLifecycle() {
     TestQuerier querier;
     querier.op_registry = static_cast<IOperatorRegistry*>(&p);
     querier.binaddon_host = static_cast<IBinAddonHost*>(&binaddon);
+    querier.cpp_operator_plugin_registry = static_cast<ICppOperatorPluginRegistryV1*>(&binaddon);
     TestBuiltinRegistry builtin_registry;
     querier.builtin_registry = &builtin_registry;
 
@@ -633,6 +837,11 @@ static void TestCppPluginLifecycle() {
     ASSERT_TRUE(op != nullptr);
     ASSERT_EQ(op->Category(), std::string("cppdemo"));
     ASSERT_EQ(op->Name(), std::string("echo"));
+    ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", req, rsp), error::CONFLICT);
+    ASSERT_TRUE(rsp.find("plugin is in use") != std::string::npos);
+    IOperator* after_conflict_op = p.Create("cppdemo.echo");
+    ASSERT_TRUE(after_conflict_op != nullptr);
+    delete after_conflict_op;
     delete op;
 
     ASSERT_EQ(routes["POST:/operators/list"]("/operators/list", R"({"type":"cpp"})", rsp), error::OK);
@@ -671,6 +880,135 @@ static void TestCppPluginLifecycle() {
         ASSERT_TRUE(d.IsObject() && d["operators"].IsArray());
         ASSERT_EQ(d["operators"].Size(), rapidjson::SizeType(0));
     }
+
+    auto* capability_registry = static_cast<ICppOperatorPluginRegistryV1*>(&binaddon);
+    ASSERT_TRUE(capability_registry != nullptr);
+
+    const std::string v2_filename = "fixture_cpp_operator_v2.so";
+    std::string v2_tmp = CopyToTmp(fixture_v2_so, upload, v2_filename);
+    ASSERT_TRUE(!v2_tmp.empty());
+    req = "{\"type\":\"cpp\",\"filename\":\"" + v2_filename + "\",\"tmp_path\":\"" + v2_tmp + "\"}";
+    ASSERT_EQ(routes["POST:/operators/upload"]("/operators/upload", req, rsp), error::OK);
+    std::string v2_plugin_id;
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_TRUE(d.IsObject() && d.HasMember("plugin_id"));
+        v2_plugin_id = d["plugin_id"].GetString();
+    }
+    std::string v2_req = "{\"type\":\"cpp\",\"plugin_id\":\"" + v2_plugin_id + "\"}";
+    ASSERT_EQ(::setenv("FLOWSQL_FIXTURE_CPP_OPERATOR_V2_CASE_DUPLICATE", "1", 1), 0);
+    ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", v2_req, rsp), error::CONFLICT);
+    ASSERT_EQ(::unsetenv("FLOWSQL_FIXTURE_CPP_OPERATOR_V2_CASE_DUPLICATE"), 0);
+    ASSERT_EQ(p.QueryStatus("fixture", "echo"), OperatorStatus::kNotFound);
+    ASSERT_EQ(p.QueryStatus("fixture", "transform"), OperatorStatus::kNotFound);
+    CppOperatorCapabilityLeaseV1 missing_lease;
+    ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_OPERATOR, &missing_lease), -1);
+    ASSERT_TRUE(missing_lease.capability == nullptr);
+    ASSERT_TRUE(!missing_lease.lifetime);
+    ASSERT_EQ(routes["POST:/operators/detail"]("/operators/detail", v2_req, rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_EQ(std::string(d["plugin"]["status"].GetString()), "broken");
+        ASSERT_EQ(std::string(d["plugin"]["last_error"].GetString()), "duplicate operators inside plugin");
+    }
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete", v2_req, rsp), error::OK);
+
+    ASSERT_EQ(p.Register("fixture.transform", []() -> IOperator* { return new PassthroughOperator(); }), 0);
+    v2_tmp = CopyToTmp(fixture_v2_so, upload, v2_filename);
+    ASSERT_TRUE(!v2_tmp.empty());
+    req = "{\"type\":\"cpp\",\"filename\":\"" + v2_filename + "\",\"tmp_path\":\"" + v2_tmp + "\"}";
+    ASSERT_EQ(routes["POST:/operators/upload"]("/operators/upload", req, rsp), error::OK);
+    ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", v2_req, rsp), error::CONFLICT);
+    ASSERT_EQ(p.QueryStatus("fixture", "echo"), OperatorStatus::kNotFound);
+    ASSERT_EQ(p.QueryStatus("fixture", "transform"), OperatorStatus::kNotFound);
+    ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_OPERATOR, &missing_lease), -1);
+    ASSERT_TRUE(missing_lease.capability == nullptr);
+    ASSERT_TRUE(!missing_lease.lifetime);
+    ASSERT_EQ(routes["POST:/operators/detail"]("/operators/detail", v2_req, rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_EQ(std::string(d["plugin"]["status"].GetString()), "broken");
+        ASSERT_EQ(std::string(d["plugin"]["last_error"].GetString()), "operator factory conflict");
+    }
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete", v2_req, rsp), error::OK);
+    ASSERT_EQ(p.RemoveFactory("fixture.transform"), 0);
+
+    v2_tmp = CopyToTmp(fixture_v2_so, upload, v2_filename);
+    ASSERT_TRUE(!v2_tmp.empty());
+    req = "{\"type\":\"cpp\",\"filename\":\"" + v2_filename + "\",\"tmp_path\":\"" + v2_tmp + "\"}";
+    ASSERT_EQ(routes["POST:/operators/upload"]("/operators/upload", req, rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_EQ(std::string(d["plugin_id"].GetString()), v2_plugin_id);
+    }
+    ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", v2_req, rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_TRUE(d.IsObject());
+        ASSERT_EQ(d["abi_version"].GetInt(), kCppOperatorPluginAbiVersionV2);
+        ASSERT_EQ(d["operator_count"].GetInt(), 2);
+        ASSERT_TRUE(d["operators"].IsArray());
+        ASSERT_EQ(d["operators"].Size(), rapidjson::SizeType(2));
+        ASSERT_EQ(std::string(d["operators"][0].GetString()), "fixture.echo");
+        ASSERT_EQ(std::string(d["operators"][1].GetString()), "fixture.transform");
+    }
+    ASSERT_EQ(p.QueryStatus("fixture", "echo"), OperatorStatus::kActive);
+    ASSERT_EQ(p.QueryStatus("fixture", "transform"), OperatorStatus::kActive);
+
+    CppOperatorCapabilityLeaseV1 echo_lease;
+    CppOperatorCapabilityLeaseV1 transform_lease;
+    ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_OPERATOR, &echo_lease), 0);
+    ASSERT_EQ(capability_registry->Acquire("fixture", "transform", IID_BLOCK_TRANSFORM_OPERATOR_V1, &transform_lease),
+              0);
+    ASSERT_TRUE(echo_lease.capability != nullptr && echo_lease.lifetime != nullptr);
+    ASSERT_TRUE(transform_lease.capability != nullptr && transform_lease.lifetime != nullptr);
+    auto* echo = static_cast<IOperator*>(echo_lease.capability);
+    auto* transform = static_cast<IBlockTransformOperatorV1*>(transform_lease.capability);
+    ASSERT_EQ(echo->Category(), std::string("fixture"));
+    ASSERT_EQ(echo->Name(), std::string("echo"));
+    ASSERT_EQ(transform->Category(), std::string("fixture"));
+    ASSERT_EQ(transform->Name(), std::string("transform"));
+
+    CppOperatorCapabilityLeaseV1 wrong_contract = echo_lease;
+    ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_BLOCK_TRANSFORM_OPERATOR_V1, &wrong_contract), -1);
+    ASSERT_TRUE(wrong_contract.capability == nullptr);
+    ASSERT_TRUE(!wrong_contract.lifetime);
+    ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", v2_req, rsp), error::CONFLICT);
+    ASSERT_TRUE(rsp.find("plugin is in use") != std::string::npos);
+    CppOperatorCapabilityLeaseV1 after_conflict;
+    ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_OPERATOR, &after_conflict), 0);
+    after_conflict = {};
+    echo_lease = {};
+    transform_lease = {};
+
+    const int queries_before_deactivate = querier.cpp_operator_plugin_registry_queries.load(std::memory_order_relaxed);
+    ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", v2_req, rsp), error::OK);
+    ASSERT_TRUE(querier.cpp_operator_plugin_registry_queries.load(std::memory_order_relaxed) >
+                queries_before_deactivate);
+    ASSERT_EQ(p.QueryStatus("fixture", "echo"), OperatorStatus::kDeactivated);
+    ASSERT_EQ(p.QueryStatus("fixture", "transform"), OperatorStatus::kDeactivated);
+    ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_OPERATOR, &missing_lease), -1);
+
+    ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", v2_req, rsp), error::OK);
+    ASSERT_EQ(capability_registry->Acquire("fixture", "transform", IID_BLOCK_TRANSFORM_OPERATOR_V1, &transform_lease),
+              0);
+    transform_lease = {};
+    const int queries_before_stop = querier.cpp_operator_plugin_registry_queries.load(std::memory_order_relaxed);
+    ASSERT_EQ(binaddon.Stop(), 0);
+    ASSERT_TRUE(querier.cpp_operator_plugin_registry_queries.load(std::memory_order_relaxed) > queries_before_stop);
+    ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_OPERATOR, &missing_lease), -1);
+    ASSERT_EQ(binaddon.Start(), 0);
+    ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_OPERATOR, &echo_lease), 0);
+    echo_lease = {};
+    ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", v2_req, rsp), error::OK);
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete", v2_req, rsp), error::OK);
+    ASSERT_EQ(p.QueryStatus("fixture", "echo"), OperatorStatus::kNotFound);
+    ASSERT_EQ(p.QueryStatus("fixture", "transform"), OperatorStatus::kNotFound);
 
     const std::string bad_filename = "fixture_bad_abi.so";
     const std::string bad_tmp = CopyToTmp(bad_abi_so, upload, bad_filename);
@@ -1013,6 +1351,7 @@ int main() {
     TestPersistFail();
     TestOperatorRegistry();
     TestOperatorCatalog();
+    TestCppOperatorPluginContracts();
     TestCppPluginLifecycle();
     TestOperatorDbPathOption();
     TestHttpRoutes();

@@ -15,8 +15,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include <framework/core/filter_planner.h>
 #include <framework/core/filter_expression.h>
+#include <framework/core/filter_planner.h>
 #include <framework/core/packet_codec.h>
 #include <framework/core/ring_stream_channel.h>
 #include <framework/core/sql_parser.h>
@@ -25,6 +25,7 @@
 #include <framework/interfaces/iblock_stream_reader.h>
 #include <framework/interfaces/iblock_transform_operator.h>
 #include <framework/interfaces/ichannel.h>
+#include <framework/interfaces/icpp_operator_plugin_registry.h>
 #include <framework/interfaces/ifilter_domain_resolver.h>
 #include <framework/interfaces/ifilter_pushdown.h>
 #include <services/scheduler/scheduler_plugin.h>
@@ -485,6 +486,7 @@ class SchedulerTransformProvider final : public IBlockTransformOperatorV1,
     int CreateTask(const BlockTransformTaskConfigV1& config,
                    IBlockTransformTaskV1** task) override {
         ++create_calls;
+        if (require_dynamic_lifetime && dynamic_lifetime.expired()) ++lifetime_violations;
         if (!task || !config.task_id || !config.with_params_json ||
             !config.pushed_filter_plan_json) {
             return EINVAL;
@@ -510,6 +512,7 @@ class SchedulerTransformProvider final : public IBlockTransformOperatorV1,
     }
 
     void ReleaseTask(IBlockTransformTaskV1* task) override {
+        if (require_dynamic_lifetime && dynamic_lifetime.expired()) ++lifetime_violations;
         auto* concrete = dynamic_cast<SchedulerTransformTask*>(task);
         ASSERT_TRUE(concrete != nullptr);
         ReleasedTransformTaskSnapshot snapshot;
@@ -562,11 +565,58 @@ class SchedulerTransformProvider final : public IBlockTransformOperatorV1,
     int flush_result = 0;
     std::string event_label;
     std::vector<std::string>* events = nullptr;
+    bool require_dynamic_lifetime = false;
+    std::weak_ptr<void> dynamic_lifetime;
+    int lifetime_violations = 0;
 
  private:
     std::shared_ptr<arrow::Schema> output_schema_;
     std::shared_ptr<arrow::RecordBatch> output_batch_;
     std::string name_;
+};
+
+class DynamicBlockTransformRegistry final : public ICppOperatorPluginRegistryV1 {
+ public:
+    explicit DynamicBlockTransformRegistry(SchedulerTransformProvider* provider) : provider_(provider) {}
+
+    int Acquire(const char* category, const char* name, const Guid& contract_iid,
+                CppOperatorCapabilityLeaseV1* lease) override {
+        ++acquire_calls;
+        if (!lease) return EINVAL;
+        *lease = {};
+        if (!provider_ || !category || !name || !SameGuid(contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1) ||
+            provider_->Category() != category || provider_->Name() != name) {
+            return ENOENT;
+        }
+        if (return_invalid_lease) return 0;
+
+        auto lifetime = std::make_shared<LeaseLifetime>(&release_calls);
+        provider_->require_dynamic_lifetime = true;
+        provider_->dynamic_lifetime = lifetime;
+        last_lifetime = lifetime;
+        lease->capability = static_cast<IBlockTransformOperatorV1*>(provider_);
+        lease->lifetime = std::move(lifetime);
+        ++successful_acquires;
+        return 0;
+    }
+
+    int acquire_calls = 0;
+    int successful_acquires = 0;
+    int release_calls = 0;
+    bool return_invalid_lease = false;
+    std::weak_ptr<void> last_lifetime;
+
+ private:
+    struct LeaseLifetime {
+        explicit LeaseLifetime(int* release_calls) : release_calls_(release_calls) {}
+        ~LeaseLifetime() {
+            if (release_calls_) ++*release_calls_;
+        }
+
+        int* release_calls_ = nullptr;
+    };
+
+    SchedulerTransformProvider* provider_ = nullptr;
 };
 
 class SourceFilterPushdownFixture final : public IFilterPushdownV1 {
@@ -636,6 +686,12 @@ class BlockProviderQuerier final : public IQuerier {
                 return transform_traverse_return_code;
             }
             providers = &transforms;
+        } else if (SameGuid(iid, IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1)) {
+            ++cpp_operator_registry_traverse_calls;
+            if (cpp_operator_registry_traverse_return_code != 0) {
+                return cpp_operator_registry_traverse_return_code;
+            }
+            providers = &cpp_operator_registries;
         } else if (SameGuid(iid, IID_FILTER_PUSHDOWN_V1)) {
             ++filter_pushdown_traverse_calls;
             if (filter_pushdown_traverse_return_code != 0) {
@@ -677,6 +733,7 @@ class BlockProviderQuerier final : public IQuerier {
     std::vector<void*> managers;
     std::vector<void*> operators;
     std::vector<void*> transforms;
+    std::vector<void*> cpp_operator_registries;
     std::vector<void*> filter_pushdowns;
     std::vector<void*> filter_domain_resolvers;
     std::vector<void*> reader_factories;
@@ -684,10 +741,12 @@ class BlockProviderQuerier final : public IQuerier {
     int manager_traverse_calls = 0;
     int operator_traverse_calls = 0;
     int transform_traverse_calls = 0;
+    int cpp_operator_registry_traverse_calls = 0;
     int filter_pushdown_traverse_calls = 0;
     int filter_domain_resolver_traverse_calls = 0;
     int reader_factory_traverse_calls = 0;
     int transform_traverse_return_code = 0;
+    int cpp_operator_registry_traverse_return_code = 0;
     int filter_pushdown_traverse_return_code = 0;
     int filter_domain_resolver_traverse_return_code = 0;
     int reader_factory_traverse_return_code = 0;
@@ -2301,6 +2360,136 @@ void TestBlockTransformSchedulerPipeline() {
     ASSERT_TRUE(protocol_builder.Finish(&protocol).ok());
     auto output_batch = arrow::RecordBatch::Make(
         output_schema, 2, {score, protocol});
+
+    {
+        SchemaBlockChannel dynamic_source(packet_batch, 1);
+        TraversalBlockFactory dynamic_factory(1);
+        dynamic_factory.channel = &dynamic_source;
+        SchedulerTransformProvider dynamic_provider(output_schema, output_batch, "dynamic_transform");
+        DynamicBlockTransformRegistry dynamic_registry(&dynamic_provider);
+        BlockProviderQuerier dynamic_querier;
+        dynamic_querier.factories = {&dynamic_factory};
+        dynamic_querier.cpp_operator_registries = {&dynamic_registry};
+        SchedulerPlugin dynamic_plugin;
+        ASSERT_EQ(dynamic_plugin.Load(&dynamic_querier), 0);
+
+        std::string dynamic_response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &dynamic_plugin,
+                      R"({"sql":"SELECT * FROM pcapfile.input USING test.dynamic_transform WHERE score >= 10"})",
+                      &dynamic_response),
+                  error::OK);
+        ASSERT_TRUE(dynamic_response.find("\"rows\":2") != std::string::npos);
+        ASSERT_EQ(dynamic_querier.transform_traverse_calls, 1);
+        ASSERT_EQ(dynamic_querier.cpp_operator_registry_traverse_calls, 1);
+        ASSERT_EQ(dynamic_registry.acquire_calls, 1);
+        ASSERT_EQ(dynamic_registry.successful_acquires, 1);
+        ASSERT_EQ(dynamic_provider.create_calls, 2);
+        ASSERT_EQ(dynamic_provider.release_calls, 2);
+        ASSERT_EQ(dynamic_provider.live_tasks, 0);
+        ASSERT_EQ(dynamic_provider.lifetime_violations, 0);
+        ASSERT_TRUE(dynamic_registry.last_lifetime.expired());
+        ASSERT_EQ(dynamic_registry.release_calls, 1);
+    }
+
+    {
+        SchemaBlockChannel conflict_source(packet_batch, 1);
+        TraversalBlockFactory conflict_factory(1);
+        conflict_factory.channel = &conflict_source;
+        SchedulerTransformProvider conflict_provider(output_schema, output_batch, "dynamic_conflict");
+        DynamicBlockTransformRegistry conflict_registry(&conflict_provider);
+        BlockProviderQuerier conflict_querier;
+        conflict_querier.factories = {&conflict_factory};
+        conflict_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&conflict_provider)};
+        conflict_querier.cpp_operator_registries = {&conflict_registry};
+        SchedulerPlugin conflict_plugin;
+        ASSERT_EQ(conflict_plugin.Load(&conflict_querier), 0);
+
+        std::string conflict_response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &conflict_plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.dynamic_conflict"})",
+                      &conflict_response),
+                  error::CONFLICT);
+        ASSERT_TRUE(conflict_response.find("multiple block transform operators matched") != std::string::npos);
+        ASSERT_EQ(conflict_source.poll_calls, 0);
+        ASSERT_EQ(conflict_provider.create_calls, 0);
+        ASSERT_EQ(conflict_registry.successful_acquires, 1);
+        ASSERT_TRUE(conflict_registry.last_lifetime.expired());
+        ASSERT_EQ(conflict_registry.release_calls, 1);
+    }
+
+    {
+        SchemaBlockChannel duplicate_source(packet_batch, 1);
+        TraversalBlockFactory duplicate_factory(1);
+        duplicate_factory.channel = &duplicate_source;
+        SchedulerTransformProvider first_dynamic_provider(output_schema, output_batch, "dynamic_duplicate");
+        SchedulerTransformProvider second_dynamic_provider(output_schema, output_batch, "dynamic_duplicate");
+        DynamicBlockTransformRegistry first_dynamic_registry(&first_dynamic_provider);
+        DynamicBlockTransformRegistry second_dynamic_registry(&second_dynamic_provider);
+        BlockProviderQuerier duplicate_querier;
+        duplicate_querier.factories = {&duplicate_factory};
+        duplicate_querier.cpp_operator_registries = {&first_dynamic_registry, &second_dynamic_registry};
+        SchedulerPlugin duplicate_plugin;
+        ASSERT_EQ(duplicate_plugin.Load(&duplicate_querier), 0);
+
+        std::string duplicate_response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &duplicate_plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.dynamic_duplicate"})",
+                      &duplicate_response),
+                  error::CONFLICT);
+        ASSERT_TRUE(duplicate_response.find("multiple block transform operators matched") != std::string::npos);
+        ASSERT_EQ(duplicate_source.poll_calls, 0);
+        ASSERT_EQ(first_dynamic_provider.create_calls, 0);
+        ASSERT_EQ(second_dynamic_provider.create_calls, 0);
+        ASSERT_EQ(first_dynamic_registry.release_calls, 1);
+        ASSERT_EQ(second_dynamic_registry.release_calls, 1);
+        ASSERT_TRUE(first_dynamic_registry.last_lifetime.expired());
+        ASSERT_TRUE(second_dynamic_registry.last_lifetime.expired());
+    }
+
+    {
+        SchemaBlockChannel traversal_source(packet_batch, 1);
+        TraversalBlockFactory traversal_factory(1);
+        traversal_factory.channel = &traversal_source;
+        BlockProviderQuerier traversal_querier;
+        traversal_querier.factories = {&traversal_factory};
+        traversal_querier.cpp_operator_registry_traverse_return_code = EIO;
+        SchedulerPlugin traversal_plugin;
+        ASSERT_EQ(traversal_plugin.Load(&traversal_querier), 0);
+
+        std::string traversal_response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &traversal_plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.dynamic_traversal_error"})",
+                      &traversal_response),
+                  error::INTERNAL_ERROR);
+        ASSERT_TRUE(traversal_response.find("operator discovery failed") != std::string::npos);
+        ASSERT_EQ(traversal_source.poll_calls, 0);
+    }
+
+    {
+        SchemaBlockChannel invalid_source(packet_batch, 1);
+        TraversalBlockFactory invalid_factory(1);
+        invalid_factory.channel = &invalid_source;
+        SchedulerTransformProvider invalid_provider(output_schema, output_batch, "dynamic_invalid_lease");
+        DynamicBlockTransformRegistry invalid_registry(&invalid_provider);
+        invalid_registry.return_invalid_lease = true;
+        BlockProviderQuerier invalid_querier;
+        invalid_querier.factories = {&invalid_factory};
+        invalid_querier.cpp_operator_registries = {&invalid_registry};
+        SchedulerPlugin invalid_plugin;
+        ASSERT_EQ(invalid_plugin.Load(&invalid_querier), 0);
+
+        std::string invalid_response;
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
+                      &invalid_plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.dynamic_invalid_lease"})",
+                      &invalid_response),
+                  error::INTERNAL_ERROR);
+        ASSERT_TRUE(invalid_response.find("operator discovery failed") != std::string::npos);
+        ASSERT_EQ(invalid_source.poll_calls, 0);
+        ASSERT_EQ(invalid_provider.create_calls, 0);
+        ASSERT_EQ(invalid_registry.acquire_calls, 1);
+        ASSERT_EQ(invalid_registry.successful_acquires, 0);
+    }
 
     SchemaBlockChannel source(packet_batch, 1);
     TraversalBlockFactory factory(1);

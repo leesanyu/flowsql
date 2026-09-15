@@ -23,7 +23,13 @@ constexpr const char* kNpiPlugin =
 constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
 constexpr const char* kNpmBasicPlugin = "libflowsql_npm_basic.so";
 constexpr const char* kSchedulerPlugin = "libflowsql_scheduler.so";
+constexpr const char* kBuiltinPlugin = "libflowsql_builtin.so";
+constexpr const char* kCatalogPlugin = "libflowsql_catalog.so";
+constexpr const char* kBinAddonPlugin = "libflowsql_binaddon.so";
 constexpr const char* kPcapFileDbPath = "/opt/flowsql/uploads/.meta/pcapfile.db";
+constexpr const char* kOperatorDbPath = "/opt/flowsql/uploads/.meta/flowsql_meta.db";
+constexpr const char* kDataframeDir = "/opt/flowsql/uploads/dataframes";
+constexpr const char* kBinAddonUploadDir = "/opt/flowsql/uploads/binaddon";
 
 bool Expect(bool condition, const std::string& message) {
     if (condition) return true;
@@ -124,6 +130,9 @@ bool TestDockerfile() {
                   "Dockerfile must install the NPI protocol definition at the runtime config path") &&
          ok;
     ok = Contains(dockerfile, "COPY build/output/lib*.so", "Dockerfile must copy built plugin libraries") && ok;
+    ok = Expect(std::filesystem::is_regular_file(std::filesystem::path(FLOWSQL_BUILD_OUTPUT_PATH) / kNpmBasicPlugin),
+                "Docker image input must contain the uploadable npm.basic plugin") &&
+         ok;
     return ok;
 }
 
@@ -159,6 +168,8 @@ bool TestCompose() {
     const std::string router_option = PluginOption(web_plugins, kRouterPlugin);
     const std::string scheduler_plugins = CommandArgument(scheduler_command, "--plugins");
     const std::string pcapfile_option = PluginOption(scheduler_plugins, kPcapFilePlugin);
+    const std::string catalog_option = PluginOption(scheduler_plugins, kCatalogPlugin);
+    const std::string binaddon_option = PluginOption(scheduler_plugins, kBinAddonPlugin);
 
     ok = Expect(gateway_command.IsSequence(), "Gateway command must use an argv sequence") && ok;
     ok = Expect(gateway_plugins == kGatewayPlugin, "Gateway plugin must not receive a config path as its option") &&
@@ -197,25 +208,45 @@ bool TestCompose() {
     ok = Expect(!PluginSpec(scheduler_plugins, kPcapFilePlugin).empty(),
                 "Scheduler must load the pcapfile provider") &&
          ok;
-    ok = Expect(!PluginSpec(scheduler_plugins, kNpmBasicPlugin).empty(),
-                "Scheduler must load the npm.basic provider") &&
+    ok = Expect(PluginSpec(scheduler_plugins, kNpmBasicPlugin).empty(),
+                "Scheduler must not statically load the npm.basic operator plugin") &&
          ok;
-    ok = Expect(PluginOption(scheduler_plugins, kNpmBasicPlugin).empty(),
-                "Docker npm.basic must not receive an option") &&
+    ok = Expect(!PluginSpec(scheduler_plugins, kBuiltinPlugin).empty(),
+                "Scheduler must load Builtin for Catalog initialization") &&
+         ok;
+    ok = Expect(!PluginSpec(scheduler_plugins, kCatalogPlugin).empty(),
+                "Scheduler must load Catalog for operator and dataframe registration") &&
+         ok;
+    ok = Expect(!PluginSpec(scheduler_plugins, kBinAddonPlugin).empty(),
+                "Scheduler must load BinAddon for C++ operator plugin lifecycle") &&
          ok;
     const size_t npi_index = scheduler_plugins.find(kNpiPlugin);
     const size_t pcapfile_index = scheduler_plugins.find(kPcapFilePlugin);
-    const size_t npm_basic_index = scheduler_plugins.find(kNpmBasicPlugin);
     const size_t scheduler_index = scheduler_plugins.find(kSchedulerPlugin);
-    ok = Expect(npi_index < pcapfile_index && pcapfile_index < npm_basic_index &&
-                    npm_basic_index < scheduler_index && scheduler_index != std::string::npos,
-                "Docker must load NPI, pcapfile and npm.basic before Scheduler in dependency order") &&
+    const size_t builtin_index = scheduler_plugins.find(kBuiltinPlugin);
+    const size_t catalog_index = scheduler_plugins.find(kCatalogPlugin);
+    const size_t binaddon_index = scheduler_plugins.find(kBinAddonPlugin);
+    ok = Expect(npi_index < pcapfile_index && pcapfile_index < scheduler_index && scheduler_index < builtin_index &&
+                    builtin_index < catalog_index && catalog_index < binaddon_index &&
+                    binaddon_index != std::string::npos,
+                "Docker must publish Builtin and Catalog before BinAddon recovery") &&
          ok;
     ok = Expect(pcapfile_option == std::string("db_path=") + kPcapFileDbPath,
                 "Docker pcapfile metadata must persist inside the capture named volume") &&
          ok;
     ok = Expect(pcapfile_option.rfind("db_path=/opt/flowsql/uploads/", 0) == 0,
                 "Docker pcapfile database must be covered by the Scheduler capture mount") &&
+         ok;
+    ok = Expect(catalog_option == std::string("data_dir=") + kDataframeDir + ";operator_db_path=" + kOperatorDbPath,
+                "Docker Catalog data and operator metadata must persist in the shared volume") &&
+         ok;
+    ok = Expect(binaddon_option ==
+                    std::string("operator_db_path=") + kOperatorDbPath + ";upload_dir=" + kBinAddonUploadDir,
+                "Docker BinAddon must share Catalog metadata and persist uploaded plugins") &&
+         ok;
+    ok = Expect(catalog_option.find(kOperatorDbPath) != std::string::npos &&
+                    binaddon_option.find(kOperatorDbPath) != std::string::npos,
+                "Docker Catalog and BinAddon must use the same operator metadata database") &&
          ok;
     ok = Expect(scheduler_plugins.find("libflowsql_example.so") == std::string::npos,
                 "Scheduler must not reference the absent example plugin") &&

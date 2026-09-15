@@ -1018,16 +1018,16 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
     }
     if (source_resolved.has_block_source && !parsed_ops.empty()) {
         std::vector<IBlockTransformOperatorV1*> transform_providers;
+        std::vector<CppOperatorCapabilityLeaseV1> transform_provider_leases;
         transform_providers.reserve(parsed_ops.size());
+        transform_provider_leases.reserve(parsed_ops.size());
         size_t transform_matches = 0;
         for (const auto& op_ref : parsed_ops) {
             bool transform_ambiguous = false;
             int transform_traverse_error = 0;
+            CppOperatorCapabilityLeaseV1 dynamic_lease;
             IBlockTransformOperatorV1* transform_provider = FindBlockTransformOperator(
-                op_ref.category,
-                op_ref.name,
-                &transform_ambiguous,
-                &transform_traverse_error);
+                op_ref.category, op_ref.name, &dynamic_lease, &transform_ambiguous, &transform_traverse_error);
             if (transform_traverse_error != 0) {
                 rsp = BuildExecutionErrorJson(
                     "block transform operator discovery failed with code " +
@@ -1042,6 +1042,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                 return error::CONFLICT;
             }
             transform_providers.push_back(transform_provider);
+            transform_provider_leases.push_back(std::move(dynamic_lease));
             if (transform_provider) ++transform_matches;
         }
         if (transform_matches != parsed_ops.size() &&

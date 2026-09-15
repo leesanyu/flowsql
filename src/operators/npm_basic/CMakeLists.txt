@@ -15,7 +15,7 @@ add_library(${PROJECT_NAME} SHARED
     npm_session_key.cpp
     npm_session_table.cpp
     npm_task_budget.cpp
-    plugin_register.cpp
+    npm_basic_plugin_exports.cpp
     ${CMAKE_SOURCE_DIR}/plugins/npi/packet_decoder.cpp
 )
 

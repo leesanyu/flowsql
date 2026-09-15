@@ -1,16 +1,15 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#include <common/network/netbase.h>
 #include <common/iplugin.h>
-#include <common/loader.hpp>
+#include <common/network/netbase.h>
 #include <framework/core/packet_codec.h>
-#include <plugins/npi/iprotocol.h>
+#include <framework/interfaces/cpp_operator_plugin_abi.h>
 #include <operators/npm_basic/npm_analysis_contract.h>
+#include <operators/npm_basic/npm_basic_operator.h>
 #include <operators/npm_basic/npm_basic_result_collector.h>
 #include <operators/npm_basic/npm_basic_result_encoder.h>
 #include <operators/npm_basic/npm_basic_result_projector.h>
-#include <operators/npm_basic/npm_basic_operator.h>
 #include <operators/npm_basic/npm_basic_task_config.h>
 #include <operators/npm_basic/npm_basic_task_runtime.h>
 #include <operators/npm_basic/npm_eof_flusher.h>
@@ -20,11 +19,13 @@
 #include <operators/npm_basic/npm_session_key.h>
 #include <operators/npm_basic/npm_session_table.h>
 #include <operators/npm_basic/npm_task_budget.h>
+#include <plugins/npi/iprotocol.h>
 
 #include <arrow/api.h>
 #include <arrow/util/byte_size.h>
 
 #include <arpa/inet.h>
+#include <dlfcn.h>
 
 #include <array>
 #include <atomic>
@@ -5715,63 +5716,67 @@ void TestNpmBasicTaskCancelBeforeOpenAndDuringProcess() {
     provider.ReleaseTask(task);
 }
 
-flowsql::IBlockTransformOperatorV1* FindDynamicNpmBasicProvider(
-    flowsql::PluginLoader* loader,
-    size_t* matches) {
-    flowsql::IBlockTransformOperatorV1* found = nullptr;
-    *matches = 0;
-    loader->Traverse(flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V1, [&](void* value) {
-        auto* provider = static_cast<flowsql::IBlockTransformOperatorV1*>(value);
-        if (provider != nullptr && provider->Category() == "npm" && provider->Name() == "basic") {
-            found = provider;
-            ++*matches;
-        }
-        return 0;
-    });
-    return found;
-}
+void TestNpmBasicV2PluginExports() {
+    void* handle = dlopen(FLOWSQL_NPM_BASIC_PLUGIN_PATH, RTLD_NOW | RTLD_LOCAL);
+    assert(handle != nullptr);
 
-void AssertDynamicNpmBasicPluginOrder(bool npm_first) {
-    flowsql::PluginLoader* loader = flowsql::PluginLoader::Single();
-    loader->StopAll();
-    assert(loader->Unload() == 0);
+    auto abi_version = reinterpret_cast<flowsql::CppOperatorPluginAbiVersionFn>(
+        dlsym(handle, flowsql::kCppOperatorPluginAbiVersionSymbol));
+    auto operator_count =
+        reinterpret_cast<flowsql::CppOperatorPluginCountFn>(dlsym(handle, flowsql::kCppOperatorPluginCountSymbol));
+    auto describe = reinterpret_cast<flowsql::CppOperatorPluginDescribeV2Fn>(
+        dlsym(handle, flowsql::kCppOperatorPluginDescribeV2Symbol));
+    auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityV2Fn>(
+        dlsym(handle, flowsql::kCppOperatorPluginCreateCapabilityV2Symbol));
+    auto destroy = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityV2Fn>(
+        dlsym(handle, flowsql::kCppOperatorPluginDestroyCapabilityV2Symbol));
+    assert(abi_version != nullptr && operator_count != nullptr && describe != nullptr);
+    assert(create != nullptr && destroy != nullptr);
+    assert(dlsym(handle, "pluginregist") == nullptr);
+    assert(dlsym(handle, flowsql::kCppOperatorPluginCreateV1Symbol) == nullptr);
+    assert(dlsym(handle, flowsql::kCppOperatorPluginDestroyV1Symbol) == nullptr);
+    assert(abi_version() == flowsql::kCppOperatorPluginAbiVersionV2);
+    assert(operator_count() == 1);
 
-    const std::string npi_option =
-        std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\",\"concurrency\":2}";
-    const char* libraries[] = {
-        npm_first ? FLOWSQL_NPM_BASIC_PLUGIN_PATH : FLOWSQL_NPI_PLUGIN_PATH,
-        npm_first ? FLOWSQL_NPI_PLUGIN_PATH : FLOWSQL_NPM_BASIC_PLUGIN_PATH,
-    };
-    const char* options[] = {
-        npm_first ? nullptr : npi_option.c_str(),
-        npm_first ? npi_option.c_str() : nullptr,
-    };
-    assert(loader->Load(".", libraries, options, 2) == 0);
+    flowsql::CppOperatorDescriptorV2 descriptor{};
+    descriptor.struct_size = flowsql::kCppOperatorDescriptorV2Size;
+    assert(describe(0, &descriptor) == 0);
+    assert(descriptor.struct_size == flowsql::kCppOperatorDescriptorV2Size);
+    assert(std::string(descriptor.category) == "npm");
+    assert(std::string(descriptor.name) == "basic");
+    assert(descriptor.description != nullptr && descriptor.description[0] != '\0');
+    assert(SameGuid(descriptor.contract_iid, flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V1));
 
-    size_t matches = 0;
-    auto* provider = FindDynamicNpmBasicProvider(loader, &matches);
-    assert(provider != nullptr && matches == 1);
-    auto* plugin = dynamic_cast<flowsql::IPlugin*>(provider);
-    assert(plugin != nullptr);
-    bool registered_same_plugin = false;
-    size_t plugin_count = 0;
-    loader->Traverse(flowsql::IID_PLUGIN, [&](void* value) {
-        ++plugin_count;
-        if (value == plugin) registered_same_plugin = true;
-        return 0;
-    });
-    assert(plugin_count == 2 && registered_same_plugin);
+    flowsql::CppOperatorDescriptorV2 rejected{};
+    rejected.struct_size = flowsql::kCppOperatorDescriptorV2Size - 1;
+    rejected.category = "sentinel";
+    assert(describe(0, &rejected) == EINVAL);
+    assert(rejected.struct_size == flowsql::kCppOperatorDescriptorV2Size - 1);
+    assert(std::string(rejected.category) == "sentinel");
+    assert(describe(-1, &descriptor) == EINVAL);
+    assert(describe(1, &descriptor) == EINVAL);
+    assert(describe(0, nullptr) == EINVAL);
+    assert(create(-1, nullptr) == nullptr);
+    assert(create(1, nullptr) == nullptr);
 
-    const std::string task_id = npm_first ? "dynamic-npm-first" : "dynamic-npi-first";
+    SinglePoolQuerier missing_dependency(nullptr);
+    assert(create(0, nullptr) == nullptr);
+    assert(create(0, &missing_dependency) == nullptr);
+
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    void* capability = create(0, &querier);
+    assert(capability != nullptr);
+    auto* provider = static_cast<flowsql::IBlockTransformOperatorV1*>(capability);
+    assert(provider->Category() == "npm" && provider->Name() == "basic");
+
+    const std::string task_id = "v2-capability";
     const std::string with_json =
         R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
     const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
-    auto* sentinel = reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1);
-    assert(provider->CreateTask(config, &sentinel) == EPIPE);
-    assert(sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
-
-    assert(loader->StartAll() == 0);
     flowsql::IBlockTransformTaskV1* task = nullptr;
     assert(provider->CreateTask(config, &task) == 0 && task != nullptr);
     std::shared_ptr<arrow::Schema> output_schema;
@@ -5789,49 +5794,14 @@ void AssertDynamicNpmBasicPluginOrder(bool npm_first) {
     assert(BasicResultColumn<arrow::StringArray>(outputs[0].batch, 21)->GetString(0) == "closed");
     outputs.clear();
     assert(task->Flush(&outputs) == 0);
-    assert(outputs.size() == 1 && outputs[0].batch != nullptr && outputs[0].ts_ms == 44);
-    assert(outputs[0].batch->num_rows() == 0);
+    assert(outputs.size() == 1 && outputs[0].batch != nullptr && outputs[0].batch->num_rows() == 0);
     provider->ReleaseTask(task);
     outputs.clear();
     output_schema.reset();
 
-    loader->StopAll();
-    sentinel = reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1);
-    assert(provider->CreateTask(config, &sentinel) == EPIPE);
-    assert(sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
-    assert(loader->Unload() == 0);
-    assert(loader->First(flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V1) == nullptr);
-}
-
-void TestNpmBasicDynamicPluginLifecycle() {
-    AssertDynamicNpmBasicPluginOrder(true);
-    AssertDynamicNpmBasicPluginOrder(false);
-
-    flowsql::PluginLoader* loader = flowsql::PluginLoader::Single();
-    const char* npm_library[] = {FLOWSQL_NPM_BASIC_PLUGIN_PATH};
-    const char* invalid_options[] = {"{}"};
-    assert(loader->Load(".", npm_library, invalid_options, 1) != 0);
-    assert(loader->First(flowsql::IID_PLUGIN) == nullptr);
-    assert(loader->First(flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V1) == nullptr);
-    assert(loader->Unload() == 0);
-
-    const char* no_options[] = {nullptr};
-    assert(loader->Load(".", npm_library, no_options, 1) == 0);
-    size_t matches = 0;
-    auto* provider = FindDynamicNpmBasicProvider(loader, &matches);
-    assert(provider != nullptr && matches == 1);
-    assert(loader->StartAll() != 0);
-
-    const std::string task_id = "missing-npi";
-    const std::string with_json =
-        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
-    const std::string filter_plan = R"({"version":1,"root":null})";
-    const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
-    auto* sentinel = reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1);
-    assert(provider->CreateTask(config, &sentinel) == EPIPE);
-    assert(sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
-    loader->StopAll();
-    assert(loader->Unload() == 0);
+    destroy(0, capability);
+    destroy(0, nullptr);
+    assert(dlclose(handle) == 0);
 }
 
 }  // namespace
@@ -5906,6 +5876,6 @@ int main() {
     TestNpmBasicTaskRejectsInvalidCallsAtomically();
     TestNpmBasicTaskMethodPreconditions();
     TestNpmBasicTaskCancelBeforeOpenAndDuringProcess();
-    TestNpmBasicDynamicPluginLifecycle();
+    TestNpmBasicV2PluginExports();
     return 0;
 }

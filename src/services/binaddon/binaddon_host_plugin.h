@@ -10,7 +10,9 @@
 #define _FLOWSQL_SERVICES_BINADDON_BINADDON_HOST_PLUGIN_H_
 
 #include <common/iplugin.h>
+#include <framework/interfaces/cpp_operator_plugin_abi.h>
 #include <framework/interfaces/ibinaddon_host.h>
+#include <framework/interfaces/icpp_operator_plugin_registry.h>
 #include <framework/interfaces/ioperator.h>
 #include <framework/interfaces/ioperator_catalog.h>
 #include <framework/interfaces/ioperator_registry.h>
@@ -27,7 +29,9 @@
 namespace flowsql {
 namespace binaddon {
 
-class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin, public IBinAddonHost {
+class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin,
+                                                                  public IBinAddonHost,
+                                                                  public ICppOperatorPluginRegistryV1 {
  public:
     struct PluginStoreRow {
         std::string plugin_id;
@@ -43,6 +47,15 @@ class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin
     };
 
     struct LoadedPlugin {
+        struct Capability {
+            int index = -1;
+            std::string category;
+            std::string name;
+            std::string description;
+            Guid contract_iid{};
+            void* instance = nullptr;
+        };
+
         void* handle = nullptr;
         std::string plugin_id;
         std::string file_path;
@@ -52,11 +65,15 @@ class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin
         int64_t size_bytes = 0;
         std::atomic<int> active_count{0};
         std::atomic<bool> pending_unload{false};
-        int (*count_fn)() = nullptr;
-        IOperator* (*create_fn)(int) = nullptr;
-        void (*destroy_fn)(IOperator*) = nullptr;
+        CppOperatorPluginCountFn count_fn = nullptr;
+        CppOperatorPluginCreateV1Fn create_fn = nullptr;
+        CppOperatorPluginDestroyV1Fn destroy_fn = nullptr;
+        CppOperatorPluginDescribeV2Fn describe_fn = nullptr;
+        CppOperatorPluginCreateCapabilityV2Fn create_capability_fn = nullptr;
+        CppOperatorPluginDestroyCapabilityV2Fn destroy_capability_fn = nullptr;
         std::vector<std::string> operator_keys;
         std::vector<std::string> operator_names;
+        std::vector<Capability> capabilities;
         ~LoadedPlugin();
     };
 
@@ -78,6 +95,10 @@ class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin
     int DeleteCppPlugin(const std::string& plugin_id, std::string& rsp) override;
     int GetCppPluginDetail(const std::string& plugin_id, std::string& rsp) override;
 
+    // ICppOperatorPluginRegistryV1
+    int Acquire(const char* category, const char* name, const Guid& contract_iid,
+                CppOperatorCapabilityLeaseV1* lease) override;
+
  private:
     int EnsureOperatorDbDir() const;
     int EnsureOperatorDbLocked();
@@ -90,6 +111,7 @@ class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin
                                  int abi_version,
                                  int operator_count,
                                  const std::string& operators_json);
+    int MarkPluginBrokenLocked(const std::string& plugin_id, const std::string& last_error, int abi_version);
     int UpsertCppOperatorsLocked(const std::string& plugin_id, const std::vector<OperatorMeta>& operators);
     int SetCppOperatorsActiveByPluginLocked(const std::string& plugin_id, int active);
     int DeleteCppOperatorsByPluginLocked(const std::string& plugin_id);

@@ -12,13 +12,17 @@
 
 namespace {
 
-constexpr const char* kUploadRoot = "/tmp/flowsql/uploads";
+constexpr const char* kUploadRoot = "./uploads";
 constexpr const char* kNpiPlugin = "libflowsql_npi.so";
 constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
 constexpr const char* kNpmBasicPlugin = "libflowsql_npm_basic.so";
 constexpr const char* kSchedulerPlugin = "libflowsql_scheduler.so";
+constexpr const char* kCatalogPlugin = "libflowsql_catalog.so";
+constexpr const char* kBinAddonPlugin = "libflowsql_binaddon.so";
 constexpr const char* kNpiOption = "{\"ldfile\":\"./config/protocols.yml\"}";
 constexpr const char* kPcapFileOption = "db_path=./meta/flowsql_meta.db";
+constexpr const char* kCatalogOption = "data_dir=./dataframes;operator_db_path=./meta/flowsql_meta.db";
+constexpr const char* kBinAddonOption = "operator_db_path=./meta/flowsql_meta.db;upload_dir=./uploads/binaddon";
 
 bool Expect(bool condition, const std::string& message) {
     if (condition) return true;
@@ -46,7 +50,7 @@ std::string PluginOption(const std::string& plugin) {
     return colon == std::string::npos ? std::string() : plugin.substr(colon + 1);
 }
 
-bool ExpectSchedulerProviders(const flowsql::gateway::ServiceConfig& service, const std::string& deployment) {
+bool ExpectSchedulerRuntime(const flowsql::gateway::ServiceConfig& service, const std::string& deployment) {
     bool ok = true;
     const std::string* npi = FindPlugin(service, kNpiPlugin);
     ok = Expect(npi != nullptr, deployment + " Scheduler process must load NPI") && ok;
@@ -64,11 +68,20 @@ bool ExpectSchedulerProviders(const flowsql::gateway::ServiceConfig& service, co
              ok;
     }
     const std::string* npm_basic = FindPlugin(service, kNpmBasicPlugin);
-    ok = Expect(npm_basic != nullptr,
-                deployment + " Scheduler process must load the npm.basic provider") &&
-         ok;
-    if (npm_basic) {
-        ok = Expect(PluginOption(*npm_basic).empty(), deployment + " npm.basic must not receive an option") && ok;
+    ok = Expect(npm_basic == nullptr, deployment + " must not statically load the npm.basic operator plugin") && ok;
+    const std::string* catalog = FindPlugin(service, kCatalogPlugin);
+    ok = Expect(catalog != nullptr, deployment + " Scheduler process must load Catalog") && ok;
+    if (catalog) {
+        ok = Expect(PluginOption(*catalog) == kCatalogOption,
+                    deployment + " Catalog must use the shared operator metadata database") &&
+             ok;
+    }
+    const std::string* binaddon = FindPlugin(service, kBinAddonPlugin);
+    ok = Expect(binaddon != nullptr, deployment + " Scheduler process must load BinAddon") && ok;
+    if (binaddon) {
+        ok = Expect(PluginOption(*binaddon) == kBinAddonOption,
+                    deployment + " BinAddon must share operator metadata and persist uploaded plugins") &&
+             ok;
     }
     const auto plugin_index = [&](const char* library) {
         return static_cast<size_t>(std::distance(
@@ -79,11 +92,12 @@ bool ExpectSchedulerProviders(const flowsql::gateway::ServiceConfig& service, co
     };
     const size_t npi_index = plugin_index(kNpiPlugin);
     const size_t pcapfile_index = plugin_index(kPcapFilePlugin);
-    const size_t npm_basic_index = plugin_index(kNpmBasicPlugin);
     const size_t scheduler_index = plugin_index(kSchedulerPlugin);
-    ok = Expect(npi_index < pcapfile_index && pcapfile_index < npm_basic_index &&
-                    npm_basic_index < scheduler_index && scheduler_index < service.plugins.size(),
-                deployment + " must load NPI, pcapfile and npm.basic before Scheduler in dependency order") &&
+    const size_t catalog_index = plugin_index(kCatalogPlugin);
+    const size_t binaddon_index = plugin_index(kBinAddonPlugin);
+    ok = Expect(npi_index < pcapfile_index && pcapfile_index < scheduler_index && scheduler_index < catalog_index &&
+                    catalog_index < binaddon_index && binaddon_index < service.plugins.size(),
+                deployment + " must start NPI before BinAddon recovery and publish Catalog before BinAddon") &&
          ok;
     return ok;
 }
@@ -95,10 +109,10 @@ bool ExpectWebUploadRoot(const flowsql::gateway::ServiceConfig& service, const s
 
     const std::string option = PluginOption(*web);
     ok = Expect(option.find("upload_dir=" + std::string(kUploadRoot)) != std::string::npos,
-                deployment + " Web must use the frozen absolute upload root") &&
+                deployment + " Web must use the runtime-relative upload root") &&
          ok;
-    ok = Expect(option.find("upload_dir=./") == std::string::npos,
-                deployment + " Web must not depend on the process working directory") &&
+    ok = Expect(option.find("upload_dir=/tmp/") == std::string::npos,
+                deployment + " Web must not persist managed captures in temporary storage") &&
          ok;
     return ok;
 }
@@ -115,7 +129,7 @@ bool TestSingleProcessConfig() {
     const auto* all = FindService(config, "all");
     ok = Expect(all != nullptr, "single-process deployment must contain the all service") && ok;
     if (!all) return false;
-    const bool providers_ok = ExpectSchedulerProviders(*all, "single-process deployment");
+    const bool providers_ok = ExpectSchedulerRuntime(*all, "single-process deployment");
     const bool web_ok = ExpectWebUploadRoot(*all, "single-process deployment");
     return providers_ok && web_ok && ok;
 }
@@ -130,7 +144,7 @@ bool TestGuardianConfig() {
     ok = Expect(scheduler != nullptr, "Guardian deployment must contain the Scheduler service") && ok;
     if (!web || !scheduler) return false;
     const bool web_ok = ExpectWebUploadRoot(*web, "Guardian deployment");
-    const bool providers_ok = ExpectSchedulerProviders(*scheduler, "Guardian deployment");
+    const bool providers_ok = ExpectSchedulerRuntime(*scheduler, "Guardian deployment");
     return web_ok && providers_ok && ok;
 }
 
@@ -227,6 +241,12 @@ bool TestPcapFilePersistenceDocumentation() {
                      "README must document pcapfile persistence");
     ok = Expect(readme.find(kPcapFileOption) != std::string::npos,
                 "README must document the native pcapfile database path") &&
+         ok;
+    ok = Expect(readme.find("build/output/uploads/pcapfile/") != std::string::npos,
+                "README must document the native managed capture path") &&
+         ok;
+    ok = Expect(readme.find("同一运行数据单元") != std::string::npos,
+                "README must couple native pcapfile database and managed capture lifecycle") &&
          ok;
     ok = Expect(readme.find("/opt/flowsql/uploads/.meta/pcapfile.db") != std::string::npos,
                 "README must document the Docker pcapfile database path") &&

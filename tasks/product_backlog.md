@@ -17,8 +17,10 @@
 | [x] | FlowSQL 阶段化过滤管线 (`stage-filter-pipeline`) | P0 | 支持 source 与每级 operator 输出的类型化 WHERE，以 Arrow 统一执行并允许 channel/operator 做精确谓词下推。 | [归档](archive/feat-stage-filter-pipeline.md) |
 | [x] | NPM 离线导入过滤 (`npm-offline-filter`) | P0 | 支持离线文件按带时区纳秒时间、MAC、IP、端口及默认双向 TCP/UDP endpoint pair 过滤，以类型化不可变规则实现任务隔离的 pcapfile 精确下推；不执行协议或应用识别。 | [归档](archive/feat-npm-offline-filter.md) |
 | [x] | PCAP 文件通道持久化 (`pcapfile-channel-persistence`) | P0 | 将 `pcapfile` 通道的规范化配置持久化到 Scheduler 侧 SQLite，并在服务重启后按原名称恢复可重复执行的离线 source。 | [归档](archive/feat-pcapfile-channel-persistence.md) |
+| [x] | 原生 PCAP 存储生命周期一致性 (`native-pcap-storage-consistency`) | P0 | 让原生受管 PCAP 文件与持久数据库共享运行目录生命周期，消除临时目录清理导致的启动恢复失败。 | [归档](archive/feat-native-pcap-storage-consistency.md) |
 | [x] | NPM 基础分析与模块组合 (`npm-basic-analysis`) | P0 | 以同一 `npm.basic` 任务内引擎统一会话、有限采样识别和模块组合；交付离线生产 provider，并以模拟时间/采集事实验证实时周期快照、有界内存、过载和性能契约。 | [归档](archive/feat-npm-basic-analysis.md) |
 | [x] | C++ 算子源码目录归位 (`operator-source-layout`) | P1 | 建立独立的 C++ 业务算子源码根目录，将 `npm_basic` 与通用能力插件分离，同时保持内置算子和运行时契约不变。 | [归档](archive/feat-operator-source-layout.md) |
+| [x] | NPM 基础分析算子插件生命周期 (`npm-basic-operator-plugin-lifecycle`) | P0 | 让 `npm.basic` 作为按功能命名的 C++ 算子，通过统一多算子插件 ABI 完成上传、激活、任务租约、去激活和重启恢复。 | [归档](archive/feat-npm-basic-operator-plugin-lifecycle.md) |
 | [ ] | 流式算子时间驱动 (`stream-time-drive`) | P0 | 在保留 V1 ABI 的前提下提供可选版本化时间通知，覆盖无包/繁忙调度、链式传播、输出背压与取消；正常 EOF 立即单次终结，支撑 NPM 等有状态算子。 | 待创建 |
 | [ ] | NPM TCP/UDP 会话性能分析 (`npm-session-analysis`) | P1 | 依赖 `npm-basic-analysis`，作为同一 NPM 算子的可选模块复用会话 ID、方向、协议标签及生命周期，计算连接、时延、重传和吞吐等性能指标；丢包指标仅在具有可观测依据时提供，不重复建立会话。 | 待创建 |
 | [ ] | NPM 应用协议分析 (`npm-protocol-analysis`) | P1 | 依赖 `npm-basic-analysis`，作为同一 NPM 算子的可选模块按需重组、增量解析 DNS、HTTP、TLS、ICMP 等协议/事务；独立于完整性能分析，约束跨包缓存并标记不完整结果，协议识别成功后仍持续解析。 | 待创建 |

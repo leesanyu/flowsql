@@ -25,17 +25,18 @@
 #include <rapidjson/writer.h>
 
 #include <common/error_code.h>
-#include <common/loader.hpp>
 #include <framework/core/dataframe.h>
 #include <framework/core/dataframe_channel.h>
 #include <framework/core/filter_planner.h>
 #include <framework/core/packet_codec.h>
 #include <framework/core/stream_channel_adapter.h>
+#include <framework/interfaces/ibinaddon_host.h>
 #include <framework/interfaces/iblock_stream_operator.h>
 #include <framework/interfaces/iblock_transform_operator.h>
+#include <framework/interfaces/ichannel_registry.h>
+#include <framework/interfaces/icpp_operator_plugin_registry.h>
 #include <framework/interfaces/idatabase_channel.h>
 #include <framework/interfaces/idatabase_factory.h>
-#include <framework/interfaces/ichannel_registry.h>
 #include <framework/interfaces/idataframe_channel.h>
 #include <framework/interfaces/ifilter_domain_resolver.h>
 #include <framework/interfaces/ioperator.h>
@@ -45,6 +46,7 @@
 #include <framework/interfaces/istream_factory.h>
 #include <framework/interfaces/istream_operator.h>
 #include <plugins/npi/iprotocol.h>
+#include <common/loader.hpp>
 
 using namespace flowsql;
 
@@ -1021,6 +1023,9 @@ int main() {
     const std::filesystem::path db_path = std::filesystem::temp_directory_path() / ("flowsql_s9_3_" + suffix + ".db");
     const std::filesystem::path data_dir = std::filesystem::temp_directory_path() / ("flowsql_s9_3_df_" + suffix);
     const std::filesystem::path operator_db_dir = std::filesystem::temp_directory_path() / ("flowsql_s9_3_catalog_" + suffix);
+    const std::filesystem::path operator_db_path = operator_db_dir / "operator_catalog.db";
+    const std::filesystem::path binaddon_upload_dir =
+        std::filesystem::temp_directory_path() / ("flowsql_s9_3_binaddon_" + suffix);
     const std::filesystem::path stream_cfg = std::filesystem::temp_directory_path() / ("flowsql_s9_3_stream_" + suffix + ".yml");
     const std::filesystem::path stream_meta_db = std::filesystem::temp_directory_path() / ("flowsql_s9_3_stream_meta_" + suffix + ".db");
     const std::filesystem::path pcap_ok =
@@ -1044,6 +1049,8 @@ int main() {
     std::filesystem::remove(pcap_nano);
     std::filesystem::remove(pcapng_offset);
     std::filesystem::remove(pcap_npm_basic);
+    std::filesystem::remove_all(operator_db_dir);
+    std::filesystem::remove_all(binaddon_upload_dir);
     std::filesystem::create_directories(data_dir);
     std::filesystem::create_directories(operator_db_dir);
     WriteSchedulerE2eBinary(pcap_ok, MakeSchedulerE2ePcap(false));
@@ -1118,17 +1125,18 @@ int main() {
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &packet_transform);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &passthrough_transform);
     const char* libs[] = {
-        "libflowsql_database.so", "libflowsql_builtin.so",   "libflowsql_catalog.so",
-        "libflowsql_npi.so",      "libflowsql_pcapfile.so",  "libflowsql_npm_basic.so",
-        "libflowsql_scheduler.so", "libflowsql_stream.so",
+        "libflowsql_database.so", "libflowsql_builtin.so",   "libflowsql_catalog.so",  "libflowsql_npi.so",
+        "libflowsql_pcapfile.so", "libflowsql_scheduler.so", "libflowsql_binaddon.so", "libflowsql_stream.so",
     };
     std::string db_opt = "type=sqlite;name=local;path=" + db_path.string();
-    std::string catalog_opt = "data_dir=" + data_dir.string() + ";operator_db_dir=" + operator_db_dir.string();
+    std::string catalog_opt = "data_dir=" + data_dir.string() + ";operator_db_path=" + operator_db_path.string();
     std::string npi_opt =
         std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\",\"concurrency\":2}";
+    std::string binaddon_opt =
+        "operator_db_path=" + operator_db_path.string() + ";upload_dir=" + binaddon_upload_dir.string();
     std::string stream_opt = "config_file=" + stream_cfg.string() + ";db_path=" + stream_meta_db.string();
-    const char* opts[] = {db_opt.c_str(),      nullptr, catalog_opt.c_str(), npi_opt.c_str(),
-                          nullptr,             nullptr, nullptr,             stream_opt.c_str()};
+    const char* opts[] = {db_opt.c_str(), nullptr, catalog_opt.c_str(),  npi_opt.c_str(),
+                          nullptr,        nullptr, binaddon_opt.c_str(), stream_opt.c_str()};
     ASSERT_EQ(loader->Load(get_absolute_process_path(), libs, opts, 8), 0);
     std::puts("[INFO] plugins loaded");
 
@@ -1150,12 +1158,19 @@ int main() {
     auto* registry = static_cast<IChannelRegistry*>(loader->First(IID_CHANNEL_REGISTRY));
     auto* stream_factory = static_cast<IStreamFactory*>(loader->First(IID_STREAM_FACTORY));
     auto* op_registry = static_cast<IOperatorRegistry*>(loader->First(IID_OPERATOR_REGISTRY));
+    auto* capability_registry =
+        static_cast<ICppOperatorPluginRegistryV1*>(loader->First(IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1));
+    auto* binaddon_host = static_cast<IBinAddonHost*>(loader->First(IID_BINADDON_HOST));
+    auto* binaddon_plugin = dynamic_cast<IPlugin*>(binaddon_host);
     auto* filter_domain_resolver = static_cast<IFilterDomainResolverV1*>(
         loader->First(IID_FILTER_DOMAIN_RESOLVER_V1));
     ASSERT_TRUE(factory != nullptr);
     ASSERT_TRUE(registry != nullptr);
     ASSERT_TRUE(stream_factory != nullptr);
     ASSERT_TRUE(op_registry != nullptr);
+    ASSERT_TRUE(capability_registry != nullptr);
+    ASSERT_TRUE(binaddon_host != nullptr);
+    ASSERT_TRUE(binaddon_plugin != nullptr);
     ASSERT_TRUE(filter_domain_resolver != nullptr);
     auto* db = dynamic_cast<IDatabaseChannel*>(factory->Get("sqlite", "local"));
     ASSERT_TRUE(db != nullptr);
@@ -1172,8 +1187,11 @@ int main() {
     auto stream_reset = FindRouteHandler(loader, "POST", "/channels/stream/reset");
     auto stream_definitions_query = FindRouteHandler(loader, "POST", "/channels/stream/definitions/query");
     auto sql_classify = FindRouteHandler(loader, "POST", "/scheduler/sql/classify");
+    auto upload = FindRouteHandler(loader, "POST", "/operators/upload");
+    auto detail = FindRouteHandler(loader, "POST", "/operators/detail");
     auto activate = FindRouteHandler(loader, "POST", "/operators/activate");
     auto deactivate = FindRouteHandler(loader, "POST", "/operators/deactivate");
+    auto delete_operator = FindRouteHandler(loader, "POST", "/operators/delete");
     auto upsert_batch = FindRouteHandler(loader, "POST", "/operators/upsert_batch");
     ASSERT_TRUE(exec != nullptr);
     ASSERT_TRUE(stream_exec != nullptr);
@@ -1185,8 +1203,11 @@ int main() {
     ASSERT_TRUE(stream_reset != nullptr);
     ASSERT_TRUE(stream_definitions_query != nullptr);
     ASSERT_TRUE(sql_classify != nullptr);
+    ASSERT_TRUE(upload != nullptr);
+    ASSERT_TRUE(detail != nullptr);
     ASSERT_TRUE(activate != nullptr);
     ASSERT_TRUE(deactivate != nullptr);
+    ASSERT_TRUE(delete_operator != nullptr);
     ASSERT_TRUE(upsert_batch != nullptr);
     std::puts("[INFO] execute handler ready");
 
@@ -1472,22 +1493,126 @@ int main() {
                   error::OK);
         ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
     }
-    // npm-basic-analysis T4.1: real pcapfile -> npm.basic -> dataframe.
+    // npm-basic-operator-plugin-lifecycle T4.4: API lifecycle and real SQL.
     {
         const std::string channel_name = "scheduler_npm_basic";
         const std::string dataframe_name = "scheduler_npm_basic";
+        const std::string plugin_filename = "libflowsql_npm_basic.so";
         std::string rsp;
         ASSERT_EQ(stream_add("/channels/stream/add",
                              MakePcapSourceAddRequest(channel_name, pcap_npm_basic),
                              rsp),
                   error::OK);
 
-        pcap_protocol.Reset();
         const std::string input_namespace = "pcapfile." + channel_name;
-        const std::string sql =
-            "SELECT * FROM " + input_namespace +
-            " USING npm.basic WITH input_namespace='" + input_namespace +
-            "',source_domains='0:77' INTO dataframe." + dataframe_name;
+        const auto make_npm_sql = [&](const std::string& destination) {
+            return "SELECT * FROM " + input_namespace + " USING npm.basic WITH input_namespace='" + input_namespace +
+                   "',source_domains='0:77' INTO dataframe." + destination;
+        };
+        const auto assert_npm_unavailable = [&](const std::string& destination) {
+            const int rc = exec("/scheduler/batch/execute", MakeReq(make_npm_sql(destination)), rsp);
+            ASSERT_TRUE(rc != error::OK);
+            ASSERT_TRUE(rsp.find("npm.basic") != std::string::npos);
+            ASSERT_TRUE(rsp.find("not found") != std::string::npos);
+            ASSERT_TRUE(registry->Get(destination.c_str()) == nullptr);
+        };
+        assert_npm_unavailable("npm_before_activation");
+
+        const auto make_upload_request = [&](const std::filesystem::path& tmp_path) {
+            rapidjson::StringBuffer buffer;
+            rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+            writer.StartObject();
+            writer.Key("type");
+            writer.String("cpp");
+            writer.Key("filename");
+            writer.String(plugin_filename.c_str());
+            writer.Key("tmp_path");
+            writer.String(tmp_path.string().c_str());
+            writer.EndObject();
+            return std::string(buffer.GetString());
+        };
+
+        const std::filesystem::path bad_upload =
+            std::filesystem::temp_directory_path() / ("flowsql_bad_npm_basic_" + suffix + ".so");
+        WriteSchedulerE2eBinary(bad_upload, {0x7f, 'B', 'A', 'D'});
+        ASSERT_EQ(upload("/operators/upload", make_upload_request(bad_upload), rsp), error::OK);
+        rapidjson::Document bad_uploaded;
+        bad_uploaded.Parse(rsp.c_str());
+        ASSERT_TRUE(!bad_uploaded.HasParseError() && bad_uploaded.IsObject());
+        ASSERT_TRUE(bad_uploaded.HasMember("plugin_id") && bad_uploaded["plugin_id"].IsString());
+        const std::string bad_plugin_id = bad_uploaded["plugin_id"].GetString();
+        const std::string bad_plugin_request = "{\"type\":\"cpp\",\"plugin_id\":\"" + bad_plugin_id + "\"}";
+        ASSERT_EQ(activate("/operators/activate", bad_plugin_request, rsp), error::BAD_REQUEST);
+        ASSERT_EQ(detail("/operators/detail", bad_plugin_request, rsp), error::OK);
+        rapidjson::Document bad_detail;
+        bad_detail.Parse(rsp.c_str());
+        ASSERT_TRUE(!bad_detail.HasParseError() && bad_detail.IsObject());
+        ASSERT_EQ(std::string(bad_detail["plugin"]["status"].GetString()), "broken");
+        ASSERT_EQ(delete_operator("/operators/delete", bad_plugin_request, rsp), error::OK);
+        ASSERT_EQ(detail("/operators/detail", bad_plugin_request, rsp), error::NOT_FOUND);
+
+        const std::filesystem::path good_upload =
+            std::filesystem::temp_directory_path() / ("flowsql_good_npm_basic_" + suffix + ".so");
+        std::error_code copy_error;
+        std::filesystem::copy_file(FLOWSQL_NPM_BASIC_PLUGIN_PATH, good_upload,
+                                   std::filesystem::copy_options::overwrite_existing, copy_error);
+        ASSERT_TRUE(!copy_error);
+        ASSERT_EQ(upload("/operators/upload", make_upload_request(good_upload), rsp), error::OK);
+        rapidjson::Document uploaded;
+        uploaded.Parse(rsp.c_str());
+        ASSERT_TRUE(!uploaded.HasParseError() && uploaded.IsObject());
+        ASSERT_TRUE(uploaded.HasMember("plugin_id") && uploaded["plugin_id"].IsString());
+        ASSERT_EQ(std::string(uploaded["status"].GetString()), "uploaded");
+        const std::string plugin_id = uploaded["plugin_id"].GetString();
+        ASSERT_TRUE(plugin_id != bad_plugin_id);
+        const std::string plugin_request = "{\"type\":\"cpp\",\"plugin_id\":\"" + plugin_id + "\"}";
+
+        ASSERT_EQ(activate("/operators/activate", plugin_request, rsp), error::OK);
+        rapidjson::Document activated;
+        activated.Parse(rsp.c_str());
+        ASSERT_TRUE(!activated.HasParseError() && activated.IsObject());
+        ASSERT_EQ(activated["abi_version"].GetInt(), 2);
+        ASSERT_EQ(activated["operator_count"].GetInt(), 1);
+        ASSERT_TRUE(activated["operators"].IsArray());
+        ASSERT_EQ(activated["operators"].Size(), rapidjson::SizeType(1));
+        ASSERT_EQ(std::string(activated["operators"][0].GetString()), "npm.basic");
+
+        ASSERT_EQ(detail("/operators/detail", plugin_request, rsp), error::OK);
+        rapidjson::Document activated_detail;
+        activated_detail.Parse(rsp.c_str());
+        ASSERT_TRUE(!activated_detail.HasParseError() && activated_detail.IsObject());
+        const auto& plugin_detail = activated_detail["plugin"];
+        ASSERT_EQ(std::string(plugin_detail["status"].GetString()), "activated");
+        ASSERT_EQ(plugin_detail["operator_count"].GetInt(), 1);
+        ASSERT_TRUE(plugin_detail["operators"].IsArray());
+        ASSERT_EQ(std::string(plugin_detail["operators"][0].GetString()), "npm.basic");
+        ASSERT_TRUE(plugin_detail["operator_details"].IsArray());
+        ASSERT_EQ(plugin_detail["operator_details"].Size(), rapidjson::SizeType(1));
+        const auto& npm_detail = plugin_detail["operator_details"][0];
+        ASSERT_EQ(std::string(npm_detail["name"].GetString()), "npm.basic");
+        ASSERT_EQ(std::string(npm_detail["contract"].GetString()), "block_transform_v1");
+
+        CppOperatorCapabilityLeaseV1 live_lease;
+        ASSERT_EQ(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR_V1, &live_lease), 0);
+        auto* live_provider = static_cast<IBlockTransformOperatorV1*>(live_lease.capability);
+        ASSERT_TRUE(live_provider != nullptr);
+        const std::string live_task_id = "npm-live-deactivation";
+        const std::string live_with = "{\"input_namespace\":\"" + input_namespace + "\",\"source_domains\":\"0:77\"}";
+        const std::string live_filter = R"({"version":1,"root":null})";
+        BlockTransformTaskConfigV1 live_config;
+        live_config.task_id = live_task_id.c_str();
+        live_config.with_params_json = live_with.c_str();
+        live_config.pushed_filter_plan_json = live_filter.c_str();
+        IBlockTransformTaskV1* live_task = nullptr;
+        ASSERT_EQ(live_provider->CreateTask(live_config, &live_task), 0);
+        ASSERT_TRUE(live_task != nullptr);
+        ASSERT_EQ(deactivate("/operators/deactivate", plugin_request, rsp), error::CONFLICT);
+        ASSERT_TRUE(rsp.find("plugin is in use") != std::string::npos);
+        live_provider->ReleaseTask(live_task);
+        live_lease = {};
+
+        pcap_protocol.Reset();
+        const std::string sql = make_npm_sql(dataframe_name);
         ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
 
         rapidjson::Document completed;
@@ -1589,13 +1714,48 @@ int main() {
         ASSERT_TRUE(protocol_name->IsNull(0));
         ASSERT_EQ(end_reason->GetString(0), "closed");
 
+        ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
+        ASSERT_EQ(deactivate("/operators/deactivate", plugin_request, rsp), error::OK);
+        CppOperatorCapabilityLeaseV1 missing_lease;
+        ASSERT_TRUE(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR_V1, &missing_lease) != 0);
+        ASSERT_TRUE(missing_lease.capability == nullptr && !missing_lease.lifetime);
+        assert_npm_unavailable("npm_after_deactivation");
+
+        ASSERT_EQ(activate("/operators/activate", plugin_request, rsp), error::OK);
+        ASSERT_EQ(binaddon_plugin->Stop(), 0);
+        ASSERT_TRUE(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR_V1, &missing_lease) != 0);
+        ASSERT_EQ(binaddon_plugin->Start(), 0);
+        CppOperatorCapabilityLeaseV1 recovered_lease;
+        ASSERT_EQ(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR_V1, &recovered_lease), 0);
+        recovered_lease = {};
+
+        const std::string recovered_dataframe = "scheduler_npm_basic_recovered";
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(make_npm_sql(recovered_dataframe)), rsp), error::OK);
+        auto recovered_output =
+            std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(recovered_dataframe.c_str()));
+        ASSERT_TRUE(recovered_output != nullptr);
+        DataFrame recovered_result;
+        ASSERT_EQ(recovered_output->Read(&recovered_result), 0);
+        const auto recovered_batch = recovered_result.ToArrow();
+        ASSERT_TRUE(recovered_batch != nullptr);
+        ASSERT_EQ(recovered_batch->num_rows(), 1);
+        AssertSchedulerE2eNpmBasicSchema(recovered_batch->schema());
+        ASSERT_EQ(registry->Unregister(recovered_dataframe.c_str()), 0);
+
+        ASSERT_EQ(deactivate("/operators/deactivate", plugin_request, rsp), error::OK);
+        ASSERT_EQ(binaddon_plugin->Stop(), 0);
+        ASSERT_EQ(binaddon_plugin->Start(), 0);
+        ASSERT_TRUE(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR_V1, &missing_lease) != 0);
+        assert_npm_unavailable("npm_deactivated_restart");
+        ASSERT_EQ(delete_operator("/operators/delete", plugin_request, rsp), error::OK);
+        ASSERT_EQ(detail("/operators/detail", plugin_request, rsp), error::NOT_FOUND);
+
         ASSERT_EQ(stream_remove("/channels/stream/remove",
                                 MakePcapSourceRemoveRequest(channel_name),
                                 rsp),
                   error::OK);
-        ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
     }
-    std::puts("[PASS] npm-basic-analysis offline SQL E2E");
+    std::puts("[PASS] npm.basic dynamic plugin lifecycle and offline SQL E2E");
     {
         const std::string channel_name = "scheduler_pcap_error";
         std::string rsp;
@@ -4700,8 +4860,11 @@ int main() {
     stream_reset = fnRouterHandler();
     stream_definitions_query = fnRouterHandler();
     sql_classify = fnRouterHandler();
+    upload = fnRouterHandler();
+    detail = fnRouterHandler();
     activate = fnRouterHandler();
     deactivate = fnRouterHandler();
+    delete_operator = fnRouterHandler();
     upsert_batch = fnRouterHandler();
     loader->StopAll();
     loader->Unload();
@@ -4716,6 +4879,7 @@ int main() {
     std::filesystem::remove(pcap_npm_basic);
     std::filesystem::remove_all(data_dir);
     std::filesystem::remove_all(operator_db_dir);
+    std::filesystem::remove_all(binaddon_upload_dir);
 
     std::puts("=== All Scheduler E2E tests passed ===");
     return 0;

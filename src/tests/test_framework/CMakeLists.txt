@@ -121,6 +121,9 @@ add_dependencies(test_docker_deploy_config
     flowsql_router
     flowsql_scheduler
     flowsql_bridge
+    flowsql_builtin
+    flowsql_catalog
+    flowsql_binaddon
     flowsql_database
     flowsql_npi
     flowsql_npm_basic

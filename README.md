@@ -94,10 +94,14 @@ LD_LIBRARY_PATH=. ./flowsql --config ../../config/deploy-multi.yaml
 回放参数恢复通道，后续 SQL 会为该通道创建新的 reader 并从文件开头读取。只有用户显式删除通道时，Scheduler
 才移除持久记录；上传目录中的受管 PCAP 文件继续由 Web 按既有安全校验和删除顺序负责。
 
-单进程和 Guardian 配置使用 `db_path=./meta/flowsql_meta.db`。该相对路径以 FlowSQL 运行目录为基准；使用
-`start.sh` 时实际位于 `build/output/meta/flowsql_meta.db`。Docker 配置使用
-`/opt/flowsql/uploads/.meta/pcapfile.db`，数据库和上传文件都位于 `pcap-uploads` named volume，不写入容器
-临时层。迁移或备份 Docker 部署时应把该 named volume 作为一个整体处理，避免数据库记录与 PCAP 文件分离。
+单进程和 Guardian 配置使用 `db_path=./meta/flowsql_meta.db` 与 `upload_dir=./uploads`。这两个相对路径都以
+FlowSQL 运行目录为基准；使用 `start.sh` 时，数据库实际位于 `build/output/meta/flowsql_meta.db`，受管文件位于
+`build/output/uploads/pcapfile/`。二者属于同一运行数据单元，备份、迁移或清理时必须一起处理；删除整个
+`build/output` 会同时删除数据库和上传文件，不会留下仅有持久记录或仅有受管文件的分裂状态。
+
+Docker 配置使用 `/opt/flowsql/uploads/.meta/pcapfile.db`，数据库和上传文件都位于 `pcap-uploads` named
+volume，不写入容器临时层。迁移或备份 Docker 部署时应把该 named volume 作为一个整体处理，避免数据库记录
+与 PCAP 文件分离。
 
 没有配置 `db_path` 的嵌入式或测试实例仍使用易失模式；这种模式下通道不会跨进程重启恢复，不建议用于正式
 部署。

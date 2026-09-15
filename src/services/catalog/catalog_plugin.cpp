@@ -341,8 +341,7 @@ void CatalogPlugin::List(std::function<void(const char* name, std::shared_ptr<IC
 int CatalogPlugin::Register(const char* name, OperatorFactory factory) {
     if (!name || !*name || !factory) return -1;
     std::lock_guard<std::mutex> lock(mu_);
-    op_factories_[name] = std::move(factory);
-    return 0;
+    return op_factories_.emplace(name, std::move(factory)).second ? 0 : -1;
 }
 
 IOperator* CatalogPlugin::Create(const char* name) {

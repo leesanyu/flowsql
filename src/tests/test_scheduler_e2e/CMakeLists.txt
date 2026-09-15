@@ -36,6 +36,7 @@ add_thirddepen(test_scheduler_mutation_guard arrow httplib rapidjson)
 add_dependencies(${PROJECT_NAME}
     flowsql_common
     flowsql_catalog
+    flowsql_binaddon
     flowsql_scheduler
     flowsql_database
     flowsql_npi
@@ -49,6 +50,7 @@ add_dependencies(test_scheduler_mutation_guard
 )
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     FLOWSQL_NPI_PROTOCOLS_PATH="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml"
+    FLOWSQL_NPM_BASIC_PLUGIN_PATH="$<TARGET_FILE:flowsql_npm_basic>"
 )
 target_link_libraries(${PROJECT_NAME} flowsql_common)
 target_link_libraries(test_scheduler_mutation_guard flowsql_common)

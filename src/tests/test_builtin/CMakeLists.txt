@@ -18,6 +18,15 @@ set_target_properties(fixture_bad_abi PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
 
+add_library(fixture_cpp_operator_v2 SHARED
+    fixtures/fixture_cpp_operator_v2.cpp
+)
+target_include_directories(fixture_cpp_operator_v2 PUBLIC ${CMAKE_SOURCE_DIR})
+target_compile_options(fixture_cpp_operator_v2 PRIVATE -fvisibility=hidden)
+set_target_properties(fixture_cpp_operator_v2 PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
+)
+
 add_executable(${PROJECT_NAME}
     test_builtin.cpp
     ${CMAKE_SOURCE_DIR}/services/catalog/catalog_plugin.cpp
@@ -33,11 +42,12 @@ find_package(OpenSSL REQUIRED)
 target_link_libraries(${PROJECT_NAME} OpenSSL::Crypto)
 
 add_dependencies(${PROJECT_NAME} flowsql_common)
-add_dependencies(${PROJECT_NAME} fixture_cpp_operator fixture_bad_abi)
+add_dependencies(${PROJECT_NAME} fixture_cpp_operator fixture_bad_abi fixture_cpp_operator_v2)
 target_link_libraries(${PROJECT_NAME} flowsql_common)
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     FIXTURE_CPP_SO_PATH="$<TARGET_FILE:fixture_cpp_operator>"
     FIXTURE_BAD_ABI_SO_PATH="$<TARGET_FILE:fixture_bad_abi>"
+    FIXTURE_CPP_V2_SO_PATH="$<TARGET_FILE:fixture_cpp_operator_v2>"
 )
 
 target_compile_options(${PROJECT_NAME} PRIVATE -UNDEBUG)
