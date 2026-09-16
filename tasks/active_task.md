@@ -1,73 +1,61 @@
 # 即时工作台
 
-Feature：`npm-basic-operator-plugin-lifecycle`（NPM 基础分析算子插件生命周期）
+事项：项目规则尺寸度量与精简
 
-原子任务：T4.4 隔离环境真实插件生命周期 E2E
+关联 Feature Task：无（项目规则维护）
+
+当前 Atomic Slice：以 200 个非空 Markdown 行替代页数，并压缩新增规则
 
 状态：已完成
 
 ## 业务意图
 
-- 让 Scheduler E2E 不再静态加载 `libflowsql_npm_basic.so`，而是经 Catalog/BinAddon API 上传并激活真实
-  V2 构建产物，再执行既有 PCAP → `npm.basic` → 22 列 DataFrame 主链路。
-- 用同一隔离 API 链验证坏记录删除重传、激活详情、租约占用时 409、释放后去激活，以及激活/去激活状态的
-  重启恢复差异。
-- 插件详情以 operator-level 诊断项报告 `npm.basic` 的 `contract=block_transform_v1`，保持插件、功能算子、
-  数据契约三层语义。
+- 用可重复、可自动检查的 Markdown 非空行数替代不稳定的页数度量。
+- 将 200 行设为初始复检阈值而非硬上限，避免规则过早诱导压缩语义或机械拆分。
+- 合并前两轮新增规则中的重复表述，在不损失指导性的前提下降低规则阅读成本。
 
 ## Non-Goals
 
-- 不修改 `npm.basic` 算法、V2 ABI、Scheduler 执行语义、部署配置或前端。
-- 不新增插件级单一 `contract`；同一 V2 插件可导出不同契约，详情必须逐算子表达。
-- 不直接编辑 SQLite，不操作用户当前运行实例或其真实 `broken` 数据；E2E 使用临时目录和同一 API 语义。
-- 不增加 `T4.4.1` 等更深规格编号，不实施其他 Feature，不 commit/push。
+- 不修改 Backlog、Feature 规格、历史归档、生产代码、测试或 `tasks/lessons.md`，不 commit/push。
+- 不把 200 行变成拒绝立项或强制拆分的硬门槛。
+- 不通过合并超长行、删除必要契约或压缩独立语义来满足行数目标。
 
 ## 允许修改文件
 
 - `tasks/active_task.md`
-- `tasks/specs/feat-npm-basic-operator-plugin-lifecycle.md`
-- `tasks/archive/feat-npm-basic-operator-plugin-lifecycle.md`（Feature 全绿后的归档目标）
-- `tasks/product_backlog.md`（Feature 全绿后的状态与链接收尾）
-- `src/services/binaddon/binaddon_host_plugin.cpp`
-- `src/tests/test_scheduler_e2e/CMakeLists.txt`
-- `src/tests/test_scheduler_e2e/test_scheduler_e2e.cpp`
+- `AGENTS.md`
 
-其余累计差异只保留，不扩改。若验收揭示公共 ABI 或其他生产模块存在新的 P0/P1 阻塞，记录证据并停止。
+## 验收锚点
 
-## 契约与测试锚点
-
-- E2E 启动时 `npm.basic` 不可用，且不消费或删除 PCAP 源；坏 `.so` 经上传和激活进入 `broken`，再经删除
-  API 清理后才允许用同一文件名上传真实构建产物。
-- 激活响应和详情报告 V2、`operator_count=1`、`operators=["npm.basic"]`；详情的 `operator_details`
-  包含 `{name:"npm.basic", contract:"block_transform_v1"}`。
-- 激活后离线 SQL 产生一行固定 22 列结果；持有动态 capability lease 时去激活返回 409，释放后成功。
-- 重新激活后执行 BinAddon `Stop/Start` 可恢复 `npm.basic`；去激活后再 `Stop/Start` 不恢复。
-- 去激活后 SQL 再次明确不可用；删除插件后隔离目录不残留插件状态或文件。
+- `AGENTS.md` 中不再使用页数度量 Feature 规格。
+- 规格实施前、`## 完成证据` 之前通常控制在 200 个非空 Markdown 行以内，并提供确定的统计口径。
+- 3～5 个一级任务和 200 行均为默认目标；超过阈值只触发边界复检，不自动拆分。
+- 最多两级编号仍是硬约束；是否拆 Feature 仍由独立价值、发布/复用边界和责任主体决定。
+- Feature、Feature Task、Atomic Slice、价值准入和执行闸门的指导语义保持完整，重复说明得到合并。
 
 ## 验收命令
 
 ```bash
-cmake -B build src
-cmake --build build --target flowsql_binaddon flowsql_npm_basic test_scheduler_e2e -j$(nproc)
-ctest --test-dir build -R '^test_scheduler_e2e$' --output-on-failure
 git diff --check
-git diff --name-only
+git diff --no-ext-diff --name-only
 git status --short --untracked-files=all
+rg -n '200 个非空 Markdown 行|尺寸复检|拆分判据|Atomic Slice|Feature Task' AGENTS.md
+! rg -n '1~2 页|1～2 页' AGENTS.md
 ```
 
 ## 时间盒
 
-30 分钟。
+20 分钟。
 
 ## 停止条件
 
-- 隔离 API 生命周期、真实 SQL、详情契约和恢复语义全部通过后，勾选 T4.4；随后执行 Feature 级完整构建与
-  全部 CTest，只有全绿才完成 T4/Feature 和归档。
-- 若定向 E2E 未通过，只修复当前允许文件内的问题；需要扩大边界时记录阻塞证据并停止。
+- 行数口径、复检条件和拆分判据明确，规则精简且验收通过后，将本工作台标记完成并停止。
+- 若修改需要触及允许文件之外，只记录问题并停止，不扩大范围。
 
 ## 完成证据
 
-- 定向目标构建通过；`test_scheduler_e2e` 通过，覆盖坏插件删除重传、真实 V2 激活、SQL、租约 409、
-  去激活和重启恢复。
-- Feature 定向验收 5/5 通过；完整构建通过；具备 loopback 权限的完整 CTest 13/13 通过。
-- `git diff --check` 通过；未启动后续 Feature，未 commit/push。
+- Feature 规格尺寸已改为实施前 `## 完成证据` 之前通常不超过 200 个非空 Markdown 行；统计命令已写入规则。
+- 3~5 个一级任务和 200 行均为可读性目标，超过阈值只触发边界复检；最多两级编号仍为硬约束。
+- Feature 拆分由独立价值、发布/复用边界、主链路、责任主体及统一验收能力决定，不按工时或文件数机械拆分。
+- 新增说明已合并为价值准入、任务语义、层级硬约束、尺寸复检和拆分判据；WIP=1 与执行闸门保持完整。
+- 纯规则文档修改，未运行编译或 CTest；文档检查通过，未 commit/push。
