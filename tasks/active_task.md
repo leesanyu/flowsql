@@ -1,76 +1,94 @@
 # 即时工作台
 
-事项：NPM 后续 Feature 边界对齐
+事项：流式算子时间驱动 T3 Scheduler V2 接线
 
-关联 Feature Task：无（Backlog Feature 立项边界调整）
+关联 Feature Task：`stream-time-drive` / T3
 
-当前 Atomic Slice：依据单任务共享分析引擎与观察/持久化分离结论，收敛 NPM 后续 Feature 目标
+当前 Atomic Slice：T3 交付 V2 优先/V1 回退、时间 task 端到端执行和动态 capability lease 生命周期
 
 状态：已完成
 
 ## 业务意图
 
-- 明确 `features` 决定同一 `npm.basic` 任务内实际执行的分析模块，`observing` 只决定当前 SQL 前台观察结果，
-  避免因观察某类结果而停用其他分析或重复执行基础会话分析。
-- 将流式时间驱动、会话分析和协议分析的 Feature 目标调整到上述模型，并把不同协议的独立主链路从过大的
-  协议 Feature 中拆出。
-- 判断并收敛 `npm-result-query` 的价值边界：持久化消费与前台观察正交，永久存储覆盖全部已启用模块的
-  类型化结果，查询正确处理累计快照版本且不要求内存无限保留。
+- 让 Scheduler 对每个 Block Transform stage 优先选择唯一 V2 provider，没有 V2 时回退唯一 V1；V2 歧义、
+  遍历错误或非法动态 lease 必须明确失败，不能静默降级。
+- 让 V2 Schema probe 仍只执行 `Open → Cancel → ReleaseTask`，execution task 的 data/time 接口进入既有
+  runner 或同步 chain；动态插件 lease 必须覆盖 probe、execution 和最终 `ReleaseTask()`。
 
 ## Non-Goals
 
-- 不创建完整 Feature 规格，不拆解 Feature Task，不修改生产代码、测试、归档规格或 `tasks/lessons.md`。
-- 不实现 `features`、`observing`、时间通知、会话/协议算法、数据库写入或查询。
-- 不在本轮冻结“持久化与前台观察同时存在”的最终 SQL 语法，不把多个异构结果强行设计为单表，也不选择
-  ClickHouse 的物理表结构、更新机制或保留策略实现。
-- 不改变现有省略 `features` / `observing` 时 `npm.basic` 的兼容语义和 22 列 Basic 输出契约。
-- 不 commit/push，不自动开始任一 Feature 的规格编写或实现。
+- 不修改公共 Block Transform ABI、C++ 插件 ABI、BinAddon 能力发布或 T1/T2 runner/chain 调度算法。
+- 不实现 NPM 模块调度、实时接线、采集事实、水位、持久化或结果查询。
+- 不修改 SQL 语法、Filter Planner 公共接口、StreamRuntime、旧 `IStreamOperator::Tick()` 或新增 timer 线程。
+- 不顺手修改既有 V1 provider/task 行为；V1 算子继续零迁移执行。
+- 不 commit/push，不开始后续 `npm-basic-realtime-integration`。
 
 ## 允许修改文件
 
 - `tasks/active_task.md`
-- `tasks/product_backlog.md`
+- `tasks/specs/feat-stream-time-drive.md`（仅 T3 完整验收后更新状态和完成证据）
+- `tasks/product_backlog.md`（仅 Feature 完整验收后更新状态/规格链接）
+- `tasks/archive/feat-stream-time-drive.md`（仅 Feature 完整验收后归档规格）
+- `src/services/scheduler/scheduler_plugin.h`
+- `src/services/scheduler/scheduler_stream_executor.cpp`
+- `src/services/scheduler/scheduler_routes.cpp`
+- `src/tests/test_scheduler_e2e/test_scheduler_mutation_guard.cpp`
+
+已知工作树中的公共 Block Transform 接口、BinAddon、fixture、`pipeline`、`test_framework`、`test_builtin`、
+Backlog 和规格改动来自已完成的规格/T0～T2；本切片保留这些改动，只完成 Scheduler T3 接线与定向测试。
 
 ## 验收锚点
 
-- `stream-time-drive` 明确时间维护覆盖同一任务内全部已启用模块，不由当前 observer 决定。
-- `npm-session-analysis` 明确是 `npm.basic` 内复用统一会话、协议标签、生命周期与预算的可选模块，不重复
-  建立会话或识别；模块启用与结果观察彼此独立。
-- 原 `npm-protocol-analysis` 收敛为可复用的协议模块基础，DNS、HTTP/1、TLS 握手和 ICMP 按独立可验收
-  主链路拆为 Feature；Feature 拆分不导致运行时拆成多个重复执行 Basic 的算子任务。
-- `npm-result-query` 面向全部已启用模块的异构类型化结果，持久化 consumer 与 `observing` 正交；支持持续
-  写入、版本/最终态查询和保留边界，未配置持久化时不要求保留未观察的终态结果。
-- Backlog 只表达每个 Feature 的适用场景、问题和可观察目标，不写实现步骤或未决 SQL/物理存储设计。
+- provider 引用明确区分 V1/V2；发现顺序是唯一 V2 优先，否则唯一 V1。同一版本静态/动态候选总数大于一、
+  IID 遍历失败或动态 Acquire 成功却返回空 capability/lifetime 时明确失败，且不回退另一版本。
+- V2 task config 由 Scheduler 零初始化并填写 `struct_size`、V2 `contract_version` 和三段借用字符串；失败或
+  null task 不发布 session。V2 probe 不查询时间；execution 暴露同一 task 的 data/time 两个接口。
+- 单 stage V2 把 time task 交给 `BlockTransformPipelineRunner`；多 stage 把 stage 对齐的可空 time task 交给
+  `SynchronousBlockTransformChainTask`，仅存在 V2 stage 时启用 chain 时间接口；全 V1 路径保持原行为。
+- 静态 V2、动态 V2、V2 优先于 V1、V2 重复冲突、非法 V2 lease、V1 回退、时间输出/Stop、probe/execution
+  生命周期和 lease 释放顺序有可执行测试；既有 V1 单/多 stage 测试继续通过。
+- T3 完成后运行 `test_framework`、`test_builtin`、`test_scheduler_e2e`、`test_scheduler_mutation_guard`，随后执行
+  Feature 级全量构建和 CTest；全部通过才勾选 T3、更新 Backlog 并归档规格。
 
 ## 验收命令
 
 ```bash
-git diff --check
-git diff --no-ext-diff --name-only
+git diff --check HEAD -- src/services/scheduler/scheduler_plugin.h \
+  src/services/scheduler/scheduler_stream_executor.cpp src/services/scheduler/scheduler_routes.cpp \
+  src/tests/test_scheduler_e2e/test_scheduler_mutation_guard.cpp tasks/active_task.md \
+  tasks/archive/feat-stream-time-drive.md tasks/product_backlog.md
+git diff --name-only HEAD -- src/services/scheduler/scheduler_plugin.h \
+  src/services/scheduler/scheduler_stream_executor.cpp src/services/scheduler/scheduler_routes.cpp \
+  src/tests/test_scheduler_e2e/test_scheduler_mutation_guard.cpp tasks/active_task.md \
+  tasks/archive/feat-stream-time-drive.md tasks/product_backlog.md
 git status --short --untracked-files=all
-rg -n 'stream-time-drive|npm-session-analysis|npm-protocol-analysis|npm-dns-analysis|npm-http1-analysis|npm-tls-handshake-analysis|npm-icmp-analysis|npm-result-query' tasks/product_backlog.md
+cmake -B build src
+cmake --build build --target test_framework test_builtin test_scheduler_e2e \
+  test_scheduler_mutation_guard -j$(nproc)
+ctest --test-dir build \
+  -R '^(test_framework|test_builtin|test_scheduler_e2e|test_scheduler_mutation_guard)$' \
+  --output-on-failure
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure
 ```
 
 ## 时间盒
 
-25 分钟。
+30 分钟。
 
 ## 停止条件
 
-- 相关 Backlog Feature 的内容、边界、依赖关系和过大风险已按验收锚点收敛，文档检查通过后，将本工作台
-  标记完成并停止。
-- 若需要修改允许文件之外的内容、冻结未决 SQL/数据库设计或进入具体 Feature 规格，记录为后续工作并停止，
-  不扩大本轮范围。
+- V2 优先/V1 回退、V2 task 时间接线、动态 lease 生命周期及完整 Feature 回归全部通过后，勾选 T3、归档
+  Feature、记录完成证据并停止，不开始后续 Feature。
+- 若实现必须修改公共 ABI、BinAddon、NPM、CMake 或允许文件外代码，记录明确阻塞依据并停止。
 
 ## 完成证据
 
-- `stream-time-drive` 已明确以同一任务全部 enabled feature 的最早截止时间驱动维护，observer 不参与模块
-  启停决策；正常 EOF 与错误/取消边界保持分离。
-- `npm-session-analysis` 已收敛为 `npm.basic` 内可选模块，复用唯一会话、识别、生命周期和预算，并将指标
-  有效性与“序列缺口不等于网络丢包”写入目标。
-- `npm-protocol-analysis` 已收敛为共享协议模块基础；DNS、HTTP/1、TLS 握手与 ICMP 按独立价值和主链路
-  拆为四个 Feature，同时均保持单个 `npm.basic` 任务内执行、不重复 Basic 分析。
-- `npm-result-query` 已收敛为全部 enabled feature 的多实体结果存储命名空间；持久化与 `observing` 正交，
-  查询覆盖 latest/final/history revision 和保留边界，不要求内存无限持有未消费结果。
-- `git diff --check`、目标条目检索、允许文件和工作区状态检查通过；本轮为纯 Backlog 文档调整，未运行编译或
-  CTest，未创建完整 Feature 规格，未 commit/push。
+- Scheduler provider 引用已区分 V1/V2，严格执行唯一 V2 优先、零 V2 时唯一 V1 回退；V2 歧义、遍历失败和
+  非法动态 lease 均失败且不降级。
+- V2 task 使用零初始化且带结构大小/版本的 config；Schema probe 只执行 Open/Cancel/Release，execution task
+  的 data/time 接口接入单 task runner 或 stage 对齐的混合 chain。
+- 测试覆盖静态 V2 优先、V1 回退、V2/V1 混合 chain、时间输出/Stop、动态 V2 lease 到 ReleaseTask、重复 V2
+  冲突和非法 V2 lease；既有 V1 单/多 stage 与 BinAddon 生命周期测试保持通过。
+- 定向构建和四项 CTest 4/4 通过；全量构建通过；完整 CTest 在允许 loopback socket 的环境中 13/13 通过。
+- T3 已勾选，规格完成证据已补充，Backlog 已标记完成并将规格归档；未开始后续 Feature，未 commit/push。

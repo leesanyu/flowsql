@@ -5,9 +5,12 @@
 
 #include <arrow/api.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <common/log.h>
 #include <exception>
+#include <iterator>
 #include <utility>
 #include <vector>
 
@@ -138,6 +141,357 @@ FilterEvalError BlockFilterStage::ProcessBlock(
     output->batch = std::move(filtered);
     output->ts_ms = ts_ms;
     return FilterEvalError::kNone;
+}
+
+SynchronousBlockTransformChainTask::SynchronousBlockTransformChainTask(
+    std::vector<IBlockTransformTaskV1*> tasks,
+    std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks,
+    std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas,
+    const std::vector<std::shared_ptr<const BoundFilterExpr>>& residuals)
+    : tasks_(std::move(tasks)),
+      time_tasks_(std::move(time_tasks)),
+      expected_output_schemas_(std::move(expected_output_schemas)) {
+    filters_.reserve(residuals.size());
+    for (const auto& residual : residuals) filters_.emplace_back(residual);
+}
+
+int SynchronousBlockTransformChainTask::Open(
+    std::shared_ptr<arrow::Schema> input_schema,
+    std::shared_ptr<arrow::Schema>* output_schema) {
+    if (open_attempted_ || !input_schema || !output_schema || tasks_.empty() ||
+        tasks_.size() != time_tasks_.size() ||
+        tasks_.size() != expected_output_schemas_.size() ||
+        tasks_.size() != filters_.size() ||
+        std::any_of(tasks_.begin(), tasks_.end(), [](const auto* task) { return !task; })) {
+        last_error_ = "multi transform chain received an invalid Open request";
+        return EINVAL;
+    }
+    open_attempted_ = true;
+    output_schema->reset();
+
+    auto current_schema = std::move(input_schema);
+    for (size_t i = 0; i < tasks_.size(); ++i) {
+        std::shared_ptr<arrow::Schema> actual_output_schema;
+        int open_rc = 0;
+        try {
+            open_rc = tasks_[i]->Open(current_schema, &actual_output_schema);
+        } catch (const std::exception& ex) {
+            return SetStageError(i, "Open threw: " + std::string(ex.what()), EFAULT);
+        } catch (...) {
+            return SetStageError(i, "Open threw an unknown exception", EFAULT);
+        }
+        if (open_rc != 0) {
+            return SetStageError(i, "Open failed: " + TaskError(i), open_rc);
+        }
+        if (!actual_output_schema || !expected_output_schemas_[i] ||
+            !actual_output_schema->Equals(*expected_output_schemas_[i], true)) {
+            return SetStageError(i, "execution Schema differs from its planning Schema", EPROTO);
+        }
+
+        std::string filter_error;
+        std::shared_ptr<arrow::Schema> filtered_schema;
+        const auto filter_rc = filters_[i].Open(
+            actual_output_schema, &filtered_schema, &filter_error);
+        if (filter_rc != FilterEvalError::kNone) {
+            if (filter_error.empty()) filter_error = "residual filter Open failed";
+            return SetStageError(i, std::move(filter_error), EINVAL);
+        }
+        current_schema = std::move(filtered_schema);
+    }
+
+    opened_ = true;
+    *output_schema = std::move(current_schema);
+    return 0;
+}
+
+int SynchronousBlockTransformChainTask::ProcessBlock(
+    const std::shared_ptr<arrow::RecordBatch>& input,
+    int64_t ts_ms,
+    std::vector<BlockTransformOutputV1>* outputs) {
+    if (!opened_ || !input || !outputs || !outputs->empty() || flush_started_) {
+        last_error_ = "multi transform chain received an invalid ProcessBlock request";
+        return -EINVAL;
+    }
+    std::vector<BlockTransformOutputV1> initial = {{input, ts_ms}};
+    std::vector<BlockTransformOutputV1> final_outputs;
+    bool stopped = false;
+    const int rc = PropagateFrom(0, std::move(initial), &final_outputs, &stopped);
+    if (rc != 0) return rc;
+    *outputs = std::move(final_outputs);
+    return stopped ? static_cast<int>(BlockTransformStatusV1::kStop)
+                   : static_cast<int>(BlockTransformStatusV1::kContinue);
+}
+
+int SynchronousBlockTransformChainTask::Flush(
+    std::vector<BlockTransformOutputV1>* outputs) {
+    if (!opened_ || !outputs || !outputs->empty() || flush_started_) {
+        last_error_ = "multi transform chain received an invalid Flush request";
+        return EINVAL;
+    }
+    flush_started_ = true;
+    std::vector<BlockTransformOutputV1> final_outputs;
+
+    for (size_t i = 0; i < tasks_.size(); ++i) {
+        std::vector<BlockTransformOutputV1> stage_outputs;
+        int flush_rc = 0;
+        try {
+            flush_rc = tasks_[i]->Flush(&stage_outputs);
+        } catch (const std::exception& ex) {
+            return SetStageError(i, "Flush threw: " + std::string(ex.what()), EFAULT);
+        } catch (...) {
+            return SetStageError(i, "Flush threw an unknown exception", EFAULT);
+        }
+        if (flush_rc != 0) {
+            if (!stage_outputs.empty()) {
+                return SetStageError(i, "Flush failed while returning output batches", EPROTO);
+            }
+            return SetStageError(i, "Flush failed: " + TaskError(i), flush_rc);
+        }
+
+        std::vector<BlockTransformOutputV1> filtered_outputs;
+        const int filter_rc = FilterStageOutputs(i, stage_outputs, &filtered_outputs);
+        if (filter_rc != 0) return filter_rc;
+
+        std::vector<BlockTransformOutputV1> propagated_outputs;
+        bool ignored_stop = false;
+        const int propagate_rc = PropagateFrom(
+            i + 1, std::move(filtered_outputs), &propagated_outputs, &ignored_stop);
+        if (propagate_rc != 0) return propagate_rc;
+        final_outputs.insert(final_outputs.end(),
+                             std::make_move_iterator(propagated_outputs.begin()),
+                             std::make_move_iterator(propagated_outputs.end()));
+    }
+
+    *outputs = std::move(final_outputs);
+    return 0;
+}
+
+void SynchronousBlockTransformChainTask::Cancel() {
+    bool expected = false;
+    if (!cancel_started_.compare_exchange_strong(expected, true)) return;
+    for (auto* task : tasks_) {
+        if (!task) continue;
+        try {
+            task->Cancel();
+        } catch (...) {
+        }
+    }
+}
+
+std::string SynchronousBlockTransformChainTask::LastError() const {
+    return last_error_;
+}
+
+int SynchronousBlockTransformChainTask::GetTimeDriveState(
+    BlockTransformTimeDriveStateV1* state) {
+    if (!opened_ || flush_started_ || !state ||
+        state->struct_size < kBlockTransformTimeDriveStateV1Size ||
+        state->contract_version != kBlockTransformTimeDriveVersionV1) {
+        last_error_ = "multi transform chain received an invalid time state request";
+        return -EINVAL;
+    }
+
+    BlockTransformTimeDriveStateV1 aggregate{};
+    aggregate.struct_size = kBlockTransformTimeDriveStateV1Size;
+    aggregate.contract_version = kBlockTransformTimeDriveVersionV1;
+    for (size_t i = 0; i < time_tasks_.size(); ++i) {
+        if (!time_tasks_[i]) continue;
+        BlockTransformTimeDriveStateV1 stage_state{};
+        const int state_rc = QueryTimeState(i, &stage_state);
+        if (state_rc != 0) return state_rc;
+        if (stage_state.armed == 1 &&
+            (aggregate.armed == 0 || stage_state.deadline_ns < aggregate.deadline_ns)) {
+            aggregate.armed = 1;
+            aggregate.deadline_ns = stage_state.deadline_ns;
+        }
+    }
+    *state = aggregate;
+    return 0;
+}
+
+int SynchronousBlockTransformChainTask::OnTime(
+    const BlockTransformTimeEventV1& event,
+    std::vector<BlockTransformOutputV1>* outputs) {
+    if (!opened_ || flush_started_ || !outputs || !outputs->empty() ||
+        event.struct_size < kBlockTransformTimeEventV1Size ||
+        event.contract_version != kBlockTransformTimeDriveVersionV1 ||
+        event.monotonic_now_ns < 0) {
+        last_error_ = "multi transform chain received an invalid OnTime request";
+        return -EINVAL;
+    }
+
+    std::vector<BlockTransformOutputV1> final_outputs;
+    bool chain_stopped = false;
+    for (size_t i = 0; i < time_tasks_.size(); ++i) {
+        auto* time_task = time_tasks_[i];
+        if (!time_task) continue;
+
+        BlockTransformTimeDriveStateV1 state{};
+        const int state_rc = QueryTimeState(i, &state);
+        if (state_rc != 0) return state_rc;
+        if (state.armed == 0 || state.deadline_ns > event.monotonic_now_ns) continue;
+
+        std::vector<BlockTransformOutputV1> stage_outputs;
+        int time_rc = 0;
+        try {
+            time_rc = time_task->OnTime(event, &stage_outputs);
+        } catch (const std::exception& ex) {
+            return SetStageError(i, "OnTime threw: " + std::string(ex.what()), EFAULT);
+        } catch (...) {
+            return SetStageError(i, "OnTime threw an unknown exception", EFAULT);
+        }
+        const bool valid_status =
+            time_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
+            time_rc == static_cast<int>(BlockTransformStatusV1::kStop);
+        if (!valid_status) {
+            if (!stage_outputs.empty()) {
+                return SetStageError(i, "OnTime failed while returning output batches", EPROTO);
+            }
+            return SetStageError(i, "OnTime failed: " + TaskError(i), time_rc);
+        }
+        if (time_rc == static_cast<int>(BlockTransformStatusV1::kContinue)) {
+            BlockTransformTimeDriveStateV1 next_state{};
+            const int next_state_rc = QueryTimeState(i, &next_state);
+            if (next_state_rc != 0) return next_state_rc;
+            if (next_state.armed == 1 && next_state.deadline_ns <= event.monotonic_now_ns) {
+                return SetStageError(i, "OnTime made no deadline progress", EPROTO);
+            }
+        }
+
+        std::vector<BlockTransformOutputV1> filtered_outputs;
+        const int filter_rc = FilterStageOutputs(i, stage_outputs, &filtered_outputs);
+        if (filter_rc != 0) return filter_rc;
+
+        std::vector<BlockTransformOutputV1> propagated_outputs;
+        bool downstream_stopped = false;
+        const int propagate_rc = PropagateFrom(
+            i + 1, std::move(filtered_outputs), &propagated_outputs, &downstream_stopped);
+        if (propagate_rc != 0) return propagate_rc;
+        final_outputs.insert(final_outputs.end(),
+                             std::make_move_iterator(propagated_outputs.begin()),
+                             std::make_move_iterator(propagated_outputs.end()));
+
+        if (time_rc == static_cast<int>(BlockTransformStatusV1::kStop) || downstream_stopped) {
+            chain_stopped = true;
+            break;
+        }
+    }
+
+    *outputs = std::move(final_outputs);
+    return chain_stopped ? static_cast<int>(BlockTransformStatusV1::kStop)
+                         : static_cast<int>(BlockTransformStatusV1::kContinue);
+}
+
+int SynchronousBlockTransformChainTask::PropagateFrom(
+    size_t first_stage,
+    std::vector<BlockTransformOutputV1> inputs,
+    std::vector<BlockTransformOutputV1>* outputs,
+    bool* stopped) {
+    if (!outputs || !stopped || first_stage > tasks_.size()) return -EINVAL;
+    outputs->clear();
+    for (size_t i = first_stage; i < tasks_.size(); ++i) {
+        std::vector<BlockTransformOutputV1> next_inputs;
+        for (const auto& input : inputs) {
+            if (!input.batch) return SetStageError(i, "received a null input batch", EPROTO);
+            std::vector<BlockTransformOutputV1> stage_outputs;
+            int process_rc = 0;
+            try {
+                process_rc = tasks_[i]->ProcessBlock(input.batch, input.ts_ms, &stage_outputs);
+            } catch (const std::exception& ex) {
+                return SetStageError(i, "ProcessBlock threw: " + std::string(ex.what()), EFAULT);
+            } catch (...) {
+                return SetStageError(i, "ProcessBlock threw an unknown exception", EFAULT);
+            }
+            const bool valid_status =
+                process_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
+                process_rc == static_cast<int>(BlockTransformStatusV1::kStop);
+            if (!valid_status) {
+                if (!stage_outputs.empty()) {
+                    return SetStageError(i, "ProcessBlock failed while returning output batches", EPROTO);
+                }
+                return SetStageError(i, "ProcessBlock failed: " + TaskError(i), process_rc);
+            }
+            if (process_rc == static_cast<int>(BlockTransformStatusV1::kStop)) *stopped = true;
+
+            std::vector<BlockTransformOutputV1> filtered_outputs;
+            const int filter_rc = FilterStageOutputs(i, stage_outputs, &filtered_outputs);
+            if (filter_rc != 0) return filter_rc;
+            next_inputs.insert(next_inputs.end(),
+                               std::make_move_iterator(filtered_outputs.begin()),
+                               std::make_move_iterator(filtered_outputs.end()));
+        }
+        inputs = std::move(next_inputs);
+    }
+    *outputs = std::move(inputs);
+    return 0;
+}
+
+int SynchronousBlockTransformChainTask::FilterStageOutputs(
+    size_t stage,
+    const std::vector<BlockTransformOutputV1>& inputs,
+    std::vector<BlockTransformOutputV1>* outputs) {
+    if (!outputs || stage >= filters_.size()) return -EINVAL;
+    outputs->clear();
+    for (const auto& input : inputs) {
+        if (!input.batch) return SetStageError(stage, "returned a null output batch", EPROTO);
+        BlockTransformOutputV1 filtered;
+        std::string filter_error;
+        const auto filter_rc = filters_[stage].ProcessBlock(
+            input.batch, input.ts_ms, &filtered, &filter_error);
+        if (filter_rc != FilterEvalError::kNone) {
+            if (filter_error.empty()) filter_error = "residual filter failed";
+            return SetStageError(stage, std::move(filter_error), EIO);
+        }
+        outputs->push_back(std::move(filtered));
+    }
+    return 0;
+}
+
+int SynchronousBlockTransformChainTask::QueryTimeState(
+    size_t stage,
+    BlockTransformTimeDriveStateV1* state) {
+    if (!state || stage >= time_tasks_.size() || !time_tasks_[stage]) return -EINVAL;
+    *state = BlockTransformTimeDriveStateV1{};
+    state->struct_size = kBlockTransformTimeDriveStateV1Size;
+    state->contract_version = kBlockTransformTimeDriveVersionV1;
+    int state_rc = 0;
+    try {
+        state_rc = time_tasks_[stage]->GetTimeDriveState(state);
+    } catch (const std::exception& ex) {
+        return SetStageError(stage, "time state query threw: " + std::string(ex.what()), EFAULT);
+    } catch (...) {
+        return SetStageError(stage, "time state query threw an unknown exception", EFAULT);
+    }
+    if (state_rc != 0) {
+        return SetStageError(stage, "time state query failed with code " + std::to_string(state_rc), state_rc);
+    }
+    if (state->struct_size < kBlockTransformTimeDriveStateV1Size ||
+        state->contract_version != kBlockTransformTimeDriveVersionV1 || state->armed > 1 ||
+        std::any_of(std::begin(state->reserved), std::end(state->reserved),
+                    [](uint8_t value) { return value != 0; }) ||
+        (state->armed == 1 && state->deadline_ns < 0)) {
+        return SetStageError(stage, "time state returned an invalid contract", EPROTO);
+    }
+    return 0;
+}
+
+int SynchronousBlockTransformChainTask::SetStageError(
+    size_t stage,
+    std::string detail,
+    int rc) {
+    last_error_ = "transform stage " + std::to_string(stage + 1) + ": " + detail;
+    if (rc == 0) return -EIO;
+    return rc > 0 ? -rc : rc;
+}
+
+std::string SynchronousBlockTransformChainTask::TaskError(size_t stage) const {
+    if (stage >= tasks_.size() || !tasks_[stage]) return "task unavailable";
+    try {
+        const std::string detail = tasks_[stage]->LastError();
+        return detail.empty() ? "task did not provide an error message" : detail;
+    } catch (...) {
+        return "task LastError threw";
+    }
 }
 
 BlockTransformPipelineRunner::BlockTransformPipelineRunner(
@@ -286,6 +640,166 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         return BlockTransformPipelineError::kNone;
     };
 
+    int64_t last_monotonic_now_ns = -1;
+    auto read_monotonic_now = [&](int64_t* now_ns, std::string* clock_error) {
+        int64_t value = -1;
+        try {
+            value = config_.monotonic_clock_ns
+                        ? config_.monotonic_clock_ns()
+                        : std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+        } catch (const std::exception& ex) {
+            *clock_error = std::string("monotonic clock threw: ") + ex.what();
+            return false;
+        } catch (...) {
+            *clock_error = "monotonic clock threw an unknown exception";
+            return false;
+        }
+        if (value < 0) {
+            *clock_error = "monotonic clock returned a negative timestamp";
+            return false;
+        }
+        if (last_monotonic_now_ns >= 0 && value < last_monotonic_now_ns) {
+            *clock_error = "monotonic clock moved backwards";
+            return false;
+        }
+        last_monotonic_now_ns = value;
+        *now_ns = value;
+        return true;
+    };
+    auto read_wall_now = [&](int64_t* now_ns, std::string* clock_error) {
+        try {
+            *now_ns = config_.wall_clock_ns
+                          ? config_.wall_clock_ns()
+                          : std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+            return true;
+        } catch (const std::exception& ex) {
+            *clock_error = std::string("wall clock threw: ") + ex.what();
+            return false;
+        } catch (...) {
+            *clock_error = "wall clock threw an unknown exception";
+            return false;
+        }
+    };
+    auto get_time_state = [&](BlockTransformTimeDriveStateV1* state,
+                              std::string* state_error) {
+        *state = BlockTransformTimeDriveStateV1{};
+        state->struct_size = kBlockTransformTimeDriveStateV1Size;
+        state->contract_version = kBlockTransformTimeDriveVersionV1;
+        int state_rc = 0;
+        try {
+            state_rc = config_.time_transform->GetTimeDriveState(state);
+        } catch (const std::exception& ex) {
+            *state_error = std::string("time state query threw: ") + ex.what();
+            return false;
+        } catch (...) {
+            *state_error = "time state query threw an unknown exception";
+            return false;
+        }
+        if (state_rc != 0) {
+            *state_error = "time state query failed with code " + std::to_string(state_rc);
+            return false;
+        }
+        if (state->struct_size < kBlockTransformTimeDriveStateV1Size ||
+            state->contract_version != kBlockTransformTimeDriveVersionV1 || state->armed > 1) {
+            *state_error = "time state returned an invalid structure, version, or armed flag";
+            return false;
+        }
+        if (std::any_of(std::begin(state->reserved), std::end(state->reserved),
+                        [](uint8_t value) { return value != 0; })) {
+            *state_error = "time state returned nonzero reserved bytes";
+            return false;
+        }
+        if (state->armed == 1 && state->deadline_ns < 0) {
+            *state_error = "time state returned a negative armed deadline";
+            return false;
+        }
+        return true;
+    };
+
+    auto service_time = [&](int* poll_timeout_ms,
+                            bool* fired,
+                            bool* time_stopped,
+                            std::string* time_error) {
+        *poll_timeout_ms = config_.poll_timeout_ms;
+        *fired = false;
+        *time_stopped = false;
+        if (!config_.time_transform) return BlockTransformPipelineError::kNone;
+
+        int64_t monotonic_now_ns = 0;
+        if (!read_monotonic_now(&monotonic_now_ns, time_error)) {
+            return BlockTransformPipelineError::kTransformContractViolation;
+        }
+        BlockTransformTimeDriveStateV1 state{};
+        if (!get_time_state(&state, time_error)) {
+            return BlockTransformPipelineError::kTransformContractViolation;
+        }
+        if (state.armed == 0) return BlockTransformPipelineError::kNone;
+        if (state.deadline_ns > monotonic_now_ns) {
+            constexpr int64_t kNanosecondsPerMillisecond = 1000 * 1000;
+            const int64_t deadline_wait_ms =
+                (state.deadline_ns - monotonic_now_ns) / kNanosecondsPerMillisecond;
+            *poll_timeout_ms = static_cast<int>(
+                std::min<int64_t>(config_.poll_timeout_ms, deadline_wait_ms));
+            return BlockTransformPipelineError::kNone;
+        }
+
+        int64_t wall_now_ns = 0;
+        if (!read_wall_now(&wall_now_ns, time_error)) {
+            return BlockTransformPipelineError::kTransformContractViolation;
+        }
+        BlockTransformTimeEventV1 event{};
+        event.struct_size = kBlockTransformTimeEventV1Size;
+        event.contract_version = kBlockTransformTimeDriveVersionV1;
+        event.monotonic_now_ns = monotonic_now_ns;
+        event.wall_now_ns = wall_now_ns;
+        std::vector<BlockTransformOutputV1> outputs;
+        int time_rc = 0;
+        try {
+            time_rc = config_.time_transform->OnTime(event, &outputs);
+        } catch (const std::exception& ex) {
+            *time_error = std::string("transform OnTime threw: ") + ex.what();
+            return outputs.empty() ? BlockTransformPipelineError::kTransformFailed
+                                   : BlockTransformPipelineError::kTransformContractViolation;
+        } catch (...) {
+            *time_error = "transform OnTime threw an unknown exception";
+            return outputs.empty() ? BlockTransformPipelineError::kTransformFailed
+                                   : BlockTransformPipelineError::kTransformContractViolation;
+        }
+
+        const bool valid_status =
+            time_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
+            time_rc == static_cast<int>(BlockTransformStatusV1::kStop);
+        if (!valid_status) {
+            if (!outputs.empty()) {
+                *time_error = "transform OnTime failed while returning output batches";
+                return BlockTransformPipelineError::kTransformContractViolation;
+            }
+            *time_error = "transform OnTime failed: " + transform_error();
+            return BlockTransformPipelineError::kTransformFailed;
+        }
+
+        if (time_rc == static_cast<int>(BlockTransformStatusV1::kContinue)) {
+            BlockTransformTimeDriveStateV1 next_state{};
+            if (!get_time_state(&next_state, time_error)) {
+                return BlockTransformPipelineError::kTransformContractViolation;
+            }
+            if (next_state.armed == 1 && next_state.deadline_ns <= monotonic_now_ns) {
+                *time_error = "transform OnTime made no deadline progress";
+                return BlockTransformPipelineError::kTransformContractViolation;
+            }
+        }
+
+        const auto delivery_rc = deliver_outputs(outputs, time_error);
+        if (delivery_rc != BlockTransformPipelineError::kNone) return delivery_rc;
+        *fired = true;
+        *time_stopped = time_rc == static_cast<int>(BlockTransformStatusV1::kStop);
+        return BlockTransformPipelineError::kNone;
+    };
+
     bool stopped = false;
     while (true) {
         if (cancel_requested_.load()) {
@@ -294,9 +808,24 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
             return BlockTransformPipelineError::kCancelled;
         }
 
+        int poll_timeout_ms = config_.poll_timeout_ms;
+        bool time_fired = false;
+        bool time_stopped = false;
+        std::string time_error;
+        const auto time_rc = service_time(
+            &poll_timeout_ms, &time_fired, &time_stopped, &time_error);
+        if (time_rc != BlockTransformPipelineError::kNone) {
+            return fail(time_rc, std::move(time_error));
+        }
+        if (time_stopped) {
+            stopped = true;
+            break;
+        }
+        if (time_fired) continue;
+
         BlockPollEvent event;
         try {
-            event = config_.source->PollBlock(config_.poll_timeout_ms);
+            event = config_.source->PollBlock(poll_timeout_ms);
         } catch (const std::exception& ex) {
             return fail(BlockTransformPipelineError::kSourcePollFailed,
                         std::string("block source PollBlock threw: ") + ex.what());

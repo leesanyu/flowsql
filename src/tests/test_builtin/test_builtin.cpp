@@ -620,6 +620,8 @@ static void TestCppOperatorPluginContracts() {
     ASSERT_EQ(kCppOperatorDescriptorV2Size, static_cast<uint32_t>(sizeof(CppOperatorDescriptorV2)));
     ASSERT_TRUE(std::memcmp(&IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1, &IID_OPERATOR, sizeof(Guid)) != 0);
     ASSERT_TRUE(std::memcmp(&IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1, &IID_BLOCK_TRANSFORM_OPERATOR_V1, sizeof(Guid)) != 0);
+    ASSERT_TRUE(std::memcmp(&IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1, &IID_BLOCK_TRANSFORM_OPERATOR_V2, sizeof(Guid)) != 0);
+    ASSERT_TRUE(std::memcmp(&IID_BLOCK_TRANSFORM_OPERATOR_V1, &IID_BLOCK_TRANSFORM_OPERATOR_V2, sizeof(Guid)) != 0);
 
     TestCppOperatorPluginRegistry registry;
     int stale_capability = 0;
@@ -691,7 +693,7 @@ static void TestCppOperatorPluginContracts() {
     ASSERT_TRUE(v2_create != nullptr);
     ASSERT_TRUE(v2_destroy != nullptr);
     ASSERT_EQ(v2_abi(), kCppOperatorPluginAbiVersionV2);
-    ASSERT_EQ(v2_count(), 2);
+    ASSERT_EQ(v2_count(), 3);
     ASSERT_TRUE(dlsym(v2_handle, kCppOperatorPluginCreateV1Symbol) == nullptr);
     ASSERT_TRUE(dlsym(v2_handle, "flowsql_stream_operator_count") == nullptr);
     ASSERT_TRUE(dlsym(v2_handle, "flowsql_block_transform_operator_count") == nullptr);
@@ -711,6 +713,15 @@ static void TestCppOperatorPluginContracts() {
     ASSERT_EQ(std::string(transform.name), std::string("transform"));
     ASSERT_EQ(std::string(transform.description), std::string("V2 fixture block transform operator"));
     ASSERT_TRUE(std::memcmp(&transform.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR_V1, sizeof(Guid)) == 0);
+
+    CppOperatorDescriptorV2 time_transform{};
+    time_transform.struct_size = kCppOperatorDescriptorV2Size;
+    ASSERT_EQ(v2_describe(2, &time_transform), 0);
+    ASSERT_EQ(std::string(time_transform.category), std::string("fixture"));
+    ASSERT_EQ(std::string(time_transform.name), std::string("time_transform"));
+    ASSERT_EQ(std::string(time_transform.description),
+              std::string("V2 fixture time-driven block transform operator"));
+    ASSERT_TRUE(std::memcmp(&time_transform.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR_V2, sizeof(Guid)) == 0);
 
     CppOperatorDescriptorV2 undersized{};
     undersized.struct_size = kCppOperatorDescriptorV2Size - 1;
@@ -745,6 +756,23 @@ static void TestCppOperatorPluginContracts() {
     ASSERT_TRUE(task != nullptr);
     transform_operator->ReleaseTask(task);
     v2_destroy(1, transform_capability);
+
+    void* time_transform_capability = v2_create(2, &querier);
+    ASSERT_TRUE(time_transform_capability != nullptr);
+    auto* time_transform_operator = static_cast<IBlockTransformOperatorV2*>(time_transform_capability);
+    ASSERT_EQ(time_transform_operator->Category(), std::string("fixture"));
+    ASSERT_EQ(time_transform_operator->Name(), std::string("time_transform"));
+    BlockTransformTaskConfigV2 time_config{};
+    time_config.struct_size = kBlockTransformTaskConfigV2Size;
+    time_config.contract_version = kBlockTransformContractVersionV2;
+    time_config.task_id = "time-task";
+    time_config.with_params_json = "{}";
+    time_config.pushed_filter_plan_json = "{}";
+    IBlockTransformTaskV2* time_task = nullptr;
+    ASSERT_EQ(time_transform_operator->CreateTask(time_config, &time_task), 0);
+    ASSERT_TRUE(time_task != nullptr);
+    time_transform_operator->ReleaseTask(time_task);
+    v2_destroy(2, time_transform_capability);
     v2_destroy(0, nullptr);
     ASSERT_EQ(dlclose(v2_handle), 0);
 
@@ -951,40 +979,68 @@ static void TestCppPluginLifecycle() {
         d.Parse(rsp.c_str());
         ASSERT_TRUE(d.IsObject());
         ASSERT_EQ(d["abi_version"].GetInt(), kCppOperatorPluginAbiVersionV2);
-        ASSERT_EQ(d["operator_count"].GetInt(), 2);
+        ASSERT_EQ(d["operator_count"].GetInt(), 3);
         ASSERT_TRUE(d["operators"].IsArray());
-        ASSERT_EQ(d["operators"].Size(), rapidjson::SizeType(2));
+        ASSERT_EQ(d["operators"].Size(), rapidjson::SizeType(3));
         ASSERT_EQ(std::string(d["operators"][0].GetString()), "fixture.echo");
         ASSERT_EQ(std::string(d["operators"][1].GetString()), "fixture.transform");
+        ASSERT_EQ(std::string(d["operators"][2].GetString()), "fixture.time_transform");
     }
     ASSERT_EQ(p.QueryStatus("fixture", "echo"), OperatorStatus::kActive);
     ASSERT_EQ(p.QueryStatus("fixture", "transform"), OperatorStatus::kActive);
+    ASSERT_EQ(p.QueryStatus("fixture", "time_transform"), OperatorStatus::kActive);
+    ASSERT_EQ(routes["POST:/operators/detail"]("/operators/detail", v2_req, rsp), error::OK);
+    {
+        rapidjson::Document d;
+        d.Parse(rsp.c_str());
+        ASSERT_TRUE(d.IsObject() && d["plugin"].IsObject());
+        const auto& details = d["plugin"]["operator_details"];
+        ASSERT_TRUE(details.IsArray());
+        ASSERT_EQ(details.Size(), rapidjson::SizeType(3));
+        ASSERT_EQ(std::string(details[0]["name"].GetString()), "fixture.echo");
+        ASSERT_EQ(std::string(details[0]["contract"].GetString()), "operator_v1");
+        ASSERT_EQ(std::string(details[1]["name"].GetString()), "fixture.transform");
+        ASSERT_EQ(std::string(details[1]["contract"].GetString()), "block_transform_v1");
+        ASSERT_EQ(std::string(details[2]["name"].GetString()), "fixture.time_transform");
+        ASSERT_EQ(std::string(details[2]["contract"].GetString()), "block_transform_v2");
+    }
 
     CppOperatorCapabilityLeaseV1 echo_lease;
     CppOperatorCapabilityLeaseV1 transform_lease;
+    CppOperatorCapabilityLeaseV1 time_transform_lease;
     ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_OPERATOR, &echo_lease), 0);
     ASSERT_EQ(capability_registry->Acquire("fixture", "transform", IID_BLOCK_TRANSFORM_OPERATOR_V1, &transform_lease),
               0);
+    ASSERT_EQ(capability_registry->Acquire(
+                  "fixture", "time_transform", IID_BLOCK_TRANSFORM_OPERATOR_V2, &time_transform_lease),
+              0);
     ASSERT_TRUE(echo_lease.capability != nullptr && echo_lease.lifetime != nullptr);
     ASSERT_TRUE(transform_lease.capability != nullptr && transform_lease.lifetime != nullptr);
+    ASSERT_TRUE(time_transform_lease.capability != nullptr && time_transform_lease.lifetime != nullptr);
     auto* echo = static_cast<IOperator*>(echo_lease.capability);
     auto* transform = static_cast<IBlockTransformOperatorV1*>(transform_lease.capability);
+    auto* time_transform = static_cast<IBlockTransformOperatorV2*>(time_transform_lease.capability);
     ASSERT_EQ(echo->Category(), std::string("fixture"));
     ASSERT_EQ(echo->Name(), std::string("echo"));
     ASSERT_EQ(transform->Category(), std::string("fixture"));
     ASSERT_EQ(transform->Name(), std::string("transform"));
+    ASSERT_EQ(time_transform->Category(), std::string("fixture"));
+    ASSERT_EQ(time_transform->Name(), std::string("time_transform"));
 
-    CppOperatorCapabilityLeaseV1 wrong_contract = echo_lease;
-    ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_BLOCK_TRANSFORM_OPERATOR_V1, &wrong_contract), -1);
+    CppOperatorCapabilityLeaseV1 wrong_contract = time_transform_lease;
+    ASSERT_EQ(capability_registry->Acquire(
+                  "fixture", "time_transform", IID_BLOCK_TRANSFORM_OPERATOR_V1, &wrong_contract),
+              -1);
     ASSERT_TRUE(wrong_contract.capability == nullptr);
     ASSERT_TRUE(!wrong_contract.lifetime);
+    echo_lease = {};
+    transform_lease = {};
     ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", v2_req, rsp), error::CONFLICT);
     ASSERT_TRUE(rsp.find("plugin is in use") != std::string::npos);
     CppOperatorCapabilityLeaseV1 after_conflict;
     ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_OPERATOR, &after_conflict), 0);
     after_conflict = {};
-    echo_lease = {};
-    transform_lease = {};
+    time_transform_lease = {};
 
     const int queries_before_deactivate = querier.cpp_operator_plugin_registry_queries.load(std::memory_order_relaxed);
     ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", v2_req, rsp), error::OK);
@@ -992,12 +1048,17 @@ static void TestCppPluginLifecycle() {
                 queries_before_deactivate);
     ASSERT_EQ(p.QueryStatus("fixture", "echo"), OperatorStatus::kDeactivated);
     ASSERT_EQ(p.QueryStatus("fixture", "transform"), OperatorStatus::kDeactivated);
+    ASSERT_EQ(p.QueryStatus("fixture", "time_transform"), OperatorStatus::kDeactivated);
     ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_OPERATOR, &missing_lease), -1);
 
     ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", v2_req, rsp), error::OK);
     ASSERT_EQ(capability_registry->Acquire("fixture", "transform", IID_BLOCK_TRANSFORM_OPERATOR_V1, &transform_lease),
               0);
+    ASSERT_EQ(capability_registry->Acquire(
+                  "fixture", "time_transform", IID_BLOCK_TRANSFORM_OPERATOR_V2, &time_transform_lease),
+              0);
     transform_lease = {};
+    time_transform_lease = {};
     const int queries_before_stop = querier.cpp_operator_plugin_registry_queries.load(std::memory_order_relaxed);
     ASSERT_EQ(binaddon.Stop(), 0);
     ASSERT_TRUE(querier.cpp_operator_plugin_registry_queries.load(std::memory_order_relaxed) > queries_before_stop);
@@ -1009,6 +1070,7 @@ static void TestCppPluginLifecycle() {
     ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete", v2_req, rsp), error::OK);
     ASSERT_EQ(p.QueryStatus("fixture", "echo"), OperatorStatus::kNotFound);
     ASSERT_EQ(p.QueryStatus("fixture", "transform"), OperatorStatus::kNotFound);
+    ASSERT_EQ(p.QueryStatus("fixture", "time_transform"), OperatorStatus::kNotFound);
 
     const std::string bad_filename = "fixture_bad_abi.so";
     const std::string bad_tmp = CopyToTmp(bad_abi_so, upload, bad_filename);

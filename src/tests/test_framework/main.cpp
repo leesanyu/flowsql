@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cerrno>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -59,6 +60,9 @@ void test_filter_mask_evaluation();
 void test_filter_record_batch();
 void test_block_filter_stage();
 void test_block_transform_pipeline_runner();
+void test_block_transform_time_driven_pipeline_runner();
+void test_synchronous_block_transform_time_driven_chain();
+void test_block_transform_time_drive_interfaces();
 void test_filter_pushdown_split();
 void test_filter_pushdown_negotiation();
 void test_statement_stage_filters();
@@ -1290,8 +1294,10 @@ class ScriptedBlockSource final : public IBlockStreamChannel {
 
     BlockPollEvent PollBlock(int timeout_ms) override {
         observed_timeout_ms = timeout_ms;
+        observed_timeouts_ms.push_back(timeout_ms);
         ++poll_calls;
         if (log_) log_->push_back("poll-" + std::to_string(poll_calls));
+        if (poll_hook) poll_hook(poll_calls, timeout_ms);
         if (throw_on_poll) throw std::runtime_error("scripted poll exception");
         if (next_event_ < events_.size()) return events_[next_event_++];
         return {BlockPollEvent::kEof, nullptr, 0};
@@ -1318,6 +1324,8 @@ class ScriptedBlockSource final : public IBlockStreamChannel {
     int release_return_code = 0;
     bool throw_on_poll = false;
     bool throw_on_release = false;
+    std::function<void(int, int)> poll_hook;
+    std::vector<int> observed_timeouts_ms;
     std::vector<std::shared_ptr<arrow::RecordBatch>> released_blocks;
 
  private:
@@ -1363,6 +1371,7 @@ class ScriptedBlockTransformTask final : public IBlockTransformTaskV1 {
         if (next_process_step >= process_steps.size()) return EIO;
         const auto& step = process_steps[next_process_step++];
         *outputs = step.outputs;
+        if (process_hook) process_hook(process_calls);
         return step.return_code;
     }
 
@@ -1397,10 +1406,144 @@ class ScriptedBlockTransformTask final : public IBlockTransformTaskV1 {
     std::shared_ptr<arrow::Schema> opened_input_schema;
     std::vector<std::shared_ptr<arrow::RecordBatch>> process_inputs;
     std::vector<int64_t> process_timestamps;
+    std::function<void(int)> process_hook;
 
  private:
     std::shared_ptr<arrow::Schema> output_schema_;
     std::vector<std::string>* log_ = nullptr;
+};
+
+class ScriptedTimeDrivenBlockTransformTask final : public IBlockTransformTaskV2 {
+ public:
+    struct ProcessStep {
+        int return_code = e2i(BlockTransformStatusV1::kContinue);
+        std::vector<BlockTransformOutputV1> outputs;
+    };
+
+    struct TimeStep {
+        int return_code = e2i(BlockTransformStatusV1::kContinue);
+        std::vector<BlockTransformOutputV1> outputs;
+        uint8_t armed_after = 0;
+        int64_t deadline_after_ns = 0;
+    };
+
+    explicit ScriptedTimeDrivenBlockTransformTask(
+        std::shared_ptr<arrow::Schema> output_schema,
+        std::vector<std::string>* log = nullptr)
+        : output_schema_(std::move(output_schema)), log_(log) {}
+
+    int Open(std::shared_ptr<arrow::Schema> input_schema,
+             std::shared_ptr<arrow::Schema>* output_schema) override {
+        ++open_calls;
+        if (log_) log_->push_back("transform-open");
+        if (!input_schema || !output_schema || opened_) return EINVAL;
+        opened_ = true;
+        *output_schema = output_schema_;
+        return 0;
+    }
+
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
+                     int64_t ts_ms,
+                     std::vector<BlockTransformOutputV1>* outputs) override {
+        ++process_calls;
+        if (log_) log_->push_back("process-" + std::to_string(process_calls));
+        assert(outputs && outputs->empty());
+        process_inputs.push_back(input);
+        process_timestamps.push_back(ts_ms);
+        if (next_process_step >= process_steps.size()) return EIO;
+        const auto& step = process_steps[next_process_step++];
+        *outputs = step.outputs;
+        if (process_hook) process_hook(process_calls);
+        return step.return_code;
+    }
+
+    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+        ++flush_calls;
+        if (log_) log_->push_back("flush");
+        assert(outputs && outputs->empty());
+        *outputs = flush_outputs;
+        return flush_return_code;
+    }
+
+    void Cancel() override {
+        ++cancel_calls;
+        if (log_) log_->push_back("transform-cancel");
+    }
+
+    std::string LastError() const override { return last_error; }
+
+    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
+        ++state_calls;
+        if (log_) log_->push_back("state-" + std::to_string(state_calls));
+        if (!state || state->struct_size < kBlockTransformTimeDriveStateV1Size ||
+            state->contract_version != kBlockTransformTimeDriveVersionV1) {
+            return EINVAL;
+        }
+        if (throw_on_state) throw std::runtime_error("scripted time state exception");
+        if (state_return_code != 0) return state_return_code;
+
+        BlockTransformTimeDriveStateV1 next{};
+        next.struct_size = kBlockTransformTimeDriveStateV1Size;
+        next.contract_version = kBlockTransformTimeDriveVersionV1;
+        next.armed = armed;
+        next.deadline_ns = deadline_ns;
+        if (state_calls == invalid_state_call) {
+            if (invalid_state_mode == 1) next.struct_size = kBlockTransformTimeDriveStateV1Size - 1;
+            if (invalid_state_mode == 2) next.contract_version = kBlockTransformTimeDriveVersionV1 + 1;
+            if (invalid_state_mode == 3) next.armed = 2;
+            if (invalid_state_mode == 4) next.reserved[0] = 1;
+            if (invalid_state_mode == 5) next.deadline_ns = -1;
+        }
+        *state = next;
+        return 0;
+    }
+
+    int OnTime(const BlockTransformTimeEventV1& event,
+               std::vector<BlockTransformOutputV1>* outputs) override {
+        ++time_calls;
+        if (log_) log_->push_back("time-" + std::to_string(time_calls));
+        assert(outputs && outputs->empty());
+        time_events.push_back(event);
+        if (throw_on_time) throw std::runtime_error("scripted OnTime exception");
+        if (next_time_step >= time_steps.size()) return EIO;
+        const auto& step = time_steps[next_time_step++];
+        *outputs = step.outputs;
+        armed = step.armed_after;
+        deadline_ns = step.deadline_after_ns;
+        if (time_hook) time_hook(time_calls);
+        return step.return_code;
+    }
+
+    std::vector<ProcessStep> process_steps;
+    std::vector<TimeStep> time_steps;
+    std::vector<BlockTransformOutputV1> flush_outputs;
+    std::vector<std::shared_ptr<arrow::RecordBatch>> process_inputs;
+    std::vector<int64_t> process_timestamps;
+    std::vector<BlockTransformTimeEventV1> time_events;
+    uint8_t armed = 0;
+    int64_t deadline_ns = 0;
+    int state_return_code = 0;
+    int invalid_state_call = 0;
+    int invalid_state_mode = 0;
+    int flush_return_code = 0;
+    bool throw_on_state = false;
+    bool throw_on_time = false;
+    std::string last_error = "scripted time transform failed";
+    int open_calls = 0;
+    int process_calls = 0;
+    int state_calls = 0;
+    int time_calls = 0;
+    int flush_calls = 0;
+    int cancel_calls = 0;
+    size_t next_process_step = 0;
+    size_t next_time_step = 0;
+    std::function<void(int)> process_hook;
+    std::function<void(int)> time_hook;
+
+ private:
+    std::shared_ptr<arrow::Schema> output_schema_;
+    std::vector<std::string>* log_ = nullptr;
+    bool opened_ = false;
 };
 
 // ============================================================
@@ -1681,6 +1824,572 @@ void test_block_transform_pipeline_runner() {
     }
 
     printf("[PASS] block transform pipeline runner\n");
+}
+
+// ============================================================
+// Test 7.6a: single-transform deadline-aware time drive
+// ============================================================
+void test_block_transform_time_driven_pipeline_runner() {
+    printf("[TEST] block transform time-driven pipeline runner...\n");
+    auto schema = arrow::schema({arrow::field("id", arrow::int32(), true)});
+    auto make_batch = [&](const std::vector<int32_t>& values) {
+        arrow::Int32Builder builder;
+        assert(builder.AppendValues(values).ok());
+        std::shared_ptr<arrow::Array> array;
+        assert(builder.Finish(&array).ok());
+        return arrow::RecordBatch::Make(
+            schema, static_cast<int64_t>(values.size()), {array});
+    };
+    auto bind = [&](const std::string& text) {
+        std::shared_ptr<FilterExpr> parsed;
+        std::string bind_error;
+        assert(ParseFilterExpression(text, &parsed, &bind_error));
+        std::shared_ptr<const BoundFilterExpr> bound;
+        assert(BindFilterExpression(schema, parsed, &bound, &bind_error) ==
+               FilterBindError::kNone);
+        return bound;
+    };
+    const auto one = make_batch({1});
+    const auto two = make_batch({2});
+    const auto three = make_batch({3});
+    const auto four = make_batch({4});
+
+    BlockTransformPipelineResult result;
+    std::string error;
+
+    {
+        std::vector<std::string> log;
+        int64_t monotonic_now_ns = 0;
+        ScriptedBlockSource source({
+            {BlockPollEvent::kTimeout, nullptr, 0},
+            {BlockPollEvent::kTimeout, nullptr, 0},
+            {BlockPollEvent::kTimeout, nullptr, 0},
+            {BlockPollEvent::kEof, nullptr, 0},
+        }, &log);
+        source.poll_hook = [&](int call, int timeout_ms) {
+            if (call <= 3) {
+                monotonic_now_ns += static_cast<int64_t>(timeout_ms) * 1000 * 1000;
+            }
+        };
+        ScriptedTimeDrivenBlockTransformTask transform(schema, &log);
+        transform.armed = 1;
+        transform.deadline_ns = 25 * 1000 * 1000;
+        transform.time_steps = {
+            {e2i(BlockTransformStatusV1::kContinue), {{three, 701}}, 0, 0},
+        };
+        std::vector<BlockTransformOutputV1> delivered;
+        BlockTransformPipelineConfig config;
+        config.source = &source;
+        config.source_schema = schema;
+        config.transform = &transform;
+        config.time_transform = &transform;
+        config.transform_residual = bind("id >= 3");
+        config.poll_timeout_ms = 10;
+        config.monotonic_clock_ns = [&]() { return monotonic_now_ns; };
+        config.wall_clock_ns = []() { return int64_t(2 * 1000 * 1000); };
+        config.output_consumer = [&](const BlockTransformOutputV1& output) {
+            log.push_back("consume-" + std::to_string(output.ts_ms));
+            delivered.push_back(output);
+            return 0;
+        };
+        BlockTransformPipelineRunner runner(std::move(config));
+        assert(runner.Run(&result, &error) == BlockTransformPipelineError::kNone);
+        assert(result.terminal == BlockTransformPipelineTerminal::kCompleted && error.empty());
+        assert(source.observed_timeouts_ms == std::vector<int>({10, 10, 5, 10}));
+        assert(transform.time_calls == 1 && transform.flush_calls == 1 && transform.cancel_calls == 0);
+        assert(transform.time_events.size() == 1);
+        assert(transform.time_events[0].monotonic_now_ns == 25 * 1000 * 1000);
+        assert(transform.time_events[0].wall_now_ns == 2 * 1000 * 1000);
+        assert(delivered.size() == 1 && delivered[0].batch->num_rows() == 1 &&
+               delivered[0].ts_ms == 701);
+        assert(std::static_pointer_cast<arrow::Int32Array>(
+                   delivered[0].batch->column(0))->Value(0) == 3);
+        assert(result.output_blocks == 1 && result.output_rows == 1);
+        const std::vector<std::string> expected_log = {
+            "transform-open", "state-1", "poll-1", "state-2", "poll-2",
+            "state-3", "poll-3", "state-4", "time-1", "state-5",
+            "consume-701", "state-6", "poll-4", "flush",
+        };
+        assert(log == expected_log);
+    }
+
+    {
+        std::vector<std::string> log;
+        int64_t monotonic_now_ns = 0;
+        std::vector<int64_t> wall_times = {1000, 900};
+        size_t next_wall_time = 0;
+        ScriptedBlockSource source({
+            {BlockPollEvent::kData, one, 0},
+            {BlockPollEvent::kData, two, 0},
+            {BlockPollEvent::kEof, nullptr, 0},
+        }, &log);
+        ScriptedTimeDrivenBlockTransformTask transform(schema, &log);
+        transform.armed = 1;
+        transform.deadline_ns = 0;
+        transform.time_steps = {
+            {e2i(BlockTransformStatusV1::kContinue), {{three, 801}}, 1, 10 * 1000 * 1000},
+            {e2i(BlockTransformStatusV1::kContinue), {{four, 803}}, 0, 0},
+        };
+        transform.process_steps = {
+            {e2i(BlockTransformStatusV1::kContinue), {{two, 802}}},
+            {e2i(BlockTransformStatusV1::kContinue), {}},
+        };
+        std::vector<int64_t> delivered_timestamps;
+        BlockTransformPipelineConfig config;
+        config.source = &source;
+        config.source_schema = schema;
+        config.transform = &transform;
+        config.time_transform = &transform;
+        config.poll_timeout_ms = 50;
+        config.monotonic_clock_ns = [&]() { return monotonic_now_ns; };
+        config.wall_clock_ns = [&]() { return wall_times[next_wall_time++]; };
+        config.output_consumer = [&](const BlockTransformOutputV1& output) {
+            log.push_back("consume-" + std::to_string(output.ts_ms));
+            delivered_timestamps.push_back(output.ts_ms);
+            if (output.ts_ms == 802) monotonic_now_ns = 10 * 1000 * 1000;
+            return 0;
+        };
+        BlockTransformPipelineRunner runner(std::move(config));
+        assert(runner.Run(&result, &error) == BlockTransformPipelineError::kNone);
+        assert(result.terminal == BlockTransformPipelineTerminal::kCompleted && error.empty());
+        assert(source.observed_timeouts_ms == std::vector<int>({10, 50, 50}));
+        assert(source.release_calls == 2 && transform.process_calls == 2);
+        assert(transform.time_calls == 2 && transform.flush_calls == 1);
+        assert(transform.time_events[0].monotonic_now_ns == 0);
+        assert(transform.time_events[1].monotonic_now_ns == 10 * 1000 * 1000);
+        assert(transform.time_events[0].wall_now_ns == 1000);
+        assert(transform.time_events[1].wall_now_ns == 900);
+        assert(delivered_timestamps == std::vector<int64_t>({801, 802, 803}));
+        const std::vector<std::string> expected_log = {
+            "transform-open", "state-1", "time-1", "state-2", "consume-801",
+            "state-3", "poll-1", "process-1", "consume-802", "release-1",
+            "state-4", "time-2", "state-5", "consume-803", "state-6",
+            "poll-2", "process-2", "release-2", "state-7", "poll-3", "flush",
+        };
+        assert(log == expected_log);
+    }
+
+    {
+        ScriptedBlockSource source({{BlockPollEvent::kEof, nullptr, 0}});
+        ScriptedTimeDrivenBlockTransformTask transform(schema);
+        transform.armed = 1;
+        transform.deadline_ns = 0;
+        transform.time_steps = {
+            {e2i(BlockTransformStatusV1::kStop), {{three, 901}}, 1, 0},
+        };
+        transform.flush_outputs = {{four, 902}};
+        std::vector<int64_t> delivered_timestamps;
+        BlockTransformPipelineConfig config;
+        config.source = &source;
+        config.source_schema = schema;
+        config.transform = &transform;
+        config.time_transform = &transform;
+        config.monotonic_clock_ns = []() { return int64_t(0); };
+        config.wall_clock_ns = []() { return int64_t(100); };
+        config.output_consumer = [&](const BlockTransformOutputV1& output) {
+            delivered_timestamps.push_back(output.ts_ms);
+            return 0;
+        };
+        BlockTransformPipelineRunner runner(std::move(config));
+        assert(runner.Run(&result, &error) == BlockTransformPipelineError::kNone);
+        assert(result.terminal == BlockTransformPipelineTerminal::kStopped && error.empty());
+        assert(source.poll_calls == 0 && transform.time_calls == 1 && transform.flush_calls == 1);
+        assert(delivered_timestamps == std::vector<int64_t>({901, 902}));
+    }
+
+    auto run_time_failure = [&](ScriptedTimeDrivenBlockTransformTask* transform,
+                                ScriptedBlockSource* source,
+                                std::function<int64_t()> monotonic_clock,
+                                BlockTransformPipelineError expected,
+                                int* consumed = nullptr,
+                                int consumer_return_code = 0) {
+        BlockTransformPipelineConfig config;
+        config.source = source;
+        config.source_schema = schema;
+        config.transform = transform;
+        config.time_transform = transform;
+        config.monotonic_clock_ns = std::move(monotonic_clock);
+        config.wall_clock_ns = []() { return int64_t(100); };
+        config.output_consumer = [&](const BlockTransformOutputV1&) {
+            if (consumed) ++*consumed;
+            return consumer_return_code;
+        };
+        BlockTransformPipelineRunner runner(std::move(config));
+        assert(runner.Run(&result, &error) == expected);
+        assert(result.terminal == BlockTransformPipelineTerminal::kFailed);
+        assert(transform->flush_calls == 0 && transform->cancel_calls == 1);
+        assert(source->cancel_calls == 1 && !error.empty());
+    };
+
+    for (int invalid_mode = 1; invalid_mode <= 5; ++invalid_mode) {
+        ScriptedBlockSource source({{BlockPollEvent::kEof, nullptr, 0}});
+        ScriptedTimeDrivenBlockTransformTask transform(schema);
+        transform.armed = 1;
+        transform.deadline_ns = 0;
+        transform.invalid_state_call = 1;
+        transform.invalid_state_mode = invalid_mode;
+        run_time_failure(
+            &transform,
+            &source,
+            []() { return int64_t(0); },
+            BlockTransformPipelineError::kTransformContractViolation);
+        assert(source.poll_calls == 0 && transform.time_calls == 0);
+    }
+
+    {
+        ScriptedBlockSource source({{BlockPollEvent::kEof, nullptr, 0}});
+        ScriptedTimeDrivenBlockTransformTask transform(schema);
+        transform.armed = 1;
+        transform.deadline_ns = 0;
+        transform.time_steps = {
+            {e2i(BlockTransformStatusV1::kContinue), {{three, 1001}}, 1, 0},
+        };
+        int consumed = 0;
+        run_time_failure(
+            &transform,
+            &source,
+            []() { return int64_t(0); },
+            BlockTransformPipelineError::kTransformContractViolation,
+            &consumed);
+        assert(consumed == 0 && source.poll_calls == 0 && transform.time_calls == 1);
+    }
+
+    {
+        ScriptedBlockSource source({
+            {BlockPollEvent::kTimeout, nullptr, 0},
+            {BlockPollEvent::kEof, nullptr, 0},
+        });
+        ScriptedTimeDrivenBlockTransformTask transform(schema);
+        transform.armed = 1;
+        transform.deadline_ns = 10 * 1000 * 1000;
+        std::vector<int64_t> monotonic_times = {5 * 1000 * 1000, 4 * 1000 * 1000};
+        size_t next_monotonic_time = 0;
+        run_time_failure(
+            &transform,
+            &source,
+            [&]() { return monotonic_times[next_monotonic_time++]; },
+            BlockTransformPipelineError::kTransformContractViolation);
+        assert(source.poll_calls == 1 && transform.time_calls == 0);
+    }
+
+    {
+        ScriptedBlockSource source({{BlockPollEvent::kEof, nullptr, 0}});
+        ScriptedTimeDrivenBlockTransformTask transform(schema);
+        transform.armed = 1;
+        transform.deadline_ns = 0;
+        transform.time_steps = {
+            {-EIO, {{three, 1002}}, 0, 0},
+        };
+        int consumed = 0;
+        run_time_failure(
+            &transform,
+            &source,
+            []() { return int64_t(0); },
+            BlockTransformPipelineError::kTransformContractViolation,
+            &consumed);
+        assert(consumed == 0 && transform.time_calls == 1);
+    }
+
+    {
+        ScriptedBlockSource source({{BlockPollEvent::kEof, nullptr, 0}});
+        ScriptedTimeDrivenBlockTransformTask transform(schema);
+        transform.armed = 1;
+        transform.deadline_ns = 0;
+        transform.throw_on_state = true;
+        run_time_failure(
+            &transform,
+            &source,
+            []() { return int64_t(0); },
+            BlockTransformPipelineError::kTransformContractViolation);
+        assert(source.poll_calls == 0 && transform.time_calls == 0);
+    }
+
+    {
+        ScriptedBlockSource source({{BlockPollEvent::kEof, nullptr, 0}});
+        ScriptedTimeDrivenBlockTransformTask transform(schema);
+        transform.armed = 1;
+        transform.deadline_ns = 0;
+        transform.throw_on_time = true;
+        run_time_failure(
+            &transform,
+            &source,
+            []() { return int64_t(0); },
+            BlockTransformPipelineError::kTransformFailed);
+        assert(source.poll_calls == 0 && transform.time_calls == 1);
+    }
+
+    {
+        ScriptedBlockSource source({{BlockPollEvent::kEof, nullptr, 0}});
+        ScriptedTimeDrivenBlockTransformTask transform(schema);
+        transform.armed = 1;
+        transform.deadline_ns = 0;
+        transform.time_steps = {
+            {e2i(BlockTransformStatusV1::kContinue), {{three, 1003}}, 0, 0},
+        };
+        int consumed = 0;
+        run_time_failure(
+            &transform,
+            &source,
+            []() { return int64_t(0); },
+            BlockTransformPipelineError::kOutputConsumerFailed,
+            &consumed,
+            EIO);
+        assert(consumed == 1 && transform.time_calls == 1);
+    }
+
+    printf("[PASS] block transform time-driven pipeline runner\n");
+}
+
+// ============================================================
+// Test 7.6b: mixed V1/V2 synchronous chain time drive
+// ============================================================
+void test_synchronous_block_transform_time_driven_chain() {
+    printf("[TEST] synchronous block transform time-driven chain...\n");
+    auto schema = arrow::schema({arrow::field("id", arrow::int32(), true)});
+    auto make_batch = [&](const std::vector<int32_t>& values) {
+        arrow::Int32Builder builder;
+        assert(builder.AppendValues(values).ok());
+        std::shared_ptr<arrow::Array> array;
+        assert(builder.Finish(&array).ok());
+        return arrow::RecordBatch::Make(
+            schema, static_cast<int64_t>(values.size()), {array});
+    };
+    auto bind = [&](const std::string& text) {
+        std::shared_ptr<FilterExpr> parsed;
+        std::string bind_error;
+        assert(ParseFilterExpression(text, &parsed, &bind_error));
+        std::shared_ptr<const BoundFilterExpr> bound;
+        assert(BindFilterExpression(schema, parsed, &bound, &bind_error) ==
+               FilterBindError::kNone);
+        return bound;
+    };
+    auto values = [](const std::shared_ptr<arrow::RecordBatch>& batch) {
+        std::vector<int32_t> result;
+        auto array = std::static_pointer_cast<arrow::Int32Array>(batch->column(0));
+        for (int64_t i = 0; i < array->length(); ++i) result.push_back(array->Value(i));
+        return result;
+    };
+
+    const auto one_two_three = make_batch({1, 2, 3});
+    const auto two_three_four = make_batch({2, 3, 4});
+    const auto three_four_five = make_batch({3, 4, 5});
+    const auto four_five_six = make_batch({4, 5, 6});
+
+    {
+        std::vector<std::string> order;
+        ScriptedTimeDrivenBlockTransformTask stage1(schema);
+        ScriptedBlockTransformTask stage2(schema);
+        ScriptedTimeDrivenBlockTransformTask stage3(schema);
+        stage1.armed = 1;
+        stage1.deadline_ns = 5;
+        stage1.time_steps = {
+            {e2i(BlockTransformStatusV1::kContinue), {{one_two_three, 101}}, 0, 0},
+        };
+        stage1.time_hook = [&](int) { order.push_back("stage1-time"); };
+        stage2.process_steps = {
+            {e2i(BlockTransformStatusV1::kContinue), {{two_three_four, 102}}},
+        };
+        stage2.process_hook = [&](int) { order.push_back("stage2-process"); };
+        stage3.armed = 1;
+        stage3.deadline_ns = 7;
+        stage3.process_steps = {
+            {e2i(BlockTransformStatusV1::kContinue), {{three_four_five, 103}}},
+        };
+        stage3.process_hook = [&](int) {
+            order.push_back("stage3-process");
+            stage3.deadline_ns = 5;
+        };
+        stage3.time_steps = {
+            {e2i(BlockTransformStatusV1::kContinue), {{four_five_six, 104}}, 0, 0},
+        };
+        stage3.time_hook = [&](int) { order.push_back("stage3-time"); };
+
+        std::vector<IBlockTransformTaskV1*> tasks = {&stage1, &stage2, &stage3};
+        std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks = {
+            &stage1, nullptr, &stage3};
+        std::vector<std::shared_ptr<arrow::Schema>> expected_schemas = {
+            schema, schema, schema};
+        std::vector<std::shared_ptr<const BoundFilterExpr>> residuals = {
+            bind("id >= 2"), bind("id >= 3"), bind("id <= 4")};
+        SynchronousBlockTransformChainTask chain(
+            std::move(tasks),
+            std::move(time_tasks),
+            std::move(expected_schemas),
+            residuals);
+
+        std::shared_ptr<arrow::Schema> output_schema;
+        assert(chain.Open(schema, &output_schema) == 0);
+        assert(output_schema && output_schema->Equals(*schema, true));
+
+        BlockTransformTimeDriveStateV1 state{};
+        state.struct_size = kBlockTransformTimeDriveStateV1Size;
+        state.contract_version = kBlockTransformTimeDriveVersionV1;
+        assert(chain.GetTimeDriveState(&state) == 0);
+        assert(state.armed == 1 && state.deadline_ns == 5);
+
+        BlockTransformTimeEventV1 event{};
+        event.struct_size = kBlockTransformTimeEventV1Size;
+        event.contract_version = kBlockTransformTimeDriveVersionV1;
+        event.monotonic_now_ns = 5;
+        event.wall_now_ns = 50;
+        std::vector<BlockTransformOutputV1> outputs;
+        assert(chain.OnTime(event, &outputs) ==
+               e2i(BlockTransformStatusV1::kContinue));
+        const std::vector<std::string> expected_order = {
+            "stage1-time", "stage2-process", "stage3-process", "stage3-time"};
+        assert(order == expected_order);
+        assert(stage1.time_calls == 1 && stage2.process_calls == 1);
+        assert(stage3.process_calls == 1 && stage3.time_calls == 1);
+        assert(stage2.process_inputs.size() == 1);
+        assert(values(stage2.process_inputs[0]) == std::vector<int32_t>({2, 3}));
+        assert(stage3.process_inputs.size() == 1);
+        assert(values(stage3.process_inputs[0]) == std::vector<int32_t>({3, 4}));
+        assert(outputs.size() == 2);
+        assert(outputs[0].ts_ms == 103);
+        assert(values(outputs[0].batch) == std::vector<int32_t>({3, 4}));
+        assert(outputs[1].ts_ms == 104);
+        assert(values(outputs[1].batch) == std::vector<int32_t>({4}));
+
+        state = {};
+        state.struct_size = kBlockTransformTimeDriveStateV1Size;
+        state.contract_version = kBlockTransformTimeDriveVersionV1;
+        assert(chain.GetTimeDriveState(&state) == 0 && state.armed == 0);
+        std::vector<BlockTransformOutputV1> flush_outputs;
+        assert(chain.Flush(&flush_outputs) == 0 && flush_outputs.empty());
+        assert(stage1.flush_calls == 1 && stage2.flush_calls == 1 &&
+               stage3.flush_calls == 1);
+    }
+
+    {
+        ScriptedBlockSource source({{BlockPollEvent::kEof, nullptr, 0}});
+        ScriptedTimeDrivenBlockTransformTask stage1(schema);
+        ScriptedBlockTransformTask stage2(schema);
+        ScriptedTimeDrivenBlockTransformTask stage3(schema);
+        stage1.armed = 1;
+        stage1.deadline_ns = 0;
+        stage1.time_steps = {
+            {e2i(BlockTransformStatusV1::kStop), {{one_two_three, 201}}, 0, 0},
+        };
+        stage2.process_steps = {
+            {e2i(BlockTransformStatusV1::kContinue), {{two_three_four, 202}}},
+        };
+        stage3.process_steps = {
+            {e2i(BlockTransformStatusV1::kContinue), {{three_four_five, 203}}},
+        };
+        std::vector<IBlockTransformTaskV1*> tasks = {&stage1, &stage2, &stage3};
+        std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks = {
+            &stage1, nullptr, &stage3};
+        std::vector<std::shared_ptr<arrow::Schema>> expected_schemas = {
+            schema, schema, schema};
+        std::vector<std::shared_ptr<const BoundFilterExpr>> residuals(3);
+        SynchronousBlockTransformChainTask chain(
+            std::move(tasks),
+            std::move(time_tasks),
+            std::move(expected_schemas),
+            residuals);
+        std::vector<BlockTransformOutputV1> delivered;
+        BlockTransformPipelineConfig config;
+        config.source = &source;
+        config.source_schema = schema;
+        config.transform = &chain;
+        config.time_transform = &chain;
+        config.monotonic_clock_ns = []() { return int64_t(0); };
+        config.wall_clock_ns = []() { return int64_t(100); };
+        config.output_consumer = [&](const BlockTransformOutputV1& output) {
+            delivered.push_back(output);
+            return 0;
+        };
+        BlockTransformPipelineRunner runner(std::move(config));
+        BlockTransformPipelineResult result;
+        std::string error;
+        assert(runner.Run(&result, &error) == BlockTransformPipelineError::kNone);
+        assert(result.terminal == BlockTransformPipelineTerminal::kStopped);
+        assert(error.empty() && source.poll_calls == 0);
+        assert(delivered.size() == 1 && delivered[0].ts_ms == 203);
+        assert(stage1.time_calls == 1 && stage2.process_calls == 1 &&
+               stage3.process_calls == 1 && stage3.time_calls == 0);
+        assert(stage1.flush_calls == 1 && stage2.flush_calls == 1 &&
+               stage3.flush_calls == 1);
+        assert(stage1.cancel_calls == 0 && stage2.cancel_calls == 0 &&
+               stage3.cancel_calls == 0);
+    }
+
+    auto run_failure = [&](ScriptedTimeDrivenBlockTransformTask* stage1,
+                           ScriptedBlockTransformTask* stage2,
+                           bool expect_process) {
+        ScriptedBlockSource source({{BlockPollEvent::kEof, nullptr, 0}});
+        std::vector<IBlockTransformTaskV1*> tasks = {stage1, stage2};
+        std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks = {stage1, nullptr};
+        std::vector<std::shared_ptr<arrow::Schema>> expected_schemas = {schema, schema};
+        std::vector<std::shared_ptr<const BoundFilterExpr>> residuals(2);
+        SynchronousBlockTransformChainTask chain(
+            std::move(tasks),
+            std::move(time_tasks),
+            std::move(expected_schemas),
+            residuals);
+        int consumed = 0;
+        BlockTransformPipelineConfig config;
+        config.source = &source;
+        config.source_schema = schema;
+        config.transform = &chain;
+        config.time_transform = &chain;
+        config.monotonic_clock_ns = []() { return int64_t(0); };
+        config.wall_clock_ns = []() { return int64_t(100); };
+        config.output_consumer = [&](const BlockTransformOutputV1&) {
+            ++consumed;
+            return 0;
+        };
+        BlockTransformPipelineRunner runner(std::move(config));
+        BlockTransformPipelineResult result;
+        std::string error;
+        const auto rc = runner.Run(&result, &error);
+        assert(rc == BlockTransformPipelineError::kTransformFailed ||
+               rc == BlockTransformPipelineError::kTransformContractViolation);
+        assert(result.terminal == BlockTransformPipelineTerminal::kFailed);
+        assert(!error.empty() && consumed == 0 && source.poll_calls == 0);
+        assert(stage1->flush_calls == 0 && stage2->flush_calls == 0);
+        assert(stage1->cancel_calls == 1 && stage2->cancel_calls == 1);
+        assert(stage2->process_calls == (expect_process ? 1 : 0));
+        assert(chain.LastError().find("transform stage") != std::string::npos);
+    };
+
+    {
+        ScriptedTimeDrivenBlockTransformTask stage1(schema);
+        ScriptedBlockTransformTask stage2(schema);
+        stage1.armed = 1;
+        stage1.deadline_ns = 0;
+        stage1.invalid_state_call = 1;
+        stage1.invalid_state_mode = 3;
+        run_failure(&stage1, &stage2, false);
+        assert(stage1.time_calls == 0);
+    }
+
+    {
+        ScriptedTimeDrivenBlockTransformTask stage1(schema);
+        ScriptedBlockTransformTask stage2(schema);
+        stage1.armed = 1;
+        stage1.deadline_ns = 0;
+        stage1.time_steps = {
+            {-EIO, {{one_two_three, 301}}, 0, 0},
+        };
+        run_failure(&stage1, &stage2, false);
+        assert(stage1.time_calls == 1);
+    }
+
+    {
+        ScriptedTimeDrivenBlockTransformTask stage1(schema);
+        ScriptedBlockTransformTask stage2(schema);
+        stage1.armed = 1;
+        stage1.deadline_ns = 0;
+        stage1.time_steps = {
+            {e2i(BlockTransformStatusV1::kContinue), {{one_two_three, 302}}, 0, 0},
+        };
+        stage2.process_steps = {{-EIO, {}}};
+        run_failure(&stage1, &stage2, true);
+        assert(stage1.time_calls == 1);
+    }
+
+    printf("[PASS] synchronous block transform time-driven chain\n");
 }
 
 // ============================================================
@@ -2657,6 +3366,233 @@ class TestBlockTransformProvider final : public IBlockTransformOperatorV1 {
     bool return_null_task = false;
 };
 
+class TestTimeDrivenBlockTransformTask final : public IBlockTransformTaskV2 {
+ public:
+    explicit TestTimeDrivenBlockTransformTask(const BlockTransformTaskConfigV2& config)
+        : task_id_(config.task_id),
+          with_params_json_(config.with_params_json),
+          pushed_filter_plan_json_(config.pushed_filter_plan_json) {}
+
+    int Open(std::shared_ptr<arrow::Schema> input_schema,
+             std::shared_ptr<arrow::Schema>* output_schema) override {
+        if (!input_schema || !output_schema || opened_) return -EINVAL;
+        schema_ = std::move(input_schema);
+        *output_schema = schema_;
+        opened_ = true;
+        return 0;
+    }
+
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
+                     int64_t ts_ms,
+                     std::vector<BlockTransformOutputV1>* outputs) override {
+        if (!opened_ || cancelled_ || !input || !outputs || !outputs->empty()) return -EINVAL;
+        last_batch_ = input;
+        outputs->push_back({input, ts_ms});
+        return e2i(BlockTransformStatusV1::kContinue);
+    }
+
+    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+        return opened_ && !cancelled_ && outputs && outputs->empty() ? 0 : -EINVAL;
+    }
+
+    void Cancel() override { cancelled_ = true; }
+    std::string LastError() const override { return ""; }
+
+    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
+        if (!opened_ || cancelled_ || !state ||
+            state->struct_size < kBlockTransformTimeDriveStateV1Size ||
+            state->contract_version != kBlockTransformTimeDriveVersionV1) {
+            return -EINVAL;
+        }
+        BlockTransformTimeDriveStateV1 next{};
+        next.struct_size = kBlockTransformTimeDriveStateV1Size;
+        next.contract_version = kBlockTransformTimeDriveVersionV1;
+        next.armed = 1;
+        next.deadline_ns = next_deadline_ns_;
+        *state = next;
+        return 0;
+    }
+
+    int OnTime(const BlockTransformTimeEventV1& event,
+               std::vector<BlockTransformOutputV1>* outputs) override {
+        if (!opened_ || cancelled_ || !outputs || !outputs->empty() ||
+            event.struct_size < kBlockTransformTimeEventV1Size ||
+            event.contract_version != kBlockTransformTimeDriveVersionV1) {
+            return -EINVAL;
+        }
+        last_monotonic_now_ns_ = event.monotonic_now_ns;
+        last_wall_now_ns_ = event.wall_now_ns;
+        next_deadline_ns_ = event.monotonic_now_ns + 100;
+        if (last_batch_) outputs->push_back({last_batch_, event.wall_now_ns / 1000 / 1000});
+        return e2i(BlockTransformStatusV1::kContinue);
+    }
+
+    const std::string& TaskId() const { return task_id_; }
+    const std::string& WithParamsJson() const { return with_params_json_; }
+    const std::string& PushedFilterPlanJson() const { return pushed_filter_plan_json_; }
+    int64_t LastMonotonicNowNs() const { return last_monotonic_now_ns_; }
+    int64_t LastWallNowNs() const { return last_wall_now_ns_; }
+
+ private:
+    std::string task_id_;
+    std::string with_params_json_;
+    std::string pushed_filter_plan_json_;
+    bool opened_ = false;
+    bool cancelled_ = false;
+    int64_t next_deadline_ns_ = 0;
+    int64_t last_monotonic_now_ns_ = 0;
+    int64_t last_wall_now_ns_ = 0;
+    std::shared_ptr<arrow::Schema> schema_;
+    std::shared_ptr<arrow::RecordBatch> last_batch_;
+};
+
+class TestTimeDrivenBlockTransformProvider final : public IBlockTransformOperatorV2 {
+ public:
+    std::string Category() const override { return "test"; }
+    std::string Name() const override { return "time_driven_transform"; }
+    std::string Description() const override { return "time drive interface fixture"; }
+
+    int CreateTask(const BlockTransformTaskConfigV2& config,
+                   IBlockTransformTaskV2** task) override {
+        if (!task) return -EINVAL;
+        *task = nullptr;
+        if (config.struct_size < kBlockTransformTaskConfigV2Size ||
+            config.contract_version != kBlockTransformContractVersionV2 || !config.task_id ||
+            !config.with_params_json || !config.pushed_filter_plan_json) {
+            return -EINVAL;
+        }
+        *task = new TestTimeDrivenBlockTransformTask(config);
+        ++live_tasks;
+        return 0;
+    }
+
+    void ReleaseTask(IBlockTransformTaskV2* task) override {
+        if (!task) return;
+        delete task;
+        --live_tasks;
+    }
+
+    int live_tasks = 0;
+};
+
+// ============================================================
+// Test 7.2a: versioned block transform time-drive contracts
+// ============================================================
+void test_block_transform_time_drive_interfaces() {
+    printf("[TEST] block transform time-drive interfaces...\n");
+
+    static_assert(std::is_standard_layout_v<BlockTransformTaskConfigV2>);
+    static_assert(std::is_standard_layout_v<BlockTransformTimeDriveStateV1>);
+    static_assert(std::is_standard_layout_v<BlockTransformTimeEventV1>);
+    static_assert(std::is_base_of_v<IBlockTransformTaskV1, IBlockTransformTaskV2>);
+    static_assert(std::is_base_of_v<IBlockTransformTimeDrivenTaskV1, IBlockTransformTaskV2>);
+    static_assert(!std::is_base_of_v<IBlockTransformTimeDrivenTaskV1, IBlockTransformTaskV1>);
+
+    assert(sizeof(IID_BLOCK_TRANSFORM_OPERATOR_V2) == sizeof(Guid));
+    assert(std::memcmp(&IID_BLOCK_TRANSFORM_OPERATOR_V1,
+                       &IID_BLOCK_TRANSFORM_OPERATOR_V2,
+                       sizeof(Guid)) != 0);
+    assert(kBlockTransformTaskConfigV2Size == sizeof(BlockTransformTaskConfigV2));
+    assert(kBlockTransformTimeDriveStateV1Size == sizeof(BlockTransformTimeDriveStateV1));
+    assert(kBlockTransformTimeEventV1Size == sizeof(BlockTransformTimeEventV1));
+
+    std::string task_id = "time-task";
+    std::string with_params = "{\"mode\":\"realtime\"}";
+    std::string filter_plan = "{\"version\":1}";
+    BlockTransformTaskConfigV2 config{};
+    config.struct_size = kBlockTransformTaskConfigV2Size;
+    config.contract_version = kBlockTransformContractVersionV2;
+    config.task_id = task_id.c_str();
+    config.with_params_json = with_params.c_str();
+    config.pushed_filter_plan_json = filter_plan.c_str();
+
+    TestTimeDrivenBlockTransformProvider provider;
+    IBlockTransformTaskV2* task = reinterpret_cast<IBlockTransformTaskV2*>(1);
+    auto rejected = config;
+    rejected.struct_size = kBlockTransformTaskConfigV2Size - 1;
+    assert(provider.CreateTask(rejected, &task) == -EINVAL && task == nullptr);
+    task = reinterpret_cast<IBlockTransformTaskV2*>(1);
+    rejected = config;
+    rejected.contract_version = kBlockTransformContractVersionV2 + 1;
+    assert(provider.CreateTask(rejected, &task) == -EINVAL && task == nullptr);
+    task = reinterpret_cast<IBlockTransformTaskV2*>(1);
+    rejected = config;
+    rejected.task_id = nullptr;
+    assert(provider.CreateTask(rejected, &task) == -EINVAL && task == nullptr);
+    task = reinterpret_cast<IBlockTransformTaskV2*>(1);
+    rejected = config;
+    rejected.with_params_json = nullptr;
+    assert(provider.CreateTask(rejected, &task) == -EINVAL && task == nullptr);
+    task = reinterpret_cast<IBlockTransformTaskV2*>(1);
+    rejected = config;
+    rejected.pushed_filter_plan_json = nullptr;
+    assert(provider.CreateTask(rejected, &task) == -EINVAL && task == nullptr);
+
+    assert(provider.CreateTask(config, &task) == 0);
+    assert(task && provider.live_tasks == 1);
+    task_id = "changed";
+    with_params = "changed";
+    filter_plan = "changed";
+
+    auto* concrete = static_cast<TestTimeDrivenBlockTransformTask*>(task);
+    assert(concrete->TaskId() == "time-task");
+    assert(concrete->WithParamsJson() == "{\"mode\":\"realtime\"}");
+    assert(concrete->PushedFilterPlanJson() == "{\"version\":1}");
+
+    IBlockTransformTaskV1* data_task = task;
+    IBlockTransformTimeDrivenTaskV1* time_task = task;
+    auto schema = arrow::schema({arrow::field("value", arrow::int64())});
+    std::shared_ptr<arrow::Schema> output_schema;
+    assert(data_task->Open(schema, &output_schema) == 0);
+    assert(output_schema && output_schema->Equals(schema));
+
+    auto batch = arrow::RecordBatch::Make(
+        schema, 0, {std::make_shared<arrow::Int64Array>(0, nullptr)});
+    std::vector<BlockTransformOutputV1> outputs;
+    assert(data_task->ProcessBlock(batch, 17, &outputs) == e2i(BlockTransformStatusV1::kContinue));
+    assert(outputs.size() == 1 && outputs[0].batch == batch && outputs[0].ts_ms == 17);
+
+    BlockTransformTimeDriveStateV1 state{};
+    state.struct_size = kBlockTransformTimeDriveStateV1Size - 1;
+    state.contract_version = kBlockTransformTimeDriveVersionV1;
+    assert(time_task->GetTimeDriveState(&state) == -EINVAL);
+    state.struct_size = kBlockTransformTimeDriveStateV1Size;
+    state.contract_version = kBlockTransformTimeDriveVersionV1 + 1;
+    assert(time_task->GetTimeDriveState(&state) == -EINVAL);
+    state.contract_version = kBlockTransformTimeDriveVersionV1;
+    assert(time_task->GetTimeDriveState(&state) == 0);
+    assert(state.armed == 1 && state.deadline_ns == 0);
+    for (const uint8_t byte : state.reserved) assert(byte == 0);
+
+    outputs.clear();
+    BlockTransformTimeEventV1 event{};
+    event.struct_size = kBlockTransformTimeEventV1Size;
+    event.contract_version = kBlockTransformTimeDriveVersionV1;
+    event.monotonic_now_ns = 1000;
+    event.wall_now_ns = 5 * 1000 * 1000;
+    auto rejected_event = event;
+    rejected_event.struct_size = kBlockTransformTimeEventV1Size - 1;
+    assert(time_task->OnTime(rejected_event, &outputs) == -EINVAL && outputs.empty());
+    rejected_event = event;
+    rejected_event.contract_version = kBlockTransformTimeDriveVersionV1 + 1;
+    assert(time_task->OnTime(rejected_event, &outputs) == -EINVAL && outputs.empty());
+    assert(concrete->LastMonotonicNowNs() == 0 && concrete->LastWallNowNs() == 0);
+    assert(time_task->OnTime(event, &outputs) == e2i(BlockTransformStatusV1::kContinue));
+    assert(outputs.size() == 1 && outputs[0].batch == batch && outputs[0].ts_ms == 5);
+    assert(concrete->LastMonotonicNowNs() == 1000 && concrete->LastWallNowNs() == 5 * 1000 * 1000);
+
+    state.struct_size = kBlockTransformTimeDriveStateV1Size;
+    state.contract_version = kBlockTransformTimeDriveVersionV1;
+    assert(time_task->GetTimeDriveState(&state) == 0);
+    assert(state.armed == 1 && state.deadline_ns == 1100);
+
+    task->Cancel();
+    provider.ReleaseTask(task);
+    assert(provider.live_tasks == 0);
+
+    printf("[PASS] block transform time-drive interfaces\n");
+}
+
 // ============================================================
 // Test 7.2: stage filter and block transform interface contracts
 // ============================================================
@@ -3375,6 +4311,9 @@ int main(int argc, char* argv[]) {
     test_filter_record_batch();
     test_block_filter_stage();
     test_block_transform_pipeline_runner();
+    test_block_transform_time_driven_pipeline_runner();
+    test_synchronous_block_transform_time_driven_chain();
+    test_block_transform_time_drive_interfaces();
     test_filter_pushdown_split();
     test_filter_pushdown_negotiation();
     test_statement_stage_filters();

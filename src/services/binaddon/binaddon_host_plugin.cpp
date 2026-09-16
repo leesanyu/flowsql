@@ -56,6 +56,7 @@ bool SameGuid(const Guid& left, const Guid& right) { return std::memcmp(&left, &
 const char* ContractName(const Guid& iid) {
     if (SameGuid(iid, IID_OPERATOR)) return "operator_v1";
     if (SameGuid(iid, IID_BLOCK_TRANSFORM_OPERATOR_V1)) return "block_transform_v1";
+    if (SameGuid(iid, IID_BLOCK_TRANSFORM_OPERATOR_V2)) return "block_transform_v2";
     return "unknown";
 }
 
@@ -937,7 +938,8 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
                 return mark_broken(error::BAD_REQUEST, "empty category/name in plugin operator", abi);
             }
             if (!SameGuid(descriptor.contract_iid, IID_OPERATOR) &&
-                !SameGuid(descriptor.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1)) {
+                !SameGuid(descriptor.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1) &&
+                !SameGuid(descriptor.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V2)) {
                 return mark_broken(error::BAD_REQUEST, "unsupported operator contract", abi);
             }
 
@@ -967,8 +969,14 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
                     meta.name = op->Name();
                     meta.description = descriptor.description ? descriptor.description : op->Description();
                     meta.position = op->Position() == OperatorPosition::STORAGE ? "storage" : "data";
-                } else {
+                } else if (SameGuid(descriptor.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1)) {
                     auto* op = static_cast<IBlockTransformOperatorV1*>(capability);
+                    meta.category = op->Category();
+                    meta.name = op->Name();
+                    meta.description = descriptor.description ? descriptor.description : op->Description();
+                    meta.position = "data";
+                } else {
+                    auto* op = static_cast<IBlockTransformOperatorV2*>(capability);
                     meta.category = op->Category();
                     meta.name = op->Name();
                     meta.description = descriptor.description ? descriptor.description : op->Description();

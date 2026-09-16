@@ -1017,7 +1017,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         }
     }
     if (source_resolved.has_block_source && !parsed_ops.empty()) {
-        std::vector<IBlockTransformOperatorV1*> transform_providers;
+        std::vector<BlockTransformProviderRef> transform_providers;
         std::vector<CppOperatorCapabilityLeaseV1> transform_provider_leases;
         transform_providers.reserve(parsed_ops.size());
         transform_provider_leases.reserve(parsed_ops.size());
@@ -1026,7 +1026,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             bool transform_ambiguous = false;
             int transform_traverse_error = 0;
             CppOperatorCapabilityLeaseV1 dynamic_lease;
-            IBlockTransformOperatorV1* transform_provider = FindBlockTransformOperator(
+            BlockTransformProviderRef transform_provider = FindBlockTransformOperator(
                 op_ref.category, op_ref.name, &dynamic_lease, &transform_ambiguous, &transform_traverse_error);
             if (transform_traverse_error != 0) {
                 rsp = BuildExecutionErrorJson(

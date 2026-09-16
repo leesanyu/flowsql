@@ -21,7 +21,7 @@
 | [x] | NPM 基础分析与模块组合 (`npm-basic-analysis`) | P0 | 以同一 `npm.basic` 任务内引擎统一会话、有限采样识别和模块组合；交付离线生产 provider，并以模拟时间/采集事实验证实时周期快照、有界内存、过载和性能契约。 | [归档](archive/feat-npm-basic-analysis.md) |
 | [x] | C++ 算子源码目录归位 (`operator-source-layout`) | P1 | 建立独立的 C++ 业务算子源码根目录，将 `npm_basic` 与通用能力插件分离，同时保持内置算子和运行时契约不变。 | [归档](archive/feat-operator-source-layout.md) |
 | [x] | NPM 基础分析算子插件生命周期 (`npm-basic-operator-plugin-lifecycle`) | P0 | 让 `npm.basic` 作为按功能命名的 C++ 算子，通过统一多算子插件 ABI 完成上传、激活、任务租约、去激活和重启恢复。 | [归档](archive/feat-npm-basic-operator-plugin-lifecycle.md) |
-| [ ] | 流式算子时间驱动 (`stream-time-drive`) | P0 | 让实时有状态算子在暂时无包、持续繁忙及输出背压期间仍能获得版本化时间通知并按期维护；正常 EOF 单次终结且错误/取消不伪装成 EOF，使 `npm.basic` 可按最早截止时间驱动同一任务内全部已启用模块而不受当前观察结果影响。 | 待创建 |
+| [x] | 流式算子时间驱动 (`stream-time-drive`) | P0 | 让实时有状态算子在暂时无包、持续繁忙及输出背压期间仍能获得版本化时间通知并按期维护；正常 EOF 单次终结且错误/取消不伪装成 EOF，使 `npm.basic` 可按最早截止时间驱动同一任务内全部已启用模块而不受当前观察结果影响。 | [归档](archive/feat-stream-time-drive.md) |
 | [ ] | NPM TCP/UDP 会话性能分析 (`npm-session-analysis`) | P1 | 让流量分析用户在同一 `npm.basic` 任务内按 `features` 启用 Session 模块、以独立的 `observing` 选择是否前台查看类型化会话性能结果；模块复用唯一会话、方向、协议标签、生命周期与预算，提供带有效性依据的连接、传输时延、重传和吞吐指标，不重复会话化或把序列缺口直接宣称为网络丢包。 | 待创建 |
 | [ ] | NPM 协议分析模块基础 (`npm-protocol-analysis`) | P1 | 为协议模块开发者在同一 `npm.basic` 任务内提供统一的 `features` 启用、`observing` 观察、packet/session 分发、按需共享的有界 TCP 字节流、事务生命周期、预算和类型化结果契约，使多个协议可同时分析而只执行一次基础会话与识别；本 Feature 不同时交付具体 DNS、HTTP、TLS 或 ICMP 解析器。 | 待创建 |
 | [ ] | NPM DNS 事务分析 (`npm-dns-analysis`) | P1 | 依赖 `npm-protocol-analysis`，在同一 `npm.basic` 任务内对 UDP/TCP DNS 消息进行有界增量解析与请求/响应关联，输出可独立观察和持久化的 DNS 事务及明确的不完整原因，不重复基础分析。 | 待创建 |

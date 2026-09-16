@@ -135,9 +135,18 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
     std::shared_ptr<IOperator> FindOperator(const std::string& category, const std::string& name);
     std::shared_ptr<IOperator> CreateOperator(const std::string& category, const std::string& name);
     IBlockStreamOperator* FindBlockOperator(const std::string& category, const std::string& name);
-    IBlockTransformOperatorV1* FindBlockTransformOperator(const std::string& category, const std::string& name,
-                                                          CppOperatorCapabilityLeaseV1* dynamic_lease, bool* ambiguous,
-                                                          int* traverse_error);
+    struct BlockTransformProviderRef {
+        IBlockTransformOperatorV1* v1 = nullptr;
+        IBlockTransformOperatorV2* v2 = nullptr;
+
+        explicit operator bool() const { return v1 || v2; }
+    };
+    BlockTransformProviderRef FindBlockTransformOperator(
+        const std::string& category,
+        const std::string& name,
+        CppOperatorCapabilityLeaseV1* dynamic_lease,
+        bool* ambiguous,
+        int* traverse_error);
     enum class BlockExecutionTerminal {
         kCompleted,
         kStopped,
@@ -160,7 +169,7 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
                              int64_t* rows_affected,
                              std::string* error);
     int ExecuteBlockTransformPipeline(IBlockStreamChannel* source,
-                                      const std::vector<IBlockTransformOperatorV1*>& providers,
+                                      const std::vector<BlockTransformProviderRef>& providers,
                                       IDataFrameChannel* sink,
                                       const SqlStatement& stmt,
                                       const std::shared_ptr<const BoundFilterExpr>& source_residual,
@@ -168,7 +177,7 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
                                       int64_t* rows_affected,
                                       std::string* error);
     int ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* source,
-                                            IBlockTransformOperatorV1* provider,
+                                            BlockTransformProviderRef provider,
                                             IDataFrameChannel* sink,
                                             const SqlStatement& stmt,
                                             const std::shared_ptr<const BoundFilterExpr>& source_residual,

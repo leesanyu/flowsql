@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "framework/core/filter_executor.h"
 #include "framework/interfaces/ichannel.h"
@@ -109,9 +110,14 @@ struct BlockTransformPipelineConfig {
     IBlockStreamChannel* source = nullptr;
     std::shared_ptr<arrow::Schema> source_schema;
     IBlockTransformTaskV1* transform = nullptr;
+    // Optional time interface of the same execution task as transform. Null preserves V1 behavior.
+    IBlockTransformTimeDrivenTaskV1* time_transform = nullptr;
     std::shared_ptr<const BoundFilterExpr> source_residual;
     std::shared_ptr<const BoundFilterExpr> transform_residual;
     std::function<int(const BlockTransformOutputV1&)> output_consumer;
+    // Injectable clocks for deterministic scheduling tests; empty functions use system clocks.
+    std::function<int64_t()> monotonic_clock_ns;
+    std::function<int64_t()> wall_clock_ns;
     int poll_timeout_ms = 100;
 };
 
@@ -121,6 +127,51 @@ struct BlockTransformPipelineResult {
     int64_t input_rows = 0;
     uint64_t output_blocks = 0;
     int64_t output_rows = 0;
+};
+
+/** Synchronous transform chain with optional, stage-aligned time capabilities. */
+class SynchronousBlockTransformChainTask final : public IBlockTransformTaskV2 {
+ public:
+    SynchronousBlockTransformChainTask(
+        std::vector<IBlockTransformTaskV1*> tasks,
+        std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks,
+        std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas,
+        const std::vector<std::shared_ptr<const BoundFilterExpr>>& residuals);
+
+    int Open(std::shared_ptr<arrow::Schema> input_schema,
+             std::shared_ptr<arrow::Schema>* output_schema) override;
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
+                     int64_t ts_ms,
+                     std::vector<BlockTransformOutputV1>* outputs) override;
+    int Flush(std::vector<BlockTransformOutputV1>* outputs) override;
+    void Cancel() override;
+    std::string LastError() const override;
+
+    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override;
+    int OnTime(const BlockTransformTimeEventV1& event,
+               std::vector<BlockTransformOutputV1>* outputs) override;
+
+ private:
+    int PropagateFrom(size_t first_stage,
+                      std::vector<BlockTransformOutputV1> inputs,
+                      std::vector<BlockTransformOutputV1>* outputs,
+                      bool* stopped);
+    int FilterStageOutputs(size_t stage,
+                           const std::vector<BlockTransformOutputV1>& inputs,
+                           std::vector<BlockTransformOutputV1>* outputs);
+    int QueryTimeState(size_t stage, BlockTransformTimeDriveStateV1* state);
+    int SetStageError(size_t stage, std::string detail, int rc);
+    std::string TaskError(size_t stage) const;
+
+    std::vector<IBlockTransformTaskV1*> tasks_;
+    std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks_;
+    std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas_;
+    std::vector<BlockFilterStage> filters_;
+    bool open_attempted_ = false;
+    bool opened_ = false;
+    bool flush_started_ = false;
+    std::atomic<bool> cancel_started_{false};
+    std::string last_error_;
 };
 
 /** Run one exclusive block transform task between reusable residual Filter Stages. */

@@ -435,56 +435,112 @@ IBlockStreamOperator* SchedulerPlugin::FindBlockOperator(const std::string& cate
     return matches == 1 ? found : nullptr;
 }
 
-IBlockTransformOperatorV1* SchedulerPlugin::FindBlockTransformOperator(const std::string& category,
-                                                                       const std::string& name,
-                                                                       CppOperatorCapabilityLeaseV1* dynamic_lease,
-                                                                       bool* ambiguous, int* traverse_error) {
+SchedulerPlugin::BlockTransformProviderRef SchedulerPlugin::FindBlockTransformOperator(
+    const std::string& category,
+    const std::string& name,
+    CppOperatorCapabilityLeaseV1* dynamic_lease,
+    bool* ambiguous,
+    int* traverse_error) {
     if (dynamic_lease) *dynamic_lease = {};
     if (ambiguous) *ambiguous = false;
     if (traverse_error) *traverse_error = 0;
-    if (!querier_ || !dynamic_lease) return nullptr;
+    if (!querier_ || !dynamic_lease) return {};
 
-    IBlockTransformOperatorV1* found = nullptr;
-    size_t matches = 0;
-    int traversal_rc = querier_->Traverse(IID_BLOCK_TRANSFORM_OPERATOR_V1, [&](void* value) -> int {
-        auto* candidate = static_cast<IBlockTransformOperatorV1*>(value);
-        if (!candidate || !IEquals(candidate->Category(), category) || candidate->Name() != name) {
+    auto resolve_version = [&](const Guid& iid,
+                               bool is_v2,
+                               void** selected,
+                               CppOperatorCapabilityLeaseV1* selected_lease,
+                               bool* version_ambiguous) {
+        *selected = nullptr;
+        *selected_lease = {};
+        *version_ambiguous = false;
+        size_t matches = 0;
+        int traversal_rc = querier_->Traverse(iid, [&](void* value) -> int {
+            if (!value) return 0;
+            const std::string candidate_category =
+                is_v2 ? static_cast<IBlockTransformOperatorV2*>(value)->Category()
+                      : static_cast<IBlockTransformOperatorV1*>(value)->Category();
+            const std::string candidate_name =
+                is_v2 ? static_cast<IBlockTransformOperatorV2*>(value)->Name()
+                      : static_cast<IBlockTransformOperatorV1*>(value)->Name();
+            if (!IEquals(candidate_category, category) || candidate_name != name) return 0;
+            *selected = value;
+            ++matches;
+            return 0;
+        });
+        if (traversal_rc != 0) return traversal_rc;
+
+        CppOperatorCapabilityLeaseV1 acquired_dynamic_lease;
+        bool invalid_dynamic_lease = false;
+        traversal_rc = querier_->Traverse(
+            IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1,
+            [&](void* value) -> int {
+                auto* registry = static_cast<ICppOperatorPluginRegistryV1*>(value);
+                if (!registry) return 0;
+
+                CppOperatorCapabilityLeaseV1 candidate_lease;
+                if (registry->Acquire(
+                        category.c_str(), name.c_str(), iid, &candidate_lease) != 0) {
+                    return 0;
+                }
+                if (!candidate_lease.capability || !candidate_lease.lifetime) {
+                    invalid_dynamic_lease = true;
+                    return 0;
+                }
+
+                *selected = candidate_lease.capability;
+                ++matches;
+                if (matches == 1) {
+                    acquired_dynamic_lease = std::move(candidate_lease);
+                }
+                return 0;
+            });
+        if (traversal_rc != 0) return traversal_rc;
+        if (invalid_dynamic_lease) return EPROTO;
+        *version_ambiguous = matches > 1;
+        if (matches != 1) {
+            *selected = nullptr;
             return 0;
         }
-        found = candidate;
-        ++matches;
+        *selected_lease = std::move(acquired_dynamic_lease);
         return 0;
-    });
+    };
+
+    void* selected = nullptr;
+    CppOperatorCapabilityLeaseV1 selected_lease;
+    bool version_ambiguous = false;
+    int traversal_rc = resolve_version(
+        IID_BLOCK_TRANSFORM_OPERATOR_V2,
+        true,
+        &selected,
+        &selected_lease,
+        &version_ambiguous);
     if (traverse_error) *traverse_error = traversal_rc;
-    if (traversal_rc != 0) return nullptr;
+    if (traversal_rc != 0) return {};
+    if (version_ambiguous) {
+        if (ambiguous) *ambiguous = true;
+        return {};
+    }
+    if (selected) {
+        *dynamic_lease = std::move(selected_lease);
+        return {nullptr, static_cast<IBlockTransformOperatorV2*>(selected)};
+    }
 
-    CppOperatorCapabilityLeaseV1 acquired_dynamic_lease;
-    bool invalid_dynamic_lease = false;
-    traversal_rc = querier_->Traverse(IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1, [&](void* value) -> int {
-        auto* registry = static_cast<ICppOperatorPluginRegistryV1*>(value);
-        if (!registry) return 0;
-
-        CppOperatorCapabilityLeaseV1 candidate_lease;
-        if (registry->Acquire(category.c_str(), name.c_str(), IID_BLOCK_TRANSFORM_OPERATOR_V1, &candidate_lease) != 0) {
-            return 0;
-        }
-        if (!candidate_lease.capability || !candidate_lease.lifetime) {
-            invalid_dynamic_lease = true;
-            return 0;
-        }
-
-        found = static_cast<IBlockTransformOperatorV1*>(candidate_lease.capability);
-        ++matches;
-        if (matches == 1) acquired_dynamic_lease = std::move(candidate_lease);
-        return 0;
-    });
-    if (traversal_rc == 0 && invalid_dynamic_lease) traversal_rc = EPROTO;
+    traversal_rc = resolve_version(
+        IID_BLOCK_TRANSFORM_OPERATOR_V1,
+        false,
+        &selected,
+        &selected_lease,
+        &version_ambiguous);
     if (traverse_error) *traverse_error = traversal_rc;
-    if (traversal_rc != 0) return nullptr;
-    if (ambiguous) *ambiguous = matches > 1;
-    if (matches != 1) return nullptr;
-    *dynamic_lease = std::move(acquired_dynamic_lease);
-    return found;
+    if (traversal_rc != 0) return {};
+    if (version_ambiguous) {
+        if (ambiguous) *ambiguous = true;
+        return {};
+    }
+    if (!selected) return {};
+    *dynamic_lease = std::move(selected_lease);
+    return {static_cast<IBlockTransformOperatorV1*>(selected), nullptr};
 }
 
 int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source,
@@ -659,250 +715,6 @@ class SchemaCheckingBlockTransformTask final : public IBlockTransformTaskV1 {
  private:
     IBlockTransformTaskV1* task_ = nullptr;
     std::shared_ptr<arrow::Schema> expected_output_schema_;
-    std::string last_error_;
-};
-
-class SynchronousBlockTransformChainTask final : public IBlockTransformTaskV1 {
- public:
-    SynchronousBlockTransformChainTask(
-        std::vector<IBlockTransformTaskV1*> tasks,
-        std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas,
-        const std::vector<std::shared_ptr<const BoundFilterExpr>>& residuals)
-        : tasks_(std::move(tasks)),
-          expected_output_schemas_(std::move(expected_output_schemas)) {
-        filters_.reserve(residuals.size());
-        for (const auto& residual : residuals) filters_.emplace_back(residual);
-    }
-
-    int Open(std::shared_ptr<arrow::Schema> input_schema,
-             std::shared_ptr<arrow::Schema>* output_schema) override {
-        if (open_attempted_ || !input_schema || !output_schema || tasks_.empty() ||
-            tasks_.size() != expected_output_schemas_.size() ||
-            tasks_.size() != filters_.size()) {
-            last_error_ = "multi transform chain received an invalid Open request";
-            return EINVAL;
-        }
-        open_attempted_ = true;
-        output_schema->reset();
-
-        auto current_schema = std::move(input_schema);
-        for (size_t i = 0; i < tasks_.size(); ++i) {
-            std::shared_ptr<arrow::Schema> actual_output_schema;
-            int open_rc = 0;
-            try {
-                open_rc = tasks_[i]->Open(current_schema, &actual_output_schema);
-            } catch (const std::exception& ex) {
-                return SetStageError(i, "Open threw: " + std::string(ex.what()), EFAULT);
-            } catch (...) {
-                return SetStageError(i, "Open threw an unknown exception", EFAULT);
-            }
-            if (open_rc != 0) {
-                return SetStageError(i, "Open failed: " + TaskError(i), open_rc);
-            }
-            if (!actual_output_schema || !expected_output_schemas_[i] ||
-                !actual_output_schema->Equals(*expected_output_schemas_[i], true)) {
-                return SetStageError(
-                    i, "execution Schema differs from its planning Schema", EPROTO);
-            }
-
-            std::string filter_error;
-            std::shared_ptr<arrow::Schema> filtered_schema;
-            const auto filter_rc = filters_[i].Open(
-                actual_output_schema, &filtered_schema, &filter_error);
-            if (filter_rc != FilterEvalError::kNone) {
-                if (filter_error.empty()) filter_error = "residual filter Open failed";
-                return SetStageError(i, std::move(filter_error), EINVAL);
-            }
-            current_schema = std::move(filtered_schema);
-        }
-
-        opened_ = true;
-        *output_schema = std::move(current_schema);
-        return 0;
-    }
-
-    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
-                     int64_t ts_ms,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
-        if (!opened_ || !input || !outputs || !outputs->empty() || flush_started_) {
-            last_error_ = "multi transform chain received an invalid ProcessBlock request";
-            return -EINVAL;
-        }
-        std::vector<BlockTransformOutputV1> initial = {{input, ts_ms}};
-        std::vector<BlockTransformOutputV1> final_outputs;
-        bool stopped = false;
-        const int rc = PropagateFrom(
-            0, std::move(initial), &final_outputs, &stopped);
-        if (rc != 0) return rc;
-        *outputs = std::move(final_outputs);
-        return stopped ? static_cast<int>(BlockTransformStatusV1::kStop)
-                       : static_cast<int>(BlockTransformStatusV1::kContinue);
-    }
-
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
-        if (!opened_ || !outputs || !outputs->empty() || flush_started_) {
-            last_error_ = "multi transform chain received an invalid Flush request";
-            return EINVAL;
-        }
-        flush_started_ = true;
-        std::vector<BlockTransformOutputV1> final_outputs;
-
-        for (size_t i = 0; i < tasks_.size(); ++i) {
-            std::vector<BlockTransformOutputV1> stage_outputs;
-            int flush_rc = 0;
-            try {
-                flush_rc = tasks_[i]->Flush(&stage_outputs);
-            } catch (const std::exception& ex) {
-                return SetStageError(i, "Flush threw: " + std::string(ex.what()), EFAULT);
-            } catch (...) {
-                return SetStageError(i, "Flush threw an unknown exception", EFAULT);
-            }
-            if (flush_rc != 0) {
-                if (!stage_outputs.empty()) {
-                    return SetStageError(
-                        i, "Flush failed while returning output batches", EPROTO);
-                }
-                return SetStageError(i, "Flush failed: " + TaskError(i), flush_rc);
-            }
-
-            std::vector<BlockTransformOutputV1> filtered_outputs;
-            const int filter_rc = FilterStageOutputs(
-                i, stage_outputs, &filtered_outputs);
-            if (filter_rc != 0) return filter_rc;
-
-            std::vector<BlockTransformOutputV1> propagated_outputs;
-            bool ignored_stop = false;
-            const int propagate_rc = PropagateFrom(
-                i + 1,
-                std::move(filtered_outputs),
-                &propagated_outputs,
-                &ignored_stop);
-            if (propagate_rc != 0) return propagate_rc;
-            final_outputs.insert(final_outputs.end(),
-                                 std::make_move_iterator(propagated_outputs.begin()),
-                                 std::make_move_iterator(propagated_outputs.end()));
-        }
-
-        *outputs = std::move(final_outputs);
-        return 0;
-    }
-
-    void Cancel() override {
-        bool expected = false;
-        if (!cancel_started_.compare_exchange_strong(expected, true)) return;
-        for (auto* task : tasks_) {
-            if (!task) continue;
-            try {
-                task->Cancel();
-            } catch (...) {
-            }
-        }
-    }
-
-    std::string LastError() const override { return last_error_; }
-
- private:
-    int PropagateFrom(size_t first_stage,
-                      std::vector<BlockTransformOutputV1> inputs,
-                      std::vector<BlockTransformOutputV1>* outputs,
-                      bool* stopped) {
-        if (!outputs || !stopped || first_stage > tasks_.size()) return -EINVAL;
-        outputs->clear();
-        for (size_t i = first_stage; i < tasks_.size(); ++i) {
-            std::vector<BlockTransformOutputV1> next_inputs;
-            for (const auto& input : inputs) {
-                if (!input.batch) {
-                    return SetStageError(i, "received a null input batch", EPROTO);
-                }
-                std::vector<BlockTransformOutputV1> stage_outputs;
-                int process_rc = 0;
-                try {
-                    process_rc = tasks_[i]->ProcessBlock(
-                        input.batch, input.ts_ms, &stage_outputs);
-                } catch (const std::exception& ex) {
-                    return SetStageError(
-                        i, "ProcessBlock threw: " + std::string(ex.what()), EFAULT);
-                } catch (...) {
-                    return SetStageError(
-                        i, "ProcessBlock threw an unknown exception", EFAULT);
-                }
-                const bool valid_status =
-                    process_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
-                    process_rc == static_cast<int>(BlockTransformStatusV1::kStop);
-                if (!valid_status) {
-                    if (!stage_outputs.empty()) {
-                        return SetStageError(
-                            i,
-                            "ProcessBlock failed while returning output batches",
-                            EPROTO);
-                    }
-                    return SetStageError(
-                        i, "ProcessBlock failed: " + TaskError(i), process_rc);
-                }
-                if (process_rc == static_cast<int>(BlockTransformStatusV1::kStop)) {
-                    *stopped = true;
-                }
-
-                std::vector<BlockTransformOutputV1> filtered_outputs;
-                const int filter_rc = FilterStageOutputs(
-                    i, stage_outputs, &filtered_outputs);
-                if (filter_rc != 0) return filter_rc;
-                next_inputs.insert(next_inputs.end(),
-                                   std::make_move_iterator(filtered_outputs.begin()),
-                                   std::make_move_iterator(filtered_outputs.end()));
-            }
-            inputs = std::move(next_inputs);
-        }
-        *outputs = std::move(inputs);
-        return 0;
-    }
-
-    int FilterStageOutputs(
-        size_t stage,
-        const std::vector<BlockTransformOutputV1>& inputs,
-        std::vector<BlockTransformOutputV1>* outputs) {
-        if (!outputs || stage >= filters_.size()) return -EINVAL;
-        outputs->clear();
-        for (const auto& input : inputs) {
-            if (!input.batch) {
-                return SetStageError(stage, "returned a null output batch", EPROTO);
-            }
-            BlockTransformOutputV1 filtered;
-            std::string filter_error;
-            const auto filter_rc = filters_[stage].ProcessBlock(
-                input.batch, input.ts_ms, &filtered, &filter_error);
-            if (filter_rc != FilterEvalError::kNone) {
-                if (filter_error.empty()) filter_error = "residual filter failed";
-                return SetStageError(stage, std::move(filter_error), EIO);
-            }
-            outputs->push_back(std::move(filtered));
-        }
-        return 0;
-    }
-
-    int SetStageError(size_t stage, std::string detail, int rc) {
-        last_error_ = "transform stage " + std::to_string(stage + 1) + ": " + detail;
-        if (rc == 0) return -EIO;
-        return rc > 0 ? -rc : rc;
-    }
-
-    std::string TaskError(size_t stage) const {
-        if (stage >= tasks_.size() || !tasks_[stage]) return "task unavailable";
-        try {
-            const std::string detail = tasks_[stage]->LastError();
-            return detail.empty() ? "task did not provide an error message" : detail;
-        } catch (...) {
-            return "task LastError threw";
-        }
-    }
-
-    std::vector<IBlockTransformTaskV1*> tasks_;
-    std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas_;
-    std::vector<BlockFilterStage> filters_;
-    bool open_attempted_ = false;
-    bool opened_ = false;
-    bool flush_started_ = false;
-    std::atomic<bool> cancel_started_{false};
     std::string last_error_;
 };
 
@@ -1172,7 +984,7 @@ int SchedulerPlugin::BuildBlockSourceFilterPlan(
 
 int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
     IBlockStreamChannel* source,
-    IBlockTransformOperatorV1* provider,
+    BlockTransformProviderRef provider,
     IDataFrameChannel* sink,
     const SqlStatement& stmt,
     const std::shared_ptr<const BoundFilterExpr>& source_residual,
@@ -1182,7 +994,8 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
     if (terminal) *terminal = BlockExecutionTerminal::kFailed;
     if (rows_affected) *rows_affected = 0;
     if (error) error->clear();
-    if (!source || !provider || !sink || stmt.operators.size() != 1) {
+    if (!source || !provider || (provider.v1 && provider.v2) || !sink ||
+        stmt.operators.size() != 1) {
         if (error) *error = "block transform pipeline requires one source, provider, operator, and sink";
         return EINVAL;
     }
@@ -1229,21 +1042,72 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
             [provider](IBlockTransformTaskV1* owned) {
                 if (!owned) return;
                 try {
-                    provider->ReleaseTask(owned);
+                    if (provider.v2) {
+                        provider.v2->ReleaseTask(
+                            static_cast<IBlockTransformTaskV2*>(owned));
+                    } else {
+                        provider.v1->ReleaseTask(owned);
+                    }
                 } catch (...) {
                 }
             });
     };
+    auto create_task = [&](const std::string& session_task_id,
+                           const FilterTaskSessionPlan& filter_plan,
+                           IBlockTransformTaskV1** data_task,
+                           IBlockTransformTimeDrivenTaskV1** time_task,
+                           std::string* plan_error) {
+        if (data_task) *data_task = nullptr;
+        if (time_task) *time_task = nullptr;
+        if (provider.v1) {
+            return CreateBlockTransformTaskSession(
+                provider.v1,
+                session_task_id,
+                with_params_json,
+                filter_plan,
+                data_task,
+                plan_error);
+        }
+        if (!provider.v2 || !data_task || !time_task || session_task_id.empty() ||
+            with_params_json.empty() || filter_plan.pushed_filter_plan_json.empty()) {
+            if (plan_error) *plan_error = "invalid V2 block transform task request";
+            return FilterPlanError::kInvalidArgument;
+        }
+
+        BlockTransformTaskConfigV2 config{};
+        config.struct_size = kBlockTransformTaskConfigV2Size;
+        config.contract_version = kBlockTransformContractVersionV2;
+        config.task_id = session_task_id.c_str();
+        config.with_params_json = with_params_json.c_str();
+        config.pushed_filter_plan_json = filter_plan.pushed_filter_plan_json.c_str();
+        IBlockTransformTaskV2* created_task = nullptr;
+        const int create_rc = provider.v2->CreateTask(config, &created_task);
+        if (create_rc != 0 || !created_task) {
+            if (created_task) provider.v2->ReleaseTask(created_task);
+            if (plan_error) {
+                *plan_error = "V2 block transform task creation failed";
+                if (create_rc != 0) {
+                    *plan_error += " with code " + std::to_string(create_rc);
+                } else {
+                    *plan_error += ": provider returned a null task";
+                }
+            }
+            return FilterPlanError::kTaskSessionCreationFailed;
+        }
+        *data_task = created_task;
+        *time_task = created_task;
+        return FilterPlanError::kNone;
+    };
 
     if (transform_expression) {
         IBlockTransformTaskV1* probe_raw = nullptr;
+        IBlockTransformTimeDrivenTaskV1* probe_time = nullptr;
         std::string plan_error;
-        const auto create_probe = CreateBlockTransformTaskSession(
-            provider,
+        const auto create_probe = create_task(
             task_id + ".schema",
-            with_params_json,
             transform_filter_plan,
             &probe_raw,
+            &probe_time,
             &plan_error);
         if (create_probe != FilterPlanError::kNone) {
             if (error) *error = "transform Schema probe creation failed: " + plan_error;
@@ -1330,13 +1194,13 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
     }
 
     IBlockTransformTaskV1* execution_raw = nullptr;
+    IBlockTransformTimeDrivenTaskV1* execution_time = nullptr;
     std::string plan_error;
-    const auto create_execution = CreateBlockTransformTaskSession(
-        provider,
+    const auto create_execution = create_task(
         task_id + ".run",
-        with_params_json,
         transform_filter_plan,
         &execution_raw,
+        &execution_time,
         &plan_error);
     if (create_execution != FilterPlanError::kNone) {
         if (error) *error = "transform execution task creation failed: " + plan_error;
@@ -1353,6 +1217,7 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
     config.source = source;
     config.source_schema = source_schema;
     config.transform = runner_task;
+    config.time_transform = execution_time;
     config.source_residual = source_residual;
     config.transform_residual = transform_filter_plan.residual_expression;
     config.output_consumer = [appendable_sink](const BlockTransformOutputV1& output) {
@@ -1384,7 +1249,7 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
 
 int SchedulerPlugin::ExecuteBlockTransformPipeline(
     IBlockStreamChannel* source,
-    const std::vector<IBlockTransformOperatorV1*>& providers,
+    const std::vector<BlockTransformProviderRef>& providers,
     IDataFrameChannel* sink,
     const SqlStatement& stmt,
     const std::shared_ptr<const BoundFilterExpr>& source_residual,
@@ -1414,9 +1279,9 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         }
         return EINVAL;
     }
-    for (auto* provider : providers) {
-        if (!provider) {
-            if (error) *error = "multi block transform pipeline received a null provider";
+    for (const auto& provider : providers) {
+        if (!provider || (provider.v1 && provider.v2)) {
+            if (error) *error = "multi block transform pipeline received an invalid provider";
             return EINVAL;
         }
     }
@@ -1453,7 +1318,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
 
     const auto source_schema = packet::PacketSchema();
     struct StagePlan {
-        IBlockTransformOperatorV1* provider = nullptr;
+        BlockTransformProviderRef provider;
         std::string with_params_json;
         FilterTaskSessionPlan filter_plan;
         std::shared_ptr<arrow::Schema> output_schema;
@@ -1466,17 +1331,70 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     using TaskHolder = std::unique_ptr<
         IBlockTransformTaskV1,
         std::function<void(IBlockTransformTaskV1*)>>;
-    auto make_task_holder = [](IBlockTransformOperatorV1* provider,
+    auto make_task_holder = [](BlockTransformProviderRef provider,
                                IBlockTransformTaskV1* task) {
         return TaskHolder(
             task,
             [provider](IBlockTransformTaskV1* owned) {
                 if (!owned) return;
                 try {
-                    provider->ReleaseTask(owned);
+                    if (provider.v2) {
+                        provider.v2->ReleaseTask(
+                            static_cast<IBlockTransformTaskV2*>(owned));
+                    } else {
+                        provider.v1->ReleaseTask(owned);
+                    }
                 } catch (...) {
                 }
             });
+    };
+    auto create_task = [](BlockTransformProviderRef provider,
+                          const std::string& session_task_id,
+                          const std::string& with_params_json,
+                          const FilterTaskSessionPlan& filter_plan,
+                          IBlockTransformTaskV1** data_task,
+                          IBlockTransformTimeDrivenTaskV1** time_task,
+                          std::string* plan_error) {
+        if (data_task) *data_task = nullptr;
+        if (time_task) *time_task = nullptr;
+        if (provider.v1) {
+            return CreateBlockTransformTaskSession(
+                provider.v1,
+                session_task_id,
+                with_params_json,
+                filter_plan,
+                data_task,
+                plan_error);
+        }
+        if (!provider.v2 || !data_task || !time_task || session_task_id.empty() ||
+            with_params_json.empty() || filter_plan.pushed_filter_plan_json.empty()) {
+            if (plan_error) *plan_error = "invalid V2 block transform task request";
+            return FilterPlanError::kInvalidArgument;
+        }
+
+        BlockTransformTaskConfigV2 config{};
+        config.struct_size = kBlockTransformTaskConfigV2Size;
+        config.contract_version = kBlockTransformContractVersionV2;
+        config.task_id = session_task_id.c_str();
+        config.with_params_json = with_params_json.c_str();
+        config.pushed_filter_plan_json = filter_plan.pushed_filter_plan_json.c_str();
+        IBlockTransformTaskV2* created_task = nullptr;
+        const int create_rc = provider.v2->CreateTask(config, &created_task);
+        if (create_rc != 0 || !created_task) {
+            if (created_task) provider.v2->ReleaseTask(created_task);
+            if (plan_error) {
+                *plan_error = "V2 block transform task creation failed";
+                if (create_rc != 0) {
+                    *plan_error += " with code " + std::to_string(create_rc);
+                } else {
+                    *plan_error += ": provider returned a null task";
+                }
+            }
+            return FilterPlanError::kTaskSessionCreationFailed;
+        }
+        *data_task = created_task;
+        *time_task = created_task;
+        return FilterPlanError::kNone;
     };
 
     for (size_t i = 0; i < providers.size(); ++i) {
@@ -1489,13 +1407,15 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         plan.with_params_json = MakeWithParamsJson(params);
 
         IBlockTransformTaskV1* probe_raw = nullptr;
+        IBlockTransformTimeDrivenTaskV1* probe_time = nullptr;
         std::string plan_error;
-        const auto create_probe = CreateBlockTransformTaskSession(
+        const auto create_probe = create_task(
             plan.provider,
             task_id + ".stage" + std::to_string(i + 1) + ".schema",
             plan.with_params_json,
             plan.filter_plan,
             &probe_raw,
+            &probe_time,
             &plan_error);
         if (create_probe != FilterPlanError::kNone) {
             if (error) {
@@ -1607,18 +1527,22 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
 
     std::vector<TaskHolder> execution_holders;
     std::vector<IBlockTransformTaskV1*> execution_tasks;
+    std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks;
     execution_holders.reserve(stage_plans.size());
     execution_tasks.reserve(stage_plans.size());
+    time_tasks.reserve(stage_plans.size());
     for (size_t i = 0; i < stage_plans.size(); ++i) {
         auto& plan = stage_plans[i];
         IBlockTransformTaskV1* execution_raw = nullptr;
+        IBlockTransformTimeDrivenTaskV1* execution_time = nullptr;
         std::string plan_error;
-        const auto create_execution = CreateBlockTransformTaskSession(
+        const auto create_execution = create_task(
             plan.provider,
             task_id + ".stage" + std::to_string(i + 1) + ".run",
             plan.with_params_json,
             plan.filter_plan,
             &execution_raw,
+            &execution_time,
             &plan_error);
         if (create_execution != FilterPlanError::kNone) {
             for (auto* task : execution_tasks) {
@@ -1634,6 +1558,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
             return EIO;
         }
         execution_tasks.push_back(execution_raw);
+        time_tasks.push_back(execution_time);
         execution_holders.push_back(
             make_task_holder(plan.provider, execution_raw));
     }
@@ -1646,13 +1571,19 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         expected_output_schemas.push_back(plan.output_schema);
         residuals.push_back(plan.filter_plan.residual_expression);
     }
+    const bool has_time_tasks = std::any_of(
+        time_tasks.begin(), time_tasks.end(), [](const auto* task) { return task != nullptr; });
     SynchronousBlockTransformChainTask chain_task(
-        execution_tasks, std::move(expected_output_schemas), residuals);
+        execution_tasks,
+        std::move(time_tasks),
+        std::move(expected_output_schemas),
+        residuals);
 
     BlockTransformPipelineConfig config;
     config.source = source;
     config.source_schema = source_schema;
     config.transform = &chain_task;
+    config.time_transform = has_time_tasks ? &chain_task : nullptr;
     config.source_residual = source_residual;
     config.output_consumer = [appendable_sink](const BlockTransformOutputV1& output) {
         if (!output.batch) return EINVAL;
