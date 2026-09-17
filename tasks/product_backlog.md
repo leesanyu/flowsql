@@ -18,6 +18,7 @@
 | [x] | NPM 离线导入过滤 (`npm-offline-filter`) | P0 | 支持离线文件按带时区纳秒时间、MAC、IP、端口及默认双向 TCP/UDP endpoint pair 过滤，以类型化不可变规则实现任务隔离的 pcapfile 精确下推；不执行协议或应用识别。 | [归档](archive/feat-npm-offline-filter.md) |
 | [x] | PCAP 文件通道持久化 (`pcapfile-channel-persistence`) | P0 | 将 `pcapfile` 通道的规范化配置持久化到 Scheduler 侧 SQLite，并在服务重启后按原名称恢复可重复执行的离线 source。 | [归档](archive/feat-pcapfile-channel-persistence.md) |
 | [x] | 原生 PCAP 存储生命周期一致性 (`native-pcap-storage-consistency`) | P0 | 让原生受管 PCAP 文件与持久数据库共享运行目录生命周期，消除临时目录清理导致的启动恢复失败。 | [归档](archive/feat-native-pcap-storage-consistency.md) |
+| [-] | 配置资源通道 (`config-channel`) | P1 | 让需要跨任务复用静态规则、映射或字典的用户和算子不再绑定各自的本地配置目录；交付 JSON/YAML/XML 文件上传、具名配置通道、永久保存、重启恢复和不可变递增版本，消费者可用 `config.<name>@<revision>` 精确取得带格式、业务 Schema 与内容摘要的只读快照；不把配置通道作为普通 SQL 数据面或密钥管理系统。 | [规格](specs/feat-config-channel.md) |
 | [x] | NPM 基础分析与模块组合 (`npm-basic-analysis`) | P0 | 以同一 `npm.basic` 任务内引擎统一会话、有限采样识别和模块组合；交付离线生产 provider，并以模拟时间/采集事实验证实时周期快照、有界内存、过载和性能契约。 | [归档](archive/feat-npm-basic-analysis.md) |
 | [x] | C++ 算子源码目录归位 (`operator-source-layout`) | P1 | 建立独立的 C++ 业务算子源码根目录，将 `npm_basic` 与通用能力插件分离，同时保持内置算子和运行时契约不变。 | [归档](archive/feat-operator-source-layout.md) |
 | [x] | NPM 基础分析算子插件生命周期 (`npm-basic-operator-plugin-lifecycle`) | P0 | 让 `npm.basic` 作为按功能命名的 C++ 算子，通过统一多算子插件 ABI 完成上传、激活、任务租约、去激活和重启恢复。 | [归档](archive/feat-npm-basic-operator-plugin-lifecycle.md) |
