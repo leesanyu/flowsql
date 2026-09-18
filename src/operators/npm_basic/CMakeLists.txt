@@ -13,8 +13,11 @@ add_library(${PROJECT_NAME} SHARED
     npm_packet_processor.cpp
     npm_protocol_context.cpp
     npm_session_key.cpp
+    npm_session_analysis_module.cpp
+    npm_session_result_encoder.cpp
     npm_session_table.cpp
     npm_task_budget.cpp
+    npm_tcp_performance_tracker.cpp
     npm_basic_plugin_exports.cpp
     ${CMAKE_SOURCE_DIR}/plugins/npi/packet_decoder.cpp
 )

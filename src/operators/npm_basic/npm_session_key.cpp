@@ -194,7 +194,8 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
     }
     size_t payload_start = 0;
     size_t payload_end = 0;
-    NpmTcpControl tcp_control;
+    size_t payload_wire_bytes = 0;
+    NpmTcpPacketFacts tcp_facts;
     if (is_tcp) {
         TcpHeader header;
         if (!ReadHeader(packet, transport_offset, &header)) {
@@ -207,13 +208,16 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
         }
         if (payload_start > packet.bytes.size) return NpmSessionPacketError::kIncompleteTransportHeader;
         if (payload_start > network_end) return NpmSessionPacketError::kInvalidPayloadBounds;
+        payload_wire_bytes = network_end - payload_start;
         payload_end = std::min(network_end, packet.bytes.size);
-        tcp_control.valid = true;
-        tcp_control.syn = header.flags.flags_bit.syn != 0;
-        tcp_control.ack = header.flags.flags_bit.ack != 0;
-        tcp_control.fin = header.flags.flags_bit.fin != 0;
-        tcp_control.rst = header.flags.flags_bit.rst != 0;
-        tcp_control.sequence = ntohl(header.seq);
+        tcp_facts.valid = true;
+        tcp_facts.syn = header.flags.flags_bit.syn != 0;
+        tcp_facts.ack = header.flags.flags_bit.ack != 0;
+        tcp_facts.fin = header.flags.flags_bit.fin != 0;
+        tcp_facts.rst = header.flags.flags_bit.rst != 0;
+        tcp_facts.sequence = ntohl(header.seq);
+        tcp_facts.acknowledgment = ntohl(header.ack);
+        tcp_facts.window = ntohs(header.window);
     } else {
         UdpHeader header;
         if (!ReadHeader(packet, transport_offset, &header)) {
@@ -226,6 +230,7 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
             return NpmSessionPacketError::kInvalidPayloadBounds;
         }
         payload_start = transport_offset + sizeof(UdpHeader);
+        payload_wire_bytes = udp_end - payload_start;
         payload_end = std::min(udp_end, packet.bytes.size);
     }
     if (layer.payload_offset != payload_start || payload_end < payload_start) {
@@ -249,7 +254,10 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
         binding.direction = NpmPacketDirection::kBToA;
     }
     binding.payload = Span<const uint8_t>(packet.bytes.data + payload_start, payload_end - payload_start);
-    binding.tcp = tcp_control;
+    binding.transport.payload_wire_bytes = static_cast<uint32_t>(payload_wire_bytes);
+    binding.transport.payload_captured_bytes = static_cast<uint32_t>(binding.payload.size);
+    binding.transport.payload_complete = binding.payload.size == payload_wire_bytes;
+    binding.transport.tcp = tcp_facts;
     *output = std::move(binding);
     return NpmSessionPacketError::kNone;
 }

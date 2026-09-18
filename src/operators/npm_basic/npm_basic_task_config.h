@@ -11,9 +11,26 @@
 
 namespace flowsql::npm {
 
+constexpr uint32_t kNpmMinSessionTcpRangesPerDirection = 8;
+constexpr uint32_t kNpmDefaultSessionTcpRangesPerDirection = 1024;
+constexpr uint32_t kNpmMaxSessionTcpRangesPerDirection = 65536;
+
+enum class NpmResultEntity : uint8_t {
+    kBasic = 0,
+    kSession = 1,
+};
+
+struct NpmBasicFeatureConfig {
+    bool basic_enabled = true;
+    bool session_enabled = false;
+    NpmResultEntity observing = NpmResultEntity::kBasic;
+    uint32_t session_max_tcp_ranges_per_direction = kNpmDefaultSessionTcpRangesPerDirection;
+};
+
 struct NpmBasicTaskConfig {
     NpmAnalysisConfig analysis;
     NpmObservationDomainMap domains;
+    NpmBasicFeatureConfig features;
 };
 
 enum class NpmBasicTaskConfigError : uint8_t {
@@ -28,6 +45,11 @@ enum class NpmBasicTaskConfigError : uint8_t {
     kMissingRequiredField,
     kInvalidEnum,
     kInvalidInteger,
+    kInvalidFeatures,
+    kInvalidObserving,
+    kObservingFeatureDisabled,
+    kSessionConfigWithoutFeature,
+    kSessionTcpRangesOutOfRange,
     kInvalidSourceDomains,
     kDomainValidationError,
     kAnalysisValidationError,

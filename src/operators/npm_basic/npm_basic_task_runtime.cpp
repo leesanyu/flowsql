@@ -134,7 +134,9 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         auto budget = std::make_shared<NpmTaskBudget>(config.analysis);
         std::unique_ptr<NpmBasicTaskRuntime> runtime(
             new NpmBasicTaskRuntime(config, std::move(protocol_context), std::move(budget)));
-        auto result_schema = NpmBasicResultSchema();
+        auto result_schema = config.features.observing == NpmResultEntity::kSession
+                                 ? NpmSessionResultSchema()
+                                 : NpmBasicResultSchema();
         *output_schema = std::move(result_schema);
         *output = std::move(runtime);
         return status;
@@ -151,8 +153,16 @@ NpmBasicTaskRuntime::NpmBasicTaskRuntime(NpmBasicTaskConfig config,
       protocol_context_(std::move(protocol_context)),
       budget_(std::move(budget)),
       sessions_(std::make_unique<NpmSessionTable>(config_.analysis, budget_)),
-      collector_(std::make_unique<NpmBasicResultCollector>()),
-      projector_(std::make_unique<NpmBasicResultProjector>(*protocol_context_)) {}
+      collector_(std::make_unique<NpmBasicResultCollector>(config_.features)),
+      projector_(std::make_unique<NpmBasicResultProjector>(*protocol_context_)) {
+    if (config_.features.session_enabled) {
+        session_module_ = std::make_unique<NpmSessionAnalysisModule>(
+            *protocol_context_,
+            budget_,
+            config_.features.session_max_tcp_ranges_per_direction);
+        modules_.push_back(session_module_.get());
+    }
+}
 
 const NpmBasicTaskConfig& NpmBasicTaskRuntime::Config() const noexcept {
     return config_;
@@ -346,7 +356,8 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
         auto progress = sessions_->AdvanceCaptureProgress(input.capture_progress);
         status.progress_disposition = progress.disposition;
         status.ended_sessions = progress.ended_sessions.size();
-        status.module_error = NotifyNpmSessionEnd(progress.ended_sessions, modules_, *collector_);
+        status.module_error = NotifyNpmSessionEnd(
+            progress.ended_sessions, modules_, input.observed_at_ns, *collector_);
         if (status.module_error != 0) {
             return fail(NpmBasicRealtimeMaintenanceError::kModuleError,
                         kRealtimeModuleError);
@@ -361,19 +372,30 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
             }
             status.active_sessions = active.size();
             for (size_t index = 0; index < active.size(); ++index) {
-                NpmBasicResult result;
-                status.projection_error =
-                    projector_->ProjectActive(active[index], input.observed_at_ns, &result);
-                if (status.projection_error != NpmBasicProjectionError::kNone) {
-                    status.active_session_index = static_cast<int64_t>(index);
-                    return fail(NpmBasicRealtimeMaintenanceError::kProjectionError,
-                                kRealtimeProjectionError);
+                if (config_.features.basic_enabled) {
+                    NpmBasicResult result;
+                    status.projection_error =
+                        projector_->ProjectActive(active[index], input.observed_at_ns, &result);
+                    if (status.projection_error != NpmBasicProjectionError::kNone) {
+                        status.active_session_index = static_cast<int64_t>(index);
+                        return fail(NpmBasicRealtimeMaintenanceError::kProjectionError,
+                                    kRealtimeProjectionError);
+                    }
+                    status.writer_error = collector_->WriteBasic(result);
+                    if (status.writer_error != 0) {
+                        status.active_session_index = static_cast<int64_t>(index);
+                        return fail(NpmBasicRealtimeMaintenanceError::kWriterError,
+                                    kRealtimeWriterError);
+                    }
                 }
-                status.writer_error = collector_->WriteBasic(result);
-                if (status.writer_error != 0) {
-                    status.active_session_index = static_cast<int64_t>(index);
-                    return fail(NpmBasicRealtimeMaintenanceError::kWriterError,
-                                kRealtimeWriterError);
+                for (auto* module : modules_) {
+                    status.module_error =
+                        module->OnSessionSnapshot(active[index], input.observed_at_ns, *collector_);
+                    if (status.module_error != 0) {
+                        status.active_session_index = static_cast<int64_t>(index);
+                        return fail(NpmBasicRealtimeMaintenanceError::kModuleError,
+                                    kRealtimeModuleError);
+                    }
                 }
             }
         }
@@ -486,11 +508,12 @@ void NpmBasicTaskRuntime::SetLastErrorOnce(const char* error) noexcept {
 }
 
 void NpmBasicTaskRuntime::ReleaseResources() noexcept {
+    modules_.clear();
+    session_module_.reset();
     sessions_.reset();
     collector_.reset();
     projector_.reset();
     protocol_context_.reset();
-    modules_.clear();
 }
 
 NpmProtocolContext& NpmBasicTaskRuntime::ProtocolContext() noexcept {

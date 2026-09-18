@@ -71,7 +71,7 @@ NpmEofFlushStatus NpmEofFlusher::Flush(
 
         std::vector<NpmSessionEndEvent> events;
         events.reserve(snapshots.size());
-        status.module_error = NotifyNpmSessionEnd(snapshots, modules, collector);
+        status.module_error = NotifyNpmSessionEnd(snapshots, modules, observed_at, collector);
         if (status.module_error != 0) {
             status.error = NpmEofFlushError::kModuleError;
             state_ = NpmEofFlushState::kFailed;

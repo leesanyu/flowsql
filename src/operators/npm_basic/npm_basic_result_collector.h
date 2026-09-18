@@ -6,7 +6,9 @@
 
 #include "npm_basic_result_encoder.h"
 #include "npm_basic_result_projector.h"
+#include "npm_basic_task_config.h"
 #include "npm_packet_processor.h"
+#include "npm_session_result_encoder.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -29,18 +31,21 @@ struct NpmBasicDrainStatus {
     int64_t event_index = -1;
     NpmBasicProjectionError projection_error = NpmBasicProjectionError::kNone;
     NpmBasicEncodeError encode_error = NpmBasicEncodeError::kNone;
+    NpmSessionEncodeError session_encode_error = NpmSessionEncodeError::kNone;
 };
 
-/** Task-private writer: copies call-borrowed module records, then drains them with owned end events. */
+/** Task-private typed router: only the observing entity is retained for foreground Arrow output. */
 class NpmBasicResultCollector final : public INpmResultWriter {
  public:
-    NpmBasicResultCollector() = default;
+    NpmBasicResultCollector();
+    explicit NpmBasicResultCollector(NpmBasicFeatureConfig features);
     NpmBasicResultCollector(const NpmBasicResultCollector&) = delete;
     NpmBasicResultCollector& operator=(const NpmBasicResultCollector&) = delete;
     NpmBasicResultCollector(NpmBasicResultCollector&&) = delete;
     NpmBasicResultCollector& operator=(NpmBasicResultCollector&&) = delete;
 
     int WriteBasic(const NpmBasicResult& result) override;
+    int WriteSession(const NpmSessionResult& result) override;
 
     /** Success consumes pending module records; failure leaves pending records and caller output unchanged. */
     NpmBasicDrainStatus Drain(const std::vector<NpmSessionEndEvent>& events,
@@ -48,10 +53,12 @@ class NpmBasicResultCollector final : public INpmResultWriter {
                               const std::shared_ptr<INpmTaskBudget>& budget,
                               std::shared_ptr<arrow::RecordBatch>* output);
 
-    size_t pending_results() const noexcept { return pending_.size(); }
+    size_t pending_results() const noexcept;
 
  private:
-    std::vector<NpmBasicResult> pending_;
+    NpmBasicFeatureConfig features_;
+    std::vector<NpmBasicResult> pending_basic_;
+    std::vector<NpmSessionResult> pending_session_;
 };
 
 }  // namespace flowsql::npm

@@ -9,10 +9,30 @@
 
 namespace flowsql::npm {
 
+NpmBasicResultCollector::NpmBasicResultCollector()
+    : NpmBasicResultCollector(NpmBasicFeatureConfig{}) {}
+
+NpmBasicResultCollector::NpmBasicResultCollector(NpmBasicFeatureConfig features)
+    : features_(features) {}
+
 int NpmBasicResultCollector::WriteBasic(const NpmBasicResult& result) {
+    if (!features_.basic_enabled) return ENOTSUP;
     if (ValidateNpmBasicResult(result) != NpmBasicResultError::kNone) return EINVAL;
+    if (features_.observing != NpmResultEntity::kBasic) return 0;
     try {
-        pending_.push_back(result);
+        pending_basic_.push_back(result);
+        return 0;
+    } catch (const std::bad_alloc&) {
+        return ENOMEM;
+    }
+}
+
+int NpmBasicResultCollector::WriteSession(const NpmSessionResult& result) {
+    if (!features_.session_enabled) return ENOTSUP;
+    if (ValidateNpmSessionResult(result) != NpmSessionResultError::kNone) return EINVAL;
+    if (features_.observing != NpmResultEntity::kSession) return 0;
+    try {
+        pending_session_.push_back(result);
         return 0;
     } catch (const std::bad_alloc&) {
         return ENOMEM;
@@ -35,32 +55,55 @@ NpmBasicDrainStatus NpmBasicResultCollector::Drain(
     }
 
     try {
-        std::vector<NpmBasicResult> results = pending_;
-        results.reserve(results.size() + events.size());
-        for (size_t index = 0; index < events.size(); ++index) {
-            NpmBasicResult result;
-            const auto& event = events[index];
-            status.projection_error = projector.ProjectFinal(
-                event.snapshot.View(), event.snapshot.end_reason, event.observed_at, &result);
-            if (status.projection_error != NpmBasicProjectionError::kNone) {
-                status.error = NpmBasicDrainError::kProjectionError;
-                status.event_index = static_cast<int64_t>(index);
-                return status;
-            }
-            results.push_back(std::move(result));
+        const bool observing_basic = features_.observing == NpmResultEntity::kBasic;
+        std::vector<NpmBasicResult> basic_results;
+        if (observing_basic) {
+            basic_results = pending_basic_;
+            basic_results.reserve(basic_results.size() + events.size());
         }
 
-        status.encode_error = EncodeNpmBasicResultsWithBudget(results, budget, output);
-        if (status.encode_error != NpmBasicEncodeError::kNone) {
+        if (features_.basic_enabled) {
+            for (size_t index = 0; index < events.size(); ++index) {
+                NpmBasicResult result;
+                const auto& event = events[index];
+                status.projection_error = projector.ProjectFinal(
+                    event.snapshot.View(), event.snapshot.end_reason, event.observed_at, &result);
+                if (status.projection_error != NpmBasicProjectionError::kNone) {
+                    status.error = NpmBasicDrainError::kProjectionError;
+                    status.event_index = static_cast<int64_t>(index);
+                    return status;
+                }
+                if (observing_basic) basic_results.push_back(std::move(result));
+            }
+        }
+
+        if (observing_basic) {
+            status.encode_error = EncodeNpmBasicResultsWithBudget(basic_results, budget, output);
+            if (status.encode_error != NpmBasicEncodeError::kNone) {
+                status.error = NpmBasicDrainError::kEncodeError;
+                return status;
+            }
+            pending_basic_.clear();
+            return status;
+        }
+
+        status.session_encode_error =
+            EncodeNpmSessionResultsWithBudget(pending_session_, budget, output);
+        if (status.session_encode_error != NpmSessionEncodeError::kNone) {
             status.error = NpmBasicDrainError::kEncodeError;
             return status;
         }
-        pending_.clear();
+        pending_session_.clear();
         return status;
     } catch (const std::bad_alloc&) {
         status.error = NpmBasicDrainError::kAllocationFailed;
         return status;
     }
+}
+
+size_t NpmBasicResultCollector::pending_results() const noexcept {
+    return features_.observing == NpmResultEntity::kBasic ? pending_basic_.size()
+                                                          : pending_session_.size();
 }
 
 }  // namespace flowsql::npm

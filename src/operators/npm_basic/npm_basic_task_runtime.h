@@ -8,6 +8,7 @@
 #include "npm_basic_task_config.h"
 #include "npm_eof_flusher.h"
 #include "npm_protocol_context.h"
+#include "npm_session_analysis_module.h"
 #include "npm_session_table.h"
 #include "npm_task_budget.h"
 
@@ -163,6 +164,7 @@ class NpmBasicTaskRuntime final {
     std::unique_ptr<NpmBasicResultCollector> collector_;
     std::unique_ptr<NpmBasicResultProjector> projector_;
     NpmEofFlusher eof_flusher_;
+    std::unique_ptr<NpmSessionAnalysisModule> session_module_;
     std::vector<INpmAnalysisModule*> modules_;
     bool realtime_clock_initialized_ = false;
     int64_t last_realtime_drive_ns_ = 0;

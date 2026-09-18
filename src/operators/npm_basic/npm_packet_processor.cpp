@@ -22,6 +22,49 @@ void AppendSessionEndEvents(std::vector<NpmSessionSnapshot>* snapshots,
     }
 }
 
+int NotifySessionEndRange(const std::vector<NpmSessionSnapshot>& ended_sessions,
+                          size_t begin,
+                          size_t end,
+                          const std::vector<INpmAnalysisModule*>& modules,
+                          int64_t observed_at_ns,
+                          INpmResultWriter& writer) {
+    for (size_t index = begin; index < end; ++index) {
+        const auto view = ended_sessions[index].View();
+        for (auto* module : modules) {
+            const int error = module->OnSessionEnd(
+                view, ended_sessions[index].end_reason, observed_at_ns, writer);
+            if (error != 0) return error;
+        }
+    }
+    return 0;
+}
+
+NpmSessionTableError SampleTerminalProtocol(bool protocol_was_pending,
+                                            const NpmPacketView& packet,
+                                            packet::IPacketProtocolIdentifier& identifier,
+                                            NpmSessionSnapshot* snapshot) {
+    if (!protocol_was_pending || packet.payload.empty()) return NpmSessionTableError::kNone;
+    if (packet.payload.data == nullptr || packet.layer == nullptr) {
+        return NpmSessionTableError::kInvalidPacketView;
+    }
+
+    const auto identified = identifier.Identify(packet.packet, *packet.layer);
+    if (identified.status == packet::ProtocolStatus::kIdentified && identified.id != 0) {
+        snapshot->protocol_status = NpmProtocolStatus::kIdentified;
+        snapshot->protocol_id = identified.id;
+        if (identified.sub_id != 0) {
+            snapshot->protocol_sub_id = identified.sub_id;
+        } else {
+            snapshot->protocol_sub_id.reset();
+        }
+    } else {
+        snapshot->protocol_status = NpmProtocolStatus::kUnknown;
+        snapshot->protocol_id.reset();
+        snapshot->protocol_sub_id.reset();
+    }
+    return NpmSessionTableError::kNone;
+}
+
 }  // namespace
 
 NpmPacketProcessStatus ProcessNpmPacket(
@@ -52,6 +95,32 @@ NpmPacketProcessStatus ProcessNpmPacket(
         return status;
     }
 
+    NpmPacketView npm_packet;
+    npm_packet.packet = packet;
+    npm_packet.layer = &layer;
+    npm_packet.payload = binding.payload;
+    npm_packet.direction = binding.direction;
+    npm_packet.transport = binding.transport;
+
+    bool had_existing_session = false;
+    uint64_t existing_session_id = 0;
+    NpmProtocolStatus existing_protocol_status = NpmProtocolStatus::kPending;
+    const bool may_close_session =
+        binding.transport.tcp.valid && (binding.transport.tcp.rst || binding.transport.tcp.fin);
+    if (may_close_session) {
+        NpmSessionView existing;
+        const auto find_error = sessions.Find(binding.key, &existing);
+        if (find_error == NpmSessionTableError::kNone) {
+            had_existing_session = true;
+            existing_session_id = existing.session_id;
+            existing_protocol_status = existing.protocol_status;
+        } else if (find_error != NpmSessionTableError::kNotFound) {
+            status.session_error = find_error;
+            status.error = NpmPacketProcessError::kSessionError;
+            return status;
+        }
+    }
+
     NpmSessionObserveResult observed;
     status.session_error = sessions.Observe(binding, packet.meta, &observed);
     if (status.session_error != NpmSessionTableError::kNone) {
@@ -59,18 +128,17 @@ NpmPacketProcessStatus ProcessNpmPacket(
         return status;
     }
 
-    status.module_error = NotifyNpmSessionEnd(observed.ended_sessions, modules, writer);
-    if (status.module_error != 0) {
-        status.error = NpmPacketProcessError::kModuleError;
-        return status;
-    }
-
     if (observed.has_active_session) {
-        NpmPacketView npm_packet;
-        npm_packet.packet = packet;
-        npm_packet.layer = &layer;
-        npm_packet.payload = binding.payload;
-        npm_packet.direction = binding.direction;
+        status.module_error = NotifySessionEndRange(observed.ended_sessions,
+                                                    0,
+                                                    observed.ended_sessions.size(),
+                                                    modules,
+                                                    packet.meta.timestamp_ns,
+                                                    writer);
+        if (status.module_error != 0) {
+            status.error = NpmPacketProcessError::kModuleError;
+            return status;
+        }
 
         NpmSessionView sampled;
         status.session_error = sessions.SampleProtocol(
@@ -86,6 +154,49 @@ NpmPacketProcessStatus ProcessNpmPacket(
                 status.error = NpmPacketProcessError::kModuleError;
                 return status;
             }
+        }
+    } else if (!observed.ended_sessions.empty()) {
+        const size_t current_session_index = observed.ended_sessions.size() - 1;
+        auto& current_snapshot = observed.ended_sessions[current_session_index];
+        const bool current_session_started_pending =
+            !had_existing_session || current_snapshot.session_id != existing_session_id ||
+            existing_protocol_status == NpmProtocolStatus::kPending;
+        status.module_error = NotifySessionEndRange(observed.ended_sessions,
+                                                    0,
+                                                    current_session_index,
+                                                    modules,
+                                                    packet.meta.timestamp_ns,
+                                                    writer);
+        if (status.module_error != 0) {
+            status.error = NpmPacketProcessError::kModuleError;
+            return status;
+        }
+
+        status.session_error = SampleTerminalProtocol(
+            current_session_started_pending, npm_packet, identifier, &current_snapshot);
+        if (status.session_error != NpmSessionTableError::kNone) {
+            status.error = NpmPacketProcessError::kSessionError;
+            return status;
+        }
+
+        const auto current_session = observed.ended_sessions[current_session_index].View();
+        for (auto* module : modules) {
+            status.module_error = module->OnPacket(npm_packet, current_session, writer);
+            if (status.module_error != 0) {
+                status.error = NpmPacketProcessError::kModuleError;
+                return status;
+            }
+        }
+
+        status.module_error = NotifySessionEndRange(observed.ended_sessions,
+                                                    current_session_index,
+                                                    observed.ended_sessions.size(),
+                                                    modules,
+                                                    packet.meta.timestamp_ns,
+                                                    writer);
+        if (status.module_error != 0) {
+            status.error = NpmPacketProcessError::kModuleError;
+            return status;
         }
     }
 
@@ -147,7 +258,8 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
                 return status;
             }
 
-            status.module_error = NotifyNpmSessionEnd(progress.ended_sessions, modules, writer);
+            status.module_error = NotifyNpmSessionEnd(
+                progress.ended_sessions, modules, packet.meta.timestamp_ns, writer);
             if (status.module_error != 0) {
                 status.error = NpmPacketBatchProcessError::kModuleError;
                 status.row = current_row;

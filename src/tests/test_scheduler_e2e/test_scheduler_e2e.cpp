@@ -511,6 +511,80 @@ static void AssertSchedulerE2eNpmBasicSchema(const std::shared_ptr<arrow::Schema
     ASSERT_EQ(schema->metadata()->Get("flowsql.timestamp_unit").ValueOrDie(), "ns");
 }
 
+static void AssertSchedulerE2eNpmSessionSchema(const std::shared_ptr<arrow::Schema>& schema) {
+    struct ExpectedField {
+        const char* name;
+        arrow::Type::type type;
+        bool nullable;
+    };
+    const std::vector<ExpectedField> expected = {
+        {"session_id", arrow::Type::UINT64, false},
+        {"observation_domain_id", arrow::Type::UINT64, false},
+        {"revision", arrow::Type::UINT64, false},
+        {"observed_at", arrow::Type::INT64, false},
+        {"is_final", arrow::Type::BOOL, false},
+        {"ip_family", arrow::Type::UINT8, false},
+        {"transport_protocol", arrow::Type::UINT8, false},
+        {"a_ip", arrow::Type::STRING, false},
+        {"b_ip", arrow::Type::STRING, false},
+        {"a_port", arrow::Type::UINT16, false},
+        {"b_port", arrow::Type::UINT16, false},
+        {"first_ns", arrow::Type::INT64, false},
+        {"last_ns", arrow::Type::INT64, false},
+        {"duration_ns", arrow::Type::INT64, false},
+        {"protocol_status", arrow::Type::STRING, false},
+        {"protocol_id", arrow::Type::UINT16, true},
+        {"protocol_sub_id", arrow::Type::UINT16, true},
+        {"protocol", arrow::Type::STRING, true},
+        {"end_reason", arrow::Type::STRING, true},
+        {"packets_ab", arrow::Type::UINT64, false},
+        {"packets_ba", arrow::Type::UINT64, false},
+        {"wire_bytes_ab", arrow::Type::UINT64, false},
+        {"wire_bytes_ba", arrow::Type::UINT64, false},
+        {"payload_bytes_ab", arrow::Type::UINT64, false},
+        {"payload_bytes_ba", arrow::Type::UINT64, false},
+        {"rate_status", arrow::Type::STRING, false},
+        {"wire_bps_ab", arrow::Type::DOUBLE, true},
+        {"wire_bps_ba", arrow::Type::DOUBLE, true},
+        {"payload_bps_ab", arrow::Type::DOUBLE, true},
+        {"payload_bps_ba", arrow::Type::DOUBLE, true},
+        {"tcp_unique_payload_bytes_ab", arrow::Type::UINT64, true},
+        {"tcp_unique_payload_bytes_ba", arrow::Type::UINT64, true},
+        {"tcp_unique_payload_bps_ab", arrow::Type::DOUBLE, true},
+        {"tcp_unique_payload_bps_ba", arrow::Type::DOUBLE, true},
+        {"tcp_handshake_status", arrow::Type::STRING, false},
+        {"tcp_initiator", arrow::Type::STRING, true},
+        {"tcp_handshake_duration_ns", arrow::Type::INT64, true},
+        {"tcp_synack_rtt_ns", arrow::Type::INT64, true},
+        {"tcp_rtt_status", arrow::Type::STRING, false},
+        {"tcp_rtt_samples", arrow::Type::UINT64, true},
+        {"tcp_rtt_min_ns", arrow::Type::INT64, true},
+        {"tcp_rtt_mean_ns", arrow::Type::INT64, true},
+        {"tcp_rtt_max_ns", arrow::Type::INT64, true},
+        {"tcp_retransmission_status", arrow::Type::STRING, false},
+        {"tcp_retrans_packets_ab", arrow::Type::UINT64, true},
+        {"tcp_retrans_packets_ba", arrow::Type::UINT64, true},
+        {"tcp_retrans_payload_bytes_ab", arrow::Type::UINT64, true},
+        {"tcp_retrans_payload_bytes_ba", arrow::Type::UINT64, true},
+        {"measurement_flags", arrow::Type::UINT32, false},
+    };
+    ASSERT_TRUE(schema != nullptr);
+    ASSERT_EQ(schema->num_fields(), static_cast<int>(expected.size()));
+    for (size_t index = 0; index < expected.size(); ++index) {
+        const auto& actual = schema->field(static_cast<int>(index));
+        ASSERT_EQ(actual->name(), expected[index].name);
+        ASSERT_EQ(actual->type()->id(), expected[index].type);
+        ASSERT_EQ(actual->nullable(), expected[index].nullable);
+    }
+    ASSERT_TRUE(schema->metadata() != nullptr);
+    ASSERT_EQ(schema->metadata()->Get("flowsql.entity").ValueOrDie(), "npm_session_result");
+    ASSERT_EQ(schema->metadata()->Get("flowsql.schema_version").ValueOrDie(), "1");
+    ASSERT_EQ(schema->metadata()->Get("flowsql.timestamp_unit").ValueOrDie(), "ns");
+    ASSERT_EQ(schema->metadata()->Get("flowsql.revision_semantics").ValueOrDie(), "cumulative");
+    ASSERT_EQ(schema->metadata()->Get("flowsql.measurement_scope").ValueOrDie(),
+              "single_capture_observed_packets");
+}
+
 static void WriteSchedulerE2eBinary(const std::filesystem::path& path,
                                     const std::vector<uint8_t>& bytes) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -1509,6 +1583,13 @@ int main() {
             return "SELECT * FROM " + input_namespace + " USING npm.basic WITH input_namespace='" + input_namespace +
                    "',source_domains='0:77' INTO dataframe." + destination;
         };
+        const auto make_npm_session_sql = [&](const std::string& destination) {
+            return "SELECT * FROM " + input_namespace +
+                   " USING npm.basic WITH input_namespace='" + input_namespace +
+                   "',source_domains='0:77',features='basic,session',observing='session'"
+                   " WHERE rate_status = 'insufficient_span' INTO dataframe." +
+                   destination;
+        };
         const auto assert_npm_unavailable = [&](const std::string& destination) {
             const int rc = exec("/scheduler/batch/execute", MakeReq(make_npm_sql(destination)), rsp);
             ASSERT_TRUE(rc != error::OK);
@@ -1713,6 +1794,71 @@ int main() {
         ASSERT_TRUE(protocol_sub_id->IsNull(0));
         ASSERT_TRUE(protocol_name->IsNull(0));
         ASSERT_EQ(end_reason->GetString(0), "closed");
+
+        const std::string session_dataframe_name = "scheduler_npm_session";
+        pcap_protocol.Reset();
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq(make_npm_session_sql(session_dataframe_name)),
+                       rsp),
+                  error::OK);
+
+        rapidjson::Document session_completed;
+        session_completed.Parse(rsp.c_str());
+        ASSERT_TRUE(!session_completed.HasParseError() && session_completed.IsObject());
+        ASSERT_TRUE(session_completed.HasMember("status") && session_completed["status"].IsString());
+        ASSERT_EQ(std::string(session_completed["status"].GetString()), "completed");
+        ASSERT_TRUE(session_completed.HasMember("rows") && session_completed["rows"].IsInt64());
+        ASSERT_EQ(session_completed["rows"].GetInt64(), 1);
+        ASSERT_TRUE(session_completed.HasMember("result_row_count") &&
+                    session_completed["result_row_count"].IsInt64());
+        ASSERT_EQ(session_completed["result_row_count"].GetInt64(), 1);
+        ASSERT_TRUE(session_completed.HasMember("result_target") &&
+                    session_completed["result_target"].IsString());
+        ASSERT_EQ(std::string(session_completed["result_target"].GetString()),
+                  "dataframe." + session_dataframe_name);
+        ASSERT_EQ(pcap_protocol.layer_calls, 1);
+
+        auto session_output = std::dynamic_pointer_cast<IDataFrameChannel>(
+            registry->Get(session_dataframe_name.c_str()));
+        ASSERT_TRUE(session_output != nullptr);
+        DataFrame session_result;
+        ASSERT_EQ(session_output->Read(&session_result), 0);
+        const auto session_batch = session_result.ToArrow();
+        ASSERT_TRUE(session_batch != nullptr);
+        ASSERT_EQ(session_batch->num_rows(), 1);
+        AssertSchedulerE2eNpmSessionSchema(session_batch->schema());
+
+        const auto session_revision = std::dynamic_pointer_cast<arrow::UInt64Array>(
+            session_batch->GetColumnByName("revision"));
+        const auto session_final = std::dynamic_pointer_cast<arrow::BooleanArray>(
+            session_batch->GetColumnByName("is_final"));
+        const auto duration_ns = std::dynamic_pointer_cast<arrow::Int64Array>(
+            session_batch->GetColumnByName("duration_ns"));
+        const auto rate_status = std::dynamic_pointer_cast<arrow::StringArray>(
+            session_batch->GetColumnByName("rate_status"));
+        const auto handshake_status = std::dynamic_pointer_cast<arrow::StringArray>(
+            session_batch->GetColumnByName("tcp_handshake_status"));
+        const auto rtt_status = std::dynamic_pointer_cast<arrow::StringArray>(
+            session_batch->GetColumnByName("tcp_rtt_status"));
+        const auto retransmission_status = std::dynamic_pointer_cast<arrow::StringArray>(
+            session_batch->GetColumnByName("tcp_retransmission_status"));
+        const auto measurement_flags = std::dynamic_pointer_cast<arrow::UInt32Array>(
+            session_batch->GetColumnByName("measurement_flags"));
+        const auto session_end_reason = std::dynamic_pointer_cast<arrow::StringArray>(
+            session_batch->GetColumnByName("end_reason"));
+        ASSERT_TRUE(session_revision && session_final && duration_ns && rate_status &&
+                    handshake_status && rtt_status && retransmission_status &&
+                    measurement_flags && session_end_reason);
+        ASSERT_EQ(session_revision->Value(0), 1);
+        ASSERT_TRUE(session_final->Value(0));
+        ASSERT_EQ(duration_ns->Value(0), 0);
+        ASSERT_EQ(rate_status->GetString(0), "insufficient_span");
+        ASSERT_EQ(handshake_status->GetString(0), "not_observed");
+        ASSERT_EQ(rtt_status->GetString(0), "no_sample");
+        ASSERT_EQ(retransmission_status->GetString(0), "valid");
+        ASSERT_EQ(measurement_flags->Value(0), 1);
+        ASSERT_EQ(session_end_reason->GetString(0), "closed");
+        ASSERT_EQ(registry->Unregister(session_dataframe_name.c_str()), 0);
 
         ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
         ASSERT_EQ(deactivate("/operators/deactivate", plugin_request, rsp), error::OK);

@@ -230,13 +230,14 @@ NpmSessionTableError NpmSessionTable::Observe(const NpmSessionPacketBinding& bin
         return NpmSessionTableError::kLatePacket;
     }
 
-    const bool is_tcp = binding.key.transport_protocol == ipv4::eNext::TCP && binding.tcp.valid;
-    const bool bare_syn = is_tcp && binding.tcp.syn && !binding.tcp.ack;
+    const auto& tcp = binding.transport.tcp;
+    const bool is_tcp = binding.key.transport_protocol == ipv4::eNext::TCP && tcp.valid;
+    const bool bare_syn = is_tcp && tcp.syn && !tcp.ack;
     auto iterator = sessions_.find(binding.key);
     const bool tuple_reuse =
         iterator != sessions_.end() && bare_syn &&
         (!iterator->second.initial_syn_observed || iterator->second.initial_syn_direction != binding.direction ||
-         iterator->second.initial_syn_sequence != binding.tcp.sequence);
+         iterator->second.initial_syn_sequence != tcp.sequence);
 
     const bool new_key = iterator == sessions_.end();
     if (new_key || tuple_reuse) {
@@ -269,9 +270,9 @@ NpmSessionTableError NpmSessionTable::Observe(const NpmSessionPacketBinding& bin
             if (bare_syn) {
                 state.initial_syn_observed = true;
                 state.initial_syn_direction = binding.direction;
-                state.initial_syn_sequence = binding.tcp.sequence;
+                state.initial_syn_sequence = tcp.sequence;
             }
-            if (is_tcp && binding.tcp.fin) {
+            if (is_tcp && tcp.fin) {
                 state.fin_ab = binding.direction == NpmPacketDirection::kAToB;
                 state.fin_ba = binding.direction == NpmPacketDirection::kBToA;
             }
@@ -282,7 +283,7 @@ NpmSessionTableError NpmSessionTable::Observe(const NpmSessionPacketBinding& bin
                         &state.wire_bytes_ab,
                         &state.wire_bytes_ba);
 
-            const bool closed = is_tcp && (binding.tcp.rst || (state.fin_ab && state.fin_ba));
+            const bool closed = is_tcp && (tcp.rst || (state.fin_ab && state.fin_ba));
             if (closed) {
                 SessionMap::value_type staged_entry(binding.key, state);
                 result.ended_sessions.push_back(MakeSnapshot(staged_entry, NpmSessionEndReason::kClosed));
@@ -337,7 +338,7 @@ NpmSessionTableError NpmSessionTable::Observe(const NpmSessionPacketBinding& bin
                 &state.packets_ba,
                 &state.wire_bytes_ab,
                 &state.wire_bytes_ba);
-    if (is_tcp && binding.tcp.fin) {
+    if (is_tcp && tcp.fin) {
         if (binding.direction == NpmPacketDirection::kAToB) {
             state.fin_ab = true;
         } else {
@@ -346,7 +347,7 @@ NpmSessionTableError NpmSessionTable::Observe(const NpmSessionPacketBinding& bin
     }
 
     NpmSessionObserveResult result;
-    if (is_tcp && (binding.tcp.rst || (state.fin_ab && state.fin_ba))) {
+    if (is_tcp && (tcp.rst || (state.fin_ab && state.fin_ba))) {
         try {
             SessionMap::value_type staged_entry(iterator->first, state);
             result.ended_sessions.push_back(MakeSnapshot(staged_entry, NpmSessionEndReason::kClosed));
@@ -513,11 +514,13 @@ NpmSessionTableError NpmSessionTable::FinishAllAtEof(std::vector<NpmSessionSnaps
 
 int NotifyNpmSessionEnd(const std::vector<NpmSessionSnapshot>& ended_sessions,
                         const std::vector<INpmAnalysisModule*>& modules,
+                        int64_t observed_at_ns,
                         INpmResultWriter& writer) {
     for (const auto& snapshot : ended_sessions) {
         const auto view = snapshot.View();
         for (auto* module : modules) {
-            const int error = module->OnSessionEnd(view, snapshot.end_reason, writer);
+            const int error = module->OnSessionEnd(
+                view, snapshot.end_reason, observed_at_ns, writer);
             if (error != 0) return error;
         }
     }

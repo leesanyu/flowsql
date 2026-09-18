@@ -172,6 +172,134 @@ const char* NpmSessionEndReasonName(NpmSessionEndReason reason);
 NpmBasicResultError ValidateNpmBasicResult(const NpmBasicResult& result);
 std::shared_ptr<arrow::Schema> NpmBasicResultSchema();
 
+enum class NpmRateStatus : uint8_t {
+    kValid = 0,
+    kInsufficientSpan = 1,
+};
+
+enum class NpmTcpHandshakeStatus : uint8_t {
+    kComplete = 0,
+    kPartial = 1,
+    kNotObserved = 2,
+    kAmbiguous = 3,
+    kNotApplicable = 4,
+};
+
+enum class NpmTcpRttStatus : uint8_t {
+    kValid = 0,
+    kNoSample = 1,
+    kAmbiguous = 2,
+    kNotApplicable = 3,
+};
+
+enum class NpmTcpRetransmissionStatus : uint8_t {
+    kValid = 0,
+    kAmbiguous = 1,
+    kNotApplicable = 2,
+};
+
+enum class NpmTcpInitiator : uint8_t {
+    kA = 0,
+    kB = 1,
+};
+
+constexpr uint32_t kNpmMeasurementMidstreamStart = 1u << 0;
+constexpr uint32_t kNpmMeasurementTruncatedPayload = 1u << 1;
+constexpr uint32_t kNpmMeasurementTimestampRegression = 1u << 2;
+constexpr uint32_t kNpmMeasurementSequenceAmbiguous = 1u << 3;
+constexpr uint32_t kNpmMeasurementSynRetransmitted = 1u << 4;
+constexpr uint32_t kNpmMeasurementKnownFlags = kNpmMeasurementMidstreamStart |
+                                               kNpmMeasurementTruncatedPayload |
+                                               kNpmMeasurementTimestampRegression |
+                                               kNpmMeasurementSequenceAmbiguous |
+                                               kNpmMeasurementSynRetransmitted;
+
+struct NpmSessionResult {
+    uint64_t session_id = 0;
+    uint64_t observation_domain_id = 0;
+    uint64_t revision = 0;
+    int64_t observed_at = 0;
+    bool is_final = false;
+    uint8_t ip_family = 0;
+    uint8_t transport_protocol = 0;
+    std::string a_ip;
+    std::string b_ip;
+    uint16_t a_port = 0;
+    uint16_t b_port = 0;
+    int64_t first_ns = 0;
+    int64_t last_ns = 0;
+    int64_t duration_ns = 0;
+    NpmProtocolStatus protocol_status = NpmProtocolStatus::kPending;
+    std::optional<uint16_t> protocol_id;
+    std::optional<uint16_t> protocol_sub_id;
+    std::optional<std::string> protocol;
+    std::optional<NpmSessionEndReason> end_reason;
+    uint64_t packets_ab = 0;
+    uint64_t packets_ba = 0;
+    uint64_t wire_bytes_ab = 0;
+    uint64_t wire_bytes_ba = 0;
+    uint64_t payload_bytes_ab = 0;
+    uint64_t payload_bytes_ba = 0;
+    NpmRateStatus rate_status = NpmRateStatus::kInsufficientSpan;
+    std::optional<double> wire_bps_ab;
+    std::optional<double> wire_bps_ba;
+    std::optional<double> payload_bps_ab;
+    std::optional<double> payload_bps_ba;
+    std::optional<uint64_t> tcp_unique_payload_bytes_ab;
+    std::optional<uint64_t> tcp_unique_payload_bytes_ba;
+    std::optional<double> tcp_unique_payload_bps_ab;
+    std::optional<double> tcp_unique_payload_bps_ba;
+    NpmTcpHandshakeStatus tcp_handshake_status = NpmTcpHandshakeStatus::kNotApplicable;
+    std::optional<NpmTcpInitiator> tcp_initiator;
+    std::optional<int64_t> tcp_handshake_duration_ns;
+    std::optional<int64_t> tcp_synack_rtt_ns;
+    NpmTcpRttStatus tcp_rtt_status = NpmTcpRttStatus::kNotApplicable;
+    std::optional<uint64_t> tcp_rtt_samples;
+    std::optional<int64_t> tcp_rtt_min_ns;
+    std::optional<int64_t> tcp_rtt_mean_ns;
+    std::optional<int64_t> tcp_rtt_max_ns;
+    NpmTcpRetransmissionStatus tcp_retransmission_status =
+        NpmTcpRetransmissionStatus::kNotApplicable;
+    std::optional<uint64_t> tcp_retrans_packets_ab;
+    std::optional<uint64_t> tcp_retrans_packets_ba;
+    std::optional<uint64_t> tcp_retrans_payload_bytes_ab;
+    std::optional<uint64_t> tcp_retrans_payload_bytes_ba;
+    uint32_t measurement_flags = 0;
+};
+
+enum class NpmSessionResultError : uint8_t {
+    kNone = 0,
+    kInvalidIdentity,
+    kInvalidProtocolStatus,
+    kInvalidEndReason,
+    kPendingFinalResult,
+    kProtocolFieldsMismatch,
+    kMissingFinalEndReason,
+    kUnexpectedActiveEndReason,
+    kInvalidTimeRange,
+    kInvalidRateStatus,
+    kRateFieldsMismatch,
+    kInvalidRateValue,
+    kTrafficTotalsMismatch,
+    kInvalidTransportProtocol,
+    kInvalidTcpHandshakeStatus,
+    kHandshakeFieldsMismatch,
+    kInvalidTcpRttStatus,
+    kRttFieldsMismatch,
+    kInvalidTcpRetransmissionStatus,
+    kRetransmissionFieldsMismatch,
+    kTcpFieldsMismatch,
+    kInvalidMeasurementFlags,
+};
+
+const char* NpmRateStatusName(NpmRateStatus status);
+const char* NpmTcpHandshakeStatusName(NpmTcpHandshakeStatus status);
+const char* NpmTcpRttStatusName(NpmTcpRttStatus status);
+const char* NpmTcpRetransmissionStatusName(NpmTcpRetransmissionStatus status);
+const char* NpmTcpInitiatorName(NpmTcpInitiator initiator);
+NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result);
+std::shared_ptr<arrow::Schema> NpmSessionResultSchema();
+
 enum class NpmBudgetCategory : uint8_t {
     kSessionState = 0,
     kModuleState = 1,
@@ -221,12 +349,33 @@ enum class NpmPacketDirection : uint8_t {
     kBToA = 1,
 };
 
+/** TCP facts copied once from a fully validated transport header. Integer fields use host byte order. */
+struct NpmTcpPacketFacts {
+    bool valid = false;
+    bool syn = false;
+    bool ack = false;
+    bool fin = false;
+    bool rst = false;
+    uint32_t sequence = 0;
+    uint32_t acknowledgment = 0;
+    uint16_t window = 0;
+};
+
+/** Transport facts derived from declared protocol lengths and the safely captured payload span. */
+struct NpmTransportPacketFacts {
+    uint32_t payload_wire_bytes = 0;
+    uint32_t payload_captured_bytes = 0;
+    bool payload_complete = true;
+    NpmTcpPacketFacts tcp;
+};
+
 /** Borrowed view valid only during the current module callback. It never owns packet bytes. */
 struct NpmPacketView {
     packet::PacketView packet;
     const packet::PacketLayerInfo* layer = nullptr;
     Span<const uint8_t> payload;
     NpmPacketDirection direction = NpmPacketDirection::kAToB;
+    NpmTransportPacketFacts transport;
 };
 
 /** Borrowed view valid only during the current module callback. The engine owns key and state. */
@@ -257,17 +406,25 @@ interface INpmResultWriter {
 
     /** Copies or encodes the call-borrowed result before returning 0; nonzero means it was not accepted. */
     virtual int WriteBasic(const NpmBasicResult& result) = 0;
+    virtual int WriteSession(const NpmSessionResult& result) = 0;
 };
 
 interface INpmAnalysisModule {
     virtual ~INpmAnalysisModule() = default;
 
-    /** Do not retain views or their pointers. Return 0 on success; every nonzero value aborts the task. */
+    /**
+     * Do not retain views or their pointers. observed_at_ns is the callback trigger/emission time, not session.last_ns.
+     * Return 0 on success; every nonzero value aborts the task.
+     */
     virtual int OnPacket(const NpmPacketView& packet,
                          const NpmSessionView& session,
                          INpmResultWriter& writer) = 0;
+    virtual int OnSessionSnapshot(const NpmSessionView& session,
+                                  int64_t observed_at_ns,
+                                  INpmResultWriter& writer) = 0;
     virtual int OnSessionEnd(const NpmSessionView& session,
                              NpmSessionEndReason reason,
+                             int64_t observed_at_ns,
                              INpmResultWriter& writer) = 0;
 };
 

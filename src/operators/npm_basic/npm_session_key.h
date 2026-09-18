@@ -27,22 +27,12 @@ enum class NpmSessionPacketError : uint8_t {
     kInvalidPayloadBounds,
 };
 
-/** TCP control facts copied from a validated transport header. Sequence is in host byte order. */
-struct NpmTcpControl {
-    bool valid = false;
-    bool syn = false;
-    bool ack = false;
-    bool fin = false;
-    bool rst = false;
-    uint32_t sequence = 0;
-};
-
 /** Owns the normalized key and borrows payload bytes from the current packet callback. */
 struct NpmSessionPacketBinding {
     NpmSessionKey key;
     NpmPacketDirection direction = NpmPacketDirection::kAToB;
     Span<const uint8_t> payload;
-    NpmTcpControl tcp;
+    NpmTransportPacketFacts transport;
 };
 
 /** Builds one packet-to-session binding. Output remains unchanged on every error. */

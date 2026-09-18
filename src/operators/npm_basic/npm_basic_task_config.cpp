@@ -27,6 +27,9 @@ enum class TaskConfigField : size_t {
     kMaxActiveSessions,
     kMaxTrackedBytes,
     kMaxPendingOutputBytes,
+    kFeatures,
+    kObserving,
+    kSessionMaxTcpRangesPerDirection,
     kInputNamespace,
     kSourceDomains,
     kCount,
@@ -44,6 +47,9 @@ constexpr std::array<const char*, static_cast<size_t>(TaskConfigField::kCount)> 
     "max_active_sessions",
     "max_tracked_bytes",
     "max_pending_output_bytes",
+    "features",
+    "observing",
+    "session_max_tcp_ranges_per_direction",
     "input_namespace",
     "source_domains",
 };
@@ -100,6 +106,104 @@ bool ParseUint32(std::string_view text, uint32_t* output) {
     }
     *output = static_cast<uint32_t>(value);
     return true;
+}
+
+bool IsAsciiWhitespace(char character) {
+    return character == ' ' || character == '\t' || character == '\n' || character == '\r' ||
+           character == '\f' || character == '\v';
+}
+
+std::string_view TrimAsciiWhitespace(std::string_view text) {
+    while (!text.empty() && IsAsciiWhitespace(text.front())) text.remove_prefix(1);
+    while (!text.empty() && IsAsciiWhitespace(text.back())) text.remove_suffix(1);
+    return text;
+}
+
+bool ParseFeatures(std::string_view text, NpmBasicFeatureConfig* config) {
+    if (config == nullptr) return false;
+    NpmBasicFeatureConfig next;
+    next.basic_enabled = false;
+    next.session_enabled = false;
+
+    size_t token_begin = 0;
+    while (token_begin <= text.size()) {
+        const size_t separator = text.find(',', token_begin);
+        const size_t token_end = separator == std::string_view::npos ? text.size() : separator;
+        const std::string_view token = TrimAsciiWhitespace(text.substr(token_begin, token_end - token_begin));
+        if (token.empty()) return false;
+        if (token == "basic") {
+            if (next.basic_enabled) return false;
+            next.basic_enabled = true;
+        } else if (token == "session") {
+            if (next.session_enabled) return false;
+            next.session_enabled = true;
+        } else {
+            return false;
+        }
+        if (separator == std::string_view::npos) break;
+        token_begin = separator + 1;
+    }
+
+    config->basic_enabled = next.basic_enabled;
+    config->session_enabled = next.session_enabled;
+    return config->basic_enabled || config->session_enabled;
+}
+
+bool ParseObserving(std::string_view text, NpmResultEntity* observing) {
+    if (observing == nullptr) return false;
+    text = TrimAsciiWhitespace(text);
+    if (text == "basic") {
+        *observing = NpmResultEntity::kBasic;
+        return true;
+    }
+    if (text == "session") {
+        *observing = NpmResultEntity::kSession;
+        return true;
+    }
+    return false;
+}
+
+NpmBasicTaskConfigStatus ParseFeatureConfig(
+    const std::array<const rapidjson::Value*, static_cast<size_t>(TaskConfigField::kCount)>& values,
+    NpmBasicFeatureConfig* config) {
+    const rapidjson::Value* features = values[FieldIndex(TaskConfigField::kFeatures)];
+    if (features != nullptr &&
+        !ParseFeatures(std::string_view(features->GetString(), features->GetStringLength()), config)) {
+        return Fail(NpmBasicTaskConfigError::kInvalidFeatures, FieldName(TaskConfigField::kFeatures));
+    }
+
+    const rapidjson::Value* observing = values[FieldIndex(TaskConfigField::kObserving)];
+    if (observing != nullptr &&
+        !ParseObserving(std::string_view(observing->GetString(), observing->GetStringLength()),
+                        &config->observing)) {
+        return Fail(NpmBasicTaskConfigError::kInvalidObserving, FieldName(TaskConfigField::kObserving));
+    }
+    const bool observing_enabled =
+        (config->observing == NpmResultEntity::kBasic && config->basic_enabled) ||
+        (config->observing == NpmResultEntity::kSession && config->session_enabled);
+    if (!observing_enabled) {
+        return Fail(NpmBasicTaskConfigError::kObservingFeatureDisabled,
+                    FieldName(TaskConfigField::kObserving));
+    }
+
+    const rapidjson::Value* range_limit =
+        values[FieldIndex(TaskConfigField::kSessionMaxTcpRangesPerDirection)];
+    if (range_limit == nullptr) return {};
+    if (!ParseUint32(std::string_view(range_limit->GetString(), range_limit->GetStringLength()),
+                     &config->session_max_tcp_ranges_per_direction)) {
+        return Fail(NpmBasicTaskConfigError::kInvalidInteger,
+                    FieldName(TaskConfigField::kSessionMaxTcpRangesPerDirection));
+    }
+    if (!config->session_enabled) {
+        return Fail(NpmBasicTaskConfigError::kSessionConfigWithoutFeature,
+                    FieldName(TaskConfigField::kSessionMaxTcpRangesPerDirection));
+    }
+    if (config->session_max_tcp_ranges_per_direction < kNpmMinSessionTcpRangesPerDirection ||
+        config->session_max_tcp_ranges_per_direction > kNpmMaxSessionTcpRangesPerDirection) {
+        return Fail(NpmBasicTaskConfigError::kSessionTcpRangesOutOfRange,
+                    FieldName(TaskConfigField::kSessionMaxTcpRangesPerDirection));
+    }
+    return {};
 }
 
 bool ParseSourceDomains(std::string_view text, std::vector<NpmSourceDomainBinding>* bindings) {
@@ -284,6 +388,8 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
         }
 
         auto status = ParseIntegerFields(values, &next.analysis);
+        if (status.error != NpmBasicTaskConfigError::kNone) return status;
+        status = ParseFeatureConfig(values, &next.features);
         if (status.error != NpmBasicTaskConfigError::kNone) return status;
 
         const rapidjson::Value* input_namespace = values[input_namespace_index];

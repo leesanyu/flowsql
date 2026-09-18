@@ -3,10 +3,13 @@
 
 #include <common/loader.hpp>
 #include <framework/core/packet_codec.h>
+#include <framework/interfaces/cpp_operator_plugin_abi.h>
 #include <framework/interfaces/iblock_transform_operator.h>
 #include <plugins/npi/packet_decoder.h>
 
 #include <arrow/api.h>
+
+#include <dlfcn.h>
 
 #include <charconv>
 #include <chrono>
@@ -99,69 +102,102 @@ int main(int argc, char* argv[]) {
     auto* loader = flowsql::PluginLoader::Single();
     flowsql::IBlockTransformOperatorV1* provider = nullptr;
     flowsql::IBlockTransformTaskV1* task = nullptr;
+    void* operator_library = nullptr;
+    flowsql::CppOperatorPluginDestroyCapabilityV2Fn destroy_capability = nullptr;
     try {
         Require(argc == 1 || argc == 3, "usage: benchmark_npm_basic [batch_rows(1..4096) iterations(1..1000)]");
         const int batch_rows = argc == 3 ? ParsePositive(argv[1], 4096) : 512;
         const int iterations = argc == 3 ? ParsePositive(argv[2], 1000) : 100;
         const std::string npi_option = std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\"}";
-        const char* libraries[] = {FLOWSQL_NPI_PLUGIN_PATH, FLOWSQL_NPM_BASIC_PLUGIN_PATH};
-        const char* options[] = {npi_option.c_str(), nullptr};
-        Require(loader->Load(".", libraries, options, 2) == 0, "plugin loading failed");
+        const char* libraries[] = {FLOWSQL_NPI_PLUGIN_PATH};
+        const char* options[] = {npi_option.c_str()};
+        Require(loader->Load(".", libraries, options, 1) == 0, "NPI plugin loading failed");
         Require(loader->StartAll() == 0, "plugin start failed");
         auto* protocol = static_cast<flowsql::IProtocol*>(loader->First(flowsql::IID_PROTOCOL));
         Require(protocol != nullptr, "NPI protocol interface not registered");
         const auto input = MakeInput(batch_rows, protocol);
-        loader->Traverse(flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V1, [&](void* value) {
-            auto* candidate = static_cast<flowsql::IBlockTransformOperatorV1*>(value);
-            if (candidate->Category() == "npm" && candidate->Name() == "basic") provider = candidate;
-            return 0;
-        });
-        Require(provider != nullptr, "npm.basic provider not registered");
-        flowsql::BlockTransformTaskConfigV1 config;
-        config.task_id = "npm-basic-benchmark";
-        config.with_params_json = R"({"input_namespace":"benchmark.packet","source_domains":"0:7"})";
-        config.pushed_filter_plan_json = R"({"version":1,"root":null})";
-        Require(provider->CreateTask(config, &task) == 0 && task != nullptr, "task creation failed");
-        std::shared_ptr<arrow::Schema> schema;
-        const int open_rc = task->Open(input->schema(), &schema);
-        Require(open_rc == 0, "task Open failed: " + task->LastError());
-        Require(schema != nullptr && schema->num_fields() == 22 &&
-                    schema->field(0)->type()->Equals(arrow::uint64()) &&
-                    schema->field(2)->type()->Equals(arrow::uint64()) &&
-                    schema->field(4)->type()->Equals(arrow::boolean()) &&
-                    schema->field(21)->type()->Equals(arrow::utf8()),
-                "expected fixed 22-column result schema");
-        std::vector<flowsql::BlockTransformOutputV1> outputs;
-        uint64_t next_session_id = 1;
-        auto process = [&]() {
-            const int rc = task->ProcessBlock(input, 1000, &outputs);
-            Require(rc == static_cast<int>(flowsql::BlockTransformStatusV1::kContinue),
-                    "ProcessBlock failed: " + task->LastError());
-            const uint64_t rows = ValidateOutputs(outputs, schema, &next_session_id);
-            Require(rows == static_cast<uint64_t>(batch_rows), "result count differs from input count");
-            outputs.clear();  // Release Arrow output owners and their pending-output budget leases.
-            return rows;
-        };
-        process();  // Warm-up is excluded from the measurement and reported row counts.
-        uint64_t output_rows = 0;
-        const auto start = std::chrono::steady_clock::now();
-        for (int i = 0; i < iterations; ++i) output_rows += process();
-        const double wall_ms =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        operator_library = dlopen(FLOWSQL_NPM_BASIC_PLUGIN_PATH, RTLD_NOW | RTLD_LOCAL);
+        Require(operator_library != nullptr, "npm.basic library loading failed");
+        const auto version = reinterpret_cast<flowsql::CppOperatorPluginAbiVersionFn>(
+            dlsym(operator_library, flowsql::kCppOperatorPluginAbiVersionSymbol));
+        const auto count = reinterpret_cast<flowsql::CppOperatorPluginCountFn>(
+            dlsym(operator_library, flowsql::kCppOperatorPluginCountSymbol));
+        const auto describe = reinterpret_cast<flowsql::CppOperatorPluginDescribeV2Fn>(
+            dlsym(operator_library, flowsql::kCppOperatorPluginDescribeV2Symbol));
+        const auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityV2Fn>(
+            dlsym(operator_library, flowsql::kCppOperatorPluginCreateCapabilityV2Symbol));
+        destroy_capability = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityV2Fn>(
+            dlsym(operator_library, flowsql::kCppOperatorPluginDestroyCapabilityV2Symbol));
+        Require(version && count && describe && create && destroy_capability,
+                "npm.basic V2 plugin symbols missing");
+        Require(version() == flowsql::kCppOperatorPluginAbiVersionV2 && count() == 1,
+                "npm.basic plugin ABI mismatch");
+        flowsql::CppOperatorDescriptorV2 descriptor{};
+        descriptor.struct_size = flowsql::kCppOperatorDescriptorV2Size;
+        Require(describe(0, &descriptor) == 0 && descriptor.category != nullptr &&
+                    descriptor.name != nullptr && std::string_view(descriptor.category) == "npm" &&
+                    std::string_view(descriptor.name) == "basic",
+                "npm.basic operator descriptor mismatch");
+        provider = static_cast<flowsql::IBlockTransformOperatorV1*>(create(0, loader));
+        Require(provider != nullptr, "npm.basic capability creation failed");
         const uint64_t packets = static_cast<uint64_t>(batch_rows) * static_cast<uint64_t>(iterations);
-        Require(output_rows == packets, "total result count mismatch");
-        const int flush_rc = task->Flush(&outputs);
-        Require(flush_rc == 0, "EOF Flush failed: " + task->LastError());
-        Require(ValidateOutputs(outputs, schema, &next_session_id) == 0, "closed sessions survived until EOF");
-        outputs.clear();
-        schema.reset();
-        provider->ReleaseTask(task);
-        task = nullptr;
+        std::cout << "mode,packets,batch_rows,iterations,wall_ms,packets_per_second,output_rows\n";
+        const auto measure = [&](const char* mode, const char* with_params_json) {
+            flowsql::BlockTransformTaskConfigV1 config;
+            config.task_id = mode;
+            config.with_params_json = with_params_json;
+            config.pushed_filter_plan_json = R"({"version":1,"root":null})";
+            Require(provider->CreateTask(config, &task) == 0 && task != nullptr, "task creation failed");
+            std::shared_ptr<arrow::Schema> schema;
+            const int open_rc = task->Open(input->schema(), &schema);
+            Require(open_rc == 0, "task Open failed: " + task->LastError());
+            Require(schema != nullptr && schema->num_fields() == 22 &&
+                        schema->field(0)->type()->Equals(arrow::uint64()) &&
+                        schema->field(2)->type()->Equals(arrow::uint64()) &&
+                        schema->field(4)->type()->Equals(arrow::boolean()) &&
+                        schema->field(21)->type()->Equals(arrow::utf8()) &&
+                        schema->metadata() != nullptr &&
+                        schema->metadata()->Get("flowsql.entity").ValueOrDie() == "npm_basic_result",
+                    "expected fixed 22-column Basic result schema");
+            std::vector<flowsql::BlockTransformOutputV1> outputs;
+            uint64_t next_session_id = 1;
+            const auto process = [&]() {
+                const int rc = task->ProcessBlock(input, 1000, &outputs);
+                Require(rc == static_cast<int>(flowsql::BlockTransformStatusV1::kContinue),
+                        "ProcessBlock failed: " + task->LastError());
+                const uint64_t rows = ValidateOutputs(outputs, schema, &next_session_id);
+                Require(rows == static_cast<uint64_t>(batch_rows), "result count differs from input count");
+                outputs.clear();  // Release Arrow output owners and their pending-output budget leases.
+                return rows;
+            };
+            process();  // Each mode has its own warm-up and fresh task state.
+            uint64_t output_rows = 0;
+            const auto start = std::chrono::steady_clock::now();
+            for (int i = 0; i < iterations; ++i) output_rows += process();
+            const double wall_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            Require(output_rows == packets && wall_ms > 0.0, "invalid benchmark measurement");
+            const int flush_rc = task->Flush(&outputs);
+            Require(flush_rc == 0, "EOF Flush failed: " + task->LastError());
+            Require(ValidateOutputs(outputs, schema, &next_session_id) == 0, "closed sessions survived until EOF");
+            outputs.clear();
+            schema.reset();
+            provider->ReleaseTask(task);
+            task = nullptr;
+            std::cout << mode << ',' << packets << ',' << batch_rows << ',' << iterations << ',' << std::fixed
+                      << std::setprecision(3) << wall_ms << ',' << static_cast<double>(packets) * 1000.0 / wall_ms
+                      << ',' << output_rows << '\n';
+        };
+        measure("basic-only", R"({"input_namespace":"benchmark.packet","source_domains":"0:7"})");
+        measure("basic+session",
+                R"({"input_namespace":"benchmark.packet","source_domains":"0:7",)"
+                R"("features":"basic,session","observing":"basic"})");
+        destroy_capability(0, provider);
+        provider = nullptr;
+        dlclose(operator_library);
+        operator_library = nullptr;
         loader->StopAll();
         loader->Unload();
-        std::cout << "packets,batch_rows,iterations,wall_ms,packets_per_second,output_rows\n"
-                  << packets << ',' << batch_rows << ',' << iterations << ',' << std::fixed << std::setprecision(3)
-                  << wall_ms << ',' << static_cast<double>(packets) * 1000.0 / wall_ms << ',' << output_rows << '\n';
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "benchmark_npm_basic failed: " << error.what() << '\n';
@@ -169,6 +205,8 @@ int main(int argc, char* argv[]) {
             task->Cancel();
             provider->ReleaseTask(task);
         }
+        if (provider != nullptr && destroy_capability != nullptr) destroy_capability(0, provider);
+        if (operator_library != nullptr) dlclose(operator_library);
         loader->StopAll();
         loader->Unload();
         return 1;

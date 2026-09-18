@@ -167,6 +167,7 @@ class NpmSessionTable {
 /** Synchronously notifies every module in registration order for each owned ended-session snapshot. */
 int NotifyNpmSessionEnd(const std::vector<NpmSessionSnapshot>& ended_sessions,
                         const std::vector<INpmAnalysisModule*>& modules,
+                        int64_t observed_at_ns,
                         INpmResultWriter& writer);
 
 }  // namespace flowsql::npm
