@@ -56,6 +56,14 @@
             <span>Stream 通道</span>
             <el-tag size="small" effect="plain">{{ streamChannels.length }}</el-tag>
           </div>
+          <div
+            class="channel-type-item"
+            :class="{ active: activeChannelType === 'config' }"
+            @click="switchChannelType('config')"
+          >
+            <span>配置通道</span>
+            <el-tag size="small" effect="plain">{{ configChannelCount }}</el-tag>
+          </div>
         </div>
 
         <div class="channel-main">
@@ -100,7 +108,12 @@
             </el-table-column>
           </el-table>
 
-          <el-table v-else :data="filteredStreamChannels" style="width: 100%" v-loading="loadingStream">
+          <el-table
+            v-else-if="activeChannelType === 'stream'"
+            :data="filteredStreamChannels"
+            style="width: 100%"
+            v-loading="loadingStream"
+          >
             <el-table-column prop="type" label="类型" width="140" />
             <el-table-column prop="name" label="名称" min-width="220" />
             <el-table-column prop="role" label="角色" width="110">
@@ -150,6 +163,11 @@
               </template>
             </el-table-column>
           </el-table>
+          <ConfigChannels
+            v-else-if="activeChannelType === 'config'"
+            :search-text="searchText"
+            @count-change="configChannelCount = $event"
+          />
         </div>
       </div>
     </el-card>
@@ -470,6 +488,7 @@ import api, {
   pcapUploadErrorMessage
 } from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import ConfigChannels from './ConfigChannels.vue'
 
 const searchText = ref('')
 const activeChannelType = ref('dataframe')
@@ -481,6 +500,7 @@ const csvInput = ref(null)
 const dbChannels = ref([])
 const dfChannels = ref([])
 const streamChannels = ref([])
+const configChannelCount = ref(0)
 const streamDefinitions = ref([])
 const loadingDb = ref(false)
 const loadingDf = ref(false)
@@ -540,6 +560,7 @@ const filteredStreamChannels = computed(() => {
 const sectionTitle = computed(() => {
   if (activeChannelType.value === 'dataframe') return 'DataFrame 通道'
   if (activeChannelType.value === 'database') return '数据库通道'
+  if (activeChannelType.value === 'config') return '配置通道'
   return 'Stream 通道'
 })
 

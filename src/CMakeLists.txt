@@ -55,6 +55,7 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_packet_contract ${CMAKE_BINARY_D
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_npm_basic ${CMAKE_BINARY_DIR}/test_npm_basic)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_pcapfile_import ${CMAKE_BINARY_DIR}/test_pcapfile_import)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_framework ${CMAKE_BINARY_DIR}/test_framework)
+add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_config_channel ${CMAKE_BINARY_DIR}/test_config_channel)
 
 # Stage 2: C++ ↔ Python 桥接
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/bridge ${CMAKE_BINARY_DIR}/bridge)

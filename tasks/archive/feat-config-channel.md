@@ -1,6 +1,6 @@
 # Feature: 配置资源通道
 
-状态：`[-]` 进行中
+状态：`[x]` 已完成
 优先级：P1
 前置 Feature：`web-console`、`routing-services`（均已完成）
 
@@ -163,13 +163,13 @@ revision 不存在）、409（版本冲突）、413（内容超限）、503（Pr
 
 ## Feature Task
 
-- `[ ]` T1：交付独立配置快照接口、SQLite 不可变持久化和事务自动 revision，使精确引用在并发发布与进程重启后
+- `[x]` T1：交付独立配置快照接口、SQLite 不可变持久化和事务自动 revision，使精确引用在并发发布与进程重启后
   始终解析为同一内容。
-- `[ ]` T2：交付 JSON/YAML/XML 的有界安全校验及列表、发布、历史、预览/下载控制面，使非法内容、重复请求和
+- `[x]` T2：交付 JSON/YAML/XML 的有界安全校验及列表、发布、历史、预览/下载控制面，使非法内容、重复请求和
   版本冲突在提交前后都有明确且不损坏历史的结果。
-- `[ ]` T3：在通道管理页面交付配置通道列表、文件/编辑器发布、版本历史和精确引用复制，使用户无需接触服务器
+- `[x]` T3：在通道管理页面交付配置通道列表、文件/编辑器发布、版本历史和精确引用复制，使用户无需接触服务器
   目录或维护版本号即可管理配置。
-- `[ ]` T4：交付重启恢复、并发发布、不可变历史、精确快照消费和部署配置的端到端验收，使新版本发布不改变
+- `[x]` T4：交付重启恢复、并发发布、不可变历史、精确快照消费和部署配置的端到端验收，使新版本发布不改变
   已绑定任务并确保现有三类通道无回归。
 
 ## 测试锚点
@@ -195,4 +195,23 @@ revision 不存在）、409（版本冲突）、413（内容超限）、503（Pr
 
 ## 完成证据
 
-待实施。
+- T1：独立 Config Provider 插件已通过版本化 IID 提供精确快照；SQLite 原文、SHA-256、系统 revision 与
+  current 指针同事务提交。`test_config_channel` 定向覆盖幂等、冲突、失败回滚、历史恢复、跨连接并发、
+  重启解析和真实 `.so` 加载/损坏数据库启动失败；本任务的定向 CTest 通过（1/1）。
+- T2：Provider 在事务前校验 512 KiB、UTF-8、64 层及 JSON/YAML/XML 安全边界；四个 Config 控制路由与
+  Web 双入口代理提供稳定分页、幂等发布、冲突及精确 Base64 读取，并保留 400/404/409/413/503/500。
+  Config/Web 定向 CTest 通过（2/2），Router 真实 HTTP 状态回归通过。
+- T3：通道管理新增独立“配置通道”类别，交付元数据列表/分页搜索、创建、文件或编辑器发布、current 预览、
+  精确引用复制、不可变历史预览/下载及基于历史创建新版本。revision 始终只读，发布携带 current
+  `expected_current_revision`，历史恢复另带 `base_revision`；409 保留草稿且不自动覆盖，预览使用纯文本渲染，
+  文件与 Resolve 内容均按严格 UTF-8 解码并保留 BOM。Config API 测试 2/2、工具及真实 Vue 状态流测试 9/9、
+  全部前端测试文件 4/4 通过；Vite 生产构建、`flowsql_web`/上传契约目标构建和定向 CTest（1/1）通过，部署静态
+  文件与最新 `dist` 逐文件一致。
+- T4：新增真实 Web→Gateway→Router→Config HTTP E2E，覆盖两个独立客户端基于同一 current 的并发发布（一个
+  200、一个 409）、幂等、非法重复键、512 KiB/1 MiB 边界、JSON/YAML/XML、历史恢复、精确引用错误和分页；
+  seed/recover 两个独立进程共享 SQLite，逐字比较 list/history/resolve 响应并验证旧任务快照在新发布及 Provider
+  卸载后仍保持不变、1000 次事件不 Resolve。`test_config_channel_e2e` 定向 CTest 1/1，完整 CMake 构建通过，
+  完整 CTest 15/15；原生与 Docker 部署契约定向测试 2/2，验证 Config Provider 位于 pcapfile 后、Scheduler 前并
+  使用持久元数据库路径。配置使用独立 `IID_CONFIG_CHANNEL_REGISTRY_V1`，与普通 `IChannelRegistry` ABI 分离；
+  既有 DataFrame/Stream/Block Stream 框架回归及 Web/PCAP/Scheduler 回归全部通过。前端测试 4/4、Vite 生产构建
+  通过，README 已记录原生/Docker 持久路径与非秘密资源边界。

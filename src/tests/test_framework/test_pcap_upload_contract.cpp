@@ -3,6 +3,7 @@
 
 #include <services/web/pcap_upload_transaction.hpp>
 #include <services/web/web_plugin.h>
+#include <common/error_code.h>
 
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -14,6 +15,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -26,6 +28,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -1271,6 +1274,101 @@ void TestWebPcapStreamQueryRedaction() {
     scheduler_thread.join();
 }
 
+void TestWebConfigControlProxy() {
+    constexpr std::array<const char*, 4> operations = {"list", "publish", "history", "resolve"};
+    std::atomic<int> scheduler_calls{0};
+    std::atomic<int> scheduler_status{200};
+    httplib::Server scheduler;
+    for (const char* operation : operations) {
+        scheduler.Post(std::string("/channels/config/") + operation,
+                       [&](const httplib::Request& req, httplib::Response& res) {
+                           ++scheduler_calls;
+                           assert(req.body == R"({"cursor":""})" ||
+                                  req.body.find("content_base64") != std::string::npos);
+                           res.status = scheduler_status;
+                           res.set_content(R"({"error":"backend result"})", "application/json");
+                       });
+    }
+    const int scheduler_port = scheduler.bind_to_any_port("127.0.0.1");
+    assert(scheduler_port > 0);
+    std::thread scheduler_thread([&]() { assert(scheduler.listen_after_bind()); });
+    scheduler.wait_until_ready();
+
+    TempDirectory temp;
+    const int web_port = ReserveLoopbackPort();
+    WebPlugin web;
+    const std::string options = "host=127.0.0.1;port=" + std::to_string(web_port) +
+                                ";db_path=:memory:;upload_dir=" + (temp.path() / "uploads").string() +
+                                ";gateway=127.0.0.1:" + std::to_string(scheduler_port);
+    assert(web.Option(options.c_str()) == 0);
+    assert(web.Start() == 0);
+    WaitForHttpServer(web_port);
+
+    std::array<flowsql::fnRouterHandler, 4> routed;
+    web.EnumRoutes([&](const flowsql::RouteItem& route) {
+        for (size_t i = 0; i < operations.size(); ++i) {
+            if (route.method == "POST" && route.uri == std::string("/api/channels/config/") + operations[i]) {
+                routed[i] = route.handler;
+            }
+        }
+    });
+    httplib::Client client("127.0.0.1", web_port);
+    const std::string publish = R"({"content_base64":"e30="})";
+    for (size_t i = 0; i < operations.size(); ++i) {
+        assert(static_cast<bool>(routed[i]));
+        const std::string uri = std::string("/api/channels/config/") + operations[i];
+        const std::string request = i == 1 ? publish : R"({"cursor":""})";
+        const auto http = client.Post(uri, request, "application/json");
+        assert(http && http->status == 200 && http->body == R"({"error":"backend result"})");
+        std::string response;
+        assert(routed[i](uri, request, response) == flowsql::error::OK);
+        assert(response == http->body);
+    }
+
+    for (const auto& [status, code] : {
+             std::pair{400, flowsql::error::BAD_REQUEST}, std::pair{404, flowsql::error::NOT_FOUND},
+             std::pair{409, flowsql::error::CONFLICT}, std::pair{413, flowsql::error::PAYLOAD_TOO_LARGE},
+             std::pair{503, flowsql::error::UNAVAILABLE}, std::pair{500, flowsql::error::INTERNAL_ERROR}}) {
+        scheduler_status = status;
+        const auto http = client.Post("/api/channels/config/list", R"({"cursor":""})", "application/json");
+        assert(http && http->status == status && http->body == R"({"error":"backend result"})");
+        std::string response;
+        assert(routed[0]("/api/channels/config/list", R"({"cursor":""})", response) == code);
+        assert(response == http->body);
+    }
+
+    const int calls_before_invalid = scheduler_calls;
+    const std::string deep_json = std::string(R"({"content_base64":"e30=","nested":)") +
+                                  std::string(65, '[') + "0" + std::string(65, ']') + "}";
+    for (const auto& [request, code, status] : {
+             std::tuple<std::string, int32_t, int>{R"({"content_base64":"Zg="})", flowsql::error::BAD_REQUEST, 400},
+             std::tuple<std::string, int32_t, int>{R"({"content_base64":"/w=="})", flowsql::error::BAD_REQUEST, 400},
+             std::tuple<std::string, int32_t, int>{std::string(R"({"content_base64":")") +
+                                                     std::string(699052, 'A') + R"("})",
+                                                 flowsql::error::PAYLOAD_TOO_LARGE, 413},
+             std::tuple<std::string, int32_t, int>{std::string(R"({"content_base64":")") +
+                                                     std::string(699056, 'Y') + R"("})",
+                                                 flowsql::error::PAYLOAD_TOO_LARGE, 413},
+             std::tuple<std::string, int32_t, int>{std::string(1024 * 1024 + 1, ' '),
+                                                 flowsql::error::PAYLOAD_TOO_LARGE, 413},
+             std::tuple<std::string, int32_t, int>{deep_json, flowsql::error::BAD_REQUEST, 400}}) {
+        const auto http = client.Post("/api/channels/config/publish", request, "application/json");
+        assert(http && http->status == status && http->body.find("error") != std::string::npos);
+        std::string response;
+        assert(routed[1]("/api/channels/config/publish", request, response) == code);
+        assert(response.find("error") != std::string::npos);
+    }
+    assert(scheduler_calls == calls_before_invalid);
+    scheduler.stop();
+    scheduler_thread.join();
+    const auto unavailable = client.Post("/api/channels/config/list", R"({"cursor":""})", "application/json");
+    assert(unavailable && unavailable->status == 503);
+    std::string response;
+    assert(routed[0]("/api/channels/config/list", R"({"cursor":""})", response) == flowsql::error::UNAVAILABLE);
+    assert(response.find("error") != std::string::npos);
+    assert(web.Stop() == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -1290,6 +1388,7 @@ int main() {
     TestWebPcapMultipartUpload();
     TestWebPcapManagedDeleteFailures();
     TestWebPcapStreamQueryRedaction();
+    TestWebConfigControlProxy();
     std::puts("[PASS] pcap upload contract");
     return 0;
 }

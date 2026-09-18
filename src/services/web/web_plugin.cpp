@@ -64,6 +64,10 @@ int WebPlugin::Option(const char* arg) {
 }
 
 int WebPlugin::Load(IQuerier* /* querier */) {
+    server_.SetWorkerAddress(worker_host_, worker_port_);
+    server_.SetSchedulerAddress(gateway_host_, gateway_port_);
+    server_.SetUploadDir(upload_dir_);
+    server_.SetPcapUploadMaxBytes(pcap_upload_max_bytes_);
     printf("WebPlugin::Load: host=%s, port=%d, db=%s\n", host_.c_str(), port_, db_path_.c_str());
     return 0;
 }

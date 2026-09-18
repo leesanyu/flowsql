@@ -21,6 +21,7 @@
 #include <sys/types.h>
 
 #include <common/error_code.h>
+#include <common/json_depth.hpp>
 #include <common/log.h>
 #include <services/web/pcap_upload_transaction.hpp>
 
@@ -30,6 +31,151 @@ namespace web {
 namespace {
 
 constexpr size_t kMaxPcapUploadFieldBytes = 4096;
+constexpr size_t kMaxConfigRequestBytes = 1024 * 1024;
+constexpr size_t kMaxConfigContentBytes = 512 * 1024;
+constexpr size_t kMaxConfigBase64Bytes = ((kMaxConfigContentBytes + 2) / 3) * 4;
+
+std::string ConfigError(const char* detail) {
+    return std::string(R"({"error":")") + detail + R"("})";
+}
+
+bool ConfigUtf8(const std::string& content) {
+    for (size_t i = 0; i < content.size();) {
+        const auto first = static_cast<unsigned char>(content[i]);
+        if (first < 0x80) {
+            ++i;
+            continue;
+        }
+        const size_t width = first >= 0xc2 && first <= 0xdf ? 2 :
+                             first >= 0xe0 && first <= 0xef ? 3 :
+                             first >= 0xf0 && first <= 0xf4 ? 4 : 0;
+        if (!width || width > content.size() - i) return false;
+        const auto second = static_cast<unsigned char>(content[i + 1]);
+        if (second < 0x80 || second > 0xbf ||
+            (first == 0xe0 && second < 0xa0) || (first == 0xed && second > 0x9f) ||
+            (first == 0xf0 && second < 0x90) || (first == 0xf4 && second > 0x8f)) return false;
+        for (size_t j = 2; j < width; ++j) {
+            const auto next = static_cast<unsigned char>(content[i + j]);
+            if (next < 0x80 || next > 0xbf) return false;
+        }
+        i += width;
+    }
+    return true;
+}
+
+int ConfigBase64Value(char value) {
+    if (value >= 'A' && value <= 'Z') return value - 'A';
+    if (value >= 'a' && value <= 'z') return value - 'a' + 26;
+    if (value >= '0' && value <= '9') return value - '0' + 52;
+    if (value == '+') return 62;
+    if (value == '/') return 63;
+    return -1;
+}
+
+int32_t CheckConfigPublish(const std::string& request, std::string* response) {
+    if (!JsonNestingWithin(request, 64)) {
+        *response = ConfigError("publish JSON nesting depth exceeds 64");
+        return error::BAD_REQUEST;
+    }
+    rapidjson::Document document;
+    document.Parse<rapidjson::kParseValidateEncodingFlag>(request.data(), request.size());
+    if (document.HasParseError() || !document.IsObject()) {
+        *response = ConfigError("invalid publish JSON");
+        return error::BAD_REQUEST;
+    }
+    const rapidjson::Value* value = nullptr;
+    for (auto field = document.MemberBegin(); field != document.MemberEnd(); ++field) {
+        if (std::string(field->name.GetString(), field->name.GetStringLength()) != "content_base64") continue;
+        if (value || !field->value.IsString()) {
+            *response = ConfigError("invalid content_base64");
+            return error::BAD_REQUEST;
+        }
+        value = &field->value;
+    }
+    if (!value) {
+        *response = ConfigError("missing content_base64");
+        return error::BAD_REQUEST;
+    }
+    const std::string encoded(value->GetString(), value->GetStringLength());
+    if (encoded.size() > kMaxConfigBase64Bytes) {
+        *response = ConfigError("content exceeds 512 KiB");
+        return error::PAYLOAD_TOO_LARGE;
+    }
+    if (encoded.size() % 4 != 0) {
+        *response = ConfigError("invalid Base64 content");
+        return error::BAD_REQUEST;
+    }
+    std::string decoded;
+    decoded.reserve((encoded.size() / 4) * 3);
+    for (size_t i = 0; i < encoded.size(); i += 4) {
+        const int a = ConfigBase64Value(encoded[i]);
+        const int b = ConfigBase64Value(encoded[i + 1]);
+        const bool pad3 = encoded[i + 2] == '=';
+        const bool pad4 = encoded[i + 3] == '=';
+        const int c = pad3 ? 0 : ConfigBase64Value(encoded[i + 2]);
+        const int d = pad4 ? 0 : ConfigBase64Value(encoded[i + 3]);
+        if (a < 0 || b < 0 || c < 0 || d < 0 || (pad3 && !pad4) ||
+            ((pad3 || pad4) && i + 4 != encoded.size()) ||
+            (pad3 && (b & 0x0f) != 0) || (pad4 && !pad3 && (c & 0x03) != 0)) {
+            *response = ConfigError("invalid Base64 content");
+            return error::BAD_REQUEST;
+        }
+        decoded.push_back(static_cast<char>((a << 2) | (b >> 4)));
+        if (!pad3) decoded.push_back(static_cast<char>((b << 4) | (c >> 2)));
+        if (!pad4) decoded.push_back(static_cast<char>((c << 6) | d));
+    }
+    if (decoded.size() > kMaxConfigContentBytes) {
+        *response = ConfigError("content exceeds 512 KiB");
+        return error::PAYLOAD_TOO_LARGE;
+    }
+    if (!ConfigUtf8(decoded)) {
+        *response = ConfigError("invalid UTF-8 content");
+        return error::BAD_REQUEST;
+    }
+    return error::OK;
+}
+
+int32_t ProxyConfigPost(const std::string& host, int port, const std::string& path,
+                        const std::string& request, std::string* response) {
+    if (request.size() > kMaxConfigRequestBytes) {
+        *response = ConfigError("control request exceeds 1 MiB");
+        return error::PAYLOAD_TOO_LARGE;
+    }
+    if (path == "/channels/config/publish") {
+        const int32_t rc = CheckConfigPublish(request, response);
+        if (rc != error::OK) return rc;
+    }
+    httplib::Client client(host, port);
+    client.set_connection_timeout(5);
+    client.set_read_timeout(10);
+    const auto result = client.Post(path.c_str(), request, "application/json");
+    if (!result) {
+        *response = ConfigError("gateway unreachable");
+        return error::UNAVAILABLE;
+    }
+    *response = result->body;
+    switch (result->status) {
+        case 200: return error::OK;
+        case 400: return error::BAD_REQUEST;
+        case 404: return error::NOT_FOUND;
+        case 409: return error::CONFLICT;
+        case 413: return error::PAYLOAD_TOO_LARGE;
+        case 503: return error::UNAVAILABLE;
+        default: return error::INTERNAL_ERROR;
+    }
+}
+
+int ConfigHttpStatus(int32_t code) {
+    switch (code) {
+        case error::OK: return 200;
+        case error::BAD_REQUEST: return 400;
+        case error::NOT_FOUND: return 404;
+        case error::CONFLICT: return 409;
+        case error::PAYLOAD_TOO_LARGE: return 413;
+        case error::UNAVAILABLE: return 503;
+        default: return 500;
+    }
+}
 
 enum class PcapMultipartPart {
     kNone,
@@ -555,6 +701,15 @@ int WebServer::Init(const std::string& db_path) {
     server_.Post("/api/channels/database/preview", [db_proxy](const httplib::Request& req, httplib::Response& res) {
         db_proxy("/channels/database/preview", req.body, res);
     });
+    for (const char* operation : {"list", "publish", "history", "resolve"}) {
+        const std::string target = std::string("/channels/config/") + operation;
+        server_.Post(std::string("/api") + target, [this, target](const httplib::Request& req, httplib::Response& res) {
+            std::string response;
+            const int32_t code = ProxyConfigPost(scheduler_host_, scheduler_port_, target, req.body, &response);
+            res.status = ConfigHttpStatus(code);
+            res.set_content(response, "application/json");
+        });
+    }
     // dataframe 管理（转发给 CatalogPlugin，经由 Gateway）
     server_.Get("/api/channels/dataframe", [this](const httplib::Request&, httplib::Response& res) {
         httplib::Client client(scheduler_host_, scheduler_port_);
@@ -929,6 +1084,13 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
         [proxy](const std::string&, const std::string& req, std::string& rsp) {
             return proxy("/channels/database/preview", req, rsp);
         }});
+    for (const char* operation : {"list", "publish", "history", "resolve"}) {
+        const std::string target = std::string("/channels/config/") + operation;
+        cb({"POST", "/api" + target,
+            [this, target](const std::string&, const std::string& req, std::string& rsp) {
+                return ProxyConfigPost(scheduler_host_, scheduler_port_, target, req, &rsp);
+            }});
+    }
     cb({"POST", "/api/channels/dataframe/preview",
         [this](const std::string&, const std::string& req, std::string& rsp) -> int32_t {
             httplib::Client client(scheduler_host_, scheduler_port_);

@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "router_agency_plugin.h"
 
@@ -213,6 +208,7 @@ int RouterAgencyPlugin::HttpStatus(int32_t rc) {
         case error::BAD_REQUEST:    return 400;
         case error::NOT_FOUND:      return 404;
         case error::CONFLICT:       return 409;
+        case error::PAYLOAD_TOO_LARGE: return 413;
         case error::UNAVAILABLE:    return 503;
         case error::INTERNAL_ERROR: return 500;
         default:                    return (rc >= 0) ? 200 : 500;

@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { createConfigChannelApi } from './configChannel.js'
 
 const api = axios.create({
   baseURL: 'http://localhost:8081',  // WebPlugin 对外端口，统一入口
@@ -92,6 +93,7 @@ export const formatPreviewCell = (value) => {
 }
 
 export default {
+  ...createConfigChannelApi(api),
   // WebPlugin 直接处理的路由
   health: () => api.get('/api/health'),
   getChannels: () => api.get('/api/channels/list').then((res) => ({

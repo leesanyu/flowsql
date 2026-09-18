@@ -31,6 +31,8 @@ services:
         option: '{"ldfile":"./config/protocols.yml"}'
       - name: libflowsql_pcapfile.so
         option: "db_path=./meta/flowsql_meta.db"
+      - name: libflowsql_config_channel.so
+        option: "db_path=./meta/flowsql_meta.db"
       - libflowsql_scheduler.so
       - libflowsql_bridge.so
       - libflowsql_builtin.so

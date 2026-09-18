@@ -34,6 +34,8 @@
 #include <framework/core/sql_parser.h>
 #include <framework/core/sql_text_splitter.h>
 #include <framework/interfaces/ichannel.h>
+#include <framework/interfaces/ichannel_registry.h>
+#include <framework/interfaces/iconfig_channel_registry.h>
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_operator.h>
 #include <framework/interfaces/iblock_stream_reader.h>
@@ -67,6 +69,7 @@ void test_filter_pushdown_split();
 void test_filter_pushdown_negotiation();
 void test_statement_stage_filters();
 void test_offline_filter_public_contracts();
+void test_config_channel_public_contract();
 void test_offline_filter_reader_factory_contracts();
 void test_stage_filter_interfaces();
 void test_filter_task_session_isolation();
@@ -4293,6 +4296,40 @@ void test_json_error_builder() {
 }
 
 // ============================================================
+// Config channel public snapshot contract
+// ============================================================
+void test_config_channel_public_contract() {
+    printf("[TEST] config channel public snapshot contract...\n");
+
+    using ResolveMethod = int (IConfigChannelRegistryV1::*)(const char*, ConfigChannelSnapshot*, std::string*);
+    static_assert(std::is_same_v<decltype(&IConfigChannelRegistryV1::Resolve), ResolveMethod>);
+    static_assert(std::is_same_v<decltype(ConfigChannelSnapshot{}.content), std::shared_ptr<const std::string>>);
+    assert(sizeof(IID_CONFIG_CHANNEL_REGISTRY_V1) == sizeof(Guid));
+    assert(memcmp(&IID_CONFIG_CHANNEL_REGISTRY_V1, &IID_CHANNEL_REGISTRY, sizeof(Guid)) != 0);
+
+    ConfigChannelSnapshot held;
+    {
+        ConfigChannelSnapshot resolved;
+        resolved.channel_name = "rules";
+        resolved.revision = 7;
+        resolved.format = "json";
+        resolved.schema_id = "rules-v1";
+        resolved.sha256_hex = "0123456789abcdef";
+        resolved.content_bytes = 2;
+        resolved.created_at_unix_ms = 123;
+        resolved.content = std::make_shared<const std::string>("{}");
+        held = resolved;
+    }
+    assert(held.channel_name == "rules" && held.revision == 7);
+    assert(held.format == "json" && held.schema_id == "rules-v1");
+    assert(held.sha256_hex == "0123456789abcdef" && held.content_bytes == 2);
+    assert(held.created_at_unix_ms == 123);
+    assert(held.content && *held.content == "{}");
+
+    printf("[PASS] config channel public snapshot contract\n");
+}
+
+// ============================================================
 // main
 // ============================================================
 int main(int argc, char* argv[]) {
@@ -4318,6 +4355,7 @@ int main(int argc, char* argv[]) {
     test_filter_pushdown_negotiation();
     test_statement_stage_filters();
     test_offline_filter_public_contracts();
+    test_config_channel_public_contract();
     test_offline_filter_reader_factory_contracts();
     test_stage_filter_interfaces();
     test_filter_task_session_isolation();

@@ -106,6 +106,18 @@ volume，不写入容器临时层。迁移或备份 Docker 部署时应把该 na
 没有配置 `db_path` 的嵌入式或测试实例仍使用易失模式；这种模式下通道不会跨进程重启恢复，不建议用于正式
 部署。
 
+### 配置资源通道持久化
+
+正式部署中的 `libflowsql_config_channel.so` 在 Scheduler 进程内提供配置资源通道，并通过 SQLite 永久保存
+JSON、YAML、XML 原文及其不可变 revision。消费者只使用 `config.<name>@<revision>` 精确引用；发布新版本或
+重启 Scheduler 不会改变旧引用对应的格式、Schema、摘要和内容。配置资源按普通非秘密控制面数据处理，不应
+用于保存密码、私钥或证书。
+
+单进程和 Guardian 配置使用 `db_path=./meta/flowsql_meta.db`；相对路径以 FlowSQL 运行目录为基准，使用
+`start.sh` 时实际位于 `build/output/meta/flowsql_meta.db`。Docker 配置使用
+`/opt/flowsql/uploads/.meta/flowsql_meta.db`，该路径由 Scheduler 的 `pcap-uploads` named volume 覆盖。
+备份、迁移或清理部署时必须保留这个 SQLite 文件，才能在重启后恢复 current 指针和全部历史 revision。
+
 ### 前端构建
 
 ```bash

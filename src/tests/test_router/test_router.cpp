@@ -1,20 +1,21 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 // test_router.cpp — RouterAgencyPlugin + RouteTable + Gateway 路由测试
 // 覆盖：路由收集、冲突检测、前缀提取、Trie 匹配、过期清理、错误码映射
 
 #include <cassert>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <common/error_code.h>
 #include <framework/interfaces/irouter_handle.h>
@@ -51,6 +52,21 @@ using namespace flowsql::gateway;
     static void name()
 
 static std::vector<std::pair<std::string, void(*)()>> tests;
+
+static int ReserveLoopbackPort() {
+    const int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+    assert(socket_fd >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    assert(bind(socket_fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0);
+    socklen_t address_size = sizeof(address);
+    assert(getsockname(socket_fd, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+    const int port = ntohs(address.sin_port);
+    close(socket_fd);
+    return port;
+}
 
 // ============================================================
 // T1: Trie 基本注册与匹配
@@ -281,7 +297,40 @@ TEST(error_code_values) {
     ASSERT_EQ(error::CONFLICT,      -3);
     ASSERT_EQ(error::INTERNAL_ERROR,-4);
     ASSERT_EQ(error::UNAVAILABLE,   -5);
+    ASSERT_EQ(error::PAYLOAD_TOO_LARGE, -6);
     printf("[PASS] error_code_values\n");
+}
+
+TEST(http_error_status_mapping) {
+    std::atomic<int32_t> code{error::OK};
+    MockRouterHandle handle({
+        {"POST", "/status", [&](auto&, auto&, std::string& response) {
+             response = R"({"error":"mapped"})";
+             return code.load();
+         }},
+    });
+    MockQuerier querier;
+    querier.AddHandle(&handle);
+    const int port = ReserveLoopbackPort();
+    router::RouterAgencyPlugin plugin;
+    const std::string options = "host=127.0.0.1;port=" + std::to_string(port);
+    ASSERT_EQ(plugin.Option(options.c_str()), 0);
+    ASSERT_EQ(plugin.Load(&querier), 0);
+    ASSERT_EQ(plugin.Start(), 0);
+    httplib::Client client("127.0.0.1", port);
+    for (const auto& [business_code, http_status] : {
+             std::pair{error::OK, 200}, std::pair{error::BAD_REQUEST, 400},
+             std::pair{error::NOT_FOUND, 404}, std::pair{error::CONFLICT, 409},
+             std::pair{error::PAYLOAD_TOO_LARGE, 413}, std::pair{error::INTERNAL_ERROR, 500},
+             std::pair{error::UNAVAILABLE, 503}}) {
+        code = business_code;
+        const auto result = client.Post("/status", "{}", "application/json");
+        ASSERT_TRUE(result);
+        ASSERT_EQ(result->status, http_status);
+        ASSERT_EQ(result->body, R"({"error":"mapped"})");
+    }
+    ASSERT_EQ(plugin.Stop(), 0);
+    printf("[PASS] http_error_status_mapping\n");
 }
 
 // ============================================================

@@ -15,12 +15,14 @@ namespace {
 constexpr const char* kUploadRoot = "./uploads";
 constexpr const char* kNpiPlugin = "libflowsql_npi.so";
 constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
+constexpr const char* kConfigChannelPlugin = "libflowsql_config_channel.so";
 constexpr const char* kNpmBasicPlugin = "libflowsql_npm_basic.so";
 constexpr const char* kSchedulerPlugin = "libflowsql_scheduler.so";
 constexpr const char* kCatalogPlugin = "libflowsql_catalog.so";
 constexpr const char* kBinAddonPlugin = "libflowsql_binaddon.so";
 constexpr const char* kNpiOption = "{\"ldfile\":\"./config/protocols.yml\"}";
 constexpr const char* kPcapFileOption = "db_path=./meta/flowsql_meta.db";
+constexpr const char* kConfigChannelOption = "db_path=./meta/flowsql_meta.db";
 constexpr const char* kCatalogOption = "data_dir=./dataframes;operator_db_path=./meta/flowsql_meta.db";
 constexpr const char* kBinAddonOption = "operator_db_path=./meta/flowsql_meta.db;upload_dir=./uploads/binaddon";
 
@@ -67,6 +69,15 @@ bool ExpectSchedulerRuntime(const flowsql::gateway::ServiceConfig& service, cons
                     deployment + " pcapfile must persist in the runtime meta database") &&
              ok;
     }
+    const std::string* config_channel = FindPlugin(service, kConfigChannelPlugin);
+    ok = Expect(config_channel != nullptr,
+                deployment + " Scheduler process must load the Config Channel provider") &&
+         ok;
+    if (config_channel) {
+        ok = Expect(PluginOption(*config_channel) == kConfigChannelOption,
+                    deployment + " Config Channel must persist in the runtime meta database") &&
+             ok;
+    }
     const std::string* npm_basic = FindPlugin(service, kNpmBasicPlugin);
     ok = Expect(npm_basic == nullptr, deployment + " must not statically load the npm.basic operator plugin") && ok;
     const std::string* catalog = FindPlugin(service, kCatalogPlugin);
@@ -92,12 +103,14 @@ bool ExpectSchedulerRuntime(const flowsql::gateway::ServiceConfig& service, cons
     };
     const size_t npi_index = plugin_index(kNpiPlugin);
     const size_t pcapfile_index = plugin_index(kPcapFilePlugin);
+    const size_t config_channel_index = plugin_index(kConfigChannelPlugin);
     const size_t scheduler_index = plugin_index(kSchedulerPlugin);
     const size_t catalog_index = plugin_index(kCatalogPlugin);
     const size_t binaddon_index = plugin_index(kBinAddonPlugin);
-    ok = Expect(npi_index < pcapfile_index && pcapfile_index < scheduler_index && scheduler_index < catalog_index &&
+    ok = Expect(npi_index < pcapfile_index && pcapfile_index < config_channel_index &&
+                    config_channel_index < scheduler_index && scheduler_index < catalog_index &&
                     catalog_index < binaddon_index && binaddon_index < service.plugins.size(),
-                deployment + " must start NPI before BinAddon recovery and publish Catalog before BinAddon") &&
+                deployment + " must register Config Channel before Scheduler and publish Catalog before BinAddon") &&
          ok;
     return ok;
 }
@@ -194,6 +207,9 @@ bool TestStartScriptRuntimeLayout() {
          ok;
     ok = Expect(std::filesystem::is_regular_file(runtime_root / kNpmBasicPlugin),
                 "start.sh runtime must contain the npm.basic provider") &&
+         ok;
+    ok = Expect(std::filesystem::is_regular_file(runtime_root / kConfigChannelPlugin),
+                "start.sh runtime must contain the Config Channel provider") &&
          ok;
     return ok;
 }
