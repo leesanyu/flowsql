@@ -12,7 +12,7 @@
 自己的本地配置目录，也不会因后续发布新版本而改变已绑定任务的配置。
 
 配置资源是体积有界、低频变更的控制面数据；独立 Config Channel Provider 在 Scheduler 进程持久化并通过
-版本化 IID 暴露快照，不复用普通 DataFrame/Stream 数据通道。`npm.basic`、Application Scope 等消费者的
+版本化 IID 暴露快照，不复用普通 DataFrame/Stream 数据通道。`npm.basic`、流量标签化等消费者的
 参数绑定和业务解释由各自 Feature 完成。
 
 ## Non-Goals
@@ -22,7 +22,7 @@
 - 不实现用户自定义 revision、`latest` 持久任务引用、可变别名、语义版本标签或版本审批流。
 - 不实现多人协同草稿、自动保存计数、文本差异合并、运行中任务热更新或内容变更通知。
 - 不实现通道重命名、历史 revision 覆盖/物理删除、保留策略、垃圾回收或跨集群复制。
-- 不定义 Application Scope 等具体业务 Schema，不替消费者校验 CIDR、端口或领域规则冲突。
+- 不定义流量标签化等具体业务 Schema，不替消费者校验 CIDR、VLAN、端口或领域规则冲突。
 
 ## 核心契约
 

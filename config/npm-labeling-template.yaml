@@ -1,0 +1,274 @@
+# NPM traffic-labeling design template.
+#
+# The npm-labeling runtime does not consume this schema yet. A Config Channel owns
+# each immutable revision; npm.basic binds it as config.<name>@<revision>.
+# One bidirectional session receives zero or one primary label. npm.basic first
+# looks up the base session key; only unique new-session admission candidates enter
+# a bounded ACL batch. Existing sessions reuse their stored label, including 0.
+# DPDK ACL category 0 returns the highest-priority matching rule; userdata is label_id.
+
+api_version: flowsql.io/npm-labeling/v1alpha1
+kind: NpmLabelingSet
+status: design-template
+
+metadata:
+  name: corp-primary-labels
+  display_name: Corporate primary traffic labels
+  description: Replace all example values before publishing.
+
+spec:
+  entity:
+    kind: session
+    label_cardinality: zero_or_one
+    rule_direction: bidirectional
+    no_match_label_id: 0
+    decision_time: on_session_admission
+    classification_scope: unique_new_session_candidate
+    classification_batch: admission_window
+    session_partition_key_includes_primary_label: false
+    primary_label_is_immutable_for_session: true
+    existing_session_reuses_primary_label: true
+    tuple_reuse_reclassifies: true
+    admission_window:
+      max_candidates: 256
+      max_wait_ns: 1000000
+
+  engine:
+    type: dpdk-acl
+    categories: 1                       # Fixed by the product; category_mask is always 1.
+    algorithm: default                  # default, scalar, sse, avx2, neon, altivec,
+                                        # avx512x16, avx512x32, or rvv.
+    numa_socket_id: any
+    max_runtime_bytes: 67108864         # Maps to rte_acl_config.max_size; also task-budget bounded.
+    limits:
+      max_labels: 10000
+      max_logical_rules: 50000
+      max_compiled_rules: 100000
+      max_expanded_fields: 64           # RTE_ACL_MAX_FIELDS.
+      reject_duplicate_label_priorities: true
+
+  # Labeling V1 consumes only typed L2-L4 facts and does not invoke NPI. The
+  # existing npm.basic NPI sampler runs after session admission. Protocol is an
+  # objective standard dimension from NPI; label is a network-defined dimension
+  # from this rule set. Both coexist in the session as separate fields with
+  # independent ownership and lifecycle semantics.
+
+  configuration_identity:
+    revision_owner: config-channel
+    expected_reference: config.corp-primary-labels@7
+    content_digest_algorithm: sha256
+    max_snapshot_bytes: 8388608          # Planned T1.1 contract; current channel limit is 512 KiB.
+
+  # Fields select typed facts, never raw packet or C++ memory offsets. The compiler
+  # generates field_index, input_index, offsets, four-byte grouping, padding, and
+  # hidden presence fields. acl_parts contain only DPDK-supported widths: 1/2/4/8.
+  # Reusing one source with different IDs/types exposes all native ACL operations.
+  tuple:
+    schema_id: npm-session-l2-l4-v1
+    byte_order: network
+    dpdk_field_contract:
+      types: [mask, range, bitmask]
+      sizes_bytes_by_type:
+        mask: [1, 2, 4, 8]
+        range: [1, 2, 4, 8]
+        bitmask: [1, 2, 4, 8]
+    field_definitions:
+      - id: observation_domain
+        source: observation.domain_id
+        type: range
+        logical_width_bytes: 8
+        acl_parts: [8]
+
+      - id: ip_family
+        source: network.ip_family
+        type: bitmask
+        logical_width_bytes: 1
+        acl_parts: [1]
+
+      - id: source_mac_prefix
+        source: link.source_mac
+        type: mask
+        logical_width_bytes: 6
+        acl_parts: [2, 4]
+
+      - id: destination_mac_prefix
+        source: link.destination_mac
+        type: mask
+        logical_width_bytes: 6
+        acl_parts: [2, 4]
+
+      - id: outer_vlan_tpid
+        source: link.vlan[0].tpid
+        type: bitmask
+        logical_width_bytes: 2
+        acl_parts: [2]
+
+      - id: outer_vlan_vid
+        source: link.vlan[0].vid
+        type: range
+        logical_width_bytes: 2
+        acl_parts: [2]
+
+      - id: inner_vlan_tpid
+        source: link.vlan[1].tpid
+        type: bitmask
+        logical_width_bytes: 2
+        acl_parts: [2]
+
+      - id: inner_vlan_vid
+        source: link.vlan[1].vid
+        type: range
+        logical_width_bytes: 2
+        acl_parts: [2]
+
+      - id: source_ipv4_prefix
+        source: network.source_ipv4
+        type: mask
+        logical_width_bytes: 4
+        acl_parts: [4]
+
+      - id: destination_ipv4_prefix
+        source: network.destination_ipv4
+        type: mask
+        logical_width_bytes: 4
+        acl_parts: [4]
+
+      - id: source_ipv4_range
+        source: network.source_ipv4
+        type: range
+        logical_width_bytes: 4
+        acl_parts: [4]
+
+      - id: destination_ipv4_range
+        source: network.destination_ipv4
+        type: range
+        logical_width_bytes: 4
+        acl_parts: [4]
+
+      - id: source_ipv6_prefix
+        source: network.source_ipv6
+        type: mask
+        logical_width_bytes: 16
+        acl_parts: [4, 4, 4, 4]
+
+      - id: destination_ipv6_prefix
+        source: network.destination_ipv6
+        type: mask
+        logical_width_bytes: 16
+        acl_parts: [4, 4, 4, 4]
+
+      - id: transport_protocol
+        source: transport.protocol
+        type: bitmask
+        logical_width_bytes: 1
+        acl_parts: [1]
+
+      - id: source_port
+        source: transport.source_port
+        type: range
+        logical_width_bytes: 2
+        acl_parts: [2]
+
+      - id: destination_port
+        source: transport.destination_port
+        type: range
+        logical_width_bytes: 2
+        acl_parts: [2]
+
+  labels:
+    - id: 1001
+      priority: 3000
+      name: corp-web
+      display_name: Corporate Web
+      description: Corporate HTTPS traffic.
+
+    - id: 1002
+      priority: 2000
+      name: corp-dns
+      display_name: Corporate DNS
+      description: Corporate DNS traffic.
+
+    - id: 1003
+      priority: 1000
+      name: gateway-management
+      display_name: Gateway Management
+      description: Management traffic involving the gateway MAC.
+
+  # A logical rule's matches are AND. An omitted field is a wildcard. Express OR
+  # with additional logical rules, which may point to the same label. The compiler
+  # emits forward and endpoint-swapped physical rules with the same priority and
+  # userdata, then removes identical duplicates. All rules inherit their label's
+  # priority and use label_id as userdata. Priorities are unique between labels;
+  # larger values win. Empty matches require explicit match_all: true.
+  #
+  # mask:    value + prefix_bits (0..logical width in bits)
+  # range:   inclusive min/max
+  # bitmask: value + mask; arbitrary masked bits are supported
+  rules:
+    - id: corp-web-client-to-server
+      label_id: 1001
+      direction: bidirectional
+      matches:
+        - field: observation_domain
+          min: 7
+          max: 7
+        - field: outer_vlan_vid
+          min: 20
+          max: 22
+        - field: destination_ipv4_prefix
+          value: "10.30.0.0"
+          prefix_bits: 16
+        - field: transport_protocol
+          value: 6                         # TCP
+          mask: 255
+        - field: destination_port
+          min: 443
+          max: 443
+
+    - id: corp-dns-ip-range
+      label_id: 1002
+      direction: bidirectional
+      matches:
+        - field: destination_ipv4_range
+          min: "10.40.0.10"
+          max: "10.40.0.99"
+        - field: transport_protocol
+          value: 17                        # UDP
+          mask: 255
+        - field: destination_port
+          min: 53
+          max: 53
+
+    - id: gateway-source-mac
+      label_id: 1003
+      direction: bidirectional
+      matches:
+        - field: source_mac_prefix
+          value: "00:11:22:33:44:55"
+          prefix_bits: 48
+
+    - id: ipv6-service-example
+      label_id: 1001
+      direction: bidirectional
+      matches:
+        - field: destination_ipv6_prefix
+          value: "2001:db8:30::"
+          prefix_bits: 48
+        - field: transport_protocol
+          value: 6
+          mask: 255
+        - field: destination_port
+          min: 8443
+          max: 8443
+
+  validation:
+    reject_unknown_fields: true
+    reject_duplicate_label_rule_and_field_ids: true
+    reject_label_id_zero: true
+    reject_unknown_label_references: true
+    reject_duplicate_label_priorities: true
+    reject_invalid_field_types_sizes_masks_and_ranges: true
+    reject_missing_optional_fact_matches: true
+    reject_empty_rule_without_explicit_match_all: true
+    reject_multi_category_configuration: true
+    reject_expansion_over_engine_limits: true

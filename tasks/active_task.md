@@ -1,74 +1,68 @@
 # 即时工作台
 
-事项：`npm-basic-parameters` T3 SQL/E2E、诊断与 Feature 收口
-关联 Feature Task：`tasks/archive/feat-npm-basic-parameters.md` T3；本切片完成 T3 和 Feature 完成出口后停止。
-当前 Atomic Slice：复用真实 `npm.basic` 插件/PCAP/Scheduler 场景锚定 legacy/V1 SQL 等价、非活动模块忽略及
-活动配置失败诊断，补齐算子最小诊断接线，完成定向与全量回归并归档 Feature。
-状态：已完成
+事项：`npm-labeling` 会话 admission 与协议/标签双维度契约刷新
+关联 Feature Task：`tasks/specs/feat-npm-labeling.md` T0/T2；本切片只修正 Feature/MVS、配置模板、执行单位与
+协议/标签并存契约，不开始 T0/T2 代码实现。
+当前 Atomic Slice：将 Labeling 从逐 packet 识别收敛为“新会话候选 admission 批量分类”，已有会话复用不可变主标签；
+保留 DPDK ACL batch 能力，并明确 protocol 是客观协议维度、label 是网络自定义归属维度，二者同时存在。
+状态：已完成（2026-09-19）
 
 ## 业务意图
 
-- 让既有 Basic/Session SQL 无修改继续运行，并证明等价 V1 SQL 经真实 Scheduler、插件和 PCAP 得到相同 Schema
-  与可观察结果。
-- 让活动模块参数类型、范围及新旧来源冲突在可执行任务建立前确定性失败，并由 Scheduler 返回稳定类别和
-  JSON Pointer 字段路径；非活动和未知模块配置仍可安全携带而不影响执行。
-- 以完整构建和 CTest 收口通用参数入口，为后续标签化与协议模块保留稳定的模块命名空间扩展点。
+- 让未启用标签化的 Basic/Session 用户不因可选能力被迫承担 DPDK 运行依赖，启用标签化的任务又能在打开阶段
+  获得明确的 provider、DPDK 环境和配置编译诊断。
+- 让 DPDK/EAL 的进程级生命周期与每任务 ACL context 生命周期可审计，同时保持唯一 packet/session 主链；
+  Labeling 只对新会话 admission 候选批量执行，避免长连接后续 packet 重复分类。
 
 ## Non-Goals
 
-- 不修改 SQL Parser、V1 信封/字段 Schema 或参数上下界；T0/T1 已完成这些契约。
-- 不新增 runtime 配置通道，不改变 Basic/Session Schema、结果、预算、生命周期和默认值。
-- 不实现 `npm-labeling`、Config Channel Resolve、TCP 字节流或具体协议模块，不修改 frontend。
-- 不处理当前切片外的既有工作树改动，不 commit、不 push，也不开始后续 Feature。
+- 不实现插件、IID、CMake、部署或测试代码，不安装 DPDK，不运行构建/CTest。
+- 不创建新的 SQL operator、数据通道或独立进程，不把逐包数据经过 HTTP/IPC。
+- 不提前抽象通用 `IDpdkRuntimeV1`，不修改 ACL 字段能力、唯一主标签语义或容量前置；本切片同步刷新设计模板的
+  admission 与协议/标签并存字段，不实现 YAML 解析器。
+- 不处理当前切片前已有的其他工作树改动，不自动 commit/push，不开始 T0；后续仅按用户明确指令提交。
 
 ## 允许修改文件
 
 - `tasks/active_task.md`
-- `tasks/specs/feat-npm-basic-parameters.md`
-- `tasks/archive/feat-npm-basic-parameters.md`
 - `tasks/product_backlog.md`
-- `src/operators/npm_basic/npm_basic_operator.h`
-- `src/operators/npm_basic/npm_basic_operator.cpp`
-- `src/tests/test_npm_basic/test_npm_basic.cpp`
-- `src/tests/test_scheduler_e2e/test_scheduler_e2e.cpp`
+- `tasks/specs/feat-npm-labeling.md`
+- `config/npm-labeling-template.yaml`
 
-只有测试证明参数状态缺少稳定类别文本时，才允许追加
-`src/operators/npm_basic/npm_basic_task_config.h/.cpp`；不得预先修改。
+本切片前已有 `tasks/archive/feat-config-channel.md`、`tasks/archive/feat-npm-basic-parameters.md`、
+`tasks/product_backlog.md` 以及上述允许文件的改动；保留这些改动，只审查本次追加的 admission/NPI 契约。
 
 ## 验收命令
 
 ```bash
-cmake --build build --target test_npm_basic test_scheduler_e2e -j$(nproc)
-ctest --test-dir build -R '^(test_npm_basic|test_scheduler_e2e)$' --output-on-failure
-cmake -B build src
-cmake --build build --target test_framework test_npm_basic test_scheduler_e2e -j$(nproc)
-ctest --test-dir build -R '^(test_framework|test_npm_basic|test_scheduler_e2e)$' --output-on-failure
-cmake --build build -j$(nproc)
-ctest --test-dir build --output-on-failure
+awk '/^## 完成证据/{exit} NF{n++} END{print n+0}' tasks/specs/feat-npm-labeling.md
+rg -n 'libflowsql_npm_labeling|IID_NPM_LABELING_PROVIDER_V1|INpmLabelingProviderV1|INpmLabelMatcherV1|admission|NPI' \
+  tasks/specs/feat-npm-labeling.md config/npm-labeling-template.yaml
+rg -n 'decision_time|session_partition_key_includes_primary_label|classification_scope|classification_batch' \
+  config/npm-labeling-template.yaml
+rg -n '第二套|新.*operator|逐包.*IQuerier|Config Channel.*插件|IDpdkRuntime' \
+  tasks/specs/feat-npm-labeling.md
+rg -n '[[:blank:]]+$' tasks/active_task.md tasks/specs/feat-npm-labeling.md config/npm-labeling-template.yaml
 git diff --check
+git diff --no-index --check /dev/null tasks/specs/feat-npm-labeling.md
+git diff --no-index --check /dev/null config/npm-labeling-template.yaml
+git diff --name-only
+git status --short
 ```
 
-另按 `src/.clang-format` 人工审查本切片 C++ Diff，并检查新增/修改 C++ 行不超过 120 列；若环境提供
-`clang-format` 或仓库 format/lint target，则同时运行对应检查。
+规格从文件头到 `## 完成证据` 前的非空行不得超过 200；本切片仅修订 Markdown，无代码格式化或构建目标。
 
 ## 时间盒与停止条件
 
-- 时间盒：30 分钟；若需延续则沿用 T3 和本工作台边界，不拆出伪任务或扩大允许文件。
-- 停止条件：T3 的真实 SQL/E2E、活动配置诊断、非活动模块忽略及完整回归全部通过；随后勾选 T3，将规格移入
-  `tasks/archive/`、把 Backlog 标为完成、记录完成证据并立即停止。
-- 若测试证明需要越过允许文件、出现 P0/P1 跨任务阻塞，或时间盒检查点仍有明确错误，则记录客观证据后停止，
-  不通过扩大范围规避。
+- 时间盒：30 分钟；若需延续则沿用本工作台，不扩大到实现。
+- 停止条件：规格和模板一致明确基础 session lookup、唯一新会话候选 admission、bounded batch、已有会话复用标签、
+  NPI 后置以及 protocol 和 label 双维度并存；原有插件/IID/EAL 契约保持不变，文档尺寸和 Diff 检查通过后记录证据并立即停止。
 
 ## 完成证据
 
-- 真实插件/PCAP/Scheduler E2E 保留既有 legacy Basic/Session SQL，并新增等价 V1 SQL；两组 Arrow Schema 和完整
-  RecordBatch 分别相同。Basic-only V1 安全忽略非活动 Session 内部错误、未启用 labeling 的非精确引用和未知
-  `http1` object；Session V1 安全忽略未知 future protocol object。
-- 活动 framework 类型错误、活动 Session 范围错误及 legacy/V1 来源冲突均由 Scheduler Schema probe 返回稳定
-  类别与 JSON Pointer，未注册目标 DataFrame、未进入 NPI 包处理；算子通过任务私有不可变字符串保留详细首错，
-  未改变 runtime、Schema、结果与 Cancel 行为。
-- `cmake -B build src`、三个指定目标构建和完整构建均通过；定向 CTest 3/3 通过（38.97 秒），完整 CTest 15/15
-  通过（52.99 秒）。
-- `git diff --check`、未跟踪新增文件空白检查和新增/修改 C++ 120 列检查通过；环境无 `clang-format`，仓库无
-  format/lint target，已按 `src/.clang-format` 人工审查本切片 Diff。
-- T3 已勾选，Feature 规格已移入 `tasks/archive/`，Backlog 已标记完成；未 commit/push，未开始后续 Feature。
+- 规格已将 Labeling 的 ACL 执行输入改为 admission window 内按基础 session key 去重的唯一新会话候选；
+  session hit 复用已保存的主标签，`label_id=0` 也缓存，tuple reuse 重新分类。
+- 规格、模板与 Backlog 已同步冻结 bounded batch、原 packet 顺序 replay、主标签不进入 session key，及 NPI 在 session 建立后采样、protocol 与 label 作为并列结果保存。
+- `awk` 统计规格在 `## 完成证据` 前为 200 个非空行；`rg` 确认 admission/NPI 语义及模板关键字段已更新，未发现旧的
+  `before_session_lookup` 或 `session_partition_key_includes_primary_label: true` 表述。
+- `git diff --check` 与针对未跟踪规格/模板的 `git diff --no-index --check` 均通过；本切片未运行构建或 CTest，后续获得用户明确 commit 授权，未授权 push。
