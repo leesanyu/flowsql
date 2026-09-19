@@ -11,6 +11,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -176,6 +177,7 @@ static std::shared_ptr<arrow::Schema> SchedulerE2eTransformSchema() {
 enum class SchedulerE2eTransformKind {
     kPacketToProtocol,
     kPassthrough,
+    kAnyPassthrough,
 };
 
 struct SchedulerE2eTransformSnapshot {
@@ -198,9 +200,12 @@ class SchedulerE2eTransformTask final : public IBlockTransformTaskV1 {
         const auto expected = kind_ == SchedulerE2eTransformKind::kPacketToProtocol
                                   ? packet::PacketSchema()
                                   : SchedulerE2eTransformSchema();
-        input_schema_matched = input_schema->Equals(*expected, true);
+        input_schema_matched = kind_ == SchedulerE2eTransformKind::kAnyPassthrough ||
+                               input_schema->Equals(*expected, true);
         if (!input_schema_matched) return EINVAL;
-        *output_schema = SchedulerE2eTransformSchema();
+        *output_schema = kind_ == SchedulerE2eTransformKind::kAnyPassthrough
+                             ? std::move(input_schema)
+                             : SchedulerE2eTransformSchema();
         return 0;
     }
 
@@ -210,7 +215,7 @@ class SchedulerE2eTransformTask final : public IBlockTransformTaskV1 {
         ++process_calls;
         if (!input || !outputs || !outputs->empty()) return -EINVAL;
         input_rows.push_back(input->num_rows());
-        if (kind_ == SchedulerE2eTransformKind::kPassthrough) {
+        if (kind_ != SchedulerE2eTransformKind::kPacketToProtocol) {
             outputs->push_back({input, ts_ms});
             return static_cast<int>(BlockTransformStatusV1::kContinue);
         }
@@ -875,6 +880,63 @@ class ParallelPassthroughStreamOperator final : public IOperator, public IStream
     std::string last_error_;
 };
 
+struct ParameterCaptureStreamState {
+    void Record(const char* with_params_json) {
+        std::lock_guard<std::mutex> guard(mutex);
+        with_params.emplace_back(with_params_json ? with_params_json : "");
+    }
+
+    std::vector<std::string> Snapshot() const {
+        std::lock_guard<std::mutex> guard(mutex);
+        return with_params;
+    }
+
+    void Clear() {
+        std::lock_guard<std::mutex> guard(mutex);
+        with_params.clear();
+    }
+
+    mutable std::mutex mutex;
+    std::vector<std::string> with_params;
+};
+
+class ParameterCaptureStreamOperator final : public IOperator, public IStreamOperator {
+ public:
+    explicit ParameterCaptureStreamOperator(std::shared_ptr<ParameterCaptureStreamState> state)
+        : state_(std::move(state)) {}
+
+    std::string Category() override { return "custom"; }
+    std::string Name() override { return "parameter_capture_stream"; }
+    std::string Description() override { return "captures Scheduler WITH parameter JSON"; }
+    OperatorPosition Position() override { return OperatorPosition::DATA; }
+
+    int Work(IChannel*, IChannel*) override { return -1; }
+    int Configure(const char*, const char*) override { return 0; }
+
+    int Init(const char* with_params_json, const StreamSinkContext& sink_ctx) override {
+        if (!state_ || sink_ctx.sink_type != ChannelType::kStream) return -1;
+        auto* output = dynamic_cast<IStreamChannel*>(sink_ctx.sink_channel);
+        if (!output) return -1;
+        output_ = std::shared_ptr<IStreamChannel>(output, [](IStreamChannel*) {});
+        state_->Record(with_params_json);
+        return 0;
+    }
+
+    int OnSchemaReady(std::shared_ptr<arrow::Schema>) override { return 0; }
+
+    int Process(const arrow::RecordBatch& batch, int64_t ts_ms) override {
+        return output_ ? output_->Put(batch.Slice(0, batch.num_rows()), ts_ms) : -1;
+    }
+
+    int Tick(int64_t) override { return 0; }
+    int Flush() override { return 0; }
+    std::string GetStats() override { return "{}"; }
+
+ private:
+    std::shared_ptr<ParameterCaptureStreamState> state_;
+    std::shared_ptr<IStreamChannel> output_;
+};
+
 class DbDirectWriterStreamOperator final : public IOperator, public IStreamOperator {
  public:
     std::string Category() override { return "custom"; }
@@ -1194,10 +1256,13 @@ int main() {
         "packet_to_protocol", SchedulerE2eTransformKind::kPacketToProtocol);
     SchedulerE2eTransformProvider passthrough_transform(
         "protocol_passthrough", SchedulerE2eTransformKind::kPassthrough);
+    SchedulerE2eTransformProvider parameter_capture_transform(
+        "parameter_capture", SchedulerE2eTransformKind::kAnyPassthrough);
     loader->Regist(IID_PROTOCOL, &pcap_protocol);
     loader->Regist(IID_BLOCK_STREAM_OPERATOR, &block_operator);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &packet_transform);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &passthrough_transform);
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &parameter_capture_transform);
     const char* libs[] = {
         "libflowsql_database.so", "libflowsql_builtin.so",   "libflowsql_catalog.so",  "libflowsql_npi.so",
         "libflowsql_pcapfile.so", "libflowsql_scheduler.so", "libflowsql_binaddon.so", "libflowsql_stream.so",
@@ -1321,11 +1386,123 @@ int main() {
                   std::vector<std::string>({std::string("\x01\x02\x03\x04", 4),
                                             std::string("\x05\x06\x07\x08", 4)}));
 
+        // npm-basic-parameters T0.2: direct SQL decodes the literal once and Scheduler
+        // wraps the exact decoded value as a JSON string for the operator task.
+        parameter_capture_transform.Reset();
+        const std::string expected_parameters =
+            R"JSON({"schema_version":1,"future":{"text":"a,b; WITH INTO","owner":"O'Brien"}})JSON";
+        const std::string parameter_dataframe = "scheduler_parameter_transport";
+        const std::string parameter_sql =
+            "SELECT * FROM pcapfile." + channel_name +
+            " USING test.parameter_capture WITH "
+            R"SQL(parameters='{"schema_version":1,"future":{"text":"a,b; WITH INTO","owner":"O''Brien"}}',)SQL"
+            "mode=legacy" +
+            " INTO dataframe." + parameter_dataframe;
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(parameter_sql), rsp), error::OK);
+        ASSERT_TRUE(parameter_capture_transform.create_calls > 0);
+        ASSERT_EQ(parameter_capture_transform.with_params.size(),
+                  static_cast<std::size_t>(parameter_capture_transform.create_calls));
+        for (const auto& encoded : parameter_capture_transform.with_params) {
+            rapidjson::Document params;
+            params.Parse(encoded.c_str());
+            ASSERT_TRUE(!params.HasParseError() && params.IsObject());
+            ASSERT_TRUE(params.HasMember("parameters") && params["parameters"].IsString());
+            ASSERT_EQ(std::string(params["parameters"].GetString()), expected_parameters);
+            ASSERT_TRUE(params.HasMember("mode") && params["mode"].IsString());
+            ASSERT_EQ(std::string(params["mode"].GetString()), "legacy");
+        }
+
+        const int create_calls_before_duplicate = parameter_capture_transform.create_calls;
+        const std::string duplicate_sql =
+            "SELECT * FROM pcapfile." + channel_name +
+            " USING test.parameter_capture WITH parameters='first',parameters='second'";
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(duplicate_sql), rsp),
+                  error::BAD_REQUEST);
+        ASSERT_EQ(parameter_capture_transform.create_calls, create_calls_before_duplicate);
+        ASSERT_EQ(registry->Unregister(parameter_dataframe.c_str()), 0);
+
         ASSERT_EQ(stream_remove("/channels/stream/remove",
                                 MakePcapSourceRemoveRequest(channel_name),
                                 rsp),
                   error::OK);
     }
+    {
+        // The sql_text entry uses SplitSqlText before the same parser/JSON transport path.
+        const auto state = std::make_shared<ParameterCaptureStreamState>();
+        std::string rsp;
+        ASSERT_EQ(op_registry->Register(
+                      "custom.parameter_capture_stream",
+                      [state]() -> IOperator* {
+                          return new ParameterCaptureStreamOperator(state);
+                      }),
+                  0);
+        ASSERT_EQ(upsert_batch("/operators/upsert_batch", R"JSON({
+            "operators":[{
+                "category":"custom",
+                "name":"parameter_capture_stream",
+                "type":"cpp",
+                "source":"e2e",
+                "description":"captures Scheduler WITH parameter JSON",
+                "position":"DATA"
+            }]
+        })JSON", rsp), error::OK);
+        ASSERT_EQ(activate("/operators/activate",
+                           R"JSON({"name":"custom.parameter_capture_stream"})JSON",
+                           rsp),
+                  error::OK);
+        ASSERT_EQ(stream_add(
+                      "/channels/stream/add",
+                      R"JSON({"type":"ring","name":"npm_parameter_in",)JSON"
+                      R"JSON("option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false"})JSON",
+                      rsp),
+                  error::OK);
+        ASSERT_EQ(stream_add(
+                      "/channels/stream/add",
+                      R"JSON({"type":"ring","name":"npm_parameter_out",)JSON"
+                      R"JSON("option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false"})JSON",
+                      rsp),
+                  error::OK);
+        const std::string stream_sql =
+            "SELECT * FROM ring.npm_parameter_in "
+            "USING custom.parameter_capture_stream WITH "
+            R"SQL(parameters="{""schema_version"":1,""future"":{""text"":""stream;value""}}",)SQL"
+            "mode=legacy INTO stream.npm_parameter_out;";
+        ASSERT_EQ(stream_exec("/scheduler/stream/execute", MakeStreamReq(stream_sql), rsp),
+                  error::OK);
+        const std::string task_id = ParseTaskId(rsp);
+        ASSERT_TRUE(!task_id.empty());
+        ASSERT_EQ(stream_stop("/scheduler/stream/stop", MakeTaskReq(task_id), rsp), error::OK);
+        const auto captured = state->Snapshot();
+        ASSERT_TRUE(!captured.empty());
+        for (const auto& encoded : captured) {
+            rapidjson::Document params;
+            params.Parse(encoded.c_str());
+            ASSERT_TRUE(!params.HasParseError() && params.IsObject());
+            ASSERT_EQ(std::string(params["parameters"].GetString()),
+                      R"JSON({"schema_version":1,"future":{"text":"stream;value"}})JSON");
+            ASSERT_EQ(std::string(params["mode"].GetString()), "legacy");
+        }
+
+        state->Clear();
+        const std::string duplicate_stream_sql =
+            "SELECT * FROM ring.npm_parameter_in USING custom.parameter_capture_stream "
+            "WITH parameters='first',parameters='second' INTO stream.npm_parameter_out;";
+        ASSERT_EQ(stream_exec("/scheduler/stream/execute",
+                              MakeStreamReq(duplicate_stream_sql), rsp),
+                  error::BAD_REQUEST);
+        ASSERT_TRUE(state->Snapshot().empty());
+        ASSERT_EQ(stream_remove(
+                      "/channels/stream/remove",
+                      R"JSON({"type":"ring","name":"npm_parameter_in"})JSON",
+                      rsp),
+                  error::OK);
+        ASSERT_EQ(stream_remove(
+                      "/channels/stream/remove",
+                      R"JSON({"type":"ring","name":"npm_parameter_out"})JSON",
+                      rsp),
+                  error::OK);
+    }
+    std::puts("[PASS] npm-basic-parameters SQL transport contract");
     {
         const std::string channel_name = "scheduler_pcap_dataframe";
         const std::string dataframe_name = "scheduler_pcap_dataframe";
@@ -1590,6 +1767,20 @@ int main() {
                    " WHERE rate_status = 'insufficient_span' INTO dataframe." +
                    destination;
         };
+        const auto make_npm_parameters_sql = [&](const std::string& destination,
+                                                 const std::string& parameters) {
+            return "SELECT * FROM " + input_namespace +
+                   " USING npm.basic WITH input_namespace='" + input_namespace +
+                   "',source_domains='0:77',parameters='" + parameters +
+                   "' INTO dataframe." + destination;
+        };
+        const auto make_npm_session_parameters_sql = [&](const std::string& destination,
+                                                         const std::string& parameters) {
+            return "SELECT * FROM " + input_namespace +
+                   " USING npm.basic WITH input_namespace='" + input_namespace +
+                   "',source_domains='0:77',features='basic,session',observing='session',parameters='" +
+                   parameters + "' WHERE rate_status = 'insufficient_span' INTO dataframe." + destination;
+        };
         const auto assert_npm_unavailable = [&](const std::string& destination) {
             const int rc = exec("/scheduler/batch/execute", MakeReq(make_npm_sql(destination)), rsp);
             ASSERT_TRUE(rc != error::OK);
@@ -1795,6 +1986,29 @@ int main() {
         ASSERT_TRUE(protocol_name->IsNull(0));
         ASSERT_EQ(end_reason->GetString(0), "closed");
 
+        const std::string parameters_basic_dataframe_name =
+            "scheduler_npm_basic_parameters";
+        const std::string parameters_basic =
+            R"({"schema_version":1,"framework":{"labeling":"@latest"},)"
+            R"("session":{"max_tcp_ranges_per_direction":"ignored"},"http1":{"future":null}})";
+        pcap_protocol.Reset();
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq(make_npm_parameters_sql(parameters_basic_dataframe_name,
+                                                       parameters_basic)),
+                       rsp),
+                  error::OK);
+        auto parameters_basic_output = std::dynamic_pointer_cast<IDataFrameChannel>(
+            registry->Get(parameters_basic_dataframe_name.c_str()));
+        ASSERT_TRUE(parameters_basic_output != nullptr);
+        DataFrame parameters_basic_result;
+        ASSERT_EQ(parameters_basic_output->Read(&parameters_basic_result), 0);
+        const auto parameters_basic_batch = parameters_basic_result.ToArrow();
+        ASSERT_TRUE(parameters_basic_batch != nullptr);
+        AssertSchedulerE2eNpmBasicSchema(parameters_basic_batch->schema());
+        ASSERT_TRUE(parameters_basic_batch->Equals(*batch));
+        ASSERT_EQ(pcap_protocol.layer_calls, 1);
+        ASSERT_EQ(registry->Unregister(parameters_basic_dataframe_name.c_str()), 0);
+
         const std::string session_dataframe_name = "scheduler_npm_session";
         pcap_protocol.Reset();
         ASSERT_EQ(exec("/scheduler/batch/execute",
@@ -1858,6 +2072,66 @@ int main() {
         ASSERT_EQ(retransmission_status->GetString(0), "valid");
         ASSERT_EQ(measurement_flags->Value(0), 1);
         ASSERT_EQ(session_end_reason->GetString(0), "closed");
+
+        const std::string parameters_session_dataframe_name =
+            "scheduler_npm_session_parameters";
+        const std::string parameters_session =
+            R"({"schema_version":1,"session":{"max_tcp_ranges_per_direction":1024},)"
+            R"("future_protocol":{"setting":null}})";
+        pcap_protocol.Reset();
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq(make_npm_session_parameters_sql(
+                           parameters_session_dataframe_name, parameters_session)),
+                       rsp),
+                  error::OK);
+        auto parameters_session_output = std::dynamic_pointer_cast<IDataFrameChannel>(
+            registry->Get(parameters_session_dataframe_name.c_str()));
+        ASSERT_TRUE(parameters_session_output != nullptr);
+        DataFrame parameters_session_result;
+        ASSERT_EQ(parameters_session_output->Read(&parameters_session_result), 0);
+        const auto parameters_session_batch = parameters_session_result.ToArrow();
+        ASSERT_TRUE(parameters_session_batch != nullptr);
+        AssertSchedulerE2eNpmSessionSchema(parameters_session_batch->schema());
+        ASSERT_TRUE(parameters_session_batch->Equals(*session_batch));
+        ASSERT_EQ(pcap_protocol.layer_calls, 1);
+        ASSERT_EQ(registry->Unregister(parameters_session_dataframe_name.c_str()), 0);
+
+        const auto assert_npm_config_failure = [&](const std::string& destination,
+                                                   const std::string& invalid_sql,
+                                                   const std::vector<std::string>& fragments) {
+            pcap_protocol.Reset();
+            ASSERT_TRUE(exec("/scheduler/batch/execute", MakeReq(invalid_sql), rsp) != error::OK);
+            for (const auto& fragment : fragments) {
+                ASSERT_TRUE(rsp.find(fragment) != std::string::npos);
+            }
+            ASSERT_TRUE(registry->Get(destination.c_str()) == nullptr);
+            ASSERT_EQ(pcap_protocol.layer_calls, 0);
+        };
+        const std::string invalid_framework_destination =
+            "scheduler_npm_invalid_framework";
+        assert_npm_config_failure(
+            invalid_framework_destination,
+            make_npm_parameters_sql(
+                invalid_framework_destination,
+                R"({"schema_version":1,"framework":{"max_active_sessions":"1"}})"),
+            {"invalid parameters", "/framework/max_active_sessions"});
+        const std::string invalid_session_destination =
+            "scheduler_npm_invalid_session";
+        assert_npm_config_failure(
+            invalid_session_destination,
+            make_npm_session_parameters_sql(
+                invalid_session_destination,
+                R"({"schema_version":1,"session":{"max_tcp_ranges_per_direction":7}})"),
+            {"invalid parameters", "/session/max_tcp_ranges_per_direction"});
+        const std::string conflict_destination = "scheduler_npm_parameter_conflict";
+        const std::string conflict_sql =
+            "SELECT * FROM " + input_namespace +
+            " USING npm.basic WITH input_namespace='" + input_namespace +
+            "',source_domains='0:77',run_mode='offline',parameters='" +
+            R"({"schema_version":1})" + "' INTO dataframe." + conflict_destination;
+        assert_npm_config_failure(
+            conflict_destination, conflict_sql,
+            {"configuration source conflict", "/run_mode"});
         ASSERT_EQ(registry->Unregister(session_dataframe_name.c_str()), 0);
 
         ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);

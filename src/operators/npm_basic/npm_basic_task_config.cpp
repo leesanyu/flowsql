@@ -32,6 +32,7 @@ enum class TaskConfigField : size_t {
     kSessionMaxTcpRangesPerDirection,
     kInputNamespace,
     kSourceDomains,
+    kParameters,
     kCount,
 };
 
@@ -52,6 +53,22 @@ constexpr std::array<const char*, static_cast<size_t>(TaskConfigField::kCount)> 
     "session_max_tcp_ranges_per_direction",
     "input_namespace",
     "source_domains",
+    "parameters",
+};
+
+constexpr std::array<TaskConfigField, 12> kLegacyTuningFields = {
+    TaskConfigField::kRunMode,
+    TaskConfigField::kResultMode,
+    TaskConfigField::kOverloadPolicy,
+    TaskConfigField::kOutputIntervalNs,
+    TaskConfigField::kPayloadSamplePackets,
+    TaskConfigField::kTcpIdleTimeoutNs,
+    TaskConfigField::kUdpIdleTimeoutNs,
+    TaskConfigField::kOutOfOrderToleranceNs,
+    TaskConfigField::kMaxActiveSessions,
+    TaskConfigField::kMaxTrackedBytes,
+    TaskConfigField::kMaxPendingOutputBytes,
+    TaskConfigField::kSessionMaxTcpRangesPerDirection,
 };
 
 size_t FieldIndex(TaskConfigField field) {
@@ -235,6 +252,28 @@ bool ParseSourceDomains(std::string_view text, std::vector<NpmSourceDomainBindin
     return !bindings->empty();
 }
 
+NpmBasicTaskConfigStatus ParseDomainConfig(
+    const std::array<const rapidjson::Value*, static_cast<size_t>(TaskConfigField::kCount)>& values,
+    NpmObservationDomainMap* domains) {
+    const rapidjson::Value* input_namespace = values[FieldIndex(TaskConfigField::kInputNamespace)];
+    domains->input_namespace.assign(input_namespace->GetString(), input_namespace->GetStringLength());
+    const rapidjson::Value* source_domains = values[FieldIndex(TaskConfigField::kSourceDomains)];
+    if (!ParseSourceDomains(std::string_view(source_domains->GetString(), source_domains->GetStringLength()),
+                            &domains->bindings)) {
+        return Fail(NpmBasicTaskConfigError::kInvalidSourceDomains,
+                    FieldName(TaskConfigField::kSourceDomains));
+    }
+
+    const auto domain_error = ValidateNpmObservationDomainMap(*domains);
+    if (domain_error == NpmObservationDomainError::kNone) return {};
+    auto status = Fail(NpmBasicTaskConfigError::kDomainValidationError,
+                       domain_error == NpmObservationDomainError::kEmptyInputNamespace
+                           ? FieldName(TaskConfigField::kInputNamespace)
+                           : FieldName(TaskConfigField::kSourceDomains));
+    status.domain_error = domain_error;
+    return status;
+}
+
 const char* AnalysisErrorField(NpmAnalysisConfigError error) {
     switch (error) {
         case NpmAnalysisConfigError::kInvalidRunMode:
@@ -354,6 +393,53 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
                         FieldName(TaskConfigField::kSourceDomains));
         }
 
+        const rapidjson::Value* parameters = values[FieldIndex(TaskConfigField::kParameters)];
+        if (parameters != nullptr) {
+            for (const TaskConfigField legacy_field : kLegacyTuningFields) {
+                if (values[FieldIndex(legacy_field)] == nullptr) continue;
+                auto status = Fail(NpmBasicTaskConfigError::kParameterSourceConflict,
+                                   FieldName(legacy_field));
+                status.parameter_status.error = NpmParameterErrorV1::kLegacyConflict;
+                status.parameter_status.path = std::string("/") + FieldName(legacy_field);
+                return status;
+            }
+
+            NpmBasicTaskConfig next;
+            auto status = ParseFeatureConfig(values, &next.features);
+            if (status.error != NpmBasicTaskConfigError::kNone) return status;
+            status = ParseDomainConfig(values, &next.domains);
+            if (status.error != NpmBasicTaskConfigError::kNone) return status;
+
+            NpmParameterConsumersV1 consumers;
+            consumers.basic_enabled = next.features.basic_enabled;
+            consumers.session_enabled = next.features.session_enabled;
+            const std::string_view parameters_text(parameters->GetString(),
+                                                   parameters->GetStringLength());
+            if (parameters_text.find('\0') != std::string_view::npos) {
+                status = Fail(NpmBasicTaskConfigError::kInvalidParameters,
+                              FieldName(TaskConfigField::kParameters));
+                status.parameter_status.error = NpmParameterErrorV1::kInvalidJson;
+                return status;
+            }
+            NpmTaskParametersV1 parsed_parameters;
+            const auto parameter_status =
+                ParseNpmParametersV1(parameters->GetString(), consumers, &parsed_parameters);
+            if (parameter_status.error != NpmParameterErrorV1::kNone) {
+                status = Fail(NpmBasicTaskConfigError::kInvalidParameters,
+                              FieldName(TaskConfigField::kParameters));
+                status.parameter_status = parameter_status;
+                return status;
+            }
+
+            next.analysis = std::move(parsed_parameters.framework.analysis);
+            if (parsed_parameters.session.has_value()) {
+                next.features.session_max_tcp_ranges_per_direction =
+                    parsed_parameters.session->max_tcp_ranges_per_direction;
+            }
+            *output = std::move(next);
+            return {};
+        }
+
         NpmRunMode run_mode = NpmRunMode::kOffline;
         if (const rapidjson::Value* value = values[FieldIndex(TaskConfigField::kRunMode)]) {
             const std::string_view text(value->GetString(), value->GetStringLength());
@@ -392,25 +478,8 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
         status = ParseFeatureConfig(values, &next.features);
         if (status.error != NpmBasicTaskConfigError::kNone) return status;
 
-        const rapidjson::Value* input_namespace = values[input_namespace_index];
-        next.domains.input_namespace.assign(input_namespace->GetString(), input_namespace->GetStringLength());
-        const rapidjson::Value* source_domains = values[source_domains_index];
-        if (!ParseSourceDomains(
-                std::string_view(source_domains->GetString(), source_domains->GetStringLength()),
-                &next.domains.bindings)) {
-            return Fail(NpmBasicTaskConfigError::kInvalidSourceDomains,
-                        FieldName(TaskConfigField::kSourceDomains));
-        }
-
-        const auto domain_error = ValidateNpmObservationDomainMap(next.domains);
-        if (domain_error != NpmObservationDomainError::kNone) {
-            status = Fail(NpmBasicTaskConfigError::kDomainValidationError,
-                          domain_error == NpmObservationDomainError::kEmptyInputNamespace
-                              ? FieldName(TaskConfigField::kInputNamespace)
-                              : FieldName(TaskConfigField::kSourceDomains));
-            status.domain_error = domain_error;
-            return status;
-        }
+        status = ParseDomainConfig(values, &next.domains);
+        if (status.error != NpmBasicTaskConfigError::kNone) return status;
 
         const auto analysis_error = ValidateNpmAnalysisConfig(next.analysis);
         if (analysis_error != NpmAnalysisConfigError::kNone) {

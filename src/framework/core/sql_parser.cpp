@@ -99,21 +99,35 @@ std::string SqlParser::ReadChannelRef(std::string* err) {
     return base + selector;
 }
 
-// 读取值：支持带引号的字符串或普通标识符
-std::string SqlParser::ReadValue() {
+// 读取值：带引号值按 SQL 成对引号解码；反斜杠保持普通字符。
+bool SqlParser::ReadValue(std::string* value, std::string* error) {
+    if (!value || !error) return false;
+    value->clear();
+    error->clear();
     SkipWhitespace();
     if (pos_ < end_ && (*pos_ == '"' || *pos_ == '\'')) {
-        char quote = *pos_++;
-        const char* start = pos_;
-        while (pos_ < end_ && *pos_ != quote) ++pos_;
-        std::string val(start, pos_);
-        if (pos_ < end_) ++pos_;  // 跳过结束引号
-        return val;
+        const char quote = *pos_++;
+        while (pos_ < end_) {
+            if (*pos_ != quote) {
+                value->push_back(*pos_++);
+                continue;
+            }
+            if (pos_ + 1 < end_ && pos_[1] == quote) {
+                value->push_back(quote);
+                pos_ += 2;
+                continue;
+            }
+            ++pos_;
+            return true;
+        }
+        *error = "unterminated quoted value";
+        return false;
     }
     // 无引号：读到逗号、空白或结尾
     const char* start = pos_;
     while (pos_ < end_ && !std::isspace(*pos_) && *pos_ != ',') ++pos_;
-    return std::string(start, pos_);
+    value->assign(start, pos_);
+    return true;
 }
 
 static bool IsSqlWordChar(char c) {
@@ -394,12 +408,21 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
             }
             ++pos_;
 
-            std::string val = ReadValue();
+            std::string val;
+            std::string value_error;
+            if (!ReadValue(&val, &value_error)) {
+                *err = value_error + " after WITH key: " + key;
+                return false;
+            }
             if (val.empty()) {
                 *err = "expected value after WITH key: " + key;
                 return false;
             }
-            (*out)[key] = val;
+            if (out->find(key) != out->end()) {
+                *err = "duplicate WITH key: " + key;
+                return false;
+            }
+            out->emplace(std::move(key), std::move(val));
             parsed_any = true;
 
             SkipWhitespace();

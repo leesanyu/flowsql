@@ -62,6 +62,7 @@ class NpmBasicTask final : public IBlockTransformTaskV1 {
     std::string task_id_;
     std::string with_params_json_;
     std::string pushed_filter_plan_json_;
+    std::string config_error_;
     IQuerier* querier_ = nullptr;
     const NpmBasicOperator* owner_ = nullptr;
     std::shared_ptr<NpmBasicTaskRuntime> runtime_;

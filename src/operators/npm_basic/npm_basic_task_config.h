@@ -5,6 +5,7 @@
 #define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_BASIC_TASK_CONFIG_H_
 
 #include "npm_analysis_contract.h"
+#include "npm_parameters.h"
 
 #include <cstdint>
 #include <string>
@@ -54,6 +55,8 @@ enum class NpmBasicTaskConfigError : uint8_t {
     kDomainValidationError,
     kAnalysisValidationError,
     kAllocationFailed,
+    kInvalidParameters,
+    kParameterSourceConflict,
 };
 
 struct NpmBasicTaskConfigStatus {
@@ -61,6 +64,7 @@ struct NpmBasicTaskConfigStatus {
     std::string field;
     NpmObservationDomainError domain_error = NpmObservationDomainError::kNone;
     NpmAnalysisConfigError analysis_error = NpmAnalysisConfigError::kNone;
+    NpmParameterStatusV1 parameter_status;
 };
 
 /** Parses and owns Scheduler WITH parameters. Output is replaced only after complete validation. */

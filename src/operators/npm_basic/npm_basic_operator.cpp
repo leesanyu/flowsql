@@ -29,6 +29,26 @@ constexpr const char* kFlushStateError = "npm.basic task is not open for Flush";
 constexpr const char* kRuntimeFlushError = "npm.basic task runtime Flush failed";
 constexpr const char* kAllocationError = "npm.basic task allocation failed";
 
+std::string BuildConfigError(const NpmBasicTaskConfigStatus& status) {
+    std::string error(kConfigError);
+    if (status.error == NpmBasicTaskConfigError::kParameterSourceConflict) {
+        error += ": configuration source conflict";
+    } else if (status.error == NpmBasicTaskConfigError::kInvalidParameters) {
+        error += ": invalid parameters";
+    } else {
+        error += ": invalid configuration";
+    }
+
+    if (!status.parameter_status.path.empty()) {
+        error += " at ";
+        error += status.parameter_status.path;
+    } else if (!status.field.empty()) {
+        error += " at /";
+        error += status.field;
+    }
+    return error;
+}
+
 bool MaxPacketTimestampNs(const std::shared_ptr<arrow::RecordBatch>& input, int64_t* output) {
     if (!input || input->num_rows() == 0 || input->num_columns() == 0 || output == nullptr) {
         return false;
@@ -77,8 +97,14 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema,
     NpmBasicTaskConfig parsed;
     const auto parse_status = ParseNpmBasicTaskConfig(with_params_json_.c_str(), &parsed);
     if (parse_status.error != NpmBasicTaskConfigError::kNone) {
+        const char* error = kConfigError;
+        try {
+            config_error_ = BuildConfigError(parse_status);
+            error = config_error_.c_str();
+        } catch (const std::bad_alloc&) {
+        }
         expected = State::kOpening;
-        expected = Fail(expected, kConfigError);
+        expected = Fail(expected, error);
         return expected == State::kCancelled ? ECANCELED : EINVAL;
     }
 

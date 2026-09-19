@@ -60,7 +60,7 @@ class SqlParser {
     bool MatchKeyword(const char* keyword);
     std::string ReadIdentifier();
     std::string ReadChannelRef(std::string* err);
-    std::string ReadValue();
+    bool ReadValue(std::string* value, std::string* error);
 
     const char* pos_ = nullptr;
     const char* end_ = nullptr;

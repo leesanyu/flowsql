@@ -1,74 +1,74 @@
 # 即时工作台
 
-事项：`config-channel` T4 端到端验收与 Feature 收口
-关联 Feature Task：`tasks/archive/feat-config-channel.md` T4；T1～T4 已完成。
-当前 Atomic Slice（第二个）：真实 HTTP 控制链路与双进程重启验收，随后完整回归并归档 Feature。
+事项：`npm-basic-parameters` T3 SQL/E2E、诊断与 Feature 收口
+关联 Feature Task：`tasks/archive/feat-npm-basic-parameters.md` T3；本切片完成 T3 和 Feature 完成出口后停止。
+当前 Atomic Slice：复用真实 `npm.basic` 插件/PCAP/Scheduler 场景锚定 legacy/V1 SQL 等价、非活动模块忽略及
+活动配置失败诊断，补齐算子最小诊断接线，完成定向与全量回归并归档 Feature。
 状态：已完成
 
-## 业务意图与接口契约
+## 业务意图
 
-- 以可执行测试证明并发发布只产生一个下一 revision、全部不可变历史在重启后逐项一致、消费者持有的精确快照
-  不随新发布或 Provider 生命周期变化。
-- 原生单进程、Guardian 与 Docker Scheduler 都必须加载 Config Provider，使用被部署持久卷覆盖的 SQLite 路径，
-  并在 Scheduler 启动前完成接口注册；完整 CTest 与前端回归共同证明现有通道和页面无回归。
-- 全部验收通过后勾选 T4，将规格移入 `tasks/archive/`，并把 Backlog Feature 标记完成。
+- 让既有 Basic/Session SQL 无修改继续运行，并证明等价 V1 SQL 经真实 Scheduler、插件和 PCAP 得到相同 Schema
+  与可观察结果。
+- 让活动模块参数类型、范围及新旧来源冲突在可执行任务建立前确定性失败，并由 Scheduler 返回稳定类别和
+  JSON Pointer 字段路径；非活动和未知模块配置仍可安全携带而不影响执行。
+- 以完整构建和 CTest 收口通用参数入口，为后续标签化与协议模块保留稳定的模块命名空间扩展点。
 
 ## Non-Goals
 
-- 不实现 Application Scope、NPM 参数消费或任何具体业务 Schema；不新增逐包 Resolve、HTTP 或 SQLite 访问。
-- 不新增配置删除、重命名、`latest`、热更新、密钥管理或跨集群复制。
-- 不顺手修改现有 NPM、Baseline 或其他工作树内容；不 commit/push。
+- 不修改 SQL Parser、V1 信封/字段 Schema 或参数上下界；T0/T1 已完成这些契约。
+- 不新增 runtime 配置通道，不改变 Basic/Session Schema、结果、预算、生命周期和默认值。
+- 不实现 `npm-labeling`、Config Channel Resolve、TCP 字节流或具体协议模块，不修改 frontend。
+- 不处理当前切片外的既有工作树改动，不 commit、不 push，也不开始后续 Feature。
 
 ## 允许修改文件
 
 - `tasks/active_task.md`
-- `tasks/specs/feat-config-channel.md`
-- `tasks/archive/feat-config-channel.md`
+- `tasks/specs/feat-npm-basic-parameters.md`
+- `tasks/archive/feat-npm-basic-parameters.md`
 - `tasks/product_backlog.md`
-- `README.md`
-- `src/tests/test_config_channel/test_config_channel.cpp`
-- `src/tests/test_framework/test_native_deploy_config.cpp`
-- `src/tests/test_framework/test_docker_deploy_config.cpp`
-- `src/tests/test_framework/CMakeLists.txt`
-- `src/services/web/web_plugin.cpp`
-- `src/tests/test_config_channel/test_config_channel_e2e.cpp`
-- `src/tests/test_config_channel/CMakeLists.txt`
+- `src/operators/npm_basic/npm_basic_operator.h`
+- `src/operators/npm_basic/npm_basic_operator.cpp`
+- `src/tests/test_npm_basic/test_npm_basic.cpp`
+- `src/tests/test_scheduler_e2e/test_scheduler_e2e.cpp`
 
-其余已有工作树修改保持原样；每次 patch 后核对 `git diff --name-only` 和新增文件状态。
+只有测试证明参数状态缺少稳定类别文本时，才允许追加
+`src/operators/npm_basic/npm_basic_task_config.h/.cpp`；不得预先修改。
 
-## 测试锚点与验收命令
+## 验收命令
 
-- `cmake --build build --target test_config_channel_e2e -j$(nproc)`
-- `ctest --test-dir build -R '^test_config_channel_e2e$' --output-on-failure`
-- `node --test src/frontend/src/api/*.test.js src/frontend/src/utils/*.test.js`
-- `npm run build --prefix src/frontend`
-- `cmake --build build -j$(nproc)`
-- `ctest --test-dir build --output-on-failure`
-- 本 Feature 文件 `git diff --check`、版权头、部署文件与归档/Backlog 状态检查。
+```bash
+cmake --build build --target test_npm_basic test_scheduler_e2e -j$(nproc)
+ctest --test-dir build -R '^(test_npm_basic|test_scheduler_e2e)$' --output-on-failure
+cmake -B build src
+cmake --build build --target test_framework test_npm_basic test_scheduler_e2e -j$(nproc)
+ctest --test-dir build -R '^(test_framework|test_npm_basic|test_scheduler_e2e)$' --output-on-failure
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure
+git diff --check
+```
+
+另按 `src/.clang-format` 人工审查本切片 C++ Diff，并检查新增/修改 C++ 行不超过 120 列；若环境提供
+`clang-format` 或仓库 format/lint target，则同时运行对应检查。
 
 ## 时间盒与停止条件
 
-30 分钟。T4 全部断言、完整构建/CTest、前端回归及归档通过后标记 Feature 完成并停止；不进入后续 Feature。
-到期仅报告：已完成、进行中且检查点通过、当前错误待修复、被明确问题阻塞。
+- 时间盒：30 分钟；若需延续则沿用 T3 和本工作台边界，不拆出伪任务或扩大允许文件。
+- 停止条件：T3 的真实 SQL/E2E、活动配置诊断、非活动模块忽略及完整回归全部通过；随后勾选 T3，将规格移入
+  `tasks/archive/`、把 Backlog 标为完成、记录完成证据并立即停止。
+- 若测试证明需要越过允许文件、出现 P0/P1 跨任务阻塞，或时间盒检查点仍有明确错误，则记录客观证据后停止，
+  不通过扩大范围规避。
 
-## 第一切片检查点
+## 完成证据
 
-- 重启前后 5 个 revision 的身份、格式、Schema、摘要、长度、时间与内容逐项一致，current 与历史列表恢复。
-- Config/原生/Docker 定向 CTest 3/3；前端测试文件 4/4、生产构建和完整 CMake 构建通过。
-- 完整 CTest 首轮 13/14：既有 T47 在 Web Load 后直接调用路由，gateway 选项此前只在 Start 下发；
-  修复 Load 同步运行边界后，Scheduler/Web 契约定向 CTest 2/2 通过。尚不勾选 T4。
-
-## 第二切片检查点与完成证据
-
-- 删除 E2E 草稿死代码并补充独立 HTTP 客户端状态采集；`test_config_channel_e2e` 构建及定向 CTest 1/1 通过。
-- 真实 HTTP 链路覆盖并发 200/409、幂等、失败不耗版本、JSON/YAML/XML、512 KiB 原文与 1 MiB 控制请求边界、
-  精确引用错误、分页元数据和基于旧版恢复；seed/recover 独立进程逐字比较重启前后 list/history/resolve 响应。
-- 任务在打开阶段只 Resolve 一次并持有 `shared_ptr<const string>`；后续发布、Provider 卸载和 1000 次事件处理均未改变
-  旧快照，也未再次 Resolve。
-- `cmake --build build -j$(nproc)` 通过；完整 `ctest --test-dir build --output-on-failure` 15/15 通过；前端测试 4/4
-  通过，`npm run build --prefix src/frontend` 通过。原生/Docker Config 部署契约和 Scheduler/Web 定向回归通过。
-
-## 完成出口
-
-T1～T4 已完成，规格已归档至 `tasks/archive/feat-config-channel.md`，Backlog 已标记 `[x]`；本工作台停止，未
-提交或推送代码。
+- 真实插件/PCAP/Scheduler E2E 保留既有 legacy Basic/Session SQL，并新增等价 V1 SQL；两组 Arrow Schema 和完整
+  RecordBatch 分别相同。Basic-only V1 安全忽略非活动 Session 内部错误、未启用 labeling 的非精确引用和未知
+  `http1` object；Session V1 安全忽略未知 future protocol object。
+- 活动 framework 类型错误、活动 Session 范围错误及 legacy/V1 来源冲突均由 Scheduler Schema probe 返回稳定
+  类别与 JSON Pointer，未注册目标 DataFrame、未进入 NPI 包处理；算子通过任务私有不可变字符串保留详细首错，
+  未改变 runtime、Schema、结果与 Cancel 行为。
+- `cmake -B build src`、三个指定目标构建和完整构建均通过；定向 CTest 3/3 通过（38.97 秒），完整 CTest 15/15
+  通过（52.99 秒）。
+- `git diff --check`、未跟踪新增文件空白检查和新增/修改 C++ 120 列检查通过；环境无 `clang-format`，仓库无
+  format/lint target，已按 `src/.clang-format` 人工审查本切片 Diff。
+- T3 已勾选，Feature 规格已移入 `tasks/archive/`，Backlog 已标记完成；未 commit/push，未开始后续 Feature。

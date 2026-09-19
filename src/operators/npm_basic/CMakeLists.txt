@@ -11,6 +11,7 @@ add_library(${PROJECT_NAME} SHARED
     npm_eof_flusher.cpp
     npm_packet_batch_view.cpp
     npm_packet_processor.cpp
+    npm_parameters.cpp
     npm_protocol_context.cpp
     npm_session_key.cpp
     npm_session_analysis_module.cpp

@@ -492,6 +492,52 @@ void test_sql_parser() {
         assert(stmt.operator_with_params[1]["p3"] == "3");
     }
 
+    // WITH values preserve unquoted behavior and decode doubled SQL quote delimiters.
+    {
+        auto stmt = parser.Parse(
+            R"SQL(SELECT * FROM source USING npm.basic WITH plain=unchanged,)SQL"
+            R"SQL(parameters='{"schema_version":1,"text":"a,b; WITH INTO","owner":"O''Brien"}' )SQL"
+            R"SQL(INTO result)SQL");
+        assert(stmt.error.empty());
+        assert(stmt.operator_with_params[0].at("plain") == "unchanged");
+        assert(stmt.operator_with_params[0].at("parameters") ==
+               R"JSON({"schema_version":1,"text":"a,b; WITH INTO","owner":"O'Brien"})JSON");
+        assert(stmt.dest == "result");
+
+        stmt = parser.Parse(
+            R"SQL(SELECT * FROM source USING test.op WITH note="a""b,; THEN INTO" INTO result)SQL");
+        assert(stmt.error.empty());
+        assert(stmt.operator_with_params[0].at("note") == "a\"b,; THEN INTO");
+        assert(stmt.dest == "result");
+    }
+
+    // A stage rejects exact duplicate keys before unordered_map insertion; stages remain independent.
+    {
+        auto duplicate = parser.Parse(
+            "SELECT * FROM source USING test.op WITH parameters='first',parameters='second' INTO result");
+        assert(duplicate.error == "duplicate WITH key: parameters");
+        auto case_distinct = parser.Parse(
+            "SELECT * FROM source USING test.op WITH parameters='first',Parameters='second' INTO result");
+        assert(case_distinct.error.empty());
+        assert(case_distinct.operator_with_params[0].at("parameters") == "first");
+        assert(case_distinct.operator_with_params[0].at("Parameters") == "second");
+        auto cross_stage = parser.Parse(
+            "SELECT * FROM source USING test.op WITH parameters='first' "
+            "THEN test.next WITH parameters='second' INTO result");
+        assert(cross_stage.error.empty());
+        assert(cross_stage.operator_with_params[0].at("parameters") == "first");
+        assert(cross_stage.operator_with_params[1].at("parameters") == "second");
+    }
+
+    {
+        auto single = parser.Parse(
+            "SELECT * FROM source USING test.op WITH parameters='unterminated INTO result");
+        assert(single.error == "unterminated quoted value after WITH key: parameters");
+        auto doubly = parser.Parse(
+            "SELECT * FROM source USING test.op WITH parameters=\"unterminated INTO result");
+        assert(doubly.error == "unterminated quoted value after WITH key: parameters");
+    }
+
     // Test pipeline rejects global WITH after USING/THEN chain
     {
         auto stmt = parser.Parse("SELECT * FROM source USING builtin.op1 THEN builtin.op2 WITH p=1 INTO result");
@@ -3903,6 +3949,25 @@ void test_sql_text_splitter() {
             "SELECT 2;";
         assert(SplitSqlText(text, &sqls, &err) == 0);
         assert(sqls.size() == 2);
+    }
+
+    {
+        std::vector<std::string> sqls;
+        SqlTextSplitError err;
+        const std::string text =
+            "SELECT * FROM source USING npm.basic WITH "
+            R"SQL(parameters='{"schema_version":1,"text":"a;b","owner":"O''Brien"}' )SQL"
+            "INTO first;"
+            R"SQL(SELECT * FROM source USING test.op WITH parameters="second;value" INTO second;)SQL";
+        assert(SplitSqlText(text, &sqls, &err) == 0);
+        assert(sqls.size() == 2);
+        SqlParser parser;
+        const auto first = parser.Parse(sqls[0]);
+        const auto second = parser.Parse(sqls[1]);
+        assert(first.error.empty() && second.error.empty());
+        assert(first.operator_with_params[0].at("parameters") ==
+               R"JSON({"schema_version":1,"text":"a;b","owner":"O'Brien"})JSON");
+        assert(second.operator_with_params[0].at("parameters") == "second;value");
     }
 
     {

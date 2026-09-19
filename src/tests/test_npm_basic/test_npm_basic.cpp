@@ -15,6 +15,7 @@
 #include <operators/npm_basic/npm_eof_flusher.h>
 #include <operators/npm_basic/npm_packet_batch_view.h>
 #include <operators/npm_basic/npm_packet_processor.h>
+#include <operators/npm_basic/npm_parameters.h>
 #include <operators/npm_basic/npm_protocol_context.h>
 #include <operators/npm_basic/npm_session_key.h>
 #include <operators/npm_basic/npm_session_analysis_module.h>
@@ -6148,7 +6149,9 @@ void TestNpmBasicResultPendingOutputFailuresAreAtomic() {
 npm::NpmBasicTaskConfigStatus ParseTaskConfigFailure(
     const char* json,
     npm::NpmBasicTaskConfigError expected_error,
-    const char* expected_field = "") {
+    const char* expected_field = "",
+    npm::NpmParameterErrorV1 expected_parameter_error = npm::NpmParameterErrorV1::kNone,
+    const char* expected_parameter_path = "") {
     npm::NpmBasicTaskConfig output;
     output.analysis = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kRealtime);
     output.analysis.max_active_sessions = 123;
@@ -6162,6 +6165,8 @@ npm::NpmBasicTaskConfigStatus ParseTaskConfigFailure(
     const auto status = npm::ParseNpmBasicTaskConfig(json, &output);
     assert(status.error == expected_error);
     assert(status.field == expected_field);
+    assert(status.parameter_status.error == expected_parameter_error);
+    assert(status.parameter_status.path == expected_parameter_path);
     assert(output.analysis.run_mode == npm::NpmRunMode::kRealtime);
     assert(output.analysis.result_mode == npm::NpmResultMode::kPeriodicSnapshot);
     assert(output.analysis.max_active_sessions == 123);
@@ -6500,6 +6505,589 @@ void TestNpmBasicTaskConfigFeatureSelection() {
         "session_max_tcp_ranges_per_direction");
 }
 
+void AssertEquivalentTaskConfig(const npm::NpmBasicTaskConfig& left,
+                                const npm::NpmBasicTaskConfig& right) {
+    assert(left.analysis.run_mode == right.analysis.run_mode);
+    assert(left.analysis.result_mode == right.analysis.result_mode);
+    assert(left.analysis.overload_policy == right.analysis.overload_policy);
+    assert(left.analysis.output_interval_ns == right.analysis.output_interval_ns);
+    assert(left.analysis.payload_sample_packets == right.analysis.payload_sample_packets);
+    assert(left.analysis.tcp_idle_timeout_ns == right.analysis.tcp_idle_timeout_ns);
+    assert(left.analysis.udp_idle_timeout_ns == right.analysis.udp_idle_timeout_ns);
+    assert(left.analysis.out_of_order_tolerance_ns == right.analysis.out_of_order_tolerance_ns);
+    assert(left.analysis.max_active_sessions == right.analysis.max_active_sessions);
+    assert(left.analysis.max_tracked_bytes == right.analysis.max_tracked_bytes);
+    assert(left.analysis.max_pending_output_bytes == right.analysis.max_pending_output_bytes);
+    assert(left.features.basic_enabled == right.features.basic_enabled);
+    assert(left.features.session_enabled == right.features.session_enabled);
+    assert(left.features.observing == right.features.observing);
+    assert(left.features.session_max_tcp_ranges_per_direction ==
+           right.features.session_max_tcp_ranges_per_direction);
+    assert(left.domains.input_namespace == right.domains.input_namespace);
+    assert(left.domains.bindings.size() == right.domains.bindings.size());
+    for (std::size_t index = 0; index < left.domains.bindings.size(); ++index) {
+        assert(left.domains.bindings[index].source_id == right.domains.bindings[index].source_id);
+        assert(left.domains.bindings[index].observation_domain_id ==
+               right.domains.bindings[index].observation_domain_id);
+    }
+}
+
+struct EquivalentRuntimeTaskConfigs {
+    std::string legacy_json;
+    std::string parameters_v1_json;
+    npm::NpmBasicTaskConfig legacy;
+    npm::NpmBasicTaskConfig parameters_v1;
+};
+
+EquivalentRuntimeTaskConfigs MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode run_mode,
+                                                              bool observing_session) {
+    const char* feature_fields = observing_session
+                                     ? R"JSON(,"features":"session","observing":"session")JSON"
+                                     : "";
+    const char* legacy_framework = run_mode == npm::NpmRunMode::kRealtime
+                                       ? R"JSON(,"run_mode":"realtime",)JSON"
+                                         R"JSON("result_mode":"periodic_snapshot",)JSON"
+                                         R"JSON("output_interval_ns":"10000000",)JSON"
+                                         R"JSON("payload_sample_packets":"4",)JSON"
+                                         R"JSON("tcp_idle_timeout_ns":"1000000000",)JSON"
+                                         R"JSON("udp_idle_timeout_ns":"1000000000",)JSON"
+                                         R"JSON("out_of_order_tolerance_ns":"0",)JSON"
+                                         R"JSON("max_active_sessions":"32",)JSON"
+                                         R"JSON("max_tracked_bytes":"1048576",)JSON"
+                                         R"JSON("max_pending_output_bytes":"1048576")JSON"
+                                       : R"JSON(,"run_mode":"offline",)JSON"
+                                         R"JSON("result_mode":"final",)JSON"
+                                         R"JSON("output_interval_ns":"10000000",)JSON"
+                                         R"JSON("payload_sample_packets":"4",)JSON"
+                                         R"JSON("tcp_idle_timeout_ns":"1000000000",)JSON"
+                                         R"JSON("udp_idle_timeout_ns":"1000000000",)JSON"
+                                         R"JSON("out_of_order_tolerance_ns":"0",)JSON"
+                                         R"JSON("max_active_sessions":"32",)JSON"
+                                         R"JSON("max_tracked_bytes":"1048576",)JSON"
+                                         R"JSON("max_pending_output_bytes":"1048576")JSON";
+    const char* parameters_framework =
+        run_mode == npm::NpmRunMode::kRealtime
+            ? R"JSON(,"parameters":"{\"schema_version\":1,\"framework\":{)JSON"
+              R"JSON(\"run_mode\":\"realtime\",\"result_mode\":\"periodic_snapshot\",)JSON"
+              R"JSON(\"output_interval_ns\":10000000,\"payload_sample_packets\":4,)JSON"
+              R"JSON(\"tcp_idle_timeout_ns\":1000000000,\"udp_idle_timeout_ns\":1000000000,)JSON"
+              R"JSON(\"out_of_order_tolerance_ns\":0,\"max_active_sessions\":32,)JSON"
+              R"JSON(\"max_tracked_bytes\":1048576,\"max_pending_output_bytes\":1048576})JSON"
+            : R"JSON(,"parameters":"{\"schema_version\":1,\"framework\":{)JSON"
+              R"JSON(\"run_mode\":\"offline\",\"result_mode\":\"final\",)JSON"
+              R"JSON(\"output_interval_ns\":10000000,\"payload_sample_packets\":4,)JSON"
+              R"JSON(\"tcp_idle_timeout_ns\":1000000000,\"udp_idle_timeout_ns\":1000000000,)JSON"
+              R"JSON(\"out_of_order_tolerance_ns\":0,\"max_active_sessions\":32,)JSON"
+              R"JSON(\"max_tracked_bytes\":1048576,\"max_pending_output_bytes\":1048576})JSON";
+
+    EquivalentRuntimeTaskConfigs configs;
+    configs.legacy_json =
+        std::string(R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77")JSON") +
+        feature_fields + legacy_framework;
+    configs.parameters_v1_json =
+        std::string(R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77")JSON") +
+        feature_fields + parameters_framework;
+    if (observing_session) {
+        configs.legacy_json += R"JSON(,"session_max_tcp_ranges_per_direction":"8")JSON";
+        configs.parameters_v1_json +=
+            R"JSON(,\"session\":{\"max_tcp_ranges_per_direction\":8})JSON";
+    }
+    configs.legacy_json += "}";
+    configs.parameters_v1_json += R"JSON(}"})JSON";
+
+    const auto legacy_status =
+        npm::ParseNpmBasicTaskConfig(configs.legacy_json.c_str(), &configs.legacy);
+    const auto parameters_status = npm::ParseNpmBasicTaskConfig(
+        configs.parameters_v1_json.c_str(), &configs.parameters_v1);
+    assert(legacy_status.error == npm::NpmBasicTaskConfigError::kNone);
+    assert(parameters_status.error == npm::NpmBasicTaskConfigError::kNone);
+    AssertEquivalentTaskConfig(configs.legacy, configs.parameters_v1);
+    return configs;
+}
+
+void TestNpmBasicTaskConfigNormalizesParametersV1() {
+    static_assert(std::is_same_v<decltype(npm::NpmBasicTaskConfigStatus::parameter_status),
+                                 npm::NpmParameterStatusV1>);
+
+    std::string v1_json = R"JSON({
+        "input_namespace":"pcapfile.capture",
+        "source_domains":"0:7;1:8",
+        "features":"basic,session",
+        "observing":"session",
+        "parameters":"{\"schema_version\":1,\"framework\":{\"run_mode\":\"realtime\",)JSON"
+                          R"JSON(\"result_mode\":\"final\",\"overload_policy\":\"fail\",)JSON"
+                          R"JSON(\"output_interval_ns\":10000000,\"payload_sample_packets\":64,)JSON"
+                          R"JSON(\"tcp_idle_timeout_ns\":1000000000,)JSON"
+                          R"JSON(\"udp_idle_timeout_ns\":86400000000000,)JSON"
+                          R"JSON(\"out_of_order_tolerance_ns\":60000000000,)JSON"
+                          R"JSON(\"max_active_sessions\":10000000,)JSON"
+                          R"JSON(\"max_tracked_bytes\":1099511627776,)JSON"
+                          R"JSON(\"max_pending_output_bytes\":1099511627776},)JSON"
+                          R"JSON(\"basic\":{},\"session\":{\"max_tcp_ranges_per_direction\":8},)JSON"
+                          R"JSON(\"future\":{\"opaque\":true}}"
+    })JSON";
+    npm::NpmBasicTaskConfig v1;
+    auto status = npm::ParseNpmBasicTaskConfig(v1_json.c_str(), &v1);
+    assert(status.error == npm::NpmBasicTaskConfigError::kNone);
+    assert(status.parameter_status.error == npm::NpmParameterErrorV1::kNone);
+    assert(v1.analysis.run_mode == npm::NpmRunMode::kRealtime);
+    assert(v1.analysis.result_mode == npm::NpmResultMode::kFinal);
+    assert(v1.analysis.output_interval_ns == npm::kNpmMinOutputIntervalNs);
+    assert(v1.analysis.payload_sample_packets == npm::kNpmMaxPayloadSamplePackets);
+    assert(v1.analysis.tcp_idle_timeout_ns == npm::kNpmMinIdleTimeoutNs);
+    assert(v1.analysis.udp_idle_timeout_ns == npm::kNpmMaxIdleTimeoutNs);
+    assert(v1.analysis.out_of_order_tolerance_ns == npm::kNpmMaxOutOfOrderToleranceNs);
+    assert(v1.analysis.max_active_sessions == npm::kNpmMaxActiveSessions);
+    assert(v1.analysis.max_tracked_bytes == npm::kNpmMaxTrackedBytes);
+    assert(v1.analysis.max_pending_output_bytes == npm::kNpmMaxPendingOutputBytes);
+    assert(v1.features.basic_enabled && v1.features.session_enabled);
+    assert(v1.features.observing == npm::NpmResultEntity::kSession);
+    assert(v1.features.session_max_tcp_ranges_per_direction ==
+           npm::kNpmMinSessionTcpRangesPerDirection);
+    assert(v1.domains.input_namespace == "pcapfile.capture");
+    assert(v1.domains.bindings.size() == 2);
+
+    const char* legacy_json = R"JSON({
+        "input_namespace":"pcapfile.capture",
+        "source_domains":"0:7;1:8",
+        "features":"basic,session",
+        "observing":"session",
+        "run_mode":"realtime",
+        "result_mode":"final",
+        "overload_policy":"fail",
+        "output_interval_ns":"10000000",
+        "payload_sample_packets":"64",
+        "tcp_idle_timeout_ns":"1000000000",
+        "udp_idle_timeout_ns":"86400000000000",
+        "out_of_order_tolerance_ns":"60000000000",
+        "max_active_sessions":"10000000",
+        "max_tracked_bytes":"1099511627776",
+        "max_pending_output_bytes":"1099511627776",
+        "session_max_tcp_ranges_per_direction":"8"
+    })JSON";
+    npm::NpmBasicTaskConfig legacy;
+    status = npm::ParseNpmBasicTaskConfig(legacy_json, &legacy);
+    assert(status.error == npm::NpmBasicTaskConfigError::kNone);
+    AssertEquivalentTaskConfig(v1, legacy);
+
+    v1_json.assign(v1_json.size(), 'x');
+    assert(v1.domains.input_namespace == "pcapfile.capture");
+    assert(v1.domains.bindings[1].observation_domain_id == 8);
+    assert(v1.features.session_max_tcp_ranges_per_direction ==
+           npm::kNpmMinSessionTcpRangesPerDirection);
+
+    npm::NpmBasicTaskConfig basic_only;
+    status = npm::ParseNpmBasicTaskConfig(
+        R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
+        R"JSON("parameters":"{\"schema_version\":1,\"session\":{\"unknown\":null},)JSON"
+        R"JSON(\"future\":{\"anything\":[1,2]}}"})JSON",
+        &basic_only);
+    assert(status.error == npm::NpmBasicTaskConfigError::kNone);
+    assert(basic_only.features.basic_enabled && !basic_only.features.session_enabled);
+    assert(basic_only.features.session_max_tcp_ranges_per_direction ==
+           npm::kNpmDefaultSessionTcpRangesPerDirection);
+
+    npm::NpmBasicTaskConfig session_only;
+    status = npm::ParseNpmBasicTaskConfig(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
+        R"JSON("observing":"session",)JSON"
+        R"JSON("parameters":"{\"schema_version\":1,\"basic\":{\"unknown\":1}}"})JSON",
+        &session_only);
+    assert(status.error == npm::NpmBasicTaskConfigError::kNone);
+    assert(!session_only.features.basic_enabled && session_only.features.session_enabled);
+    assert(session_only.features.session_max_tcp_ranges_per_direction ==
+           npm::kNpmDefaultSessionTcpRangesPerDirection);
+}
+
+void TestNpmBasicTaskConfigRejectsParameterSourceConflicts() {
+    static constexpr const char* kLegacyTuningFields[] = {
+        "run_mode",
+        "result_mode",
+        "overload_policy",
+        "output_interval_ns",
+        "payload_sample_packets",
+        "tcp_idle_timeout_ns",
+        "udp_idle_timeout_ns",
+        "out_of_order_tolerance_ns",
+        "max_active_sessions",
+        "max_tracked_bytes",
+        "max_pending_output_bytes",
+        "session_max_tcp_ranges_per_direction",
+    };
+    for (const char* field : kLegacyTuningFields) {
+        const std::string json =
+            std::string(R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON") +
+            R"JSON("parameters":"{\"schema_version\":1}",")JSON" + field +
+            R"JSON(":"ignored"})JSON";
+        const std::string path = std::string("/") + field;
+        ParseTaskConfigFailure(json.c_str(),
+                               npm::NpmBasicTaskConfigError::kParameterSourceConflict,
+                               field,
+                               npm::NpmParameterErrorV1::kLegacyConflict,
+                               path.c_str());
+    }
+
+    npm::NpmBasicTaskConfig output;
+    const auto status = npm::ParseNpmBasicTaskConfig(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
+        R"JSON("observing":"session","parameters":"{\"schema_version\":1}"})JSON",
+        &output);
+    assert(status.error == npm::NpmBasicTaskConfigError::kNone);
+    assert(!output.features.basic_enabled && output.features.session_enabled);
+}
+
+void TestNpmBasicTaskConfigPreservesParameterFailuresAtomically() {
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":""})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters,
+        "parameters",
+        npm::NpmParameterErrorV1::kEmptyInput);
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
+        R"JSON("parameters":"{\"schema_version\":1,\"framework\":{)JSON"
+        R"JSON(\"max_active_sessions\":\"1\"}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters,
+        "parameters",
+        npm::NpmParameterErrorV1::kInvalidType,
+        "/framework/max_active_sessions");
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
+        R"JSON("observing":"session",)JSON"
+        R"JSON("parameters":"{\"schema_version\":1,\"session\":{)JSON"
+        R"JSON(\"max_tcp_ranges_per_direction\":7}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters,
+        "parameters",
+        npm::NpmParameterErrorV1::kInvalidRange,
+        "/session/max_tcp_ranges_per_direction");
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":{}})JSON",
+        npm::NpmBasicTaskConfigError::kNonStringValue,
+        "parameters");
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
+        R"JSON("parameters":"{\"schema_version\":1}\u0000trailing"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters,
+        "parameters",
+        npm::NpmParameterErrorV1::kInvalidJson);
+
+    std::string oversized = R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":")JSON";
+    oversized.append(npm::kNpmParametersMaxJsonBytesV1 + 1, 'x');
+    oversized += R"JSON("})JSON";
+    ParseTaskConfigFailure(oversized.c_str(),
+                           npm::NpmBasicTaskConfigError::kInvalidParameters,
+                           "parameters",
+                           npm::NpmParameterErrorV1::kJsonTooLarge);
+}
+
+npm::NpmParameterStatusV1 ParseParametersFailure(
+    const char* json,
+    const npm::NpmParameterConsumersV1& consumers,
+    npm::NpmParameterErrorV1 expected_error,
+    const char* expected_path = "") {
+    npm::NpmTaskParametersV1 output;
+    output.schema_version = 99;
+    output.source = npm::NpmParameterSourceV1::kLegacyWith;
+    output.framework.analysis = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kRealtime);
+    output.framework.analysis.max_active_sessions = 123;
+    output.framework.labeling_reference = "sentinel";
+    output.basic.reset();
+    output.session = npm::NpmSessionModuleParametersV1{321};
+
+    const auto status = npm::ParseNpmParametersV1(json, consumers, &output);
+    assert(status.error == expected_error);
+    assert(status.path == expected_path);
+    assert(output.schema_version == 99);
+    assert(output.source == npm::NpmParameterSourceV1::kLegacyWith);
+    assert(output.framework.analysis.run_mode == npm::NpmRunMode::kRealtime);
+    assert(output.framework.analysis.max_active_sessions == 123);
+    assert(output.framework.labeling_reference == "sentinel");
+    assert(!output.basic.has_value());
+    assert(output.session.has_value());
+    assert(output.session->max_tcp_ranges_per_direction == 321);
+    return status;
+}
+
+void AssertEquivalentParameters(const npm::NpmTaskParametersV1& left,
+                                const npm::NpmTaskParametersV1& right) {
+    assert(left.schema_version == right.schema_version);
+    assert(left.source == right.source);
+    assert(left.framework.analysis.run_mode == right.framework.analysis.run_mode);
+    assert(left.framework.analysis.result_mode == right.framework.analysis.result_mode);
+    assert(left.framework.analysis.output_interval_ns == right.framework.analysis.output_interval_ns);
+    assert(left.framework.analysis.payload_sample_packets ==
+           right.framework.analysis.payload_sample_packets);
+    assert(left.framework.analysis.tcp_idle_timeout_ns == right.framework.analysis.tcp_idle_timeout_ns);
+    assert(left.framework.analysis.udp_idle_timeout_ns == right.framework.analysis.udp_idle_timeout_ns);
+    assert(left.framework.analysis.out_of_order_tolerance_ns ==
+           right.framework.analysis.out_of_order_tolerance_ns);
+    assert(left.framework.analysis.max_active_sessions == right.framework.analysis.max_active_sessions);
+    assert(left.framework.analysis.max_tracked_bytes == right.framework.analysis.max_tracked_bytes);
+    assert(left.framework.analysis.max_pending_output_bytes ==
+           right.framework.analysis.max_pending_output_bytes);
+    assert(left.framework.analysis.overload_policy == right.framework.analysis.overload_policy);
+    assert(left.framework.labeling_reference == right.framework.labeling_reference);
+    assert(left.basic.has_value() == right.basic.has_value());
+    assert(left.session.has_value() == right.session.has_value());
+    if (left.session) {
+        assert(left.session->max_tcp_ranges_per_direction ==
+               right.session->max_tcp_ranges_per_direction);
+    }
+}
+
+void TestNpmParametersV1OwnsCanonicalConfig() {
+    static_assert(std::is_default_constructible_v<npm::NpmTaskParametersV1>);
+    static_assert(std::is_same_v<decltype(npm::NpmParameterStatusV1::path), std::string>);
+    static_assert(npm::kNpmParametersMaxJsonBytesV1 == 64 * 1024);
+    static_assert(npm::kNpmParametersMaxDepthV1 == 64);
+
+    npm::NpmTaskParametersV1 minimal;
+    auto status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1})JSON", {}, &minimal);
+    assert(status.error == npm::NpmParameterErrorV1::kNone && status.path.empty());
+    assert(minimal.schema_version == 1);
+    assert(minimal.source == npm::NpmParameterSourceV1::kParametersV1);
+    assert(minimal.framework.analysis.run_mode == npm::NpmRunMode::kOffline);
+    assert(minimal.framework.analysis.result_mode == npm::NpmResultMode::kFinal);
+    assert(!minimal.framework.labeling_reference.has_value());
+    assert(minimal.basic.has_value() && !minimal.session.has_value());
+
+    npm::NpmParameterConsumersV1 consumers;
+    consumers.session_enabled = true;
+    std::string json = R"JSON({
+        "future":{"opaque":null,"array":[1,{"nested":true}]},
+        "session":{"max_tcp_ranges_per_direction":65536},
+        "basic":{},
+        "framework":{
+            "max_pending_output_bytes":1099511627776,
+            "max_tracked_bytes":1099511627776,
+            "max_active_sessions":10000000,
+            "out_of_order_tolerance_ns":60000000000,
+            "udp_idle_timeout_ns":86400000000000,
+            "tcp_idle_timeout_ns":1000000000,
+            "payload_sample_packets":64,
+            "output_interval_ns":10000000,
+            "overload_policy":"fail",
+            "result_mode":"final",
+            "run_mode":"realtime",
+            "labeling":"not-an-exact-reference"
+        },
+        "schema_version":1
+    })JSON";
+    npm::NpmTaskParametersV1 first;
+    status = npm::ParseNpmParametersV1(json.c_str(), consumers, &first);
+    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    assert(first.framework.analysis.run_mode == npm::NpmRunMode::kRealtime);
+    assert(first.framework.analysis.result_mode == npm::NpmResultMode::kFinal);
+    assert(first.framework.analysis.output_interval_ns == npm::kNpmMinOutputIntervalNs);
+    assert(first.framework.analysis.payload_sample_packets == npm::kNpmMaxPayloadSamplePackets);
+    assert(first.framework.analysis.tcp_idle_timeout_ns == npm::kNpmMinIdleTimeoutNs);
+    assert(first.framework.analysis.udp_idle_timeout_ns == npm::kNpmMaxIdleTimeoutNs);
+    assert(first.framework.analysis.out_of_order_tolerance_ns ==
+           npm::kNpmMaxOutOfOrderToleranceNs);
+    assert(first.framework.analysis.max_active_sessions == npm::kNpmMaxActiveSessions);
+    assert(first.framework.analysis.max_tracked_bytes == npm::kNpmMaxTrackedBytes);
+    assert(first.framework.analysis.max_pending_output_bytes == npm::kNpmMaxPendingOutputBytes);
+    assert(!first.framework.labeling_reference.has_value());
+    assert(first.basic.has_value() && first.session.has_value());
+    assert(first.session->max_tcp_ranges_per_direction ==
+           npm::kNpmMaxSessionTcpRangesPerDirection);
+
+    const char* reordered = R"JSON({
+        "schema_version":1,
+        "framework":{"labeling":"ignored","run_mode":"realtime","result_mode":"final",
+            "overload_policy":"fail","output_interval_ns":10000000,"payload_sample_packets":64,
+            "tcp_idle_timeout_ns":1000000000,"udp_idle_timeout_ns":86400000000000,
+            "out_of_order_tolerance_ns":60000000000,"max_active_sessions":10000000,
+            "max_tracked_bytes":1099511627776,"max_pending_output_bytes":1099511627776},
+        "basic":{},"session":{"max_tcp_ranges_per_direction":65536},
+        "future":{"array":[1,{"nested":true}],"opaque":null}
+    })JSON";
+    npm::NpmTaskParametersV1 second;
+    status = npm::ParseNpmParametersV1(reordered, consumers, &second);
+    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    AssertEquivalentParameters(first, second);
+
+    json.assign(json.size(), 'x');
+    assert(first.session->max_tcp_ranges_per_direction ==
+           npm::kNpmMaxSessionTcpRangesPerDirection);
+}
+
+void TestNpmParametersV1RejectsEnvelopeAndDuplicatesAtomically() {
+    const npm::NpmParameterConsumersV1 consumers;
+    ParseParametersFailure(nullptr, consumers, npm::NpmParameterErrorV1::kNullInput);
+    ParseParametersFailure("", consumers, npm::NpmParameterErrorV1::kEmptyInput);
+    auto status = npm::ParseNpmParametersV1("{}", consumers, nullptr);
+    assert(status.error == npm::NpmParameterErrorV1::kNullOutput && status.path.empty());
+    ParseParametersFailure("{", consumers, npm::NpmParameterErrorV1::kInvalidJson);
+    ParseParametersFailure("[]", consumers, npm::NpmParameterErrorV1::kInvalidEnvelope);
+    ParseParametersFailure("{}", consumers, npm::NpmParameterErrorV1::kMissingSchemaVersion,
+                           "/schema_version");
+    ParseParametersFailure(R"JSON({"schema_version":"1"})JSON", consumers,
+                           npm::NpmParameterErrorV1::kInvalidType, "/schema_version");
+    ParseParametersFailure(R"JSON({"schema_version":2})JSON", consumers,
+                           npm::NpmParameterErrorV1::kUnsupportedVersion, "/schema_version");
+    ParseParametersFailure(R"JSON({"schema_version":1,"schema_version":1})JSON", consumers,
+                           npm::NpmParameterErrorV1::kDuplicateField, "/schema_version");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"framework":{"run_mode":"offline","run_mode":"realtime"}})JSON",
+        consumers, npm::NpmParameterErrorV1::kDuplicateField, "/framework/run_mode");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"future":{"nested":{"value":1,"value":2}}})JSON",
+        consumers, npm::NpmParameterErrorV1::kDuplicateField, "/future/nested/value");
+    ParseParametersFailure(R"JSON({"schema_version":1,"":7})JSON", consumers,
+                           npm::NpmParameterErrorV1::kInvalidType, "/");
+
+    const std::string size_prefix = R"JSON({"schema_version":1,"future":{"padding":")JSON";
+    const std::string size_suffix = R"JSON("}})JSON";
+    std::string maximum_size = size_prefix;
+    maximum_size.append(npm::kNpmParametersMaxJsonBytesV1 -
+                            size_prefix.size() - size_suffix.size(),
+                        'x');
+    maximum_size += size_suffix;
+    npm::NpmTaskParametersV1 maximum_size_output;
+    status = npm::ParseNpmParametersV1(maximum_size.c_str(), consumers, &maximum_size_output);
+    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    std::string oversized = maximum_size + " ";
+    ParseParametersFailure(oversized.c_str(), consumers,
+                           npm::NpmParameterErrorV1::kJsonTooLarge);
+
+    const auto nested_json = [](std::size_t depth) {
+        std::string json = R"JSON({"schema_version":1,"future":{"nested":)JSON";
+        json.append(depth, '[');
+        json += "0";
+        json.append(depth, ']');
+        json += "}}";
+        return json;
+    };
+    const std::string maximum_depth = nested_json(npm::kNpmParametersMaxDepthV1 - 2);
+    npm::NpmTaskParametersV1 maximum_depth_output;
+    status = npm::ParseNpmParametersV1(maximum_depth.c_str(), consumers, &maximum_depth_output);
+    assert(status.error == npm::NpmParameterErrorV1::kNone);
+
+    const std::string deep = nested_json(npm::kNpmParametersMaxDepthV1 - 1);
+    std::string deep_path = "/future/nested";
+    for (std::size_t depth = 0; depth < npm::kNpmParametersMaxDepthV1 - 1; ++depth) {
+        deep_path += "/0";
+    }
+    ParseParametersFailure(deep.c_str(), consumers,
+                           npm::NpmParameterErrorV1::kNestingTooDeep,
+                           deep_path.c_str());
+}
+
+void TestNpmParametersV1ConsumesOnlyEnabledAvailableModules() {
+    npm::NpmParameterConsumersV1 basic_only;
+    npm::NpmTaskParametersV1 output;
+    auto status = npm::ParseNpmParametersV1(
+        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":null},)JSON"
+        R"JSON("future":{"anything":false},"basic":{}})JSON",
+        basic_only, &output);
+    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    assert(output.basic.has_value() && !output.session.has_value());
+
+    status = npm::ParseNpmParametersV1(
+        R"JSON({"schema_version":1,"session":{"unknown":"ignored"}})JSON",
+        basic_only, &output);
+    assert(status.error == npm::NpmParameterErrorV1::kNone && !output.session.has_value());
+    ParseParametersFailure(R"JSON({"schema_version":1,"future":7})JSON", basic_only,
+                           npm::NpmParameterErrorV1::kInvalidType, "/future");
+    ParseParametersFailure(R"JSON({"schema_version":1,"basic":{"unknown":1}})JSON", basic_only,
+                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/basic/unknown");
+    ParseParametersFailure(R"JSON({"schema_version":1,"basic":{"":1}})JSON", basic_only,
+                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/basic/");
+
+    npm::NpmParameterConsumersV1 session = basic_only;
+    session.basic_enabled = false;
+    session.session_enabled = true;
+    status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1})JSON", session, &output);
+    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    assert(!output.basic.has_value() && output.session.has_value());
+    assert(output.session->max_tcp_ranges_per_direction ==
+           npm::kNpmDefaultSessionTcpRangesPerDirection);
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":null}})JSON",
+        session, npm::NpmParameterErrorV1::kInvalidType,
+        "/session/max_tcp_ranges_per_direction");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":"1024"}})JSON",
+        session, npm::NpmParameterErrorV1::kInvalidType,
+        "/session/max_tcp_ranges_per_direction");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":7}})JSON",
+        session, npm::NpmParameterErrorV1::kInvalidRange,
+        "/session/max_tcp_ranges_per_direction");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":65537}})JSON",
+        session, npm::NpmParameterErrorV1::kInvalidRange,
+        "/session/max_tcp_ranges_per_direction");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":4294967296}})JSON",
+        session, npm::NpmParameterErrorV1::kInvalidRange,
+        "/session/max_tcp_ranges_per_direction");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":-1}})JSON",
+        session, npm::NpmParameterErrorV1::kInvalidType,
+        "/session/max_tcp_ranges_per_direction");
+    ParseParametersFailure(R"JSON({"schema_version":1,"session":{"unknown":1}})JSON", session,
+                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/session/unknown");
+
+    session.session_available = false;
+    ParseParametersFailure(R"JSON({"schema_version":1,"session":{}})JSON", session,
+                           npm::NpmParameterErrorV1::kUnavailableFeature, "/session");
+    session.session_enabled = false;
+    status = npm::ParseNpmParametersV1(
+        R"JSON({"schema_version":1,"session":{"unknown":null}})JSON", session, &output);
+    assert(status.error == npm::NpmParameterErrorV1::kNone && !output.session.has_value());
+}
+
+void TestNpmParametersV1ValidatesFrameworkAndConditionalLabeling() {
+    npm::NpmParameterConsumersV1 consumers;
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"framework":{"unknown":1}})JSON", consumers,
+        npm::NpmParameterErrorV1::kUnknownConsumedField, "/framework/unknown");
+    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"":1}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/framework/");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"framework":{"run_mode":null}})JSON", consumers,
+        npm::NpmParameterErrorV1::kInvalidType, "/framework/run_mode");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"framework":{"run_mode":"batch"}})JSON", consumers,
+        npm::NpmParameterErrorV1::kInvalidValue, "/framework/run_mode");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"framework":{"max_active_sessions":"1"}})JSON", consumers,
+        npm::NpmParameterErrorV1::kInvalidType, "/framework/max_active_sessions");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"framework":{"max_active_sessions":0}})JSON", consumers,
+        npm::NpmParameterErrorV1::kInvalidRange, "/framework/max_active_sessions");
+    ParseParametersFailure(R"JSON({"schema_version":1,"framework":null})JSON", consumers,
+                           npm::NpmParameterErrorV1::kInvalidType, "/framework");
+
+    npm::NpmTaskParametersV1 output;
+    auto status = npm::ParseNpmParametersV1(
+        R"JSON({"schema_version":1,"framework":{"labeling":null}})JSON", consumers, &output);
+    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    assert(!output.framework.labeling_reference.has_value());
+
+    consumers.labeling_enabled = true;
+    consumers.labeling_available = true;
+    for (const char* reference : {"", "rules@1", "config.rules", "config.rules@latest",
+                                  "config.rules@0", "config.Rules@1", "config.rules@01"}) {
+        const std::string json =
+            std::string(R"JSON({"schema_version":1,"framework":{"labeling":")JSON") + reference +
+            R"JSON("}})JSON";
+        ParseParametersFailure(json.c_str(), consumers,
+                               npm::NpmParameterErrorV1::kInvalidExactReference,
+                               "/framework/labeling");
+    }
+    status = npm::ParseNpmParametersV1(
+        R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7"}})JSON",
+        consumers, &output);
+    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    assert(output.framework.labeling_reference == "config.corp-labels@7");
+
+    consumers.labeling_available = false;
+    ParseParametersFailure(R"JSON({"schema_version":1})JSON", consumers,
+                           npm::NpmParameterErrorV1::kUnavailableFeature, "/labeling");
+}
+
 void AssertTaskBudgetUsage(const npm::NpmBudgetUsage& usage,
                            uint64_t session,
                            uint64_t module,
@@ -6509,6 +7097,79 @@ void AssertTaskBudgetUsage(const npm::NpmBudgetUsage& usage,
     assert(usage.module_state_bytes == module);
     assert(usage.input_batch_bytes == input);
     assert(usage.pending_output_bytes == output);
+}
+
+void AssertEquivalentBudgetUsage(const npm::NpmBudgetUsage& left,
+                                 const npm::NpmBudgetUsage& right) {
+    assert(left.session_state_bytes == right.session_state_bytes);
+    assert(left.module_state_bytes == right.module_state_bytes);
+    assert(left.input_batch_bytes == right.input_batch_bytes);
+    assert(left.pending_output_bytes == right.pending_output_bytes);
+}
+
+void AssertEquivalentRecordBatch(const std::shared_ptr<arrow::RecordBatch>& left,
+                                 const std::shared_ptr<arrow::RecordBatch>& right) {
+    assert(left != nullptr && right != nullptr);
+    assert(left->Equals(*right));
+}
+
+void AssertEquivalentOfflineBatchStatus(const npm::NpmBasicOfflineBatchStatus& left,
+                                        const npm::NpmBasicOfflineBatchStatus& right) {
+    assert(left.error == right.error);
+    assert(left.runtime_state == right.runtime_state);
+    assert(left.input_bytes == right.input_bytes);
+    assert(left.budget_error == right.budget_error);
+    assert(left.batch_view_error == right.batch_view_error);
+    assert(left.process_status.error == right.process_status.error);
+    assert(left.process_status.row == right.process_status.row);
+    assert(left.process_status.batch_error == right.process_status.batch_error);
+    assert(left.process_status.packet_status.error == right.process_status.packet_status.error);
+    assert(left.process_status.packet_status.binding_error ==
+           right.process_status.packet_status.binding_error);
+    assert(left.process_status.packet_status.session_error ==
+           right.process_status.packet_status.session_error);
+    assert(left.process_status.packet_status.module_error ==
+           right.process_status.packet_status.module_error);
+    assert(left.process_status.progress_disposition == right.process_status.progress_disposition);
+    assert(left.process_status.module_error == right.process_status.module_error);
+    assert(left.drain_status.error == right.drain_status.error);
+    assert(left.drain_status.event_index == right.drain_status.event_index);
+    assert(left.drain_status.projection_error == right.drain_status.projection_error);
+    assert(left.drain_status.encode_error == right.drain_status.encode_error);
+    assert(left.drain_status.session_encode_error == right.drain_status.session_encode_error);
+}
+
+void AssertEquivalentRealtimeStatus(const npm::NpmBasicRealtimeMaintenanceStatus& left,
+                                    const npm::NpmBasicRealtimeMaintenanceStatus& right) {
+    assert(left.error == right.error);
+    assert(left.runtime_state == right.runtime_state);
+    assert(left.progress_disposition == right.progress_disposition);
+    assert(left.snapshot_due == right.snapshot_due);
+    assert(left.emitted == right.emitted);
+    assert(left.active_sessions == right.active_sessions);
+    assert(left.ended_sessions == right.ended_sessions);
+    assert(left.active_session_index == right.active_session_index);
+    assert(left.session_error == right.session_error);
+    assert(left.module_error == right.module_error);
+    assert(left.projection_error == right.projection_error);
+    assert(left.writer_error == right.writer_error);
+    assert(left.drain_status.error == right.drain_status.error);
+    assert(left.drain_status.event_index == right.drain_status.event_index);
+    assert(left.drain_status.projection_error == right.drain_status.projection_error);
+    assert(left.drain_status.encode_error == right.drain_status.encode_error);
+    assert(left.drain_status.session_encode_error == right.drain_status.session_encode_error);
+}
+
+void AssertEquivalentEofStatus(const npm::NpmEofFlushStatus& left,
+                               const npm::NpmEofFlushStatus& right) {
+    assert(left.error == right.error);
+    assert(left.session_error == right.session_error);
+    assert(left.module_error == right.module_error);
+    assert(left.drain_status.error == right.drain_status.error);
+    assert(left.drain_status.event_index == right.drain_status.event_index);
+    assert(left.drain_status.projection_error == right.drain_status.projection_error);
+    assert(left.drain_status.encode_error == right.drain_status.encode_error);
+    assert(left.drain_status.session_encode_error == right.drain_status.session_encode_error);
 }
 
 void TestNpmTaskBudgetLimitsAtomicityAndIsolation() {
@@ -6649,6 +7310,88 @@ std::unique_ptr<npm::NpmBasicTaskRuntime> CreateRealtimeRuntimeForTest(
     assert(output_schema != nullptr && output_schema->Equals(*expected_schema, true));
     assert(runtime != nullptr);
     return runtime;
+}
+
+void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Offline() {
+    for (const bool observing_session : {false, true}) {
+        auto configs =
+            MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kOffline, observing_session);
+        configs.legacy_json.assign(configs.legacy_json.size(), 'x');
+        configs.parameters_v1_json.assign(configs.parameters_v1_json.size(), 'y');
+        assert(configs.legacy.domains.input_namespace == "pcapfile.capture");
+        assert(configs.parameters_v1.domains.input_namespace == "pcapfile.capture");
+
+        ContextDictionary dictionary;
+        ContextProtocol protocol(&dictionary);
+        DualContextPool pool(&protocol);
+        SinglePoolQuerier querier(&pool);
+        std::shared_ptr<arrow::Schema> legacy_schema;
+        std::shared_ptr<arrow::Schema> parameters_schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> legacy_runtime;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> parameters_runtime;
+        auto legacy_create = npm::NpmBasicTaskRuntime::Create(
+            configs.legacy,
+            &querier,
+            flowsql::packet::PacketSchema(),
+            &legacy_schema,
+            &legacy_runtime);
+        auto parameters_create = npm::NpmBasicTaskRuntime::Create(
+            configs.parameters_v1,
+            &querier,
+            flowsql::packet::PacketSchema(),
+            &parameters_schema,
+            &parameters_runtime);
+        assert(legacy_create.error == npm::NpmBasicTaskRuntimeError::kNone);
+        assert(parameters_create.error == npm::NpmBasicTaskRuntimeError::kNone);
+        assert(legacy_schema != nullptr && parameters_schema != nullptr);
+        assert(legacy_schema->Equals(*parameters_schema, true));
+        assert(legacy_runtime != nullptr && parameters_runtime != nullptr);
+        AssertEquivalentTaskConfig(legacy_runtime->Config(), parameters_runtime->Config());
+        assert(legacy_runtime->State() == npm::NpmEofFlushState::kOpen);
+        assert(parameters_runtime->State() == npm::NpmEofFlushState::kOpen);
+        assert(pool.acquire_calls == 2 && pool.release_calls == 0);
+
+        const auto packet = MakeIpv4TcpPacket(
+            "192.0.2.10", 41000, "198.51.100.20", 443, {0x16, 0x03}, kTcpAck, 101);
+        auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 1)});
+        std::shared_ptr<arrow::RecordBatch> legacy_output;
+        std::shared_ptr<arrow::RecordBatch> parameters_output;
+        const auto legacy_status = legacy_runtime->ProcessOfflineBatch(input, &legacy_output);
+        const auto parameters_status =
+            parameters_runtime->ProcessOfflineBatch(input, &parameters_output);
+        AssertEquivalentOfflineBatchStatus(legacy_status, parameters_status);
+        assert(legacy_status.error == npm::NpmBasicOfflineBatchError::kNone);
+        AssertEquivalentRecordBatch(legacy_output, parameters_output);
+        assert(legacy_output->num_rows() == 0);
+        assert(legacy_runtime->Sessions().size() == 1);
+        assert(parameters_runtime->Sessions().size() == 1);
+        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(),
+                                    parameters_runtime->Budget()->Usage());
+
+        legacy_output.reset();
+        parameters_output.reset();
+        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(),
+                                    parameters_runtime->Budget()->Usage());
+        std::shared_ptr<arrow::RecordBatch> legacy_final;
+        std::shared_ptr<arrow::RecordBatch> parameters_final;
+        const auto legacy_flush = legacy_runtime->FlushOffline(100, &legacy_final);
+        const auto parameters_flush = parameters_runtime->FlushOffline(100, &parameters_final);
+        AssertEquivalentEofStatus(legacy_flush, parameters_flush);
+        assert(legacy_flush.error == npm::NpmEofFlushError::kNone);
+        AssertEquivalentRecordBatch(legacy_final, parameters_final);
+        assert(legacy_final->num_rows() == 1);
+        assert(legacy_runtime->State() == npm::NpmEofFlushState::kFlushed);
+        assert(parameters_runtime->State() == npm::NpmEofFlushState::kFlushed);
+        assert(pool.release_calls == 2);
+        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(),
+                                    parameters_runtime->Budget()->Usage());
+        assert(legacy_runtime->Budget()->Usage().pending_output_bytes > 0);
+
+        legacy_final.reset();
+        parameters_final.reset();
+        AssertTaskBudgetUsage(legacy_runtime->Budget()->Usage(), 0, 0, 0, 0);
+        AssertTaskBudgetUsage(parameters_runtime->Budget()->Usage(), 0, 0, 0, 0);
+    }
 }
 
 void TestNpmBasicTaskRuntimeCreatesExclusiveInitialState() {
@@ -6973,6 +7716,153 @@ npm::NpmBasicRealtimeMaintenanceInput RealtimeMaintenanceInput(
     input.capture_progress.source_backlog_known = source_backlog_known;
     input.capture_progress.source_has_backlog = source_has_backlog;
     return input;
+}
+
+void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Realtime() {
+    constexpr int64_t interval_ns = 10'000'000;
+    constexpr int64_t observed_start_ns = 1'700'000'000'000'000'000LL;
+    for (const bool observing_session : {false, true}) {
+        auto configs =
+            MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kRealtime, observing_session);
+        configs.legacy_json.assign(configs.legacy_json.size(), 'x');
+        configs.parameters_v1_json.assign(configs.parameters_v1_json.size(), 'y');
+
+        ContextDictionary dictionary;
+        ContextProtocol protocol(&dictionary);
+        DualContextPool pool(&protocol);
+        SinglePoolQuerier querier(&pool);
+        std::shared_ptr<arrow::Schema> legacy_schema;
+        std::shared_ptr<arrow::Schema> parameters_schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> legacy_runtime;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> parameters_runtime;
+        const auto legacy_create = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
+            configs.legacy,
+            &querier,
+            flowsql::packet::PacketSchema(),
+            AllRealtimeTimeCapabilities(),
+            &legacy_schema,
+            &legacy_runtime);
+        const auto parameters_create = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
+            configs.parameters_v1,
+            &querier,
+            flowsql::packet::PacketSchema(),
+            AllRealtimeTimeCapabilities(),
+            &parameters_schema,
+            &parameters_runtime);
+        assert(legacy_create.error == npm::NpmBasicTaskRuntimeError::kNone);
+        assert(parameters_create.error == npm::NpmBasicTaskRuntimeError::kNone);
+        assert(legacy_schema != nullptr && parameters_schema != nullptr);
+        assert(legacy_schema->Equals(*parameters_schema, true));
+        AssertEquivalentTaskConfig(legacy_runtime->Config(), parameters_runtime->Config());
+        assert(pool.acquire_calls == 2 && pool.release_calls == 0);
+
+        const auto packet = MakeIpv6UdpPacket(
+            "2001:db8::10", 53010, "2001:db8::20", 53, {0x12, 0x34});
+        auto packet_view = packet.View(0, 100);
+        packet_view.meta.timestamp_ns = 1'000;
+        std::vector<npm::NpmSessionSnapshot> legacy_ended;
+        std::vector<npm::NpmSessionSnapshot> parameters_ended;
+        const auto legacy_process = npm::ProcessNpmPacket(
+            legacy_runtime->Config().domains,
+            packet_view,
+            packet.layer,
+            legacy_runtime->Sessions(),
+            *legacy_runtime->ProtocolContext().Identifier(),
+            legacy_runtime->Modules(),
+            legacy_runtime->Collector(),
+            &legacy_ended);
+        const auto parameters_process = npm::ProcessNpmPacket(
+            parameters_runtime->Config().domains,
+            packet_view,
+            packet.layer,
+            parameters_runtime->Sessions(),
+            *parameters_runtime->ProtocolContext().Identifier(),
+            parameters_runtime->Modules(),
+            parameters_runtime->Collector(),
+            &parameters_ended);
+        assert(legacy_process.error == npm::NpmPacketProcessError::kNone);
+        assert(parameters_process.error == legacy_process.error);
+        assert(parameters_process.binding_error == legacy_process.binding_error);
+        assert(parameters_process.session_error == legacy_process.session_error);
+        assert(parameters_process.module_error == legacy_process.module_error);
+        assert(legacy_ended.empty() && parameters_ended.empty());
+        assert(legacy_runtime->Sessions().size() == 1);
+        assert(parameters_runtime->Sessions().size() == 1);
+        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(),
+                                    parameters_runtime->Budget()->Usage());
+
+        auto legacy_output = MakeNpmPacketViewBatch();
+        auto parameters_output = MakeNpmPacketViewBatch();
+        const auto legacy_sentinel = legacy_output;
+        const auto parameters_sentinel = parameters_output;
+        auto legacy_status = legacy_runtime->DriveRealtimeMaintenance(
+            RealtimeMaintenanceInput(100,
+                                     observed_start_ns,
+                                     packet_view.meta.timestamp_ns,
+                                     true,
+                                     false,
+                                     true,
+                                     false),
+            &legacy_output);
+        auto parameters_status = parameters_runtime->DriveRealtimeMaintenance(
+            RealtimeMaintenanceInput(100,
+                                     observed_start_ns,
+                                     packet_view.meta.timestamp_ns,
+                                     true,
+                                     false,
+                                     true,
+                                     false),
+            &parameters_output);
+        AssertEquivalentRealtimeStatus(legacy_status, parameters_status);
+        assert(legacy_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+        assert(!legacy_status.snapshot_due && !legacy_status.emitted);
+        assert(legacy_output == legacy_sentinel && parameters_output == parameters_sentinel);
+
+        legacy_status = legacy_runtime->DriveRealtimeMaintenance(
+            RealtimeMaintenanceInput(100 + interval_ns,
+                                     observed_start_ns + interval_ns,
+                                     packet_view.meta.timestamp_ns,
+                                     false,
+                                     false,
+                                     true,
+                                     true),
+            &legacy_output);
+        parameters_status = parameters_runtime->DriveRealtimeMaintenance(
+            RealtimeMaintenanceInput(100 + interval_ns,
+                                     observed_start_ns + interval_ns,
+                                     packet_view.meta.timestamp_ns,
+                                     false,
+                                     false,
+                                     true,
+                                     true),
+            &parameters_output);
+        AssertEquivalentRealtimeStatus(legacy_status, parameters_status);
+        assert(legacy_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+        assert(legacy_status.snapshot_due && legacy_status.emitted);
+        assert(legacy_status.active_sessions == 1 && legacy_status.ended_sessions == 0);
+        AssertEquivalentRecordBatch(legacy_output, parameters_output);
+        assert(legacy_output->num_rows() == 1);
+        if (observing_session) {
+            assert(SessionResultColumn<arrow::UInt64Array>(legacy_output, 2)->Value(0) == 1);
+        } else {
+            assert(BasicResultColumn<arrow::UInt64Array>(legacy_output, 2)->Value(0) == 1);
+        }
+        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(),
+                                    parameters_runtime->Budget()->Usage());
+        assert(legacy_runtime->Budget()->Usage().pending_output_bytes > 0);
+
+        legacy_runtime->Cancel();
+        parameters_runtime->Cancel();
+        assert(legacy_runtime->State() == npm::NpmEofFlushState::kCancelled);
+        assert(parameters_runtime->State() == npm::NpmEofFlushState::kCancelled);
+        assert(pool.release_calls == 2);
+        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(),
+                                    parameters_runtime->Budget()->Usage());
+        legacy_output.reset();
+        parameters_output.reset();
+        AssertTaskBudgetUsage(legacy_runtime->Budget()->Usage(), 0, 0, 0, 0);
+        AssertTaskBudgetUsage(parameters_runtime->Budget()->Usage(), 0, 0, 0, 0);
+    }
 }
 
 void TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions() {
@@ -10451,6 +11341,61 @@ void TestNpmBasicTaskObservingSchemaProbe() {
         npm::NpmSessionResultSchema());
 }
 
+void TestNpmBasicTaskProbeMatchesLegacyAndParametersV1() {
+    for (const bool observing_session : {false, true}) {
+        auto configs =
+            MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kOffline, observing_session);
+        const std::string expected_legacy_json = configs.legacy_json;
+        const std::string expected_parameters_json = configs.parameters_v1_json;
+        ContextDictionary dictionary;
+        ContextProtocol protocol(&dictionary);
+        DualContextPool pool(&protocol);
+        SinglePoolQuerier querier(&pool);
+        npm::NpmBasicOperator provider(&querier);
+        const std::string filter_plan = R"({"version":1,"root":null})";
+        const std::string legacy_task_id = observing_session ? "probe-legacy-session" : "probe-legacy-basic";
+        const std::string parameters_task_id =
+            observing_session ? "probe-parameters-session" : "probe-parameters-basic";
+        const auto legacy_config =
+            MakeOperatorTaskConfig(legacy_task_id, configs.legacy_json, filter_plan);
+        const auto parameters_config =
+            MakeOperatorTaskConfig(parameters_task_id, configs.parameters_v1_json, filter_plan);
+        flowsql::IBlockTransformTaskV1* legacy_task = nullptr;
+        flowsql::IBlockTransformTaskV1* parameters_task = nullptr;
+        assert(provider.CreateTask(legacy_config, &legacy_task) == 0 && legacy_task != nullptr);
+        assert(provider.CreateTask(parameters_config, &parameters_task) == 0 &&
+               parameters_task != nullptr);
+
+        configs.legacy_json.assign(configs.legacy_json.size(), 'x');
+        configs.parameters_v1_json.assign(configs.parameters_v1_json.size(), 'y');
+        auto* legacy_concrete = dynamic_cast<npm::NpmBasicTask*>(legacy_task);
+        auto* parameters_concrete = dynamic_cast<npm::NpmBasicTask*>(parameters_task);
+        assert(legacy_concrete != nullptr && parameters_concrete != nullptr);
+        assert(legacy_concrete->WithParamsJson() == expected_legacy_json);
+        assert(parameters_concrete->WithParamsJson() == expected_parameters_json);
+
+        std::shared_ptr<arrow::Schema> legacy_schema;
+        std::shared_ptr<arrow::Schema> parameters_schema;
+        assert(legacy_task->Open(flowsql::packet::PacketSchema(), &legacy_schema) == 0);
+        assert(parameters_task->Open(flowsql::packet::PacketSchema(), &parameters_schema) == 0);
+        assert(legacy_schema != nullptr && parameters_schema != nullptr);
+        assert(legacy_schema->Equals(*parameters_schema, true));
+        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema()
+                                                       : npm::NpmBasicResultSchema();
+        assert(legacy_schema->Equals(*expected_schema, true));
+        assert(legacy_task->LastError().empty() && parameters_task->LastError().empty());
+        assert(pool.acquire_calls == 2 && pool.release_calls == 0);
+
+        legacy_task->Cancel();
+        assert(pool.release_calls == 1);
+        parameters_task->Cancel();
+        assert(pool.release_calls == 2);
+        provider.ReleaseTask(legacy_task);
+        provider.ReleaseTask(parameters_task);
+        assert(pool.release_calls == 2);
+    }
+}
+
 void TestNpmBasicTaskOpenProcessAndFlush() {
     ContextDictionary dictionary;
     ContextProtocol protocol(&dictionary);
@@ -10567,6 +11512,48 @@ void TestNpmBasicTaskRejectsInvalidCallsAtomically() {
     assert(task->Flush(&outputs) != 0 && outputs.empty());
     assert(task->LastError() == process_error);
     provider.ReleaseTask(task);
+}
+
+void TestNpmBasicTaskReportsConfigurationFailurePaths() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    npm::NpmBasicOperator provider(&querier);
+    const std::string filter_plan = R"({"version":1,"root":null})";
+    const auto assert_failure = [&](const std::string& task_id,
+                                    const std::string& with_json,
+                                    const std::vector<std::string>& expected_fragments) {
+        const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
+        flowsql::IBlockTransformTaskV1* task = nullptr;
+        assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
+        auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
+        std::shared_ptr<arrow::Schema> output_schema = sentinel_schema;
+        assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) != 0);
+        assert(output_schema == sentinel_schema);
+        const auto error = task->LastError();
+        for (const auto& fragment : expected_fragments) {
+            assert(error.find(fragment) != std::string::npos);
+        }
+        provider.ReleaseTask(task);
+    };
+
+    assert_failure(
+        "task-invalid-framework-parameter",
+        R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
+        R"JSON("parameters":"{\"schema_version\":1,\"framework\":{\"max_active_sessions\":\"1\"}}"})JSON",
+        {"invalid parameters", "/framework/max_active_sessions"});
+    assert_failure(
+        "task-invalid-session-parameter",
+        R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
+        R"JSON("features":"basic,session","observing":"session",)JSON"
+        R"JSON("parameters":"{\"schema_version\":1,\"session\":{\"max_tcp_ranges_per_direction\":7}}"})JSON",
+        {"invalid parameters", "/session/max_tcp_ranges_per_direction"});
+    assert_failure(
+        "task-parameter-source-conflict",
+        R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
+        R"JSON("run_mode":"offline","parameters":"{\"schema_version\":1}"})JSON",
+        {"configuration source conflict", "/run_mode"});
 }
 
 void TestNpmBasicTaskMethodPreconditions() {
@@ -10888,12 +11875,21 @@ int main() {
     TestNpmBasicTaskConfigRejectsMappingsAndRanges();
     TestNpmBasicTaskConfigNumericBoundaries();
     TestNpmBasicTaskConfigFeatureSelection();
+    TestNpmBasicTaskConfigNormalizesParametersV1();
+    TestNpmBasicTaskConfigRejectsParameterSourceConflicts();
+    TestNpmBasicTaskConfigPreservesParameterFailuresAtomically();
+    TestNpmParametersV1OwnsCanonicalConfig();
+    TestNpmParametersV1RejectsEnvelopeAndDuplicatesAtomically();
+    TestNpmParametersV1ConsumesOnlyEnabledAvailableModules();
+    TestNpmParametersV1ValidatesFrameworkAndConditionalLabeling();
     TestNpmTaskBudgetLimitsAtomicityAndIsolation();
     TestNpmTaskBudgetConcurrentAccountingAndSharedLifetime();
+    TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Offline();
     TestNpmBasicTaskRuntimeCreatesExclusiveInitialState();
     TestNpmBasicTaskRuntimeSelectsObservedSchema();
     TestNpmBasicTaskRuntimeRejectsOpenFailuresAtomically();
     TestNpmBasicTaskRuntimeRealtimeCapabilityInjection();
+    TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Realtime();
     TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions();
     TestNpmBasicTaskRuntimeRoutesRealtimePeriodicSnapshots();
     TestNpmBasicTaskRuntimeClosesRealtimeSessionsAfterPeriodicSnapshots();
@@ -10918,8 +11914,10 @@ int main() {
     TestNpmBasicTaskRuntimeCancelKeepsDeliveredOutputAlive();
     TestNpmBasicOperatorCopiesConfigAndOwnsTasks();
     TestNpmBasicTaskObservingSchemaProbe();
+    TestNpmBasicTaskProbeMatchesLegacyAndParametersV1();
     TestNpmBasicTaskOpenProcessAndFlush();
     TestNpmBasicTaskRejectsInvalidCallsAtomically();
+    TestNpmBasicTaskReportsConfigurationFailurePaths();
     TestNpmBasicTaskMethodPreconditions();
     TestNpmBasicTaskCancelBeforeOpenAndDuringProcess();
     TestNpmBasicV2PluginExports();
