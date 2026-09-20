@@ -3,7 +3,7 @@
 状态：`[x]` 已完成（2026-09-19）
 优先级：P1
 前置 Feature：`npm-basic-analysis`、`npm-session-analysis`（均已完成）
-后续 Feature：`npm-labeling`、`npm-shared-tcp-stream`、`npm-protocol-analysis`
+后续 Feature：`flow-labeling`、`npm-shared-tcp-stream`、`npm-protocol-analysis`
 
 ## Non-Goals
 
@@ -103,7 +103,7 @@ V1 把现有共享参数按原名放入 `framework`：
 等可变长解析结果的属性匹配；只有该早期主标签可供后续处理准入使用。
 
 流量标签化已启用且可用时，`framework.labeling` 是单个精确不可变引用字符串 `config.<name>@<revision>`；空字符串、
-裸名称、`@latest`、revision 0 和非 Config 引用无效。省略表示未配置，是否必填由 `npm-labeling` 契约决定。
+裸名称、`@latest`、revision 0 和非 Config 引用无效。省略表示未配置，是否必填由 `flow-labeling` 契约决定。
 
 后续能力交付后的扩展位置固定为：
 
@@ -119,7 +119,7 @@ V1 把现有共享参数按原名放入 `framework`：
 
 该片段只展示保留位置，不是本 Feature 完成时即可执行的配置。
 
-本 Feature 只冻结字段位置、条件消费和精确引用词法契约。在 `npm-labeling` 未启用或尚不可用时，出现该字段不报错，
+本 Feature 只冻结字段位置、条件消费和精确引用词法契约。在 `flow-labeling` 未启用或尚不可用时，出现该字段不报错，
 不校验引用、不 Resolve，也不写入任务配置。后续 Feature 启用该能力时，必须在任务打开阶段校验并 Resolve 一次精确
 快照，编译为任务私有结构；逐包或逐事件路径不得访问 Config Channel、HTTP 或 SQLite。
 

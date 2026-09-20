@@ -1,14 +1,14 @@
-# NPM traffic-labeling design template.
+# Flow-labeling design template.
 #
-# The npm-labeling runtime does not consume this schema yet. A Config Channel owns
-# each immutable revision; npm.basic binds it as config.<name>@<revision>.
+# The flow-labeling runtime does not consume this schema yet. A Config Channel owns
+# each immutable revision; npm.basic is the first consumer and binds it as config.<name>@<revision>.
 # One bidirectional session receives zero or one primary label. npm.basic first
 # looks up the base session key; only unique new-session admission candidates enter
 # a bounded ACL batch. Existing sessions reuse their stored label, including 0.
 # DPDK ACL category 0 returns the highest-priority matching rule; userdata is label_id.
 
-api_version: flowsql.io/npm-labeling/v1alpha1
-kind: NpmLabelingSet
+api_version: flowsql.io/flow-labeling/v1alpha1
+kind: FlowLabelingSet
 status: design-template
 
 metadata:
@@ -64,7 +64,7 @@ spec:
   # hidden presence fields. acl_parts contain only DPDK-supported widths: 1/2/4/8.
   # Reusing one source with different IDs/types exposes all native ACL operations.
   tuple:
-    schema_id: npm-session-l2-l4-v1
+    schema_id: flow-labeling-l2-l4-v1
     byte_order: network
     dpdk_field_contract:
       types: [mask, range, bitmask]

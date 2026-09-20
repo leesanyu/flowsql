@@ -1,9 +1,7 @@
-# Feature: NPM 流量标签化
+# Feature: 流量标签化
 
-状态：`[-]` 进行中（已冻结 MVS，尚未开始 T0）
-优先级：P1
-前置 Feature：`config-channel`、`npm-basic-parameters`（均已完成）
-后续 Feature：`npm-shared-tcp-stream`、`npm-protocol-analysis`
+状态：`[-]` 进行中（已冻结 MVS，尚未开始 T0）；优先级：P1
+依赖关系：前置 `config-channel`、`npm-basic-parameters`（均已完成）；后续 `npm-shared-tcp-stream`、`npm-protocol-analysis`
 
 ## Non-Goals
 
@@ -18,20 +16,20 @@
 
 ## 业务意图
 
-中大型网络用户需要用上万个具名主标签统一表达 MAC、VLAN、IP/CIDR、传输协议和端口归属，不应让各模块重复匹配，
-也不应让可选标签能力把 DPDK 依赖强加给未启用它的 Basic/Session 任务。标签的产品归属单位是双向会话流，
+网络性能、安全等流量分析用户需要用上万个具名主标签统一表达 MAC、VLAN、IP/CIDR、传输协议和端口归属，不应让
+各消费模块重复匹配，也不应让可选标签能力把 DPDK 依赖强加给未启用它的任务。标签的产品归属单位是双向会话流，
 不是逐 packet 结果；ACL 的执行输入是本次 admission window 内去重后的唯一新会话候选。
 
-本 Feature 交付独立同进程能力插件 `libflowsql_npm_labeling.so`。插件通过固定 IID 创建任务私有、不可变的
-DPDK ACL matcher，并统一拥有进程级 EAL；`npm.basic` 继续拥有唯一解码、精确配置 Resolve、会话化、任务预算和
+本 Feature 交付通用同进程能力插件 `libflowsql_flow_labeling.so`。插件通过固定 IID 创建任务私有、不可变的
+DPDK ACL matcher，并统一拥有进程级 EAL；`npm.basic` 是首个消费者，继续拥有唯一解码、精确配置 Resolve、会话化、任务预算和
 结果投影。每个双向会话流只得到零或一个稳定主标签，provider 或 DPDK 环境不可用时在节点启动或任务打开阶段明确失败。
 
 ## 核心契约
 
 ### 独立插件与职责边界
 
-- `libflowsql_npm_labeling.so` 是 Scheduler 进程加载的系统能力插件，实现 `IPlugin` 并注册
-  `IID_NPM_LABELING_PROVIDER_V1`；它不注册 operator、channel 或 external-entry，不经过 BinAddon operator ABI。
+- `libflowsql_flow_labeling.so` 是 Scheduler 进程加载的通用系统能力插件，实现 `IPlugin` 并注册
+  `IID_FLOW_LABELING_PROVIDER_V1`；它不注册 operator、channel 或 external-entry，不经过 BinAddon operator ABI。
 - `npm.basic::Start()` 不要求该 provider。仅当 `features` 包含 `labeling` 时，任务打开路径查询 IID 一次；
   未找到或未就绪则该任务失败，未启用标签化的任务不查询且行为不变。
 - `npm.basic` Resolve 一次 `config.<name>@<revision>`，预留任务预算并把 borrowed
@@ -45,7 +43,7 @@ DPDK ACL matcher，并统一拥有进程级 EAL；`npm.basic` 继续拥有唯一
 | 所有者 | 唯一职责 |
 | --- | --- |
 | Config Channel | 持有不可变 revision 和拥有型快照，不解释 Labeling 业务规则 |
-| Labeling 插件 | DPDK/EAL、Schema 校验、ACL 编译、批量分类、标签目录和 matcher 租约 |
+| Flow Labeling 插件 | DPDK/EAL、Schema 校验、ACL 编译、批量分类、标签目录和 matcher 租约 |
 | `npm.basic` | 条件消费、精确 Resolve、类型化 facts、基础 session 身份、admission staging、任务预算、结果与错误传播 |
 
 ### 执行单位与 admission 语义
@@ -71,9 +69,9 @@ DPDK ACL matcher，并统一拥有进程级 EAL；`npm.basic` 继续拥有唯一
 byte order；MAC 与 IP 字节保持网络顺序，IPv4 放在 `ip[0..3]` 且其余字节为 0；所有可选事实均有显式 validity。
 
 ```cpp
-const Guid IID_NPM_LABELING_PROVIDER_V1 = /* fixed in the T0 public header */;
+const Guid IID_FLOW_LABELING_PROVIDER_V1 = /* fixed in the T0 public header */;
 
-enum class NpmLabelingErrorV1 : uint8_t {
+enum class FlowLabelingErrorV1 : uint8_t {
     kNone = 0,
     kUnavailable,
     kInvalidSnapshot,
@@ -85,7 +83,7 @@ enum class NpmLabelingErrorV1 : uint8_t {
     kAllocationFailed,
 };
 
-struct NpmLabelEndpointFactsV1 {
+struct FlowLabelEndpointFactsV1 {
     uint8_t mac[6]{};
     uint8_t mac_valid = 0;
     uint8_t ip[16]{};
@@ -94,25 +92,25 @@ struct NpmLabelEndpointFactsV1 {
     uint8_t port_valid = 0;
 };
 
-struct NpmLabelVlanFactsV1 {
+struct FlowLabelVlanFactsV1 {
     uint16_t tpid = 0;
     uint16_t vid = 0;
     uint8_t valid = 0;
 };
 
-struct NpmLabelFactsV1 {
-    uint32_t struct_size = sizeof(NpmLabelFactsV1);
+struct FlowLabelFactsV1 {
+    uint32_t struct_size = sizeof(FlowLabelFactsV1);
     uint64_t observation_domain_id = 0;
     uint8_t ip_family = 0;  // 4 or 6.
     uint8_t transport_protocol = 0;
     uint8_t transport_valid = 0;
-    NpmLabelEndpointFactsV1 source;
-    NpmLabelEndpointFactsV1 destination;
-    NpmLabelVlanFactsV1 vlan[2];
+    FlowLabelEndpointFactsV1 source;
+    FlowLabelEndpointFactsV1 destination;
+    FlowLabelVlanFactsV1 vlan[2];
 };
 
-struct NpmLabelingCompileRequestV1 {
-    uint32_t struct_size = sizeof(NpmLabelingCompileRequestV1);
+struct FlowLabelingCompileRequestV1 {
+    uint32_t struct_size = sizeof(FlowLabelingCompileRequestV1);
     const ConfigChannelSnapshot* snapshot = nullptr;  // Borrowed for CreateMatcher only.
     uint64_t reserved_module_state_bytes = 0;
     uint32_t max_labels = 0;
@@ -120,7 +118,7 @@ struct NpmLabelingCompileRequestV1 {
     uint32_t max_compiled_rules = 0;
 };
 
-struct NpmPrimaryLabelViewV1 {
+struct FlowPrimaryLabelViewV1 {
     uint32_t label_id = 0;
     int32_t priority = 0;
     const char* name = nullptr;
@@ -128,27 +126,27 @@ struct NpmPrimaryLabelViewV1 {
     const char* description = nullptr;  // Matcher-owned until Release.
 };
 
-struct NpmLabelingDiagnosticV1 {
-    NpmLabelingErrorV1 error = NpmLabelingErrorV1::kNone;
+struct FlowLabelingDiagnosticV1 {
+    FlowLabelingErrorV1 error = FlowLabelingErrorV1::kNone;
     const char* path = nullptr;
     const char* detail = nullptr;  // Call-borrowed; caller copies before return.
 };
 
-interface INpmLabelMatcherV1 {
-    virtual ~INpmLabelMatcherV1() = default;
-    virtual int ClassifyBatch(const NpmLabelFactsV1* facts,
+interface IFlowLabelMatcherV1 {
+    virtual ~IFlowLabelMatcherV1() = default;
+    virtual int ClassifyBatch(const FlowLabelFactsV1* facts,
                               uint32_t count,
                               uint32_t* primary_label_ids) const = 0;
-    virtual bool FindLabel(uint32_t label_id, NpmPrimaryLabelViewV1* output) const = 0;
+    virtual bool FindLabel(uint32_t label_id, FlowPrimaryLabelViewV1* output) const = 0;
     virtual void Release() noexcept = 0;
 };
 
-interface INpmLabelingProviderV1 {
-    virtual ~INpmLabelingProviderV1() = default;
-    virtual NpmLabelingErrorV1 RuntimeStatus(NpmLabelingDiagnosticV1* diagnostic) const = 0;
-    virtual NpmLabelingErrorV1 CreateMatcher(const NpmLabelingCompileRequestV1& request,
-                                             INpmLabelMatcherV1** output,
-                                             NpmLabelingDiagnosticV1* diagnostic) = 0;
+interface IFlowLabelingProviderV1 {
+    virtual ~IFlowLabelingProviderV1() = default;
+    virtual FlowLabelingErrorV1 RuntimeStatus(FlowLabelingDiagnosticV1* diagnostic) const = 0;
+    virtual FlowLabelingErrorV1 CreateMatcher(const FlowLabelingCompileRequestV1& request,
+                                              IFlowLabelMatcherV1** output,
+                                              FlowLabelingDiagnosticV1* diagnostic) = 0;
 };
 ```
 
@@ -168,23 +166,24 @@ interface INpmLabelingProviderV1 {
 - 配置只选择冻结的 observation domain、MAC、两层 VLAN、IPv4/IPv6、传输协议和端口；插件生成
   `field_index/input_index/offset`、presence 字段和网络字节序 tuple。逐包变化的 TCP flags 不进入 V1。
 - `algorithm` 映射 DPDK classify 实现，`max_runtime_bytes` 映射 `rte_acl_config.max_size`；非法配置、
-  不支持的 SIMD、规则/字段/预算越界都在 matcher 发布前失败。详例见 `config/npm-labeling-template.yaml`。
+  不支持的 SIMD、规则/字段/预算越界都在 matcher 发布前失败。详例见 `config/flow-labeling-template.yaml`。
 - 会话只保存不可变 `primary_label_id`，名称由 matcher 的任务级不可变目录解析；标签不参与基础 session key，协议状态和
   协议 ID 由 NPI 独立维护，两个维度使用独立字段和生命周期。
 
-### DPDK、EAL 与插件生命周期
+### DPDK 构建、EAL 生命周期与部署
 
-- 只有 Labeling 插件目标链接系统 `libdpdk`；`libflowsql_npm_basic.so` 不产生 DPDK `DT_NEEDED`。
-  构建该插件需要开发包、`rte_acl.h` 和 `libdpdk` pkg-config；部署该插件需要兼容运行库，不 vendor 私有副本。
-- 插件遵循批次 `Option → Load → Start`。Option 只接受受控的最小 EAL 参数；Start 在任何任务 matcher 前执行
-  唯一一次无 NIC PMD、无网卡绑定、无巨页依赖的 EAL 初始化，失败则已配置该插件的节点启动失败。
-- 每个任务拥有唯一命名的 ACL context，只在打开时 add/build，发布后只 classify。插件统计活跃 matcher 租约以检测
-  生命周期违规；安全保证来自宿主先结束任务并 Release 全部 matcher，再 Stop/Unload 和最终 EAL cleanup。
-  不得依赖当前 `PluginLoader::StopAll()` 忽略的 Stop 返回值来阻止活跃虚表被 dlclose。
-- `npm.basic` 在 CreateMatcher 前按固定上界预留 `kModuleState`，并把额度传入 request；provider 的全部
-  规则、context 和目录内存不得越过该额度，失败和 Release 均释放预算。
-- 当前 Config Channel 512 KiB 无法容纳代表性 10K 标签配置（紧凑 JSON 实测 1,452,272 bytes）；
-  T1.1 先有界扩展到 8 MiB，并同步 Web Base64、校验和读取边界。
+- DPDK 是 Labeling 真实插件私有的系统依赖，不新增 `thirdparts/dpdk`、`ExternalProject` 或私有缓存副本；构建环境
+  安装 `pkg-config`、DPDK 开发包和 `rte_acl.h`，部署环境由系统包管理器提供 ABI 兼容运行库。
+- 插件局部 CMake 以 `pkg_check_modules(DPDK ... IMPORTED_TARGET libdpdk)` 发现依赖并 `PRIVATE` 链接
+  `PkgConfig::DPDK`，完整保留 `libdpdk.pc` 的 include、含 `-march` 的 CFLAGS、链接选项和依赖库，不手写 `-ldpdk`。
+- `FLOWSQL_FLOW_LABELING=AUTO|ON|OFF`：`AUTO` 缺 DPDK 时提示并跳过真实插件，`ON` 缺依赖时明确配置失败，`OFF`
+  明确不构建；Feature 完整验收必须使用 `ON`，不得以 `AUTO` 跳过真实目标后宣称完成。
+- 只有 `libflowsql_flow_labeling.so` 产生 DPDK `DT_NEEDED`，公共头、mock 和 `libflowsql_npm_basic.so` 保持 DPDK-free；
+  发布物不复制 `librte_*.so`，插件仅部署到 Scheduler，构建与运行环境须使用兼容发行版、CPU 参数和 DPDK ABI。
+- 插件按批次 `Option → Load → Start`，Start 在任何 matcher 前执行唯一一次无 NIC、网卡绑定和巨页依赖的最小 EAL；
+  每任务 ACL context 只在打开时 add/build，宿主须先 Release 全部 matcher 再 Stop/Unload/cleanup，不能依赖 Stop 返回值阻止 dlclose。
+- `npm.basic` 先预留 `kModuleState`；规则、context 和目录内存不得越界。Config Channel 由 512 KiB 有界扩至 8 MiB，
+  以容纳实测 1,452,272 bytes 的代表性 10K 配置，并同步 Web Base64、校验和读取边界。
 
 ## 主链路
 
@@ -201,8 +200,8 @@ interface INpmLabelingProviderV1 {
   启用任务获得安全 matcher 租约和确定诊断。
   - `[ ]` T0.1：以 mock provider 冻结 compile request、typed facts、batch classify、目录视图、显式 Release、
     provider 缺失/未就绪及普通任务不查询 IID。
-  - `[ ]` T0.2：构建并部署 `libflowsql_npm_labeling.so`，验证系统 DPDK、单次最小 EAL、并发 matcher、
-    宿主先释放全部租约再卸载的顺序、违规计数诊断及 `npm.basic` 无 DPDK 动态依赖。
+  - `[ ]` T0.2：以三态开关构建并部署 `libflowsql_flow_labeling.so`，验证 `ON` 真实链接、`AUTO/OFF` 隔离、最小 EAL、
+    并发 matcher、租约先释放再卸载、ABI 完整及 `npm.basic` 无 DPDK 动态依赖。
 - `[ ]` T1：交付 10K 标签可发布的有界快照和 DPDK ACL 配置编译，使全量字段能力及失败原子性由测试锁定。
   - `[ ]` T1.1：把 Config Channel 单快照及 Web/校验边界扩展为 8 MiB，锚定 8 MiB 成功、超 1 byte 失败和
     代表性 10K 标签发布/Resolve，不改变不可变 revision。
@@ -219,7 +218,7 @@ interface INpmLabelingProviderV1 {
 
 | 验收面 | 必测断言 |
 | --- | --- |
-| 条件依赖 | 普通任务不查询 provider 且无 DPDK 依赖；启用任务缺 provider/运行环境在执行前失败 |
+| 条件依赖 | `AUTO/OFF` 不阻塞普通构建；`ON` 缺依赖即失败；普通任务不查询 provider 且无 DPDK 依赖 |
 | 插件生命周期 | EAL 只初始化一次；并发 matcher 独立；所有 matcher Release 前不得 Stop/Unload/dlclose |
 | 接口所有权 | snapshot/facts 为 call-borrowed；matcher/标签字符串活到 Release；失败 output 不变；无 `rte_*` 公共类型 |
 | admission 与唯一 | session hit 不调用 matcher；同一 window 同 key 只一个 candidate；未命中 0 也缓存；tuple reuse 重新分类 |
@@ -228,6 +227,7 @@ interface INpmLabelingProviderV1 {
 | 批量与顺序 | admission window 有界 flush；多个 miss 一次 `ClassifyBatch`；按原 packet 顺序 replay，不改变 NPI/模块回调 |
 | 热路径 | session hit 不再 ACL；不再重复解码、逐包查 IID/配置或访问 HTTP/SQLite；matcher classify 不分配 |
 | 双维度结果 | NPI protocol 与网络自定义 label 同时存在、分别更新；来源、字段和生命周期语义独立 |
+| 构建与部署 | `pkg-config --cflags --libs libdpdk` 完整；`readelf -d`/`ldd` 证明插件 DPDK 依赖可解且 Basic 无依赖；ABI 兼容 |
 | 预算与容量 | matcher 不越过预留；8 MiB 边界和 10K 发布明确；1K/10K/50K 记录展开、内存、时间和吞吐 |
 
 ## 完成出口
@@ -235,7 +235,7 @@ interface INpmLabelingProviderV1 {
 1. Labeling 作为独立能力插件经固定 IID 被条件消费，不成为 operator 或第二条解析/会话链。
 2. 插件独占 DPDK/EAL、配置编译和 matcher 生命周期；`npm.basic` 独占 Resolve、facts、预算、会话和结果。
 3. 每个双向会话流在 admission 批量 classify 后只有零或一个稳定主标签；后续 packet 复用该标签，热路径不触达控制面且无悬空插件对象。
-4. 部署、接口、容量、算法、并发、预算、完整构建和 CTest 均通过，发布范围有可复核证据。
+4. 系统 DPDK 发现、三态构建、ABI 部署、接口、容量、算法、并发、预算、完整构建和 CTest 均有可复核证据。
 
 ## 完成证据
 
