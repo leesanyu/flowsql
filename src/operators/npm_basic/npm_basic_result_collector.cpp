@@ -78,7 +78,8 @@ NpmBasicDrainStatus NpmBasicResultCollector::Drain(
         }
 
         if (observing_basic) {
-            status.encode_error = EncodeNpmBasicResultsWithBudget(basic_results, budget, output);
+            status.encode_error =
+                EncodeNpmBasicResultsWithBudget(basic_results, budget, output, nullptr, features_.labeling_enabled);
             if (status.encode_error != NpmBasicEncodeError::kNone) {
                 status.error = NpmBasicDrainError::kEncodeError;
                 return status;
@@ -88,7 +89,7 @@ NpmBasicDrainStatus NpmBasicResultCollector::Drain(
         }
 
         status.session_encode_error =
-            EncodeNpmSessionResultsWithBudget(pending_session_, budget, output);
+            EncodeNpmSessionResultsWithBudget(pending_session_, budget, output, nullptr, features_.labeling_enabled);
         if (status.session_encode_error != NpmSessionEncodeError::kNone) {
             status.error = NpmBasicDrainError::kEncodeError;
             return status;

@@ -1,6 +1,6 @@
 # Feature: 流量标签化
 
-状态：`[-]` 进行中（已冻结 MVS，尚未开始 T0）；优先级：P1
+状态：`[x]` 已完成；优先级：P1
 依赖关系：前置 `config-channel`、`npm-basic-parameters`（均已完成）；后续 `npm-shared-tcp-stream`、`npm-protocol-analysis`
 
 ## Non-Goals
@@ -196,23 +196,30 @@ interface IFlowLabelingProviderV1 {
 
 ## Feature Tasks 与测试锚点
 
-- `[ ]` T0：交付独立能力插件、公共 IID/接口、条件消费和进程级 EAL 生命周期，使未启用任务不依赖 DPDK，
+- `[x]` T0：交付独立能力插件、公共 IID/接口、条件消费和进程级 EAL 生命周期，使未启用任务不依赖 DPDK，
   启用任务获得安全 matcher 租约和确定诊断。
-  - `[ ]` T0.1：以 mock provider 冻结 compile request、typed facts、batch classify、目录视图、显式 Release、
+  - `[x]` T0.1：以 mock provider 冻结 compile request、typed facts、batch classify、目录视图、显式 Release、
     provider 缺失/未就绪及普通任务不查询 IID。
-  - `[ ]` T0.2：以三态开关构建并部署 `libflowsql_flow_labeling.so`，验证 `ON` 真实链接、`AUTO/OFF` 隔离、最小 EAL、
+  - `[x]` T0.2：以三态开关构建并部署 `libflowsql_flow_labeling.so`，验证 `ON` 真实链接、`AUTO/OFF` 隔离、最小 EAL、
     并发 matcher、租约先释放再卸载、ABI 完整及 `npm.basic` 无 DPDK 动态依赖。
-- `[ ]` T1：交付 10K 标签可发布的有界快照和 DPDK ACL 配置编译，使全量字段能力及失败原子性由测试锁定。
-  - `[ ]` T1.1：把 Config Channel 单快照及 Web/校验边界扩展为 8 MiB，锚定 8 MiB 成功、超 1 byte 失败和
+- `[x]` T1：交付 10K 标签可发布的有界快照和 DPDK ACL 配置编译，使全量字段能力及失败原子性由测试锁定。
+  - `[x]` T1.1：把 Config Channel 单快照及 Web/校验边界扩展为 8 MiB，锚定 8 MiB 成功、超 1 byte 失败和
     代表性 10K 标签发布/Resolve，不改变不可变 revision。
-  - `[ ]` T1.2：交付严格 Schema、双向展开、tuple 编码和单 category build，非法输入不发布 matcher。
-- `[ ]` T2：把 admission batch matcher 接入唯一解码/会话链，使新会话绑定稳定主标签、已有会话零次重复分类，并保持
+  - `[x]` T1.2：交付严格 Schema、双向展开、tuple 编码和单 category build，非法输入不发布 matcher。
+- `[x]` T2：把 admission batch matcher 接入唯一解码/会话链，使新会话绑定稳定主标签、已有会话零次重复分类，并保持
   NPI 采样、packet/session-end 回调顺序和失败原子性。
-  - `[ ]` T2.1：验证 session hit 不调用 matcher、同一 window 同 key 只产生一个 candidate、多个 miss 合并一次
+  - `[x]` T2.1：验证 session hit 不调用 matcher、同一 window 同 key 只产生一个 candidate、多个 miss 合并一次
     `ClassifyBatch`、未命中 0 也被缓存、tuple reuse 重新分类及 ACL 失败不发布半成品 session。
-  - `[ ]` T2.2：验证 NPI 在 session 建立后按既有 pending/identified/unknown 采样运行；protocol 与自定义 label 并列输出、
+  - `[x]` T2.2：验证 NPI 在 session 建立后按既有 pending/identified/unknown 采样运行；protocol 与自定义 label 并列输出、
     各自生命周期独立。
-- `[ ]` T3：交付真实插件部署 E2E、1K/10K/50K 规则的构建内存/时间与分类吞吐、资源诊断和完整回归。
+- `[x]` T3：交付真实插件部署 E2E、1K/10K/50K 规则的构建内存/时间与分类吞吐、资源诊断和完整回归。
+  - `[x]` T3.1：交付单 context 无损规则压缩和可解释的 matcher 稳态预算，使全部既有规则组合保持等价的同时，
+    每条物理规则由 44 fields/720 bytes 降至 32 fields/528 bytes，构建期不再保留完整规则字符串去重副本或依赖
+    未受控的 vector 几何扩容。
+  - `[x]` T3.2：交付任务级 matcher 内存参数化，使用户可在 8/16/32/64/128/256 MiB 六档中显式选择并保持
+    默认 64 MiB，同时以任务总跟踪预算至少两倍于 matcher 预算的准入约束，为会话与输入状态保留确定余量。
+  - `[x]` T3.3：交付 1K/10K/50K 真实规则容量画像和完整回归，使默认及可调预算的成功边界、失败诊断与最终
+    Feature 完成状态具有可复核证据。
 
 ## 验收矩阵
 
@@ -239,4 +246,93 @@ interface IFlowLabelingProviderV1 {
 
 ## 完成证据
 
-尚未开始实现。
+- T0.1 已冻结 DPDK-free 公共 ABI、mock matcher 生命周期和 `npm.basic` 条件 provider 查询；普通任务路径不查询
+  Labeling IID，启用任务对 provider 缺失/未就绪给出确定失败。
+- T2 已让启用任务精确 Resolve 一次不可变 Config Channel 快照，预留任务预算并创建任务私有 matcher；runtime 在所有
+  成功、失败、取消和 Flush 资源释放路径持有并显式 Release matcher，普通任务的 schema 与热路径保持不变。
+- 唯一 packet/layer decode 现在同时生成 host-order 数值和 network-order MAC/IP 的 `FlowLabelFactsV1`；离线 admission
+  对同一窗口基础 key 去重，候选窗口按 256 有界批量 `ClassifyBatch`，整批成功后才按原 packet 顺序运行既有
+  Observe、NPI 和 module callback。分类失败不创建候选 session，也不调用 NPI 或模块。
+- session active view、owned snapshot 与 end event 都携带不可变 `primary_label_id`；0 被正常缓存，session hit 不再调用
+  matcher，tuple reuse 创建新 instance 并重新分类，旧实例终结回调仍携带旧标签，标签不进入 session/partition key。
+- 不发布的 admission planner 按原 row 顺序预测 RST、双 FIN、idle retirement 与 tuple reuse；这些同 block 生命周期边界
+  后的同 key 新实例重新分类，跨 256 候选边界的同实例 hit 继续复用已绑定标签且不增加 matcher 调用。
+- 显式启用 labeling 时，Basic 与 Session Arrow schema 增加非空 `primary_label_id`；NPI `protocol_status/id/name` 仍按
+  pending/identified/unknown 独立采样和投影。定向测试同时验证 protocol 与 label 并列存在且互不改写。
+- `cmake --build build --target test_framework test_npm_basic -j$(nproc)` 通过；定向 CTest 2/2 通过。257 个唯一候选测试锚定
+  `256 + 1` 两次窗口 classify 和第二窗口失败零回放；格式化 diff、`git diff --check`、允许文件边界均通过。
+- T0.2 以系统 DPDK 23.11.4 和 `PkgConfig::DPDK` 私有链接真实插件；`OFF`、缺依赖 `AUTO`、缺依赖 `ON` 与真实
+  `ON` 的三态配置分别证明跳过、跳过、明确失败和成功构建。`readelf -d`/`ldd` 显示仅真实插件直接依赖
+  `librte_acl.so.24`、`librte_eal.so.24`，`libflowsql_npm_basic.so` 与公共头仍无 DPDK/RTE 依赖。
+- 真实插件通过固定 IID 暴露 provider，以无 NIC/巨页的最小 EAL 启动；T0.2 当时的两个任务私有 ACL
+  context 可并发只读分类空规则 snapshot，活跃租约阻止直接 Stop/Unload，全部显式 Release 后完成
+  Stop/Unload/cleanup；当时对非空配置的拒绝现已被 T1.2 真实编译链取代。
+- 原生与 Docker 部署测试证明插件只进入包含 Scheduler 的进程，Docker 运行环境由 Ubuntu 24.04 系统包提供 DPDK 23.11
+  ABI。五个定向目标构建通过，定向 CTest 5/5 通过；格式化 diff、`git diff --check` 和允许文件边界通过。
+  该 T0.2 切片结束时 T1/T3 未勾选，未运行完整 CTest，未 commit/push。
+- T1.1 已将 Provider、Config 控制面、Web 代理和前端原文上限统一为 8 MiB，Base64 上限按原文边界计算为
+  11,184,812 bytes，Config 专用控制请求和 Router 请求体保持 12 MiB 有界入口。真实 Web→Gateway→Router→Config
+  Channel 链路证明恰好 8 MiB 发布/精确 Resolve 成功，8 MiB + 1 byte 返回 413 且 current 与下一 revision
+  不变；526,918 bytes 的 10,000 标签 YAML 保持 Schema ID、内容和 SHA-256 摘要一致。三个定向 CTest 3/3
+  通过，前端定向测试通过，格式化 diff、`git diff --check` 和允许文件边界通过。该 T1.1 切片结束时
+  T1/T1.2 保持未勾选，未运行完整 CTest，未 commit/push。
+- T1.2 已在不修改 DPDK-free 公共 ABI 的前提下交付严格 `FlowLabelingSet` YAML Schema：根、metadata、
+  engine/limits、labels、rules 和 matches 均拒绝未知/缺失/重复字段；标签 ID、name、priority 各自唯一，
+  字符串由 matcher 拥有到 `Release`。配置限额不得超过 compile request，ACL runtime、物理规则与目录
+  状态同时受 64 MiB 预留预算约束，未知/不可用算法、预算与数量越界返回区分诊断且 output 不变。
+- T1.2 当时的编译器用 44 个固定 DPDK field definitions 和显式 presence 字段编码 observation domain、MAC、两层 VLAN、
+  IPv4/IPv6、传输协议与端口；数值 facts 从 host order 编码为 network-order tuple。定向规则矩阵实际经过
+  `rte_acl_add_rules`、`rte_acl_build` 和 `rte_acl_classify_alg`，覆盖 MASK/RANGE/BITMASK 的 1/2/4/8
+  字节宽度、IPv6 四段 prefix、所有 presence 反例、无命中 0 和重叠命中最高 priority。
+- 每条逻辑规则只允许 `bidirectional`，正向与端点互换反向物理规则在 build 前展开并去重；对称
+  `match_all` 在 `max_compiled_rules=1` 下成功，非对称规则在同一上限下明确越界。正反首包的
+  IPv4、IPv6、MAC 和类型操作矩阵均返回相同标签；四线程并发只读 `ClassifyBatch`/`FindLabel`
+  稳定，分类实现仅使用固定栈上 batch 缓冲和 DPDK classify，无热路堆分配。
+- 严格示例 `config/flow-labeling-template.yaml` 已由真实 provider 成功编译。
+  `cmake --build build --target test_flow_labeling -j$(nproc)` 通过；定向 CTest 1/1 通过，0 失败，
+  最后一次耗时 0.81 秒；格式化 dry-run/diff、`git diff --check` 与允许文件边界通过。T1/T1.2
+  已勾选，T3 未勾选；未运行完整 CTest，未 commit/push。
+- 规格尺寸复检为 `## 完成证据` 前 200 个非空行、4 个一级任务且无第三层编号；配置编译与
+  admission 是同一“会话主标签”交付链的两个连续阶段，共享一个 Feature 完成出口，因此保持当前 Feature 边界。
+- T3 非 50K 验收已在 `FLOWSQL_FLOW_LABELING=ON` 下完成：真实 Web/Config Channel revision 经 `npm.basic`
+  和真实 DPDK matcher 输出稳定 `primary_label_id`；独立 benchmark 以方向无关、唯一 observation domain 规则
+  成功测量 1K/10K 逻辑规则的配置大小、展开、构建耗时、实际 RSS 和分类吞吐。
+- 当前最终工作树以系统 DPDK 23.11.4 完整构建通过；全量 CTest 16/16、0 失败，总耗时 56.03 秒，覆盖真实
+  Flow Labeling、Config Channel E2E、`npm.basic`、Scheduler、原生/Docker 部署契约和既有全仓回归。
+  50K 逻辑规则与 64 MiB 预留的容量合同按用户要求留到 T3 最后单独讨论，因此 T3 仍未勾选。
+- T3.1 将私有单 context 布局无损压缩为 32 fields：九个 validity 条件合并为一个 32-bit presence bitmask，
+  observation-domain prefix 归一为 arbitrary bitmask 后求交，`RANGE` 与 `BITMASK` 仍为独立通道；静态断言锁定
+  `sizeof(FlowAclRule) == 528`，Schema、公共 ABI 和既有逻辑字段均未改变。
+- 物理规则改为预留双向候选上界后按完整 rule data 与全部 fields 排序/精确去重，不再为每条规则构造 720-byte
+  `std::string` 副本；同 predicate 不同 label/priority 不会误去重。预算按 DPDK context 长期保留的唯一 raw rules、
+  runtime 上限、标签目录和固定开销准入，临时编译 vector 的多余 capacity 不再冒充 matcher 稳态所有权。
+- 新增真实 DPDK 断言覆盖九个 presence 位逐一缺失、observation-domain range/prefix/bitmask 三重交集各自反例、
+  prefix/bitmask 冲突永不命中、32-field 配置准入、不同 rule data 不去重及预算阈值两侧；原有全字段、正反向、
+  priority、并发与模板矩阵继续通过。定向构建成功，CTest 1/1 通过，最后一次 0.67 秒。
+- 最终 64 MiB/40 MiB runtime benchmark：1K 规则构建 197.951 ms、构建 RSS 增量 31,648 KiB、22.557 M/s；
+  10K 规则构建 1,902.237 ms、构建 RSS 增量 105,636 KiB、22.936 M/s。两档均实际 build/classify 成功；这些是
+  当前机器观察值，不是跨机器阈值或 50K 容量结论。clang-format dry-run、tracked/untracked Diff 检查通过。
+- T3.2 在 V1 `framework` 中交付 `labeling_memory_mib`：默认 64 MiB，严格接受 8/16/32/64/128/256 六档，所选
+  bytes 同时用于任务 `kModuleState` 预留和 provider compile request；`max_tracked_bytes` 必须至少为该值两倍，
+  因而 256 MiB 档要求显式提供至少 512 MiB 总跟踪预算。labeling 未启用时字段保持 optional-module 忽略语义，
+  显式启用但 provider 不可用时继续明确失败。
+- 测试锚定缺省/六档、非法类型与数值、2 倍边界、解析失败原子性、任务配置归一化、128 MiB 精确传值及下一任务
+  恢复 64 MiB；公共 Flow Labeling ABI、规则上限与 matcher 布局未修改。`FLOWSQL_FLOW_LABELING=ON` 配置成功，
+  `test_npm_basic` 构建成功，定向 CTest 1/1 通过、0 失败（0.51 秒）；clang-format dry-run、`git diff --check` 通过。
+  规格尺寸复检为 205 个非空行、4 个一级任务且无第三层编号；T3.2 与既有容量验收属于同一主链，因此不拆 Feature。
+  父任务 T3 仍未勾选，节点级总预算、容量矩阵与 50K 最终验收未实施，未运行全量 CTest，未 commit/push。
+- T3.3 使用 `observation_domain` 唯一值与非对称 `source_port=443` 组合，确保每条双向逻辑规则展开为两个不同物理
+  规则。最终 40 MiB runtime 矩阵：1K/2K 物理规则在 64 MiB 下构建 294.766 ms、RSS 增量 41,244 KiB、
+  峰值 62,880 KiB、16.152 M/s；10K/20K 在 64 MiB 下构建 2,863.214 ms、RSS 增量 153,284 KiB、
+  峰值 244,188 KiB、15.755 M/s；50K/100K 在 64 MiB 下于 `/spec/engine/max_runtime_bytes` 明确返回
+  `kBudgetExceeded`；改用 128 MiB 后实际 build/classify 成功，构建 14,619.722 ms、RSS 增量 650,796 KiB、
+  峰值 1,061,768 KiB、15.256 M/s。RSS 含 512 MiB EAL 堆和构建期临时对象，不等同于 matcher 稳态预算。
+- 50K/128 初次实测暴露 DPDK 无巨页模式默认仅预留 64 MiB，实际 ACL build 额外分配约 24.1 MiB 时失败；插件私有
+  EAL 参数已显式设为 512 MiB，使最高 256 MiB 单任务 matcher 档位和构建期工作区可用，不改变公共 ABI、任务预算
+  或规则语义。六档保守代表点均实际成功：8 MiB→1K（4 MiB runtime）、16 MiB→5K（8 MiB）、32 MiB→10K
+  （16 MiB）、64 MiB→20K（32 MiB）、128 MiB→50K（40 MiB）、256 MiB→50K（128 MiB）；这些是当前布局与
+  机器的建议值，不是任意规则组合硬上限，256 MiB 档受现有 50K 逻辑规则上限约束，主要为复杂 ACL runtime 留余量。
+- 最终系统 DPDK 23.11.4 全量构建通过，完整 CTest 16/16、0 失败，总耗时 53.30 秒。`readelf`/`ldd` 复核仅
+  `libflowsql_flow_labeling.so` 直接依赖且可解析 `librte_acl.so.24`、`librte_eal.so.24`，
+  `libflowsql_npm_basic.so` 仍无 RTE/DPDK 依赖；clang-format dry-run 与 `git diff --check` 通过。规格完成前尺寸为
+  207 个非空行、4 个一级任务、无第三层编号；所有任务和完成出口均满足，Feature 已完成并归档，未 commit/push。

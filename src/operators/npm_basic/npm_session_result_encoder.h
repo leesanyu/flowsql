@@ -29,17 +29,15 @@ enum class NpmSessionEncodeError : uint8_t {
 };
 
 /** Encodes valid Session results into the fixed NpmSessionResultSchema. Output is unchanged on error. */
-NpmSessionEncodeError EncodeNpmSessionResults(
-    const std::vector<NpmSessionResult>& results,
-    std::shared_ptr<arrow::RecordBatch>* output,
-    std::string* error = nullptr);
+NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult>& results,
+                                              std::shared_ptr<arrow::RecordBatch>* output, std::string* error = nullptr,
+                                              bool labeling_enabled = false);
 
 /** Encodes, reserves exact Arrow buffer bytes, and releases the reservation with the last output owner. */
-NpmSessionEncodeError EncodeNpmSessionResultsWithBudget(
-    const std::vector<NpmSessionResult>& results,
-    const std::shared_ptr<INpmTaskBudget>& budget,
-    std::shared_ptr<arrow::RecordBatch>* output,
-    std::string* error = nullptr);
+NpmSessionEncodeError EncodeNpmSessionResultsWithBudget(const std::vector<NpmSessionResult>& results,
+                                                        const std::shared_ptr<INpmTaskBudget>& budget,
+                                                        std::shared_ptr<arrow::RecordBatch>* output,
+                                                        std::string* error = nullptr, bool labeling_enabled = false);
 
 }  // namespace flowsql::npm
 

@@ -95,6 +95,52 @@ bool EndpointComesFirst(const NpmEndpoint& left,
     return address_order < 0 || (address_order == 0 && left.port <= right.port);
 }
 
+void PopulateLabelEndpoint(const packet::MacAddress& mac, const packet::IpAddress& ip, uint16_t port,
+                           FlowLabelEndpointFactsV1* output) {
+    if (mac.valid) {
+        std::memcpy(output->mac, mac.value.bytes, sizeof(output->mac));
+        output->mac_valid = 1;
+    }
+    if (const auto* ipv4 = std::get_if<packet::IPv4Address>(&ip)) {
+        std::memcpy(output->ip, ipv4->bytes, sizeof(ipv4->bytes));
+        output->ip_valid = 1;
+    } else if (const auto* ipv6 = std::get_if<packet::IPv6Address>(&ip)) {
+        std::memcpy(output->ip, ipv6->bytes, sizeof(ipv6->bytes));
+        output->ip_valid = 1;
+    }
+    output->port = port;
+    output->port_valid = 1;
+}
+
+uint16_t VlanTpid(const packet::PacketView& packet, const packet::PacketLayerInfo& layer, uint8_t vlan_index) {
+    if (vlan_index == 0) return 0;
+    const auto& previous = layer.layers[vlan_index - 1];
+    if (previous.kind == static_cast<uint16_t>(eLayer::ETHERNET)) {
+        EthernetHeader ethernet;
+        return ReadHeader(packet, previous.offset, &ethernet) ? ntohs(ethernet.ether_type) : 0;
+    }
+    if (previous.kind == static_cast<uint16_t>(eLayer::VLAN)) {
+        VlanHeader vlan;
+        return ReadHeader(packet, previous.offset, &vlan) ? ntohs(vlan.ether_type) : 0;
+    }
+    return 0;
+}
+
+void PopulateLabelVlans(const packet::PacketView& packet, const packet::PacketLayerInfo& layer, uint8_t network_index,
+                        FlowLabelFactsV1* output) {
+    size_t fact_index = 0;
+    for (uint8_t index = 0; index < network_index && fact_index < 2; ++index) {
+        if (layer.layers[index].kind != static_cast<uint16_t>(eLayer::VLAN)) continue;
+        VlanHeader vlan;
+        const uint16_t tpid = VlanTpid(packet, layer, index);
+        if (tpid == 0 || !ReadHeader(packet, layer.layers[index].offset, &vlan)) continue;
+        output->vlan[fact_index].tpid = tpid;
+        output->vlan[fact_index].vid = ntohs(vlan.vlan_tci) & 0x0fffu;
+        output->vlan[fact_index].valid = 1;
+        ++fact_index;
+    }
+}
+
 }  // namespace
 
 NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap& domain_map,
@@ -258,6 +304,13 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
     binding.transport.payload_captured_bytes = static_cast<uint32_t>(binding.payload.size);
     binding.transport.payload_complete = binding.payload.size == payload_wire_bytes;
     binding.transport.tcp = tcp_facts;
+    binding.label_facts.observation_domain_id = observation_domain_id;
+    binding.label_facts.ip_family = static_cast<uint8_t>(family);
+    binding.label_facts.transport_protocol = expected_protocol;
+    binding.label_facts.transport_valid = 1;
+    PopulateLabelEndpoint(layer.src_mac, layer.src_ip, layer.src_port, &binding.label_facts.source);
+    PopulateLabelEndpoint(layer.dst_mac, layer.dst_ip, layer.dst_port, &binding.label_facts.destination);
+    PopulateLabelVlans(packet, layer, network_index, &binding.label_facts);
     *output = std::move(binding);
     return NpmSessionPacketError::kNone;
 }

@@ -101,6 +101,12 @@ target_compile_definitions(test_native_deploy_config PRIVATE
 )
 target_compile_options(test_native_deploy_config PRIVATE -UNDEBUG)
 add_dependencies(test_native_deploy_config flowsql flowsql_npm_basic flowsql_config_channel)
+if(TARGET flowsql_flow_labeling)
+    add_dependencies(test_native_deploy_config flowsql_flow_labeling)
+    target_compile_definitions(test_native_deploy_config PRIVATE FLOWSQL_FLOW_LABELING_BUILT=1)
+else()
+    target_compile_definitions(test_native_deploy_config PRIVATE FLOWSQL_FLOW_LABELING_BUILT=0)
+endif()
 set_target_properties(test_native_deploy_config PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
@@ -130,6 +136,12 @@ add_dependencies(test_docker_deploy_config
     flowsql_pcapfile
     flowsql_config_channel
 )
+if(TARGET flowsql_flow_labeling)
+    add_dependencies(test_docker_deploy_config flowsql_flow_labeling)
+    target_compile_definitions(test_docker_deploy_config PRIVATE FLOWSQL_FLOW_LABELING_BUILT=1)
+else()
+    target_compile_definitions(test_docker_deploy_config PRIVATE FLOWSQL_FLOW_LABELING_BUILT=0)
+endif()
 set_target_properties(test_docker_deploy_config PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )

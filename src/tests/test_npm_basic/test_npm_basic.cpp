@@ -5,6 +5,7 @@
 #include <common/network/netbase.h>
 #include <framework/core/packet_codec.h>
 #include <framework/interfaces/cpp_operator_plugin_abi.h>
+#include <framework/interfaces/iflow_labeling.h>
 #include <operators/npm_basic/npm_analysis_contract.h>
 #include <operators/npm_basic/npm_basic_operator.h>
 #include <operators/npm_basic/npm_basic_result_collector.h>
@@ -17,13 +18,14 @@
 #include <operators/npm_basic/npm_packet_processor.h>
 #include <operators/npm_basic/npm_parameters.h>
 #include <operators/npm_basic/npm_protocol_context.h>
-#include <operators/npm_basic/npm_session_key.h>
 #include <operators/npm_basic/npm_session_analysis_module.h>
+#include <operators/npm_basic/npm_session_key.h>
 #include <operators/npm_basic/npm_session_result_encoder.h>
 #include <operators/npm_basic/npm_session_table.h>
 #include <operators/npm_basic/npm_task_budget.h>
 #include <operators/npm_basic/npm_tcp_performance_tracker.h>
 #include <plugins/npi/iprotocol.h>
+#include <common/loader.hpp>
 
 #include <arrow/api.h>
 #include <arrow/util/byte_size.h>
@@ -57,9 +59,7 @@ constexpr uint8_t kTcpSyn = 0x02;
 constexpr uint8_t kTcpRst = 0x04;
 constexpr uint8_t kTcpAck = 0x10;
 
-bool SameGuid(const flowsql::Guid& left, const flowsql::Guid& right) {
-    return !(left < right) && !(right < left);
-}
+bool SameGuid(const flowsql::Guid& left, const flowsql::Guid& right) { return !(left < right) && !(right < left); }
 
 class NpiInterfaceRegistry : public flowsql::IRegister {
  public:
@@ -85,11 +85,204 @@ class SinglePoolQuerier final : public flowsql::IQuerier {
     }
 
     void* First(const flowsql::Guid& iid) override {
-        return SameGuid(iid, flowsql::IID_PROTOCOL_PIPELINE_POOL_V1) ? pool_ : nullptr;
+        if (SameGuid(iid, flowsql::IID_PROTOCOL_PIPELINE_POOL_V1)) return pool_;
+        if (SameGuid(iid, flowsql::IID_FLOW_LABELING_PROVIDER_V1)) {
+            ++labeling_queries;
+            return labeling_provider;
+        }
+        if (SameGuid(iid, flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1)) {
+            ++config_registry_queries;
+            return config_registry;
+        }
+        return nullptr;
     }
+
+    flowsql::IFlowLabelingProviderV1* labeling_provider = nullptr;
+    flowsql::IConfigChannelRegistryV1* config_registry = nullptr;
+    uint32_t labeling_queries = 0;
+    uint32_t config_registry_queries = 0;
 
  private:
     flowsql::IProtocolPipelinePoolV1* pool_ = nullptr;
+};
+
+class LabelingConfigRegistry final : public flowsql::IConfigChannelRegistryV1 {
+ public:
+    int Resolve(const char* exact_reference, flowsql::ConfigChannelSnapshot* snapshot, std::string* error) override {
+        ++resolve_calls;
+        last_reference = exact_reference == nullptr ? std::string() : exact_reference;
+        if (!succeed || snapshot == nullptr || last_reference != "config.corp-labels@7") {
+            if (error != nullptr) *error = "mock exact snapshot unavailable";
+            return ENOENT;
+        }
+        flowsql::ConfigChannelSnapshot next;
+        next.channel_name = "corp-labels";
+        next.revision = 7;
+        next.format = "yaml";
+        next.schema_id = "flowsql.io/flow-labeling/v1alpha1";
+        next.sha256_hex = "mock";
+        next.content = std::make_shared<const std::string>("labels: []");
+        next.content_bytes = next.content->size();
+        *snapshot = std::move(next);
+        if (error != nullptr) error->clear();
+        return 0;
+    }
+
+    bool succeed = true;
+    uint32_t resolve_calls = 0;
+    std::string last_reference;
+};
+
+#ifdef FLOWSQL_FLOW_LABELING_PLUGIN_PATH
+class RealLabelingSnapshotRegistry final : public flowsql::IConfigChannelRegistryV1 {
+ public:
+    int Resolve(const char* exact_reference, flowsql::ConfigChannelSnapshot* snapshot, std::string* error) override {
+        ++resolve_calls;
+        if (exact_reference == nullptr || std::strcmp(exact_reference, "config.corp-labels@7") != 0 ||
+            snapshot == nullptr) {
+            if (error != nullptr) *error = "unknown exact revision";
+            return ENOENT;
+        }
+        flowsql::ConfigChannelSnapshot next;
+        next.channel_name = "corp-labels";
+        next.revision = 7;
+        next.format = "yaml";
+        next.schema_id = "flowsql.io/flow-labeling/v1alpha1";
+        next.sha256_hex = "test";
+        next.content = std::make_shared<const std::string>(R"(api_version: flowsql.io/flow-labeling/v1alpha1
+kind: FlowLabelingSet
+spec:
+  engine:
+    type: dpdk-acl
+    categories: 1
+    algorithm: scalar
+    numa_socket_id: any
+    max_runtime_bytes: 8388608
+    limits:
+      max_labels: 10000
+      max_logical_rules: 50000
+      max_compiled_rules: 100000
+      max_expanded_fields: 64
+      reject_duplicate_label_priorities: true
+  labels:
+    - id: 1001
+      priority: 3000
+      name: corp-web
+  rules:
+    - id: corp-web-port
+      label_id: 1001
+      direction: bidirectional
+      matches:
+        - field: destination_ipv4_prefix
+          value: 198.51.100.2
+          prefix_bits: 32
+        - field: destination_port
+          min: 443
+          max: 443
+)");
+        next.content_bytes = next.content->size();
+        *snapshot = std::move(next);
+        if (error != nullptr) error->clear();
+        return 0;
+    }
+
+    uint32_t resolve_calls = 0;
+};
+#endif
+
+struct LabelingMatcherStats {
+    uint32_t classify_calls = 0;
+    uint32_t release_calls = 0;
+    int classify_error = 0;
+    int fail_call = -1;
+    std::vector<uint32_t> batch_counts;
+    std::vector<flowsql::FlowLabelFactsV1> facts;
+    std::vector<std::vector<uint32_t>> labels_by_call;
+};
+
+class RecordingLabelMatcher final : public flowsql::IFlowLabelMatcherV1 {
+ public:
+    explicit RecordingLabelMatcher(LabelingMatcherStats* stats) : stats_(stats) {}
+
+    int ClassifyBatch(const flowsql::FlowLabelFactsV1* facts, uint32_t count,
+                      uint32_t* primary_label_ids) const override {
+        assert(stats_ != nullptr && facts != nullptr && count != 0 && primary_label_ids != nullptr);
+        const size_t call_index = stats_->classify_calls++;
+        stats_->batch_counts.push_back(count);
+        stats_->facts.insert(stats_->facts.end(), facts, facts + count);
+        if (stats_->classify_error != 0 &&
+            (stats_->fail_call < 0 || static_cast<size_t>(stats_->fail_call) == call_index)) {
+            return stats_->classify_error;
+        }
+        for (uint32_t index = 0; index < count; ++index) {
+            if (call_index < stats_->labels_by_call.size() && index < stats_->labels_by_call[call_index].size()) {
+                primary_label_ids[index] = stats_->labels_by_call[call_index][index];
+            } else {
+                primary_label_ids[index] = facts[index].destination.port == 443 ? 1001 : 0;
+            }
+        }
+        return 0;
+    }
+
+    bool FindLabel(uint32_t, flowsql::FlowPrimaryLabelViewV1*) const override { return false; }
+
+    void Release() noexcept override {
+        ++stats_->release_calls;
+        delete this;
+    }
+
+ private:
+    LabelingMatcherStats* stats_ = nullptr;
+};
+
+class LabelingStatusProvider final : public flowsql::IFlowLabelingProviderV1 {
+ public:
+    flowsql::FlowLabelingErrorV1 RuntimeStatus(flowsql::FlowLabelingDiagnosticV1* diagnostic) const override {
+        ++runtime_status_calls;
+        if (ready) {
+            if (diagnostic != nullptr) *diagnostic = {};
+            return flowsql::FlowLabelingErrorV1::kNone;
+        }
+        if (diagnostic != nullptr) {
+            diagnostic->error = flowsql::FlowLabelingErrorV1::kUnavailable;
+            diagnostic->path = "/runtime";
+            diagnostic->detail = "mock labeling runtime unavailable";
+        }
+        return flowsql::FlowLabelingErrorV1::kUnavailable;
+    }
+
+    flowsql::FlowLabelingErrorV1 CreateMatcher(const flowsql::FlowLabelingCompileRequestV1& request,
+                                               flowsql::IFlowLabelMatcherV1** output,
+                                               flowsql::FlowLabelingDiagnosticV1* diagnostic) override {
+        ++create_matcher_calls;
+        if (create_succeeds && request.snapshot != nullptr && output != nullptr) {
+            captured_reference = request.snapshot->channel_name + "@" + std::to_string(request.snapshot->revision);
+            captured_reserved_bytes = request.reserved_module_state_bytes;
+            captured_max_labels = request.max_labels;
+            captured_max_logical_rules = request.max_logical_rules;
+            captured_max_compiled_rules = request.max_compiled_rules;
+            *output = new RecordingLabelMatcher(&matcher_stats);
+            if (diagnostic != nullptr) *diagnostic = {};
+            return flowsql::FlowLabelingErrorV1::kNone;
+        }
+        if (diagnostic != nullptr) {
+            diagnostic->error = flowsql::FlowLabelingErrorV1::kInvalidConfig;
+            diagnostic->path = "/mock";
+            diagnostic->detail = "not used by T0.1";
+        }
+        return flowsql::FlowLabelingErrorV1::kInvalidConfig;
+    }
+
+    bool ready = true;
+    bool create_succeeds = false;
+    mutable uint32_t runtime_status_calls = 0;
+    uint32_t create_matcher_calls = 0;
+    uint64_t captured_reserved_bytes = 0;
+    uint32_t captured_max_labels = 0;
+    uint32_t captured_max_logical_rules = 0;
+    uint32_t captured_max_compiled_rules = 0;
+    std::string captured_reference;
+    LabelingMatcherStats matcher_stats;
 };
 
 class ContextDictionary final : public flowsql::protocol::IDictionary {
@@ -121,23 +314,17 @@ class ContextProtocol final : public flowsql::IProtocol {
 
     void Concurrency(int32_t) override {}
 
-    flowsql::protocol::Protocol Identify(int32_t pipeno,
-                                         const uint8_t*,
-                                         int32_t,
+    flowsql::protocol::Protocol Identify(int32_t pipeno, const uint8_t*, int32_t,
                                          const flowsql::protocol::Layers*) override {
         if (identify_entered != nullptr) identify_entered->store(true, std::memory_order_release);
-        while (release_identify != nullptr &&
-               !release_identify->load(std::memory_order_acquire)) {
+        while (release_identify != nullptr && !release_identify->load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
         identify_pipelines.push_back(pipeno);
         return {7, 8};
     }
 
-    int32_t Layer(int32_t,
-                  const uint8_t*,
-                  int32_t,
-                  flowsql::protocol::Layers*) override {
+    int32_t Layer(int32_t, const uint8_t*, int32_t, flowsql::protocol::Layers*) override {
         ++layer_calls;
         return 0;
     }
@@ -156,8 +343,7 @@ class ContextProtocol final : public flowsql::IProtocol {
 class ContextPool final : public flowsql::IProtocolPipelinePoolV1 {
  public:
     explicit ContextPool(flowsql::IProtocol* protocol,
-                         flowsql::ProtocolPipelinePoolError acquire_result =
-                             flowsql::ProtocolPipelinePoolError::kNone)
+                         flowsql::ProtocolPipelinePoolError acquire_result = flowsql::ProtocolPipelinePoolError::kNone)
         : protocol_(protocol), acquire_result_(acquire_result) {}
 
     flowsql::ProtocolPipelinePoolError Acquire(int32_t* pipeno) override {
@@ -235,17 +421,13 @@ class CountingProtocolProxy final : public flowsql::IProtocol {
 
     void Concurrency(int32_t number) override { target_->Concurrency(number); }
 
-    flowsql::protocol::Protocol Identify(int32_t pipeno,
-                                         const uint8_t* packet,
-                                         int32_t packet_size,
+    flowsql::protocol::Protocol Identify(int32_t pipeno, const uint8_t* packet, int32_t packet_size,
                                          const flowsql::protocol::Layers* layers) override {
         identify_pipelines.push_back(pipeno);
         return target_->Identify(pipeno, packet, packet_size, layers);
     }
 
-    int32_t Layer(int32_t pipeno,
-                  const uint8_t* packet,
-                  int32_t packet_size,
+    int32_t Layer(int32_t pipeno, const uint8_t* packet, int32_t packet_size,
                   flowsql::protocol::Layers* layers) override {
         ++layer_calls;
         return target_->Layer(pipeno, packet, packet_size, layers);
@@ -301,15 +483,9 @@ flowsql::packet::IPv6Address ParseIpv6(const char* text) {
     return address;
 }
 
-PacketFixture MakeIpv4TcpPacket(const char* src,
-                                uint16_t src_port,
-                                const char* dst,
-                                uint16_t dst_port,
-                                const std::vector<uint8_t>& payload,
-                                uint8_t flags = 0,
-                                uint32_t sequence = 0,
-                                uint32_t acknowledgment = 0,
-                                uint16_t window = 0) {
+PacketFixture MakeIpv4TcpPacket(const char* src, uint16_t src_port, const char* dst, uint16_t dst_port,
+                                const std::vector<uint8_t>& payload, uint8_t flags = 0, uint32_t sequence = 0,
+                                uint32_t acknowledgment = 0, uint16_t window = 0) {
     PacketFixture fixture;
     fixture.bytes.resize(sizeof(flowsql::Ipv4Header) + sizeof(flowsql::TcpHeader) + payload.size());
     auto* ip = reinterpret_cast<flowsql::Ipv4Header*>(fixture.bytes.data());
@@ -327,8 +503,7 @@ PacketFixture MakeIpv4TcpPacket(const char* src,
     tcp->offset = 5;
     tcp->flags.flags_byte = flags;
     tcp->window = htons(window);
-    std::memcpy(fixture.bytes.data() + sizeof(flowsql::Ipv4Header) + sizeof(flowsql::TcpHeader),
-                payload.data(),
+    std::memcpy(fixture.bytes.data() + sizeof(flowsql::Ipv4Header) + sizeof(flowsql::TcpHeader), payload.data(),
                 payload.size());
 
     fixture.layer.status = flowsql::packet::LayerStatus::kDecoded;
@@ -347,12 +522,8 @@ PacketFixture MakeIpv4TcpPacket(const char* src,
     return fixture;
 }
 
-PacketFixture MakeIpv6UdpPacket(const char* src,
-                                uint16_t src_port,
-                                const char* dst,
-                                uint16_t dst_port,
-                                const std::vector<uint8_t>& payload,
-                                bool fragmented = false,
+PacketFixture MakeIpv6UdpPacket(const char* src, uint16_t src_port, const char* dst, uint16_t dst_port,
+                                const std::vector<uint8_t>& payload, bool fragmented = false,
                                 uint16_t fragment_offset = 0) {
     const size_t fragment_header_size = fragmented ? 8 : 0;
     PacketFixture fixture;
@@ -412,10 +583,10 @@ bool SameIp(const flowsql::packet::IpAddress& left, const flowsql::packet::IpAdd
 }
 
 bool SameKey(const npm::NpmSessionKey& left, const npm::NpmSessionKey& right) {
-    return left.input_namespace == right.input_namespace &&
-           left.observation_domain_id == right.observation_domain_id && left.ip_family == right.ip_family &&
-           left.transport_protocol == right.transport_protocol && SameIp(left.a.ip, right.a.ip) &&
-           left.a.port == right.a.port && SameIp(left.b.ip, right.b.ip) && left.b.port == right.b.port;
+    return left.input_namespace == right.input_namespace && left.observation_domain_id == right.observation_domain_id &&
+           left.ip_family == right.ip_family && left.transport_protocol == right.transport_protocol &&
+           SameIp(left.a.ip, right.a.ip) && left.a.port == right.a.port && SameIp(left.b.ip, right.b.ip) &&
+           left.b.port == right.b.port;
 }
 
 void TestConfigDefaultsAndEnumContract() {
@@ -558,8 +729,7 @@ void TestConfigRangesAndUnsupportedValues() {
 }
 
 void TestObservationDomainMapping() {
-    const npm::NpmObservationDomainMap domain_map{
-        "pcapfile.capture", {{4, 7}, {9, 7}, {10, 8}}};
+    const npm::NpmObservationDomainMap domain_map{"pcapfile.capture", {{4, 7}, {9, 7}, {10, 8}}};
     assert(npm::ValidateNpmObservationDomainMap(domain_map) == npm::NpmObservationDomainError::kNone);
 
     uint64_t observation_domain_id = 99;
@@ -577,17 +747,14 @@ void TestObservationDomainMapping() {
     assert(npm::ResolveNpmObservationDomain(domain_map, 11, &observation_domain_id) ==
            npm::NpmObservationDomainError::kUnknownSourceId);
     assert(observation_domain_id == 99);
-    assert(npm::ResolveNpmObservationDomain(domain_map, 4, nullptr) ==
-           npm::NpmObservationDomainError::kNullOutput);
+    assert(npm::ResolveNpmObservationDomain(domain_map, 4, nullptr) == npm::NpmObservationDomainError::kNullOutput);
 
     const npm::NpmObservationDomainMap empty_namespace{"", {{4, 7}}};
     assert(npm::ValidateNpmObservationDomainMap(empty_namespace) ==
            npm::NpmObservationDomainError::kEmptyInputNamespace);
     const npm::NpmObservationDomainMap empty_bindings{"pcapfile.capture", {}};
-    assert(npm::ValidateNpmObservationDomainMap(empty_bindings) ==
-           npm::NpmObservationDomainError::kEmptyBindings);
-    const npm::NpmObservationDomainMap duplicate_source{
-        "pcapfile.capture", {{4, 7}, {4, 8}}};
+    assert(npm::ValidateNpmObservationDomainMap(empty_bindings) == npm::NpmObservationDomainError::kEmptyBindings);
+    const npm::NpmObservationDomainMap duplicate_source{"pcapfile.capture", {{4, 7}, {4, 8}}};
     assert(npm::ValidateNpmObservationDomainMap(duplicate_source) ==
            npm::NpmObservationDomainError::kDuplicateSourceId);
 }
@@ -758,94 +925,70 @@ void TestSessionResultStatusAndNullableContract() {
     static_assert(std::is_same_v<std::underlying_type_t<npm::NpmRateStatus>, uint8_t>);
     static_assert(std::is_same_v<std::underlying_type_t<npm::NpmTcpHandshakeStatus>, uint8_t>);
     static_assert(std::is_same_v<std::underlying_type_t<npm::NpmTcpRttStatus>, uint8_t>);
-    static_assert(
-        std::is_same_v<std::underlying_type_t<npm::NpmTcpRetransmissionStatus>, uint8_t>);
+    static_assert(std::is_same_v<std::underlying_type_t<npm::NpmTcpRetransmissionStatus>, uint8_t>);
     static_assert(std::is_same_v<std::underlying_type_t<npm::NpmTcpInitiator>, uint8_t>);
     static_assert(npm::kNpmMeasurementKnownFlags == 31);
 
     assert(std::strcmp(npm::NpmRateStatusName(npm::NpmRateStatus::kValid), "valid") == 0);
-    assert(std::strcmp(npm::NpmRateStatusName(npm::NpmRateStatus::kInsufficientSpan),
-                       "insufficient_span") == 0);
-    assert(std::strcmp(npm::NpmTcpHandshakeStatusName(npm::NpmTcpHandshakeStatus::kComplete),
-                       "complete") == 0);
-    assert(std::strcmp(npm::NpmTcpHandshakeStatusName(npm::NpmTcpHandshakeStatus::kPartial),
-                       "partial") == 0);
-    assert(std::strcmp(
-               npm::NpmTcpHandshakeStatusName(npm::NpmTcpHandshakeStatus::kNotObserved),
-               "not_observed") == 0);
-    assert(std::strcmp(npm::NpmTcpHandshakeStatusName(npm::NpmTcpHandshakeStatus::kAmbiguous),
-                       "ambiguous") == 0);
-    assert(std::strcmp(
-               npm::NpmTcpHandshakeStatusName(npm::NpmTcpHandshakeStatus::kNotApplicable),
-               "not_applicable") == 0);
-    assert(std::strcmp(npm::NpmTcpRttStatusName(npm::NpmTcpRttStatus::kNoSample),
-                       "no_sample") == 0);
-    assert(std::strcmp(npm::NpmTcpRetransmissionStatusName(
-                           npm::NpmTcpRetransmissionStatus::kNotApplicable),
+    assert(std::strcmp(npm::NpmRateStatusName(npm::NpmRateStatus::kInsufficientSpan), "insufficient_span") == 0);
+    assert(std::strcmp(npm::NpmTcpHandshakeStatusName(npm::NpmTcpHandshakeStatus::kComplete), "complete") == 0);
+    assert(std::strcmp(npm::NpmTcpHandshakeStatusName(npm::NpmTcpHandshakeStatus::kPartial), "partial") == 0);
+    assert(std::strcmp(npm::NpmTcpHandshakeStatusName(npm::NpmTcpHandshakeStatus::kNotObserved), "not_observed") == 0);
+    assert(std::strcmp(npm::NpmTcpHandshakeStatusName(npm::NpmTcpHandshakeStatus::kAmbiguous), "ambiguous") == 0);
+    assert(std::strcmp(npm::NpmTcpHandshakeStatusName(npm::NpmTcpHandshakeStatus::kNotApplicable), "not_applicable") ==
+           0);
+    assert(std::strcmp(npm::NpmTcpRttStatusName(npm::NpmTcpRttStatus::kNoSample), "no_sample") == 0);
+    assert(std::strcmp(npm::NpmTcpRetransmissionStatusName(npm::NpmTcpRetransmissionStatus::kNotApplicable),
                        "not_applicable") == 0);
     assert(std::strcmp(npm::NpmTcpInitiatorName(npm::NpmTcpInitiator::kA), "a") == 0);
     assert(std::strcmp(npm::NpmTcpInitiatorName(npm::NpmTcpInitiator::kB), "b") == 0);
     assert(npm::NpmRateStatusName(static_cast<npm::NpmRateStatus>(2)) == nullptr);
-    assert(npm::NpmTcpHandshakeStatusName(static_cast<npm::NpmTcpHandshakeStatus>(5)) ==
-           nullptr);
+    assert(npm::NpmTcpHandshakeStatusName(static_cast<npm::NpmTcpHandshakeStatus>(5)) == nullptr);
     assert(npm::NpmTcpRttStatusName(static_cast<npm::NpmTcpRttStatus>(4)) == nullptr);
-    assert(npm::NpmTcpRetransmissionStatusName(
-               static_cast<npm::NpmTcpRetransmissionStatus>(3)) == nullptr);
+    assert(npm::NpmTcpRetransmissionStatusName(static_cast<npm::NpmTcpRetransmissionStatus>(3)) == nullptr);
     assert(npm::NpmTcpInitiatorName(static_cast<npm::NpmTcpInitiator>(2)) == nullptr);
 
     auto udp = MakeValidUdpSessionResult();
     assert(npm::ValidateNpmSessionResult(udp) == npm::NpmSessionResultError::kNone);
-    udp.measurement_flags = npm::kNpmMeasurementTruncatedPayload |
-                            npm::kNpmMeasurementTimestampRegression;
+    udp.measurement_flags = npm::kNpmMeasurementTruncatedPayload | npm::kNpmMeasurementTimestampRegression;
     assert(npm::ValidateNpmSessionResult(udp) == npm::NpmSessionResultError::kNone);
     udp.measurement_flags = npm::kNpmMeasurementMidstreamStart;
-    assert(npm::ValidateNpmSessionResult(udp) ==
-           npm::NpmSessionResultError::kTcpFieldsMismatch);
+    assert(npm::ValidateNpmSessionResult(udp) == npm::NpmSessionResultError::kTcpFieldsMismatch);
     udp = MakeValidUdpSessionResult();
     udp.tcp_rtt_samples = 0;
-    assert(npm::ValidateNpmSessionResult(udp) ==
-           npm::NpmSessionResultError::kTcpFieldsMismatch);
+    assert(npm::ValidateNpmSessionResult(udp) == npm::NpmSessionResultError::kTcpFieldsMismatch);
 
     auto tcp = MakeValidTcpSessionResult();
     assert(npm::ValidateNpmSessionResult(tcp) == npm::NpmSessionResultError::kNone);
 
     auto invalid = tcp;
     invalid.revision = 0;
-    assert(npm::ValidateNpmSessionResult(invalid) ==
-           npm::NpmSessionResultError::kInvalidIdentity);
+    assert(npm::ValidateNpmSessionResult(invalid) == npm::NpmSessionResultError::kInvalidIdentity);
     invalid = tcp;
     invalid.duration_ns = 9;
-    assert(npm::ValidateNpmSessionResult(invalid) ==
-           npm::NpmSessionResultError::kInvalidTimeRange);
+    assert(npm::ValidateNpmSessionResult(invalid) == npm::NpmSessionResultError::kInvalidTimeRange);
     invalid = tcp;
     invalid.wire_bps_ab = std::numeric_limits<double>::infinity();
-    assert(npm::ValidateNpmSessionResult(invalid) ==
-           npm::NpmSessionResultError::kInvalidRateValue);
+    assert(npm::ValidateNpmSessionResult(invalid) == npm::NpmSessionResultError::kInvalidRateValue);
     invalid = tcp;
     invalid.payload_bytes_ab = invalid.wire_bytes_ab + 1;
-    assert(npm::ValidateNpmSessionResult(invalid) ==
-           npm::NpmSessionResultError::kTrafficTotalsMismatch);
+    assert(npm::ValidateNpmSessionResult(invalid) == npm::NpmSessionResultError::kTrafficTotalsMismatch);
     invalid = tcp;
     invalid.measurement_flags = 1u << 5;
-    assert(npm::ValidateNpmSessionResult(invalid) ==
-           npm::NpmSessionResultError::kInvalidMeasurementFlags);
+    assert(npm::ValidateNpmSessionResult(invalid) == npm::NpmSessionResultError::kInvalidMeasurementFlags);
 
     invalid = tcp;
     invalid.tcp_rtt_status = static_cast<npm::NpmTcpRttStatus>(4);
-    assert(npm::ValidateNpmSessionResult(invalid) ==
-           npm::NpmSessionResultError::kInvalidTcpRttStatus);
+    assert(npm::ValidateNpmSessionResult(invalid) == npm::NpmSessionResultError::kInvalidTcpRttStatus);
     invalid = tcp;
     invalid.tcp_handshake_duration_ns.reset();
-    assert(npm::ValidateNpmSessionResult(invalid) ==
-           npm::NpmSessionResultError::kHandshakeFieldsMismatch);
+    assert(npm::ValidateNpmSessionResult(invalid) == npm::NpmSessionResultError::kHandshakeFieldsMismatch);
     invalid = tcp;
     invalid.tcp_rtt_samples = 0;
-    assert(npm::ValidateNpmSessionResult(invalid) ==
-           npm::NpmSessionResultError::kRttFieldsMismatch);
+    assert(npm::ValidateNpmSessionResult(invalid) == npm::NpmSessionResultError::kRttFieldsMismatch);
     invalid = tcp;
     invalid.tcp_retrans_packets_ab.reset();
-    assert(npm::ValidateNpmSessionResult(invalid) ==
-           npm::NpmSessionResultError::kRetransmissionFieldsMismatch);
+    assert(npm::ValidateNpmSessionResult(invalid) == npm::NpmSessionResultError::kRetransmissionFieldsMismatch);
 
     tcp.tcp_rtt_status = npm::NpmTcpRttStatus::kNoSample;
     tcp.tcp_rtt_samples = 0;
@@ -869,8 +1012,7 @@ void TestSessionResultStatusAndNullableContract() {
     assert(npm::ValidateNpmSessionResult(tcp) == npm::NpmSessionResultError::kNone);
 
     tcp.measurement_flags |= npm::kNpmMeasurementSynRetransmitted;
-    assert(npm::ValidateNpmSessionResult(tcp) ==
-           npm::NpmSessionResultError::kHandshakeFieldsMismatch);
+    assert(npm::ValidateNpmSessionResult(tcp) == npm::NpmSessionResultError::kHandshakeFieldsMismatch);
     tcp.tcp_handshake_status = npm::NpmTcpHandshakeStatus::kAmbiguous;
     tcp.tcp_initiator.reset();
     tcp.tcp_handshake_duration_ns.reset();
@@ -883,13 +1025,11 @@ void TestSessionResultStatusAndNullableContract() {
     invalid.protocol_id.reset();
     invalid.protocol.reset();
     invalid.end_reason = npm::NpmSessionEndReason::kEof;
-    assert(npm::ValidateNpmSessionResult(invalid) ==
-           npm::NpmSessionResultError::kPendingFinalResult);
+    assert(npm::ValidateNpmSessionResult(invalid) == npm::NpmSessionResultError::kPendingFinalResult);
     invalid.protocol_status = npm::NpmProtocolStatus::kUnknown;
     assert(npm::ValidateNpmSessionResult(invalid) == npm::NpmSessionResultError::kNone);
     invalid.end_reason.reset();
-    assert(npm::ValidateNpmSessionResult(invalid) ==
-           npm::NpmSessionResultError::kMissingFinalEndReason);
+    assert(npm::ValidateNpmSessionResult(invalid) == npm::NpmSessionResultError::kMissingFinalEndReason);
 }
 
 void TestSessionResultSchema() {
@@ -966,14 +1106,10 @@ void TestSessionResultSchema() {
     assert(schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == "1");
     assert(schema->metadata()->Get("flowsql.timestamp_unit").ValueOrDie() == "ns");
     assert(schema->metadata()->Get("flowsql.revision_semantics").ValueOrDie() == "cumulative");
-    assert(schema->metadata()->Get("flowsql.measurement_scope").ValueOrDie() ==
-           "single_capture_observed_packets");
+    assert(schema->metadata()->Get("flowsql.measurement_scope").ValueOrDie() == "single_capture_observed_packets");
 }
 
-void AssertBudgetUsage(const npm::NpmBudgetUsage& usage,
-                       uint64_t session,
-                       uint64_t module,
-                       uint64_t input,
+void AssertBudgetUsage(const npm::NpmBudgetUsage& usage, uint64_t session, uint64_t module, uint64_t input,
                        uint64_t output) {
     assert(usage.session_state_bytes == session);
     assert(usage.module_state_bytes == module);
@@ -990,32 +1126,25 @@ void TestBudgetAccounting() {
 
     assert(npm::ReserveNpmBudget(config, npm::NpmBudgetCategory::kSessionState, 100, &usage) ==
            npm::NpmBudgetError::kNone);
-    assert(npm::ReserveNpmBudget(config,
-                                npm::NpmBudgetCategory::kModuleState,
-                                config.max_tracked_bytes - 100,
-                                &usage) == npm::NpmBudgetError::kNone);
+    assert(npm::ReserveNpmBudget(config, npm::NpmBudgetCategory::kModuleState, config.max_tracked_bytes - 100,
+                                 &usage) == npm::NpmBudgetError::kNone);
     AssertBudgetUsage(usage, 100, config.max_tracked_bytes - 100, 0, 0);
     assert(npm::ReserveNpmBudget(config, npm::NpmBudgetCategory::kInputBatch, 1, &usage) ==
            npm::NpmBudgetError::kTrackedLimitExceeded);
     AssertBudgetUsage(usage, 100, config.max_tracked_bytes - 100, 0, 0);
 
-    assert(npm::ReserveNpmBudget(config,
-                                npm::NpmBudgetCategory::kPendingOutput,
-                                config.max_pending_output_bytes,
-                                &usage) == npm::NpmBudgetError::kNone);
+    assert(npm::ReserveNpmBudget(config, npm::NpmBudgetCategory::kPendingOutput, config.max_pending_output_bytes,
+                                 &usage) == npm::NpmBudgetError::kNone);
     assert(npm::ReserveNpmBudget(config, npm::NpmBudgetCategory::kPendingOutput, 1, &usage) ==
            npm::NpmBudgetError::kPendingOutputLimitExceeded);
     AssertBudgetUsage(usage, 100, config.max_tracked_bytes - 100, 0, config.max_pending_output_bytes);
-    assert(npm::ReleaseNpmBudget(npm::NpmBudgetCategory::kPendingOutput, 1, &usage) ==
-           npm::NpmBudgetError::kNone);
+    assert(npm::ReleaseNpmBudget(npm::NpmBudgetCategory::kPendingOutput, 1, &usage) == npm::NpmBudgetError::kNone);
     assert(npm::ReserveNpmBudget(config, npm::NpmBudgetCategory::kPendingOutput, 1, &usage) ==
            npm::NpmBudgetError::kNone);
     AssertBudgetUsage(usage, 100, config.max_tracked_bytes - 100, 0, config.max_pending_output_bytes);
 
-    assert(npm::ReleaseNpmBudget(npm::NpmBudgetCategory::kModuleState, 1, &usage) ==
-           npm::NpmBudgetError::kNone);
-    assert(npm::ReserveNpmBudget(config, npm::NpmBudgetCategory::kInputBatch, 1, &usage) ==
-           npm::NpmBudgetError::kNone);
+    assert(npm::ReleaseNpmBudget(npm::NpmBudgetCategory::kModuleState, 1, &usage) == npm::NpmBudgetError::kNone);
+    assert(npm::ReserveNpmBudget(config, npm::NpmBudgetCategory::kInputBatch, 1, &usage) == npm::NpmBudgetError::kNone);
     AssertBudgetUsage(usage, 100, config.max_tracked_bytes - 101, 1, config.max_pending_output_bytes);
 
     assert(npm::ReleaseNpmBudget(npm::NpmBudgetCategory::kSessionState, 101, &usage) ==
@@ -1028,8 +1157,7 @@ void TestBudgetAccounting() {
     AssertBudgetUsage(usage, 100, config.max_tracked_bytes - 101, 1, config.max_pending_output_bytes);
     assert(npm::ReserveNpmBudget(config, npm::NpmBudgetCategory::kSessionState, 1, nullptr) ==
            npm::NpmBudgetError::kNullUsage);
-    assert(npm::ReleaseNpmBudget(npm::NpmBudgetCategory::kSessionState, 1, nullptr) ==
-           npm::NpmBudgetError::kNullUsage);
+    assert(npm::ReleaseNpmBudget(npm::NpmBudgetCategory::kSessionState, 1, nullptr) == npm::NpmBudgetError::kNullUsage);
     AssertBudgetUsage(usage, 100, config.max_tracked_bytes - 101, 1, config.max_pending_output_bytes);
 }
 
@@ -1108,8 +1236,7 @@ class CapturingForwardingWriter final : public npm::INpmResultWriter {
 
 class FixtureModule final : public npm::INpmAnalysisModule {
  public:
-    int OnPacket(const npm::NpmPacketView& packet,
-                 const npm::NpmSessionView& session,
+    int OnPacket(const npm::NpmPacketView& packet, const npm::NpmSessionView& session,
                  npm::INpmResultWriter& writer) override {
         assert(packet.layer != nullptr);
         assert(packet.payload.size == 2);
@@ -1133,8 +1260,7 @@ class FixtureModule final : public npm::INpmAnalysisModule {
         return writer.WriteBasic(result);
     }
 
-    int OnSessionSnapshot(const npm::NpmSessionView& session,
-                          int64_t observed_at_ns,
+    int OnSessionSnapshot(const npm::NpmSessionView& session, int64_t observed_at_ns,
                           npm::INpmResultWriter& writer) override {
         auto result = MakeValidUdpSessionResult();
         result.session_id = session.session_id;
@@ -1143,9 +1269,7 @@ class FixtureModule final : public npm::INpmAnalysisModule {
         return writer.WriteSession(result);
     }
 
-    int OnSessionEnd(const npm::NpmSessionView& session,
-                     npm::NpmSessionEndReason reason,
-                     int64_t observed_at_ns,
+    int OnSessionEnd(const npm::NpmSessionView& session, npm::NpmSessionEndReason reason, int64_t observed_at_ns,
                      npm::INpmResultWriter& writer) override {
         auto result = MakeValidUdpSessionResult();
         result.session_id = session.session_id;
@@ -1160,21 +1284,19 @@ class FixtureModule final : public npm::INpmAnalysisModule {
 
 void TestBorrowedViewsAndModuleInterfaces() {
     using WriteSessionMethod = int (npm::INpmResultWriter::*)(const npm::NpmSessionResult&);
-    using SessionSnapshotMethod = int (npm::INpmAnalysisModule::*)(
-        const npm::NpmSessionView&, int64_t, npm::INpmResultWriter&);
-    using SessionEndMethod = int (npm::INpmAnalysisModule::*)(
-        const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t, npm::INpmResultWriter&);
+    using SessionSnapshotMethod =
+        int (npm::INpmAnalysisModule::*)(const npm::NpmSessionView&, int64_t, npm::INpmResultWriter&);
+    using SessionEndMethod = int (npm::INpmAnalysisModule::*)(const npm::NpmSessionView&, npm::NpmSessionEndReason,
+                                                              int64_t, npm::INpmResultWriter&);
     static_assert(std::is_abstract_v<npm::INpmTaskBudget>);
     static_assert(std::is_abstract_v<npm::INpmResultWriter>);
     static_assert(std::is_abstract_v<npm::INpmAnalysisModule>);
     static_assert(std::is_same_v<decltype(&npm::INpmResultWriter::WriteSession), WriteSessionMethod>);
-    static_assert(std::is_same_v<decltype(&npm::INpmAnalysisModule::OnSessionSnapshot),
-                                 SessionSnapshotMethod>);
+    static_assert(std::is_same_v<decltype(&npm::INpmAnalysisModule::OnSessionSnapshot), SessionSnapshotMethod>);
     static_assert(std::is_same_v<decltype(&npm::INpmAnalysisModule::OnSessionEnd), SessionEndMethod>);
     static_assert(std::is_same_v<std::underlying_type_t<npm::NpmPacketDirection>, uint8_t>);
 
-    auto bytes_owner = std::make_shared<std::array<uint8_t, 4>>(
-        std::array<uint8_t, 4>{0x10, 0x20, 0x30, 0x40});
+    auto bytes_owner = std::make_shared<std::array<uint8_t, 4>>(std::array<uint8_t, 4>{0x10, 0x20, 0x30, 0x40});
     const std::weak_ptr<std::array<uint8_t, 4>> weak_owner = bytes_owner;
     npm::NpmPacketView packet_view;
     packet_view.packet.meta.timestamp_ns = 123;
@@ -1225,8 +1347,7 @@ void TestBorrowedViewsAndModuleInterfaces() {
     assert(writer.last_session_result.observed_at == 789);
     assert(writer.last_session_result.is_final);
     assert(writer.last_session_result.end_reason == npm::NpmSessionEndReason::kEof);
-    assert(npm::ValidateNpmSessionResult(writer.last_session_result) ==
-           npm::NpmSessionResultError::kNone);
+    assert(npm::ValidateNpmSessionResult(writer.last_session_result) == npm::NpmSessionResultError::kNone);
 
     FixtureBudget budget(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     assert(budget.Reserve(npm::NpmBudgetCategory::kModuleState, 16) == npm::NpmBudgetError::kNone);
@@ -1259,30 +1380,15 @@ void TestTimeCapabilityRequirements() {
     assert(npm::ValidateNpmTimeCapabilities(realtime, capabilities) == npm::NpmTimeCapabilityError::kNone);
 
     realtime.run_mode = static_cast<npm::NpmRunMode>(2);
-    assert(npm::ValidateNpmTimeCapabilities(realtime, capabilities) ==
-           npm::NpmTimeCapabilityError::kInvalidRunMode);
+    assert(npm::ValidateNpmTimeCapabilities(realtime, capabilities) == npm::NpmTimeCapabilityError::kInvalidRunMode);
 }
 
 void TestSessionPacketCanonicalizationAndObservationDomains() {
     const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}, {2, 77}, {3, 88}}};
-    auto forward = MakeIpv4TcpPacket("192.0.2.200",
-                                     50000,
-                                     "192.0.2.10",
-                                     443,
-                                     {0x10, 0x20},
-                                     kTcpSyn,
-                                     0x01020304,
-                                     0x11121314,
-                                     4096);
-    auto reverse = MakeIpv4TcpPacket("192.0.2.10",
-                                     443,
-                                     "192.0.2.200",
-                                     50000,
-                                     {0x30},
-                                     kTcpSyn | kTcpAck,
-                                     0x50607080,
-                                     0xa0b0c0d0,
-                                     8192);
+    auto forward =
+        MakeIpv4TcpPacket("192.0.2.200", 50000, "192.0.2.10", 443, {0x10, 0x20}, kTcpSyn, 0x01020304, 0x11121314, 4096);
+    auto reverse = MakeIpv4TcpPacket("192.0.2.10", 443, "192.0.2.200", 50000, {0x30}, kTcpSyn | kTcpAck, 0x50607080,
+                                     0xa0b0c0d0, 8192);
     npm::NpmSessionPacketBinding forward_binding;
     npm::NpmSessionPacketBinding reverse_binding;
     assert(npm::BuildNpmSessionPacketBinding(domain_map, forward.View(1), forward.layer, &forward_binding) ==
@@ -1321,12 +1427,10 @@ void TestSessionPacketCanonicalizationAndObservationDomains() {
     auto ipv6_reverse = MakeIpv6UdpPacket("2001:db8::1", 53, "2001:db8::ff", 53000, {0xbb});
     npm::NpmSessionPacketBinding ipv6_forward_binding;
     npm::NpmSessionPacketBinding ipv6_reverse_binding;
-    assert(npm::BuildNpmSessionPacketBinding(
-               domain_map, ipv6_forward.View(1), ipv6_forward.layer, &ipv6_forward_binding) ==
-           npm::NpmSessionPacketError::kNone);
-    assert(npm::BuildNpmSessionPacketBinding(
-               domain_map, ipv6_reverse.View(2), ipv6_reverse.layer, &ipv6_reverse_binding) ==
-           npm::NpmSessionPacketError::kNone);
+    assert(npm::BuildNpmSessionPacketBinding(domain_map, ipv6_forward.View(1), ipv6_forward.layer,
+                                             &ipv6_forward_binding) == npm::NpmSessionPacketError::kNone);
+    assert(npm::BuildNpmSessionPacketBinding(domain_map, ipv6_reverse.View(2), ipv6_reverse.layer,
+                                             &ipv6_reverse_binding) == npm::NpmSessionPacketError::kNone);
     assert(SameKey(ipv6_forward_binding.key, ipv6_reverse_binding.key));
     assert(ipv6_forward_binding.key.ip_family == flowsql::packet::AddressFamily::kIPv6);
     assert(ipv6_forward_binding.direction == npm::NpmPacketDirection::kBToA);
@@ -1343,8 +1447,7 @@ void TestSessionPacketCanonicalizationAndObservationDomains() {
     assert(!SameKey(forward_binding.key, other_domain.key));
     const npm::NpmObservationDomainMap other_namespace{"capture-b", {{1, 77}}};
     npm::NpmSessionPacketBinding namespace_binding;
-    assert(npm::BuildNpmSessionPacketBinding(
-               other_namespace, forward.View(1), forward.layer, &namespace_binding) ==
+    assert(npm::BuildNpmSessionPacketBinding(other_namespace, forward.View(1), forward.layer, &namespace_binding) ==
            npm::NpmSessionPacketError::kNone);
     assert(namespace_binding.key.input_namespace == "capture-b");
     assert(!SameKey(forward_binding.key, namespace_binding.key));
@@ -1377,9 +1480,8 @@ void TestSessionPacketPayloadAndInvalidInputs() {
     auto truncated_body = packet;
     truncated_body.bytes.resize(truncated_body.bytes.size() - 2);
     truncated_body.layer.status = flowsql::packet::LayerStatus::kTruncated;
-    assert(npm::BuildNpmSessionPacketBinding(
-               domain_map, truncated_body.View(1, packet.bytes.size()), truncated_body.layer, &binding) ==
-           npm::NpmSessionPacketError::kNone);
+    assert(npm::BuildNpmSessionPacketBinding(domain_map, truncated_body.View(1, packet.bytes.size()),
+                                             truncated_body.layer, &binding) == npm::NpmSessionPacketError::kNone);
     assert(binding.payload.size == 2 && binding.payload[1] == 2);
     assert(binding.transport.payload_wire_bytes == 4);
     assert(binding.transport.payload_captured_bytes == 2);
@@ -1394,9 +1496,8 @@ void TestSessionPacketPayloadAndInvalidInputs() {
     auto truncated_udp = udp_packet;
     truncated_udp.bytes.resize(truncated_udp.bytes.size() - 1);
     truncated_udp.layer.status = flowsql::packet::LayerStatus::kTruncated;
-    assert(npm::BuildNpmSessionPacketBinding(
-               domain_map, truncated_udp.View(1, udp_packet.bytes.size()), truncated_udp.layer, &binding) ==
-           npm::NpmSessionPacketError::kNone);
+    assert(npm::BuildNpmSessionPacketBinding(domain_map, truncated_udp.View(1, udp_packet.bytes.size()),
+                                             truncated_udp.layer, &binding) == npm::NpmSessionPacketError::kNone);
     assert(binding.transport.payload_wire_bytes == 3);
     assert(binding.transport.payload_captured_bytes == 2);
     assert(!binding.transport.payload_complete && !binding.transport.tcp.valid);
@@ -1406,24 +1507,22 @@ void TestSessionPacketPayloadAndInvalidInputs() {
     truncated_header.layer.status = flowsql::packet::LayerStatus::kTruncated;
     binding.transport.payload_wire_bytes = 99;
     binding.transport.tcp.sequence = 88;
-    assert(npm::BuildNpmSessionPacketBinding(
-               domain_map, truncated_header.View(1, packet.bytes.size()), truncated_header.layer, &binding) ==
-           npm::NpmSessionPacketError::kIncompleteTransportHeader);
+    assert(npm::BuildNpmSessionPacketBinding(domain_map, truncated_header.View(1, packet.bytes.size()),
+                                             truncated_header.layer,
+                                             &binding) == npm::NpmSessionPacketError::kIncompleteTransportHeader);
     assert(binding.transport.payload_wire_bytes == 99);
     assert(binding.transport.tcp.sequence == 88);
 
     auto invalid_payload = packet;
     ++invalid_payload.layer.payload_offset;
-    assert(npm::BuildNpmSessionPacketBinding(
-               domain_map, invalid_payload.View(1), invalid_payload.layer, &binding) ==
+    assert(npm::BuildNpmSessionPacketBinding(domain_map, invalid_payload.View(1), invalid_payload.layer, &binding) ==
            npm::NpmSessionPacketError::kInvalidPayloadBounds);
 
     auto invalid_udp_length = MakeIpv6UdpPacket("2001:db8::1", 1000, "2001:db8::2", 2000, {1, 2});
     auto* udp = reinterpret_cast<flowsql::UdpHeader*>(invalid_udp_length.bytes.data() + sizeof(flowsql::Ipv6Header));
     udp->length = htons(1000);
-    assert(npm::BuildNpmSessionPacketBinding(
-               domain_map, invalid_udp_length.View(1), invalid_udp_length.layer, &binding) ==
-           npm::NpmSessionPacketError::kInvalidPayloadBounds);
+    assert(npm::BuildNpmSessionPacketBinding(domain_map, invalid_udp_length.View(1), invalid_udp_length.layer,
+                                             &binding) == npm::NpmSessionPacketError::kInvalidPayloadBounds);
 
     auto invalid = packet;
     invalid.layer.status = flowsql::packet::LayerStatus::kMalformed;
@@ -1502,21 +1601,18 @@ void TestSessionPacketFragmentsAndTunnelContext() {
     auto ipv4_fragment = MakeIpv4TcpPacket("192.0.2.1", 12000, "192.0.2.2", 443, {1});
     auto* ipv4 = reinterpret_cast<flowsql::Ipv4Header*>(ipv4_fragment.bytes.data());
     ipv4->fragment_offset = htons(1);
-    assert(npm::BuildNpmSessionPacketBinding(
-               domain_map, ipv4_fragment.View(1), ipv4_fragment.layer, &binding) ==
+    assert(npm::BuildNpmSessionPacketBinding(domain_map, ipv4_fragment.View(1), ipv4_fragment.layer, &binding) ==
            npm::NpmSessionPacketError::kNonInitialFragment);
 
     auto ipv6_fragment = MakeIpv6UdpPacket("2001:db8::1", 1000, "2001:db8::2", 2000, {1}, true, 2);
     ipv6_fragment.layer.layer_count = 2;
     ipv6_fragment.layer.transport_layer_index = flowsql::packet::kNoLayerIndex;
     ipv6_fragment.layer.ports_valid = 0;
-    assert(npm::BuildNpmSessionPacketBinding(
-               domain_map, ipv6_fragment.View(1), ipv6_fragment.layer, &binding) ==
+    assert(npm::BuildNpmSessionPacketBinding(domain_map, ipv6_fragment.View(1), ipv6_fragment.layer, &binding) ==
            npm::NpmSessionPacketError::kNonInitialFragment);
     auto ipv6_first_fragment = MakeIpv6UdpPacket("2001:db8::1", 1000, "2001:db8::2", 2000, {1}, true, 0);
-    assert(npm::BuildNpmSessionPacketBinding(
-               domain_map, ipv6_first_fragment.View(1), ipv6_first_fragment.layer, &binding) ==
-           npm::NpmSessionPacketError::kNone);
+    assert(npm::BuildNpmSessionPacketBinding(domain_map, ipv6_first_fragment.View(1), ipv6_first_fragment.layer,
+                                             &binding) == npm::NpmSessionPacketError::kNone);
     assert(binding.payload.size == 1 && binding.payload[0] == 1);
 
     auto tunnel = MakeTunnelPacket();
@@ -1537,11 +1633,8 @@ void TestSessionPacketFragmentsAndTunnelContext() {
     assert(binding.payload.size == tunnel.bytes.size() - 28);
 }
 
-npm::NpmSessionPacketBinding BuildBinding(const npm::NpmObservationDomainMap& domain_map,
-                                          const PacketFixture& packet,
-                                          uint32_t source_id,
-                                          int64_t timestamp_ns,
-                                          uint32_t wire_len,
+npm::NpmSessionPacketBinding BuildBinding(const npm::NpmObservationDomainMap& domain_map, const PacketFixture& packet,
+                                          uint32_t source_id, int64_t timestamp_ns, uint32_t wire_len,
                                           flowsql::packet::PacketMeta* meta) {
     auto view = packet.View(source_id, wire_len);
     view.meta.timestamp_ns = timestamp_ns;
@@ -1552,11 +1645,8 @@ npm::NpmSessionPacketBinding BuildBinding(const npm::NpmObservationDomainMap& do
     return binding;
 }
 
-npm::NpmPacketView MakeNpmPacketView(const PacketFixture& packet,
-                                     const npm::NpmSessionPacketBinding& binding,
-                                     uint32_t source_id,
-                                     int64_t timestamp_ns,
-                                     uint32_t wire_len) {
+npm::NpmPacketView MakeNpmPacketView(const PacketFixture& packet, const npm::NpmSessionPacketBinding& binding,
+                                     uint32_t source_id, int64_t timestamp_ns, uint32_t wire_len) {
     npm::NpmPacketView view;
     view.packet = packet.View(source_id, wire_len);
     view.packet.meta.timestamp_ns = timestamp_ns;
@@ -1567,8 +1657,7 @@ npm::NpmPacketView MakeNpmPacketView(const PacketFixture& packet,
     return view;
 }
 
-npm::NpmPacketView MakeTcpPerformancePacket(const npm::NpmObservationDomainMap& domain_map,
-                                            const PacketFixture& packet,
+npm::NpmPacketView MakeTcpPerformancePacket(const npm::NpmObservationDomainMap& domain_map, const PacketFixture& packet,
                                             int64_t timestamp_ns) {
     flowsql::packet::PacketMeta meta;
     const auto binding = BuildBinding(domain_map, packet, 0, timestamp_ns, 0, &meta);
@@ -1587,16 +1676,11 @@ void TestTcpPerformanceHandshakeStates() {
     static_assert(!std::is_move_constructible_v<npm::NpmTcpPerformanceTracker>);
 
     const npm::NpmObservationDomainMap domain_map{"capture", {{0, 1}}};
-    const auto syn = MakeIpv4TcpPacket(
-        "192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpSyn, 100);
-    const auto synack = MakeIpv4TcpPacket(
-        "198.51.100.2", 443, "192.0.2.1", 50000, {}, kTcpSyn | kTcpAck, 500, 101);
-    const auto ack = MakeIpv4TcpPacket(
-        "192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpAck, 101, 501);
-    const auto ordinary = MakeIpv4TcpPacket(
-        "192.0.2.1", 50000, "198.51.100.2", 443, {1}, kTcpAck, 1000, 700);
-    auto budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    const auto syn = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpSyn, 100);
+    const auto synack = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 50000, {}, kTcpSyn | kTcpAck, 500, 101);
+    const auto ack = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpAck, 101, 501);
+    const auto ordinary = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {1}, kTcpAck, 1000, 700);
+    auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmTcpPerformanceTracker tracker(budget);
     npm::NpmTcpPerformanceSnapshot snapshot;
     assert(tracker.Snapshot(1, nullptr) == npm::NpmTcpPerformanceError::kNullOutput);
@@ -1660,18 +1744,15 @@ void TestTcpPerformanceHandshakeStates() {
 
 void TestTcpPerformanceRttKarnAndTimestampRegression() {
     const npm::NpmObservationDomainMap domain_map{"capture", {{0, 1}}};
-    auto budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmTcpPerformanceTracker tracker(budget);
     const auto session = MakePerformanceSession(10);
-    const auto data_ab = MakeIpv4TcpPacket(
-        "192.0.2.1", 50000, "198.51.100.2", 443, std::vector<uint8_t>(10, 1), kTcpAck, 100);
-    const auto ack_ab = MakeIpv4TcpPacket(
-        "198.51.100.2", 443, "192.0.2.1", 50000, {}, kTcpAck, 500, 110);
-    const auto data_ba = MakeIpv4TcpPacket(
-        "198.51.100.2", 443, "192.0.2.1", 50000, std::vector<uint8_t>(5, 2), kTcpAck, 500, 110);
-    const auto ack_ba = MakeIpv4TcpPacket(
-        "192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpAck, 110, 505);
+    const auto data_ab =
+        MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, std::vector<uint8_t>(10, 1), kTcpAck, 100);
+    const auto ack_ab = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 50000, {}, kTcpAck, 500, 110);
+    const auto data_ba =
+        MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 50000, std::vector<uint8_t>(5, 2), kTcpAck, 500, 110);
+    const auto ack_ba = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpAck, 110, 505);
 
     assert(tracker.Observe(MakeTcpPerformancePacket(domain_map, data_ab, 100), session) ==
            npm::NpmTcpPerformanceError::kNone);
@@ -1691,10 +1772,9 @@ void TestTcpPerformanceRttKarnAndTimestampRegression() {
     assert(snapshot.rtt_min_ns == 30 && snapshot.rtt_mean_ns == 30 && snapshot.rtt_max_ns == 30);
     assert(tracker.outstanding_segments() == 0);
 
-    const auto retransmit = MakeIpv4TcpPacket(
-        "192.0.2.1", 50000, "198.51.100.2", 443, std::vector<uint8_t>(10, 3), kTcpAck, 200);
-    const auto retransmit_ack = MakeIpv4TcpPacket(
-        "198.51.100.2", 443, "192.0.2.1", 50000, {}, kTcpAck, 600, 210);
+    const auto retransmit =
+        MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, std::vector<uint8_t>(10, 3), kTcpAck, 200);
+    const auto retransmit_ack = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 50000, {}, kTcpAck, 600, 210);
     assert(tracker.Observe(MakeTcpPerformancePacket(domain_map, retransmit, 200), session) ==
            npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Observe(MakeTcpPerformancePacket(domain_map, retransmit, 210), session) ==
@@ -1733,64 +1813,51 @@ void TestTcpPerformanceRttKarnAndTimestampRegression() {
 
 void TestTcpPerformanceBudgetCleanupAndIsolation() {
     const npm::NpmObservationDomainMap domain_map{"capture", {{0, 1}}};
-    const auto syn = MakeIpv4TcpPacket(
-        "192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpSyn, 100);
-    const auto synack = MakeIpv4TcpPacket(
-        "198.51.100.2", 443, "192.0.2.1", 50000, {}, kTcpSyn | kTcpAck, 500, 101);
-    const auto ack = MakeIpv4TcpPacket(
-        "192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpAck, 101, 501);
-    const auto data = MakeIpv4TcpPacket(
-        "192.0.2.1", 50000, "198.51.100.2", 443, std::vector<uint8_t>(10, 1), kTcpAck, 200);
+    const auto syn = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpSyn, 100);
+    const auto synack = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 50000, {}, kTcpSyn | kTcpAck, 500, 101);
+    const auto ack = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpAck, 101, 501);
+    const auto data =
+        MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, std::vector<uint8_t>(10, 1), kTcpAck, 200);
     const auto packet = MakeTcpPerformancePacket(domain_map, syn, 10);
 
     npm::NpmAnalysisConfig tiny = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     tiny.max_tracked_bytes = 1;
     auto tiny_budget = std::make_shared<FixtureBudget>(tiny);
     npm::NpmTcpPerformanceTracker constrained(tiny_budget);
-    assert(constrained.Observe(packet, MakePerformanceSession(1)) ==
-           npm::NpmTcpPerformanceError::kBudgetExceeded);
+    assert(constrained.Observe(packet, MakePerformanceSession(1)) == npm::NpmTcpPerformanceError::kBudgetExceeded);
     assert(constrained.size() == 0 && constrained.tracked_bytes() == 0);
     assert(tiny_budget->Usage().module_state_bytes == 0);
 
     uint64_t state_charge = 0;
-    auto probe_budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    auto probe_budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     {
         npm::NpmTcpPerformanceTracker probe(probe_budget);
-        assert(probe.Observe(packet, MakePerformanceSession(1)) ==
-               npm::NpmTcpPerformanceError::kNone);
+        assert(probe.Observe(packet, MakePerformanceSession(1)) == npm::NpmTcpPerformanceError::kNone);
         state_charge = probe.tracked_bytes();
         assert(state_charge > 1 && state_charge == probe_budget->Usage().module_state_bytes);
     }
     assert(probe_budget->Usage().module_state_bytes == 0);
 
-    npm::NpmAnalysisConfig state_only =
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
+    npm::NpmAnalysisConfig state_only = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     state_only.max_tracked_bytes = state_charge;
     auto rollback_budget = std::make_shared<FixtureBudget>(state_only);
     npm::NpmTcpPerformanceTracker rollback_tracker(rollback_budget);
-    assert(rollback_tracker.Observe(
-               MakeTcpPerformancePacket(domain_map, data, 100), MakePerformanceSession(1)) ==
+    assert(rollback_tracker.Observe(MakeTcpPerformancePacket(domain_map, data, 100), MakePerformanceSession(1)) ==
            npm::NpmTcpPerformanceError::kBudgetExceeded);
     assert(rollback_tracker.size() == 0 && rollback_tracker.tracked_bytes() == 0);
     assert(rollback_budget->Usage().module_state_bytes == 0);
 
-    assert(rollback_tracker.Observe(packet, MakePerformanceSession(2)) ==
-           npm::NpmTcpPerformanceError::kNone);
-    assert(rollback_tracker.Observe(
-               MakeTcpPerformancePacket(domain_map, data, 100), MakePerformanceSession(2)) ==
+    assert(rollback_tracker.Observe(packet, MakePerformanceSession(2)) == npm::NpmTcpPerformanceError::kNone);
+    assert(rollback_tracker.Observe(MakeTcpPerformancePacket(domain_map, data, 100), MakePerformanceSession(2)) ==
            npm::NpmTcpPerformanceError::kBudgetExceeded);
     assert(rollback_tracker.outstanding_segments() == 0);
     assert(rollback_tracker.tracked_bytes() == state_charge);
-    assert(rollback_tracker.Observe(
-               MakeTcpPerformancePacket(domain_map, synack, 20), MakePerformanceSession(2)) ==
+    assert(rollback_tracker.Observe(MakeTcpPerformancePacket(domain_map, synack, 20), MakePerformanceSession(2)) ==
            npm::NpmTcpPerformanceError::kNone);
-    assert(rollback_tracker.Observe(
-               MakeTcpPerformancePacket(domain_map, ack, 30), MakePerformanceSession(2)) ==
+    assert(rollback_tracker.Observe(MakeTcpPerformancePacket(domain_map, ack, 30), MakePerformanceSession(2)) ==
            npm::NpmTcpPerformanceError::kNone);
     npm::NpmTcpPerformanceSnapshot rollback_snapshot;
-    assert(rollback_tracker.Snapshot(2, &rollback_snapshot) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(rollback_tracker.Snapshot(2, &rollback_snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(rollback_snapshot.handshake_status == npm::NpmTcpHandshakeStatus::kComplete);
     assert(rollback_snapshot.handshake_duration_ns == 20);
     assert((rollback_snapshot.measurement_flags & npm::kNpmMeasurementTimestampRegression) == 0);
@@ -1798,24 +1865,20 @@ void TestTcpPerformanceBudgetCleanupAndIsolation() {
     assert(rollback_budget->Usage().module_state_bytes == 0);
 
     npm::NpmTcpPerformanceTracker missing_budget(nullptr);
-    assert(missing_budget.Observe(packet, MakePerformanceSession(1)) ==
-           npm::NpmTcpPerformanceError::kNullBudget);
+    assert(missing_budget.Observe(packet, MakePerformanceSession(1)) == npm::NpmTcpPerformanceError::kNullBudget);
     assert(missing_budget.size() == 0);
 
-    auto budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     {
         npm::NpmTcpPerformanceTracker tracker(budget);
         auto invalid_packet = packet;
         invalid_packet.transport.tcp.valid = false;
-        assert(tracker.Observe(packet, MakePerformanceSession(0)) ==
-               npm::NpmTcpPerformanceError::kInvalidSession);
+        assert(tracker.Observe(packet, MakePerformanceSession(0)) == npm::NpmTcpPerformanceError::kInvalidSession);
         assert(tracker.Observe(invalid_packet, MakePerformanceSession(1)) ==
                npm::NpmTcpPerformanceError::kInvalidPacket);
         assert(tracker.size() == 0 && tracker.tracked_bytes() == 0);
 
-        assert(tracker.Observe(packet, MakePerformanceSession(1)) ==
-               npm::NpmTcpPerformanceError::kNone);
+        assert(tracker.Observe(packet, MakePerformanceSession(1)) == npm::NpmTcpPerformanceError::kNone);
         assert(tracker.Observe(MakeTcpPerformancePacket(domain_map, data, 20), MakePerformanceSession(2)) ==
                npm::NpmTcpPerformanceError::kNone);
         assert(tracker.size() == 2 && tracker.outstanding_segments() == 1);
@@ -1831,28 +1894,23 @@ void TestTcpPerformanceBudgetCleanupAndIsolation() {
         assert(tracker.size() == 0 && tracker.outstanding_segments() == 0);
         assert(tracker.tracked_bytes() == 0 && budget->Usage().module_state_bytes == 0);
 
-        assert(tracker.Observe(
-                   MakeTcpPerformancePacket(domain_map, data, 30), MakePerformanceSession(2)) ==
+        assert(tracker.Observe(MakeTcpPerformancePacket(domain_map, data, 30), MakePerformanceSession(2)) ==
                npm::NpmTcpPerformanceError::kNone);
         assert(tracker.size() == 1 && tracker.outstanding_segments() == 1);
         tracker.Clear();
         assert(tracker.size() == 0 && tracker.outstanding_segments() == 0);
         assert(tracker.tracked_bytes() == 0 && budget->Usage().module_state_bytes == 0);
 
-        assert(tracker.Observe(
-                   MakeTcpPerformancePacket(domain_map, data, 40), MakePerformanceSession(3)) ==
+        assert(tracker.Observe(MakeTcpPerformancePacket(domain_map, data, 40), MakePerformanceSession(3)) ==
                npm::NpmTcpPerformanceError::kNone);
         assert(tracker.outstanding_segments() == 1 && budget->Usage().module_state_bytes > 0);
     }
     assert(budget->Usage().module_state_bytes == 0);
 }
 
-npm::NpmPacketView MakeLedgerPacket(int64_t timestamp_ns,
-                                   npm::NpmPacketDirection direction,
-                                   uint32_t sequence,
-                                   uint32_t payload_bytes,
-                                   std::optional<uint32_t> acknowledgment = std::nullopt,
-                                   bool syn = false) {
+npm::NpmPacketView MakeLedgerPacket(int64_t timestamp_ns, npm::NpmPacketDirection direction, uint32_t sequence,
+                                    uint32_t payload_bytes, std::optional<uint32_t> acknowledgment = std::nullopt,
+                                    bool syn = false) {
     npm::NpmPacketView packet;
     packet.packet.meta.timestamp_ns = timestamp_ns;
     packet.direction = direction;
@@ -1868,14 +1926,11 @@ npm::NpmPacketView MakeLedgerPacket(int64_t timestamp_ns,
 void TestTcpLedgerWrapOverlapAndKarn() {
     const auto ab = npm::NpmPacketDirection::kAToB;
     const auto ba = npm::NpmPacketDirection::kBToA;
-    auto budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmTcpPerformanceTracker tracker(budget);
     const auto session = MakePerformanceSession(1);
-    assert(tracker.Observe(MakeLedgerPacket(10, ab, 0xfffffff8u, 16), session) ==
-           npm::NpmTcpPerformanceError::kNone);
-    assert(tracker.Observe(MakeLedgerPacket(40, ba, 500, 0, 8), session) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(10, ab, 0xfffffff8u, 16), session) == npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(40, ba, 500, 0, 8), session) == npm::NpmTcpPerformanceError::kNone);
     npm::NpmTcpPerformanceSnapshot snapshot;
     assert(tracker.Snapshot(1, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(snapshot.unique_payload_bytes_ab == 16 && snapshot.unique_payload_bytes_ba == 0);
@@ -1885,28 +1940,23 @@ void TestTcpLedgerWrapOverlapAndKarn() {
     assert(tracker.outstanding_segments() == 0);
 
     // Overlap with already ACKed history still counts as an observed retransmission.
-    assert(tracker.Observe(MakeLedgerPacket(50, ab, 0, 16), session) ==
-           npm::NpmTcpPerformanceError::kNone);
-    assert(tracker.Observe(MakeLedgerPacket(70, ba, 500, 0, 16), session) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(50, ab, 0, 16), session) == npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(70, ba, 500, 0, 16), session) == npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Snapshot(1, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(snapshot.unique_payload_bytes_ab == 24);
     assert(snapshot.retrans_packets_ab == 1 && snapshot.retrans_payload_bytes_ab == 8);
     assert(snapshot.rtt_samples == 1);  // Mixed original/retransmitted payload is excluded by Karn.
 
     const auto partial_session = MakePerformanceSession(2);
-    assert(tracker.Observe(MakeLedgerPacket(10, ab, 100, 20), partial_session) ==
-           npm::NpmTcpPerformanceError::kNone);
-    assert(tracker.Observe(MakeLedgerPacket(20, ab, 110, 20), partial_session) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(10, ab, 100, 20), partial_session) == npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(20, ab, 110, 20), partial_session) == npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Observe(MakeLedgerPacket(30, ba, 500, 0, 130), partial_session) ==
            npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Snapshot(2, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(snapshot.unique_payload_bytes_ab == 30);
     assert(snapshot.retrans_packets_ab == 1 && snapshot.retrans_payload_bytes_ab == 10);
     assert(snapshot.rtt_status == npm::NpmTcpRttStatus::kNoSample && snapshot.rtt_samples == 0);
-    assert(tracker.Observe(MakeLedgerPacket(40, ab, 130, 10), partial_session) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(40, ab, 130, 10), partial_session) == npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Observe(MakeLedgerPacket(80, ba, 500, 0, 140), partial_session) ==
            npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Snapshot(2, &snapshot) == npm::NpmTcpPerformanceError::kNone);
@@ -1916,8 +1966,7 @@ void TestTcpLedgerWrapOverlapAndKarn() {
     const auto syn_session = MakePerformanceSession(3);
     assert(tracker.Observe(MakeLedgerPacket(10, ab, 0xffffffffu, 4, std::nullopt, true), syn_session) ==
            npm::NpmTcpPerformanceError::kNone);
-    assert(tracker.Observe(MakeLedgerPacket(30, ba, 500, 0, 4), syn_session) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(30, ba, 500, 0, 4), syn_session) == npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Snapshot(3, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(snapshot.unique_payload_bytes_ab == 4 && snapshot.rtt_mean_ns == 20);
     tracker.Clear();
@@ -1927,46 +1976,35 @@ void TestTcpLedgerWrapOverlapAndKarn() {
 void TestTcpLedgerOutOfOrderAckAndAmbiguity() {
     const auto ab = npm::NpmPacketDirection::kAToB;
     const auto ba = npm::NpmPacketDirection::kBToA;
-    auto budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmTcpPerformanceTracker tracker(budget);
     const auto session = MakePerformanceSession(10);
-    assert(tracker.Observe(MakeLedgerPacket(10, ab, 120, 10), session) ==
-           npm::NpmTcpPerformanceError::kNone);
-    assert(tracker.Observe(MakeLedgerPacket(20, ab, 100, 10), session) ==
-           npm::NpmTcpPerformanceError::kNone);
-    assert(tracker.Observe(MakeLedgerPacket(30, ab, 110, 10), session) ==
-           npm::NpmTcpPerformanceError::kNone);
-    assert(tracker.Observe(MakeLedgerPacket(60, ba, 500, 0, 130), session) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(10, ab, 120, 10), session) == npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(20, ab, 100, 10), session) == npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(30, ab, 110, 10), session) == npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(60, ba, 500, 0, 130), session) == npm::NpmTcpPerformanceError::kNone);
     npm::NpmTcpPerformanceSnapshot snapshot;
     assert(tracker.Snapshot(10, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(snapshot.unique_payload_bytes_ab == 30 && snapshot.retrans_packets_ab == 0);
     assert(snapshot.rtt_samples == 1 && snapshot.rtt_mean_ns == 30);
     assert(tracker.outstanding_segments() == 0);
-    assert(tracker.Observe(MakeLedgerPacket(70, ab, 100, 10), session) ==
-           npm::NpmTcpPerformanceError::kNone);
-    assert(tracker.Observe(MakeLedgerPacket(80, ba, 500, 0, 130), session) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(70, ab, 100, 10), session) == npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(80, ba, 500, 0, 130), session) == npm::NpmTcpPerformanceError::kNone);
     assert(tracker.outstanding_segments() == 0);
     assert(tracker.Snapshot(10, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(snapshot.retrans_packets_ab == 1 && snapshot.rtt_samples == 1);
 
     // Direction and session ID are independent; RTT samples may come from either direction.
-    assert(tracker.Observe(MakeLedgerPacket(90, ba, 500, 5), session) ==
-           npm::NpmTcpPerformanceError::kNone);
-    assert(tracker.Observe(MakeLedgerPacket(120, ab, 130, 0, 505), session) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(90, ba, 500, 5), session) == npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(120, ab, 130, 0, 505), session) == npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Snapshot(10, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(snapshot.unique_payload_bytes_ba == 5 && snapshot.retrans_packets_ba == 0);
     assert(snapshot.rtt_samples == 2);
 
     const auto ambiguous = MakePerformanceSession(11);
-    assert(tracker.Observe(MakeLedgerPacket(10, ab, 0, 10), ambiguous) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(10, ab, 0, 10), ambiguous) == npm::NpmTcpPerformanceError::kNone);
     const uint64_t before = tracker.tracked_bytes();
-    assert(tracker.Observe(MakeLedgerPacket(20, ab, 0x8000000au, 1), ambiguous) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(20, ab, 0x8000000au, 1), ambiguous) == npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Snapshot(11, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert((snapshot.measurement_flags & npm::kNpmMeasurementSequenceAmbiguous) != 0);
     assert(snapshot.rtt_status == npm::NpmTcpRttStatus::kAmbiguous);
@@ -1974,16 +2012,14 @@ void TestTcpLedgerOutOfOrderAckAndAmbiguity() {
     assert(!snapshot.unique_payload_bytes_ab && !snapshot.unique_payload_bytes_ba);
     assert(!snapshot.retrans_packets_ab && !snapshot.retrans_payload_bytes_ab && !snapshot.rtt_samples);
     assert(tracker.tracked_bytes() < before && tracker.outstanding_segments() == 0);
-    assert(tracker.Observe(MakeLedgerPacket(30, ab, 10, 10), ambiguous) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(30, ab, 10, 10), ambiguous) == npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Snapshot(11, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(!snapshot.unique_payload_bytes_ab && snapshot.rtt_status == npm::NpmTcpRttStatus::kAmbiguous);
     assert(tracker.Snapshot(10, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(snapshot.unique_payload_bytes_ab == 30 && snapshot.rtt_samples == 2);
 
     const auto ambiguous_ack = MakePerformanceSession(12);
-    assert(tracker.Observe(MakeLedgerPacket(10, ab, 0, 10), ambiguous_ack) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(10, ab, 0, 10), ambiguous_ack) == npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Observe(MakeLedgerPacket(20, ba, 500, 0, 0x8000000au), ambiguous_ack) ==
            npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Snapshot(12, &snapshot) == npm::NpmTcpPerformanceError::kNone);
@@ -2012,8 +2048,7 @@ void TestTcpLedgerLimitsAndBudgetAtomicity() {
     npm::NpmTcpPerformanceSnapshot snapshot;
     assert(limited.Snapshot(1, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(snapshot.unique_payload_bytes_ab == 40 && snapshot.retrans_packets_ab == 0);
-    assert(limited.Observe(MakeLedgerPacket(50, ab, 100, 70), session) ==
-           npm::NpmTcpPerformanceError::kNone);
+    assert(limited.Observe(MakeLedgerPacket(50, ab, 100, 70), session) == npm::NpmTcpPerformanceError::kNone);
     assert(limited.Snapshot(1, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(snapshot.unique_payload_bytes_ab == 70 && snapshot.retrans_payload_bytes_ab == 40);
     assert((snapshot.measurement_flags & npm::kNpmMeasurementTimestampRegression) == 0);
@@ -2036,8 +2071,7 @@ void TestTcpLedgerLimitsAndBudgetAtomicity() {
         assert(probe.Observe(MakeLedgerPacket(10, ab, 100, 0, std::nullopt, true), session) ==
                npm::NpmTcpPerformanceError::kNone);
         state_charge = probe.tracked_bytes();
-        assert(probe.Observe(MakeLedgerPacket(20, ab, 101, 10), session) ==
-               npm::NpmTcpPerformanceError::kNone);
+        assert(probe.Observe(MakeLedgerPacket(20, ab, 101, 10), session) == npm::NpmTcpPerformanceError::kNone);
         node_charge = (probe.tracked_bytes() - state_charge) / 2;
         assert(node_charge > 0);
     }
@@ -2045,14 +2079,12 @@ void TestTcpLedgerLimitsAndBudgetAtomicity() {
     config.max_tracked_bytes = state_charge + node_charge;
     auto tight_budget = std::make_shared<FixtureBudget>(config);
     npm::NpmTcpPerformanceTracker tight(tight_budget);
-    assert(tight.Observe(MakeLedgerPacket(100, ab, 101, 10), session) ==
-           npm::NpmTcpPerformanceError::kBudgetExceeded);
+    assert(tight.Observe(MakeLedgerPacket(100, ab, 101, 10), session) == npm::NpmTcpPerformanceError::kBudgetExceeded);
     assert(tight.size() == 0 && tight.tracked_bytes() == 0);
     assert(tight_budget->Usage().module_state_bytes == 0);
     assert(tight.Observe(MakeLedgerPacket(10, ab, 100, 0, std::nullopt, true), session) ==
            npm::NpmTcpPerformanceError::kNone);
-    assert(tight.Observe(MakeLedgerPacket(100, ab, 101, 10), session) ==
-           npm::NpmTcpPerformanceError::kBudgetExceeded);
+    assert(tight.Observe(MakeLedgerPacket(100, ab, 101, 10), session) == npm::NpmTcpPerformanceError::kBudgetExceeded);
     assert(tight.tracked_bytes() == state_charge && tight.outstanding_segments() == 0);
     assert(tight.Snapshot(1, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(snapshot.unique_payload_bytes_ab == 0 && snapshot.retrans_packets_ab == 0);
@@ -2063,8 +2095,7 @@ void TestTcpLedgerLimitsAndBudgetAtomicity() {
 void TestSessionTrackerPeakStateAndRangeProfile() {
     constexpr uint64_t session_count = 128;
     constexpr uint32_t ranges_per_session = 4;
-    auto budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmTcpPerformanceTracker tracker(budget, 1024);
     uint64_t peak_module_bytes = 0;
     size_t peak_sessions = 0;
@@ -2074,15 +2105,11 @@ void TestSessionTrackerPeakStateAndRangeProfile() {
         const auto session = MakePerformanceSession(session_id);
         for (uint32_t range = 0; range < ranges_per_session; ++range) {
             const int64_t timestamp = static_cast<int64_t>((session_id - 1) * ranges_per_session + range + 1);
-            assert(tracker.Observe(MakeLedgerPacket(timestamp,
-                                                   npm::NpmPacketDirection::kAToB,
-                                                   100 + range * 20,
-                                                   10),
+            assert(tracker.Observe(MakeLedgerPacket(timestamp, npm::NpmPacketDirection::kAToB, 100 + range * 20, 10),
                                    session) == npm::NpmTcpPerformanceError::kNone);
             const auto usage = budget->Usage();
             assert(usage.module_state_bytes == tracker.tracked_bytes());
-            assert(usage.session_state_bytes == 0 && usage.input_batch_bytes == 0 &&
-                   usage.pending_output_bytes == 0);
+            assert(usage.session_state_bytes == 0 && usage.input_batch_bytes == 0 && usage.pending_output_bytes == 0);
             peak_module_bytes = std::max(peak_module_bytes, usage.module_state_bytes);
             peak_sessions = std::max(peak_sessions, tracker.size());
             peak_outstanding = std::max(peak_outstanding, tracker.outstanding_segments());
@@ -2091,20 +2118,15 @@ void TestSessionTrackerPeakStateAndRangeProfile() {
     assert(peak_sessions == session_count);
     assert(peak_outstanding == session_count * ranges_per_session);
     assert(peak_module_bytes > 0 && peak_module_bytes == tracker.tracked_bytes());
-    std::fprintf(stderr,
-                 "session_tracker_profile,sessions=%zu,outstanding_ranges=%zu,module_state_bytes=%llu\n",
-                 peak_sessions,
-                 peak_outstanding,
-                 static_cast<unsigned long long>(peak_module_bytes));
+    std::fprintf(stderr, "session_tracker_profile,sessions=%zu,outstanding_ranges=%zu,module_state_bytes=%llu\n",
+                 peak_sessions, peak_outstanding, static_cast<unsigned long long>(peak_module_bytes));
     tracker.Clear();
     assert(tracker.size() == 0 && tracker.outstanding_segments() == 0 && tracker.tracked_bytes() == 0);
     assert(budget->Usage().module_state_bytes == 0);
 }
 
-npm::NpmPacketView MakeUdpPerformancePacket(int64_t timestamp_ns,
-                                            npm::NpmPacketDirection direction,
-                                            uint32_t payload_wire_bytes,
-                                            uint32_t wire_bytes,
+npm::NpmPacketView MakeUdpPerformancePacket(int64_t timestamp_ns, npm::NpmPacketDirection direction,
+                                            uint32_t payload_wire_bytes, uint32_t wire_bytes,
                                             bool payload_complete = true) {
     npm::NpmPacketView packet;
     packet.packet.meta.timestamp_ns = timestamp_ns;
@@ -2116,14 +2138,9 @@ npm::NpmPacketView MakeUdpPerformancePacket(int64_t timestamp_ns,
     return packet;
 }
 
-npm::NpmSessionView MakeTransportSnapshotView(npm::NpmSessionKey* key,
-                                              uint64_t session_id,
-                                              int64_t first_ns,
-                                              int64_t last_ns,
-                                              uint64_t packets_ab,
-                                              uint64_t packets_ba,
-                                              uint64_t wire_bytes_ab,
-                                              uint64_t wire_bytes_ba) {
+npm::NpmSessionView MakeTransportSnapshotView(npm::NpmSessionKey* key, uint64_t session_id, int64_t first_ns,
+                                              int64_t last_ns, uint64_t packets_ab, uint64_t packets_ba,
+                                              uint64_t wire_bytes_ab, uint64_t wire_bytes_ba) {
     npm::NpmSessionView session;
     session.session_id = session_id;
     session.key = key;
@@ -2139,15 +2156,12 @@ npm::NpmSessionView MakeTransportSnapshotView(npm::NpmSessionKey* key,
 void TestSessionPerformanceUdpProjectionAndRates() {
     npm::NpmSessionKey udp_key;
     udp_key.transport_protocol = flowsql::ipv4::eNext::UDP;
-    auto budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmTcpPerformanceTracker tracker(budget);
     auto session = MakeTransportSnapshotView(&udp_key, 1, 100, 100, 0, 0, 0, 0);
-    assert(tracker.Observe(
-               MakeUdpPerformancePacket(100, npm::NpmPacketDirection::kAToB, 20, 120, false), session) ==
+    assert(tracker.Observe(MakeUdpPerformancePacket(100, npm::NpmPacketDirection::kAToB, 20, 120, false), session) ==
            npm::NpmTcpPerformanceError::kNone);
-    assert(tracker.Observe(
-               MakeUdpPerformancePacket(200, npm::NpmPacketDirection::kBToA, 10, 80), session) ==
+    assert(tracker.Observe(MakeUdpPerformancePacket(200, npm::NpmPacketDirection::kBToA, 10, 80), session) ==
            npm::NpmTcpPerformanceError::kNone);
 
     session = MakeTransportSnapshotView(&udp_key, 1, 100, 200, 1, 1, 120, 80);
@@ -2156,24 +2170,20 @@ void TestSessionPerformanceUdpProjectionAndRates() {
     assert(snapshot.payload_bytes_ab == 20 && snapshot.payload_bytes_ba == 10);
     assert(snapshot.rate_status == npm::NpmRateStatus::kValid);
     assert(snapshot.wire_bps_ab == 9'600'000'000.0 && snapshot.wire_bps_ba == 6'400'000'000.0);
-    assert(snapshot.payload_bps_ab == 1'600'000'000.0 &&
-           snapshot.payload_bps_ba == 800'000'000.0);
+    assert(snapshot.payload_bps_ab == 1'600'000'000.0 && snapshot.payload_bps_ba == 800'000'000.0);
     assert(snapshot.handshake_status == npm::NpmTcpHandshakeStatus::kNotApplicable);
     assert(snapshot.rtt_status == npm::NpmTcpRttStatus::kNotApplicable);
     assert(snapshot.retransmission_status == npm::NpmTcpRetransmissionStatus::kNotApplicable);
     assert(!snapshot.initiator && !snapshot.handshake_duration_ns && !snapshot.synack_rtt_ns);
-    assert(!snapshot.rtt_samples && !snapshot.unique_payload_bytes_ab &&
-           !snapshot.unique_payload_bytes_ba);
+    assert(!snapshot.rtt_samples && !snapshot.unique_payload_bytes_ab && !snapshot.unique_payload_bytes_ba);
     assert(!snapshot.unique_payload_bps_ab && !snapshot.unique_payload_bps_ba);
     assert(!snapshot.retrans_packets_ab && !snapshot.retrans_packets_ba);
     assert((snapshot.measurement_flags & npm::kNpmMeasurementTruncatedPayload) != 0);
-    assert((snapshot.measurement_flags & (npm::kNpmMeasurementMidstreamStart |
-                                          npm::kNpmMeasurementSequenceAmbiguous |
+    assert((snapshot.measurement_flags & (npm::kNpmMeasurementMidstreamStart | npm::kNpmMeasurementSequenceAmbiguous |
                                           npm::kNpmMeasurementSynRetransmitted)) == 0);
 
     auto zero_span = MakeTransportSnapshotView(&udp_key, 2, 300, 300, 0, 0, 0, 0);
-    assert(tracker.Observe(
-               MakeUdpPerformancePacket(300, npm::NpmPacketDirection::kAToB, 5, 30), zero_span) ==
+    assert(tracker.Observe(MakeUdpPerformancePacket(300, npm::NpmPacketDirection::kAToB, 5, 30), zero_span) ==
            npm::NpmTcpPerformanceError::kNone);
     zero_span = MakeTransportSnapshotView(&udp_key, 2, 300, 300, 1, 0, 30, 0);
     assert(tracker.Snapshot(zero_span, &snapshot) == npm::NpmTcpPerformanceError::kNone);
@@ -2187,16 +2197,12 @@ void TestSessionPerformanceUdpProjectionAndRates() {
 void TestSessionPerformanceTcpRatesAndSequenceAmbiguity() {
     npm::NpmSessionKey tcp_key;
     tcp_key.transport_protocol = flowsql::ipv4::eNext::TCP;
-    auto budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmTcpPerformanceTracker tracker(budget);
     auto session = MakeTransportSnapshotView(&tcp_key, 10, 0, 0, 0, 0, 0, 0);
     auto first = MakeLedgerPacket(0, npm::NpmPacketDirection::kAToB, 100, 20);
     first.packet.meta.wire_len = 100;
-    auto overlap = MakeLedgerPacket(1'000'000'000,
-                                    npm::NpmPacketDirection::kAToB,
-                                    110,
-                                    20);
+    auto overlap = MakeLedgerPacket(1'000'000'000, npm::NpmPacketDirection::kAToB, 110, 20);
     overlap.packet.meta.wire_len = 100;
     assert(tracker.Observe(first, session) == npm::NpmTcpPerformanceError::kNone);
     assert(tracker.Observe(overlap, session) == npm::NpmTcpPerformanceError::kNone);
@@ -2210,14 +2216,10 @@ void TestSessionPerformanceTcpRatesAndSequenceAmbiguity() {
     assert(snapshot.retrans_packets_ab == 1 && snapshot.retrans_payload_bytes_ab == 10);
 
     const auto ambiguous_session = MakePerformanceSession(11);
-    assert(tracker.Observe(
-               MakeLedgerPacket(0, npm::NpmPacketDirection::kAToB, 0, 10), ambiguous_session) ==
+    assert(tracker.Observe(MakeLedgerPacket(0, npm::NpmPacketDirection::kAToB, 0, 10), ambiguous_session) ==
            npm::NpmTcpPerformanceError::kNone);
-    assert(tracker.Observe(MakeLedgerPacket(1,
-                                           npm::NpmPacketDirection::kAToB,
-                                           0x8000000au,
-                                           1),
-                           ambiguous_session) == npm::NpmTcpPerformanceError::kNone);
+    assert(tracker.Observe(MakeLedgerPacket(1, npm::NpmPacketDirection::kAToB, 0x8000000au, 1), ambiguous_session) ==
+           npm::NpmTcpPerformanceError::kNone);
     auto ambiguous_view = MakeTransportSnapshotView(&tcp_key, 11, 0, 1'000'000'000, 2, 0, 80, 0);
     assert(tracker.Snapshot(ambiguous_view, &snapshot) == npm::NpmTcpPerformanceError::kNone);
     assert(snapshot.rate_status == npm::NpmRateStatus::kValid && snapshot.payload_bps_ab == 88.0);
@@ -2232,12 +2234,10 @@ void TestSessionPerformanceProtocolAndViewErrorsAreAtomic() {
     udp_key.transport_protocol = flowsql::ipv4::eNext::UDP;
     npm::NpmSessionKey tcp_key;
     tcp_key.transport_protocol = flowsql::ipv4::eNext::TCP;
-    auto budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmTcpPerformanceTracker tracker(budget);
     auto udp = MakeTransportSnapshotView(&udp_key, 1, 10, 10, 0, 0, 0, 0);
-    assert(tracker.Observe(
-               MakeUdpPerformancePacket(10, npm::NpmPacketDirection::kAToB, 5, 20), udp) ==
+    assert(tracker.Observe(MakeUdpPerformancePacket(10, npm::NpmPacketDirection::kAToB, 5, 20), udp) ==
            npm::NpmTcpPerformanceError::kNone);
     const uint64_t before = tracker.tracked_bytes();
     auto tcp_packet = MakeLedgerPacket(20, npm::NpmPacketDirection::kAToB, 100, 10);
@@ -2248,23 +2248,16 @@ void TestSessionPerformanceProtocolAndViewErrorsAreAtomic() {
     assert(snapshot.payload_bytes_ab == 5);
 
     auto wrong_protocol = MakeTransportSnapshotView(&tcp_key, 1, 10, 20, 1, 0, 20, 0);
-    assert(tracker.Snapshot(wrong_protocol, &snapshot) ==
-           npm::NpmTcpPerformanceError::kProtocolMismatch);
-    assert(snapshot.payload_bytes_ab == 5 &&
-           snapshot.handshake_status == npm::NpmTcpHandshakeStatus::kNotApplicable);
+    assert(tracker.Snapshot(wrong_protocol, &snapshot) == npm::NpmTcpPerformanceError::kProtocolMismatch);
+    assert(snapshot.payload_bytes_ab == 5 && snapshot.handshake_status == npm::NpmTcpHandshakeStatus::kNotApplicable);
     auto invalid_time = MakeTransportSnapshotView(&udp_key, 1, 20, 10, 1, 0, 20, 0);
-    assert(tracker.Snapshot(invalid_time, &snapshot) ==
-           npm::NpmTcpPerformanceError::kSessionViewMismatch);
+    assert(tracker.Snapshot(invalid_time, &snapshot) == npm::NpmTcpPerformanceError::kSessionViewMismatch);
     auto missing_packet = MakeTransportSnapshotView(&udp_key, 1, 10, 20, 0, 0, 20, 0);
-    assert(tracker.Snapshot(missing_packet, &snapshot) ==
-           npm::NpmTcpPerformanceError::kSessionViewMismatch);
+    assert(tracker.Snapshot(missing_packet, &snapshot) == npm::NpmTcpPerformanceError::kSessionViewMismatch);
     auto missing_wire = MakeTransportSnapshotView(&udp_key, 1, 10, 20, 1, 0, 19, 0);
-    assert(tracker.Snapshot(missing_wire, &snapshot) ==
-           npm::NpmTcpPerformanceError::kSessionViewMismatch);
-    assert(tracker.Snapshot(MakePerformanceSession(1), &snapshot) ==
-           npm::NpmTcpPerformanceError::kSessionViewMismatch);
-    assert(snapshot.payload_bytes_ab == 5 &&
-           snapshot.handshake_status == npm::NpmTcpHandshakeStatus::kNotApplicable);
+    assert(tracker.Snapshot(missing_wire, &snapshot) == npm::NpmTcpPerformanceError::kSessionViewMismatch);
+    assert(tracker.Snapshot(MakePerformanceSession(1), &snapshot) == npm::NpmTcpPerformanceError::kSessionViewMismatch);
+    assert(snapshot.payload_bytes_ab == 5 && snapshot.handshake_status == npm::NpmTcpHandshakeStatus::kNotApplicable);
     assert(tracker.tracked_bytes() == before && budget->Usage().module_state_bytes == before);
     tracker.Clear();
 }
@@ -2290,10 +2283,8 @@ void TestSessionAnalysisModuleTcpRevisionsAndWriterAtomicity() {
     ContextPool pool(&protocol);
     SinglePoolQuerier querier(&pool);
     std::unique_ptr<npm::NpmProtocolContext> context;
-    assert(npm::NpmProtocolContext::Create(&querier, &context) ==
-           npm::NpmProtocolContextError::kNone);
-    auto budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    assert(npm::NpmProtocolContext::Create(&querier, &context) == npm::NpmProtocolContextError::kNone);
+    auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmSessionAnalysisModule module(*context, budget, 8);
     auto key = MakeSessionModuleKey(flowsql::ipv4::eNext::TCP);
     auto session = MakeTransportSnapshotView(&key, 1, 100, 200, 1, 0, 100, 0);
@@ -2330,13 +2321,11 @@ void TestSessionAnalysisModuleTcpRevisionsAndWriterAtomicity() {
     assert(module.OnSessionSnapshot(second_session, 1350, writer) == 0);
     assert(writer.last_session_result.revision == 1);
 
-    assert(module.OnSessionEnd(
-               session, npm::NpmSessionEndReason::kClosed, 1400, writer) == 0);
+    assert(module.OnSessionEnd(session, npm::NpmSessionEndReason::kClosed, 1400, writer) == 0);
     assert(writer.last_session_result.revision == 4 && writer.last_session_result.is_final);
     assert(writer.last_session_result.end_reason == npm::NpmSessionEndReason::kClosed);
     assert(module.tracked_sessions() == 1 && module.tracked_bytes() > 0);
-    assert(module.OnSessionEnd(
-               second_session, npm::NpmSessionEndReason::kClosed, 1450, writer) == 0);
+    assert(module.OnSessionEnd(second_session, npm::NpmSessionEndReason::kClosed, 1450, writer) == 0);
     assert(writer.last_session_result.revision == 2 && writer.last_session_result.is_final);
     assert(module.tracked_sessions() == 0 && module.tracked_bytes() == 0);
     assert(budget->Usage().module_state_bytes == 0);
@@ -2349,38 +2338,30 @@ void TestSessionAnalysisModuleUdpFinalOnlyAndInvalidFinal() {
     ContextPool pool(&protocol);
     SinglePoolQuerier querier(&pool);
     std::unique_ptr<npm::NpmProtocolContext> context;
-    assert(npm::NpmProtocolContext::Create(&querier, &context) ==
-           npm::NpmProtocolContextError::kNone);
-    auto budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    assert(npm::NpmProtocolContext::Create(&querier, &context) == npm::NpmProtocolContextError::kNone);
+    auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmSessionAnalysisModule module(*context, budget, 8);
     auto key = MakeSessionModuleKey(flowsql::ipv4::eNext::UDP);
     key.b.port = 53;
     auto session = MakeTransportSnapshotView(&key, 2, 10, 10, 0, 1, 0, 80);
     session.protocol_status = npm::NpmProtocolStatus::kUnknown;
-    const auto packet =
-        MakeUdpPerformancePacket(10, npm::NpmPacketDirection::kBToA, 12, 80, false);
+    const auto packet = MakeUdpPerformancePacket(10, npm::NpmPacketDirection::kBToA, 12, 80, false);
     FixtureWriter writer;
     assert(module.OnPacket(packet, session, writer) == 0);
-    assert(module.OnSessionEnd(
-               session, npm::NpmSessionEndReason::kEof, 20, writer) == 0);
+    assert(module.OnSessionEnd(session, npm::NpmSessionEndReason::kEof, 20, writer) == 0);
     assert(writer.session_accepted == 1 && writer.last_session_result.revision == 1);
-    assert(writer.last_session_result.tcp_handshake_status ==
-           npm::NpmTcpHandshakeStatus::kNotApplicable);
+    assert(writer.last_session_result.tcp_handshake_status == npm::NpmTcpHandshakeStatus::kNotApplicable);
     assert(writer.last_session_result.tcp_rtt_status == npm::NpmTcpRttStatus::kNotApplicable);
-    assert(writer.last_session_result.tcp_retransmission_status ==
-           npm::NpmTcpRetransmissionStatus::kNotApplicable);
+    assert(writer.last_session_result.tcp_retransmission_status == npm::NpmTcpRetransmissionStatus::kNotApplicable);
     assert(writer.last_session_result.payload_bytes_ba == 12);
-    assert((writer.last_session_result.measurement_flags &
-            npm::kNpmMeasurementTruncatedPayload) != 0);
+    assert((writer.last_session_result.measurement_flags & npm::kNpmMeasurementTruncatedPayload) != 0);
     assert(module.tracked_sessions() == 0 && budget->Usage().module_state_bytes == 0);
 
     session.session_id = 3;
     session.protocol_status = npm::NpmProtocolStatus::kPending;
     assert(module.OnPacket(packet, session, writer) == 0);
     const uint64_t before = module.tracked_bytes();
-    assert(module.OnSessionEnd(
-               session, npm::NpmSessionEndReason::kEof, 30, writer) == EINVAL);
+    assert(module.OnSessionEnd(session, npm::NpmSessionEndReason::kEof, 30, writer) == EINVAL);
     assert(module.tracked_sessions() == 1 && module.tracked_bytes() >= before);
     assert(writer.session_accepted == 1);
     module.Clear();
@@ -2393,18 +2374,15 @@ void TestSessionAnalysisModuleRevisionBudgetAndDestructorCleanup() {
     ContextPool pool(&protocol);
     SinglePoolQuerier querier(&pool);
     std::unique_ptr<npm::NpmProtocolContext> context;
-    assert(npm::NpmProtocolContext::Create(&querier, &context) ==
-           npm::NpmProtocolContextError::kNone);
+    assert(npm::NpmProtocolContext::Create(&querier, &context) == npm::NpmProtocolContextError::kNone);
     auto key = MakeSessionModuleKey(flowsql::ipv4::eNext::UDP);
     auto session = MakeTransportSnapshotView(&key, 4, 10, 10, 1, 0, 30, 0);
     session.protocol_status = npm::NpmProtocolStatus::kUnknown;
-    const auto packet =
-        MakeUdpPerformancePacket(10, npm::NpmPacketDirection::kAToB, 5, 30);
+    const auto packet = MakeUdpPerformancePacket(10, npm::NpmPacketDirection::kAToB, 5, 30);
     FixtureWriter writer;
 
     uint64_t tracker_bytes = 0;
-    auto probe_budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    auto probe_budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     {
         npm::NpmSessionAnalysisModule probe(*context, probe_budget, 8);
         assert(probe.OnPacket(packet, session, writer) == 0);
@@ -2425,8 +2403,7 @@ void TestSessionAnalysisModuleRevisionBudgetAndDestructorCleanup() {
     }
     assert(tight_budget->Usage().module_state_bytes == 0);
 
-    auto cleanup_budget = std::make_shared<FixtureBudget>(
-        npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
+    auto cleanup_budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     {
         npm::NpmSessionAnalysisModule cleanup(*context, cleanup_budget, 8);
         session.session_id = 5;
@@ -2439,10 +2416,8 @@ void TestSessionAnalysisModuleRevisionBudgetAndDestructorCleanup() {
     assert(cleanup_budget->Usage().module_state_bytes == 0);
 }
 
-npm::NpmSessionTableError ObserveActive(npm::NpmSessionTable& table,
-                                        const npm::NpmSessionPacketBinding& binding,
-                                        const flowsql::packet::PacketMeta& meta,
-                                        npm::NpmSessionView* output) {
+npm::NpmSessionTableError ObserveActive(npm::NpmSessionTable& table, const npm::NpmSessionPacketBinding& binding,
+                                        const flowsql::packet::PacketMeta& meta, npm::NpmSessionView* output) {
     if (!output) return table.Observe(binding, meta, nullptr);
     npm::NpmSessionObserveResult result;
     const auto error = table.Observe(binding, meta, &result);
@@ -2475,8 +2450,7 @@ void TestSessionTableBidirectionalCountersAndLookup() {
     assert(view.protocol_status == npm::NpmProtocolStatus::kPending);
     assert(!view.protocol_id.has_value() && !view.protocol_sub_id.has_value());
 
-    assert(ObserveActive(table, reverse_from_other_queue, reverse_meta, &view) ==
-           npm::NpmSessionTableError::kNone);
+    assert(ObserveActive(table, reverse_from_other_queue, reverse_meta, &view) == npm::NpmSessionTableError::kNone);
     assert(table.size() == 1 && view.session_id == 1);
     assert(view.first_ns == 100 && view.last_ns == 300);
     assert(view.packets_ab == 1 && view.packets_ba == 1);
@@ -2617,10 +2591,7 @@ void TestSessionTableIsolationCapacityAndErrors() {
 }
 
 npm::NpmCaptureProgressUpdate OfflineProgress(int64_t capture_time_ns);
-void AssertTaskBudgetUsage(const npm::NpmBudgetUsage& usage,
-                           uint64_t session,
-                           uint64_t module,
-                           uint64_t input,
+void AssertTaskBudgetUsage(const npm::NpmBudgetUsage& usage, uint64_t session, uint64_t module, uint64_t input,
                            uint64_t output);
 
 void TestSessionTableBudgetReserveFailureAndStableCharge() {
@@ -2655,24 +2626,20 @@ void TestSessionTableBudgetReserveFailureAndStableCharge() {
     AssertTaskBudgetUsage(long_budget->Usage(), long_table.tracked_bytes(), 0, 0, 0);
 
     auto limited_budget = std::make_shared<npm::NpmTaskBudget>(config);
-    assert(limited_budget->Reserve(
-               npm::NpmBudgetCategory::kModuleState, config.max_tracked_bytes - short_charge + 1) ==
+    assert(limited_budget->Reserve(npm::NpmBudgetCategory::kModuleState, config.max_tracked_bytes - short_charge + 1) ==
            npm::NpmBudgetError::kNone);
     npm::NpmSessionTable limited(config, limited_budget);
     npm::NpmSessionObserveResult unchanged;
     unchanged.has_active_session = true;
     unchanged.active_session.session_id = 99;
     unchanged.ended_sessions.emplace_back().session_id = 88;
-    assert(limited.Observe(short_binding, short_meta, &unchanged) ==
-           npm::NpmSessionTableError::kSessionBudgetExceeded);
+    assert(limited.Observe(short_binding, short_meta, &unchanged) == npm::NpmSessionTableError::kSessionBudgetExceeded);
     assert(limited.size() == 0 && limited.tracked_bytes() == 0);
     assert(unchanged.has_active_session && unchanged.active_session.session_id == 99);
     assert(unchanged.ended_sessions.size() == 1 && unchanged.ended_sessions[0].session_id == 88);
-    AssertTaskBudgetUsage(
-        limited_budget->Usage(), 0, config.max_tracked_bytes - short_charge + 1, 0, 0);
+    AssertTaskBudgetUsage(limited_budget->Usage(), 0, config.max_tracked_bytes - short_charge + 1, 0, 0);
 
-    assert(limited_budget->Release(
-               npm::NpmBudgetCategory::kModuleState, config.max_tracked_bytes - short_charge + 1) ==
+    assert(limited_budget->Release(npm::NpmBudgetCategory::kModuleState, config.max_tracked_bytes - short_charge + 1) ==
            npm::NpmBudgetError::kNone);
     assert(ObserveActive(limited, short_binding, short_meta, &observed) == npm::NpmSessionTableError::kNone);
     assert(observed.session_id == 1 && limited.tracked_bytes() == short_charge);
@@ -2706,8 +2673,7 @@ void TestSessionTableBudgetReleasesAllTerminalPaths() {
     assert(eof_sessions.size() == 1 && eof_table.tracked_bytes() == 0);
     AssertTaskBudgetUsage(eof_budget->Usage(), 0, 0, 0, 0);
 
-    const auto rst_packet =
-        MakeIpv4TcpPacket("198.51.100.1", 51000, "198.51.100.2", 8443, {}, kTcpRst, 200);
+    const auto rst_packet = MakeIpv4TcpPacket("198.51.100.1", 51000, "198.51.100.2", 8443, {}, kTcpRst, 200);
     flowsql::packet::PacketMeta rst_meta;
     const auto rst = BuildBinding(domain_map, rst_packet, 1, 20, 90, &rst_meta);
     auto closed_budget = std::make_shared<npm::NpmTaskBudget>(config);
@@ -2836,10 +2802,8 @@ void TestIdleDeadlineReplacementLatePacketAndCapacityRelease() {
     assert(view.first_ns == 125 * second && view.last_ns == 125 * second);
 }
 
-npm::NpmCaptureProgressUpdate RealtimeProgress(int64_t capture_time_ns,
-                                               bool packet_observed,
-                                               bool source_idle_confirmed,
-                                               bool source_backlog_known,
+npm::NpmCaptureProgressUpdate RealtimeProgress(int64_t capture_time_ns, bool packet_observed,
+                                               bool source_idle_confirmed, bool source_backlog_known,
                                                bool source_has_backlog) {
     npm::NpmCaptureProgressUpdate update;
     update.capture_time_ns = capture_time_ns;
@@ -2886,16 +2850,11 @@ void TestRealtimeProgressRequiresIdleAndBacklogEvidence() {
 
 void TestTcpSynRetransmissionAndTupleReuse() {
     const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}}};
-    const auto middle_packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpAck, 1000);
-    const auto initial_syn =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpSyn, 100);
-    const auto syn_ack =
-        MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpSyn | kTcpAck, 500);
-    const auto changed_syn =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpSyn, 101);
-    const auto reverse_syn =
-        MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpSyn, 700);
+    const auto middle_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpAck, 1000);
+    const auto initial_syn = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpSyn, 100);
+    const auto syn_ack = MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpSyn | kTcpAck, 500);
+    const auto changed_syn = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpSyn, 101);
+    const auto reverse_syn = MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpSyn, 700);
 
     flowsql::packet::PacketMeta middle_meta;
     flowsql::packet::PacketMeta syn_meta;
@@ -2958,14 +2917,10 @@ void TestTcpSynRetransmissionAndTupleReuse() {
 
 void TestTcpFinRstAndUdpLifecycle() {
     const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}}};
-    const auto data_packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpAck, 100);
-    const auto forward_fin =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpFin | kTcpAck, 200);
-    const auto reverse_fin =
-        MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpFin | kTcpAck, 300);
-    const auto reverse_rst =
-        MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpRst | kTcpAck, 400);
+    const auto data_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpAck, 100);
+    const auto forward_fin = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpFin | kTcpAck, 200);
+    const auto reverse_fin = MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpFin | kTcpAck, 300);
+    const auto reverse_rst = MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpRst | kTcpAck, 400);
 
     flowsql::packet::PacketMeta data_meta;
     flowsql::packet::PacketMeta fin_meta;
@@ -2985,8 +2940,7 @@ void TestTcpFinRstAndUdpLifecycle() {
     assert(result.has_active_session && result.active_session.session_id == 1);
     assert(result.active_session.packets_ab == 2 && result.active_session.packets_ba == 0);
     assert(result.ended_sessions.empty());
-    assert(fin_table.Observe(fin_retransmit, fin_retransmit_meta, &result) ==
-           npm::NpmSessionTableError::kNone);
+    assert(fin_table.Observe(fin_retransmit, fin_retransmit_meta, &result) == npm::NpmSessionTableError::kNone);
     assert(result.has_active_session && result.active_session.session_id == 1);
     assert(result.active_session.packets_ab == 3 && result.active_session.packets_ba == 0);
     assert(result.ended_sessions.empty());
@@ -3023,12 +2977,8 @@ void TestTcpFinRstAndUdpLifecycle() {
 
 class RecordingEndModule final : public npm::INpmAnalysisModule {
  public:
-    RecordingEndModule(uint64_t marker,
-                       std::vector<uint64_t>* calls,
-                       std::vector<npm::NpmSessionEndReason>* reasons,
-                       std::vector<int64_t>* observed_ats,
-                       bool write_result,
-                       int error)
+    RecordingEndModule(uint64_t marker, std::vector<uint64_t>* calls, std::vector<npm::NpmSessionEndReason>* reasons,
+                       std::vector<int64_t>* observed_ats, bool write_result, int error)
         : marker_(marker),
           calls_(calls),
           reasons_(reasons),
@@ -3036,21 +2986,11 @@ class RecordingEndModule final : public npm::INpmAnalysisModule {
           write_result_(write_result),
           error_(error) {}
 
-    int OnPacket(const npm::NpmPacketView&,
-                 const npm::NpmSessionView&,
-                 npm::INpmResultWriter&) override {
-        return 0;
-    }
+    int OnPacket(const npm::NpmPacketView&, const npm::NpmSessionView&, npm::INpmResultWriter&) override { return 0; }
 
-    int OnSessionSnapshot(const npm::NpmSessionView&,
-                          int64_t,
-                          npm::INpmResultWriter&) override {
-        return 0;
-    }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultWriter&) override { return 0; }
 
-    int OnSessionEnd(const npm::NpmSessionView& session,
-                     npm::NpmSessionEndReason reason,
-                     int64_t observed_at_ns,
+    int OnSessionEnd(const npm::NpmSessionView& session, npm::NpmSessionEndReason reason, int64_t observed_at_ns,
                      npm::INpmResultWriter& writer) override {
         assert(session.key != nullptr);
         calls_->push_back(session.session_id * 10 + marker_);
@@ -3097,10 +3037,9 @@ void TestSessionEndModuleNotificationOrderAndErrors() {
     FixtureWriter writer;
     assert(npm::NotifyNpmSessionEnd(ended_sessions, modules, 5000, writer) == 0);
     assert((calls == std::vector<uint64_t>{11, 12, 21, 22}));
-    assert((reasons == std::vector<npm::NpmSessionEndReason>{npm::NpmSessionEndReason::kClosed,
-                                                            npm::NpmSessionEndReason::kClosed,
-                                                            npm::NpmSessionEndReason::kTupleReuse,
-                                                            npm::NpmSessionEndReason::kTupleReuse}));
+    assert((reasons == std::vector<npm::NpmSessionEndReason>{
+                           npm::NpmSessionEndReason::kClosed, npm::NpmSessionEndReason::kClosed,
+                           npm::NpmSessionEndReason::kTupleReuse, npm::NpmSessionEndReason::kTupleReuse}));
     assert((observed_ats == std::vector<int64_t>{5000, 5000, 5000, 5000}));
     assert(writer.accepted == 4);
 
@@ -3133,7 +3072,7 @@ class SequenceProtocolIdentifier final : public flowsql::packet::IPacketProtocol
         : results_(std::move(results)) {}
 
     flowsql::packet::PacketProtocolInfo Identify(const flowsql::packet::PacketView& packet,
-                                                  const flowsql::packet::PacketLayerInfo& layer) override {
+                                                 const flowsql::packet::PacketLayerInfo& layer) override {
         ++calls;
         last_packet_data = packet.bytes.data;
         last_layer = &layer;
@@ -3154,12 +3093,9 @@ void TestProtocolSamplingSkipsEmptyPayloadAndStopsAfterHit() {
     auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     config.payload_sample_packets = 3;
     const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}}};
-    const auto empty_packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpAck, 100);
-    const auto payload_packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1, 2}, kTcpAck, 101);
-    const auto rst_packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpRst | kTcpAck, 102);
+    const auto empty_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpAck, 100);
+    const auto payload_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1, 2}, kTcpAck, 101);
+    const auto rst_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpRst | kTcpAck, 102);
 
     flowsql::packet::PacketMeta empty_meta;
     flowsql::packet::PacketMeta payload_meta;
@@ -3174,8 +3110,8 @@ void TestProtocolSamplingSkipsEmptyPayloadAndStopsAfterHit() {
     npm::NpmSessionObserveResult observed;
     assert(table.Observe(empty, empty_meta, &observed) == npm::NpmSessionTableError::kNone);
     const uint64_t session_id = observed.active_session.session_id;
-    SequenceProtocolIdentifier identifier({{flowsql::packet::ProtocolStatus::kUnknown, 0, 0},
-                                           {flowsql::packet::ProtocolStatus::kIdentified, 7, 8}});
+    SequenceProtocolIdentifier identifier(
+        {{flowsql::packet::ProtocolStatus::kUnknown, 0, 0}, {flowsql::packet::ProtocolStatus::kIdentified, 7, 8}});
 
     npm::NpmSessionView sampled;
     assert(table.SampleProtocol(empty.key, session_id, empty_view, identifier, &sampled) ==
@@ -3235,12 +3171,9 @@ void TestProtocolSamplingExhaustionAndSessionInstanceIsolation() {
     auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     config.payload_sample_packets = 2;
     const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}}};
-    const auto middle_packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1}, kTcpAck, 100);
-    const auto syn_packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {2}, kTcpSyn, 200);
-    const auto rst_packet =
-        MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpRst | kTcpAck, 300);
+    const auto middle_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1}, kTcpAck, 100);
+    const auto syn_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {2}, kTcpSyn, 200);
+    const auto rst_packet = MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpRst | kTcpAck, 300);
 
     flowsql::packet::PacketMeta middle_meta;
     flowsql::packet::PacketMeta syn_meta;
@@ -3315,8 +3248,7 @@ void TestProtocolPendingFinalizesUnknownOnIdle() {
     assert(!progress.ended_sessions[0].protocol_id.has_value());
     assert(!progress.ended_sessions[0].protocol_sub_id.has_value());
 
-    const auto rst_packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpRst | kTcpAck, 100);
+    const auto rst_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpRst | kTcpAck, 100);
     flowsql::packet::PacketMeta rst_meta;
     const auto rst = BuildBinding(domain_map, rst_packet, 1, 50 * second, 90, &rst_meta);
     npm::NpmSessionTable closed_table(config);
@@ -3331,12 +3263,9 @@ void TestSessionTableFinishAllAtEof() {
     auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     config.out_of_order_tolerance_ns = 0;
     const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}}};
-    const auto pending_packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpAck, 100);
-    const auto identified_packet =
-        MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, {1, 2});
-    const auto closed_packet =
-        MakeIpv4TcpPacket("198.51.100.1", 51000, "198.51.100.2", 8443, {}, kTcpRst, 200);
+    const auto pending_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {}, kTcpAck, 100);
+    const auto identified_packet = MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, {1, 2});
+    const auto closed_packet = MakeIpv4TcpPacket("198.51.100.1", 51000, "198.51.100.2", 8443, {}, kTcpRst, 200);
 
     flowsql::packet::PacketMeta pending_meta;
     flowsql::packet::PacketMeta identified_meta;
@@ -3352,13 +3281,9 @@ void TestSessionTableFinishAllAtEof() {
     assert(observed.active_session.session_id == 1);
     assert(table.Observe(identified, identified_meta, &observed) == npm::NpmSessionTableError::kNone);
     assert(observed.active_session.session_id == 2);
-    SequenceProtocolIdentifier identifier(
-        {{flowsql::packet::ProtocolStatus::kIdentified, 7, 8}});
+    SequenceProtocolIdentifier identifier({{flowsql::packet::ProtocolStatus::kIdentified, 7, 8}});
     npm::NpmSessionView sampled;
-    assert(table.SampleProtocol(identified.key,
-                                observed.active_session.session_id,
-                                identified_view,
-                                identifier,
+    assert(table.SampleProtocol(identified.key, observed.active_session.session_id, identified_view, identifier,
                                 &sampled) == npm::NpmSessionTableError::kNone);
     assert(sampled.protocol_status == npm::NpmProtocolStatus::kIdentified);
 
@@ -3399,34 +3324,26 @@ void TestSessionTableFinishAllAtEof() {
 
 class PacketProcessorRecordingModule final : public npm::INpmAnalysisModule {
  public:
-    PacketProcessorRecordingModule(uint64_t marker, std::vector<uint64_t>* events)
-        : marker_(marker), events_(events) {}
+    PacketProcessorRecordingModule(uint64_t marker, std::vector<uint64_t>* events) : marker_(marker), events_(events) {}
 
-    int OnPacket(const npm::NpmPacketView& packet,
-                 const npm::NpmSessionView& session,
+    int OnPacket(const npm::NpmPacketView& packet, const npm::NpmSessionView& session,
                  npm::INpmResultWriter&) override {
         events_->push_back(2000 + session.session_id * 10 + marker_);
         packet_sequences.push_back(packet.packet.meta.sequence);
         packet_timestamps.push_back(packet.packet.meta.timestamp_ns);
         transport_facts.push_back(packet.transport);
-        packet_matches_expectation =
-            packet.packet.bytes.data == expected_packet_data && packet.layer == expected_layer &&
-            packet.payload.size == expected_payload_size &&
-            (expected_payload_size == 0 || packet.payload[0] == expected_payload_first) &&
-            packet.direction == expected_direction;
+        packet_matches_expectation = packet.packet.bytes.data == expected_packet_data &&
+                                     packet.layer == expected_layer && packet.payload.size == expected_payload_size &&
+                                     (expected_payload_size == 0 || packet.payload[0] == expected_payload_first) &&
+                                     packet.direction == expected_direction;
         packet_protocol_statuses.push_back(session.protocol_status);
+        packet_label_ids.push_back(session.primary_label_id);
         return packet_error;
     }
 
-    int OnSessionSnapshot(const npm::NpmSessionView&,
-                          int64_t,
-                          npm::INpmResultWriter&) override {
-        return 0;
-    }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultWriter&) override { return 0; }
 
-    int OnSessionEnd(const npm::NpmSessionView& session,
-                     npm::NpmSessionEndReason reason,
-                     int64_t observed_at_ns,
+    int OnSessionEnd(const npm::NpmSessionView& session, npm::NpmSessionEndReason reason, int64_t observed_at_ns,
                      npm::INpmResultWriter&) override {
         events_->push_back(1000 + session.session_id * 10 + marker_);
         end_reasons.push_back(reason);
@@ -3434,6 +3351,7 @@ class PacketProcessorRecordingModule final : public npm::INpmAnalysisModule {
         end_protocol_statuses.push_back(session.protocol_status);
         end_protocol_ids.push_back(session.protocol_id);
         end_protocol_sub_ids.push_back(session.protocol_sub_id);
+        end_label_ids.push_back(session.primary_label_id);
         return end_error;
     }
 
@@ -3449,11 +3367,13 @@ class PacketProcessorRecordingModule final : public npm::INpmAnalysisModule {
     std::vector<int64_t> packet_timestamps;
     std::vector<npm::NpmTransportPacketFacts> transport_facts;
     std::vector<npm::NpmProtocolStatus> packet_protocol_statuses;
+    std::vector<uint32_t> packet_label_ids;
     std::vector<npm::NpmSessionEndReason> end_reasons;
     std::vector<int64_t> end_observed_ats;
     std::vector<npm::NpmProtocolStatus> end_protocol_statuses;
     std::vector<std::optional<uint16_t>> end_protocol_ids;
     std::vector<std::optional<uint16_t>> end_protocol_sub_ids;
+    std::vector<uint32_t> end_label_ids;
 
  private:
     uint64_t marker_ = 0;
@@ -3463,12 +3383,9 @@ class PacketProcessorRecordingModule final : public npm::INpmAnalysisModule {
 void TestProcessNpmPacketSamplingAndCallbackOrder() {
     auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}}};
-    const auto first_packet = MakeIpv4TcpPacket(
-        "192.0.2.1", 50000, "192.0.2.2", 443, {1}, kTcpAck, 100, 90, 2048);
-    const auto reuse_packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {2}, kTcpSyn, 200);
-    const auto close_packet =
-        MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpRst | kTcpAck, 300);
+    const auto first_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1}, kTcpAck, 100, 90, 2048);
+    const auto reuse_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {2}, kTcpSyn, 200);
+    const auto close_packet = MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpRst | kTcpAck, 300);
 
     auto first_view = first_packet.View(1, 100);
     first_view.meta.timestamp_ns = 10;
@@ -3498,13 +3415,7 @@ void TestProcessNpmPacketSamplingAndCallbackOrder() {
 
     std::vector<npm::NpmSessionSnapshot> ended_sessions(1);
     ended_sessions[0].session_id = 999;
-    auto status = npm::ProcessNpmPacket(domain_map,
-                                        first_view,
-                                        first_packet.layer,
-                                        table,
-                                        identifier,
-                                        modules,
-                                        writer,
+    auto status = npm::ProcessNpmPacket(domain_map, first_view, first_packet.layer, table, identifier, modules, writer,
                                         &ended_sessions);
     assert(status.error == npm::NpmPacketProcessError::kNone);
     assert(ended_sessions.empty() && table.size() == 1);
@@ -3528,13 +3439,7 @@ void TestProcessNpmPacketSamplingAndCallbackOrder() {
     second_module.expected_packet_data = reuse_packet.bytes.data();
     second_module.expected_layer = &reuse_packet.layer;
     second_module.expected_payload_first = 2;
-    status = npm::ProcessNpmPacket(domain_map,
-                                   reuse_view,
-                                   reuse_packet.layer,
-                                   table,
-                                   identifier,
-                                   modules,
-                                   writer,
+    status = npm::ProcessNpmPacket(domain_map, reuse_view, reuse_packet.layer, table, identifier, modules, writer,
                                    &ended_sessions);
     assert(status.error == npm::NpmPacketProcessError::kNone);
     assert(ended_sessions.size() == 1);
@@ -3558,13 +3463,7 @@ void TestProcessNpmPacketSamplingAndCallbackOrder() {
     second_module.expected_layer = &close_packet.layer;
     second_module.expected_payload_size = 0;
     second_module.expected_direction = npm::NpmPacketDirection::kBToA;
-    status = npm::ProcessNpmPacket(domain_map,
-                                   close_view,
-                                   close_packet.layer,
-                                   table,
-                                   identifier,
-                                   modules,
-                                   writer,
+    status = npm::ProcessNpmPacket(domain_map, close_view, close_packet.layer, table, identifier, modules, writer,
                                    &ended_sessions);
     assert(status.error == npm::NpmPacketProcessError::kNone);
     assert(ended_sessions.size() == 1);
@@ -3579,8 +3478,7 @@ void TestProcessNpmPacketSamplingAndCallbackOrder() {
     assert(second_module.end_observed_ats.back() == 30);
     assert(identifier.calls == 2 && table.size() == 0);
 
-    const auto old_packet =
-        MakeIpv4TcpPacket("203.0.113.1", 52000, "203.0.113.2", 443, {}, kTcpAck, 10);
+    const auto old_packet = MakeIpv4TcpPacket("203.0.113.1", 52000, "203.0.113.2", 443, {}, kTcpAck, 10);
     const auto reuse_and_close_packet =
         MakeIpv4TcpPacket("203.0.113.1", 52000, "203.0.113.2", 443, {}, kTcpSyn | kTcpRst, 20);
     auto old_view = old_packet.View(1, 80);
@@ -3589,24 +3487,12 @@ void TestProcessNpmPacketSamplingAndCallbackOrder() {
     reuse_and_close_view.meta.timestamp_ns = 50;
     npm::NpmSessionTable reuse_and_close_table(config);
     events.clear();
-    assert(npm::ProcessNpmPacket(domain_map,
-                                 old_view,
-                                 old_packet.layer,
-                                 reuse_and_close_table,
-                                 identifier,
-                                 modules,
-                                 writer,
-                                 &ended_sessions)
+    assert(npm::ProcessNpmPacket(domain_map, old_view, old_packet.layer, reuse_and_close_table, identifier, modules,
+                                 writer, &ended_sessions)
                .error == npm::NpmPacketProcessError::kNone);
     events.clear();
-    status = npm::ProcessNpmPacket(domain_map,
-                                   reuse_and_close_view,
-                                   reuse_and_close_packet.layer,
-                                   reuse_and_close_table,
-                                   identifier,
-                                   modules,
-                                   writer,
-                                   &ended_sessions);
+    status = npm::ProcessNpmPacket(domain_map, reuse_and_close_view, reuse_and_close_packet.layer,
+                                   reuse_and_close_table, identifier, modules, writer, &ended_sessions);
     assert(status.error == npm::NpmPacketProcessError::kNone);
     assert(ended_sessions.size() == 2);
     assert(ended_sessions[0].session_id == 1);
@@ -3623,20 +3509,18 @@ void TestProcessNpmPacketSamplesTerminalPayloadBeforeFinalization() {
 
     {
         auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
-        const auto packet = MakeIpv4TcpPacket(
-            "192.0.2.1", 50000, "192.0.2.2", 443, {0x31}, kTcpRst | kTcpAck, 100);
+        const auto packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {0x31}, kTcpRst | kTcpAck, 100);
         auto view = packet.View(1, 100);
         view.meta.timestamp_ns = 10;
         npm::NpmSessionTable table(config);
-        SequenceProtocolIdentifier identifier(
-            {{flowsql::packet::ProtocolStatus::kIdentified, 7, 8}});
+        SequenceProtocolIdentifier identifier({{flowsql::packet::ProtocolStatus::kIdentified, 7, 8}});
         std::vector<uint64_t> events;
         PacketProcessorRecordingModule module(1, &events);
         const std::vector<npm::INpmAnalysisModule*> modules{&module};
         std::vector<npm::NpmSessionSnapshot> ended_sessions;
 
-        const auto status = npm::ProcessNpmPacket(
-            domain_map, view, packet.layer, table, identifier, modules, writer, &ended_sessions);
+        const auto status =
+            npm::ProcessNpmPacket(domain_map, view, packet.layer, table, identifier, modules, writer, &ended_sessions);
         assert(status.error == npm::NpmPacketProcessError::kNone);
         assert(identifier.calls == 1 && identifier.last_packet_data == packet.bytes.data());
         assert(ended_sessions.size() == 1 && table.size() == 0);
@@ -3651,10 +3535,10 @@ void TestProcessNpmPacketSamplesTerminalPayloadBeforeFinalization() {
     {
         auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
         config.payload_sample_packets = 2;
-        const auto first = MakeIpv4TcpPacket(
-            "198.51.100.1", 51000, "198.51.100.2", 8443, {0x40}, kTcpFin | kTcpAck, 200);
-        const auto close = MakeIpv4TcpPacket(
-            "198.51.100.2", 8443, "198.51.100.1", 51000, {0x41}, kTcpFin | kTcpAck, 300);
+        const auto first =
+            MakeIpv4TcpPacket("198.51.100.1", 51000, "198.51.100.2", 8443, {0x40}, kTcpFin | kTcpAck, 200);
+        const auto close =
+            MakeIpv4TcpPacket("198.51.100.2", 8443, "198.51.100.1", 51000, {0x41}, kTcpFin | kTcpAck, 300);
         auto first_view = first.View(1, 100);
         first_view.meta.timestamp_ns = 20;
         auto close_view = close.View(1, 110);
@@ -3669,26 +3553,14 @@ void TestProcessNpmPacketSamplesTerminalPayloadBeforeFinalization() {
         const std::vector<npm::INpmAnalysisModule*> modules{&module};
         std::vector<npm::NpmSessionSnapshot> ended_sessions;
 
-        assert(npm::ProcessNpmPacket(domain_map,
-                                     first_view,
-                                     first.layer,
-                                     table,
-                                     identifier,
-                                     modules,
-                                     writer,
+        assert(npm::ProcessNpmPacket(domain_map, first_view, first.layer, table, identifier, modules, writer,
                                      &ended_sessions)
                    .error == npm::NpmPacketProcessError::kNone);
         assert(identifier.calls == 1 && ended_sessions.empty() && table.size() == 1);
         assert(module.packet_protocol_statuses.back() == npm::NpmProtocolStatus::kPending);
         events.clear();
-        const auto status = npm::ProcessNpmPacket(domain_map,
-                                                   close_view,
-                                                   close.layer,
-                                                   table,
-                                                   identifier,
-                                                   modules,
-                                                   writer,
-                                                   &ended_sessions);
+        const auto status = npm::ProcessNpmPacket(domain_map, close_view, close.layer, table, identifier, modules,
+                                                  writer, &ended_sessions);
         assert(status.error == npm::NpmPacketProcessError::kNone);
         assert(identifier.calls == 2 && ended_sessions.size() == 1 && table.size() == 0);
         assert(ended_sessions[0].protocol_status == npm::NpmProtocolStatus::kIdentified);
@@ -3700,10 +3572,9 @@ void TestProcessNpmPacketSamplesTerminalPayloadBeforeFinalization() {
 
     {
         auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
-        const auto first =
-            MakeIpv4TcpPacket("203.0.113.10", 52100, "203.0.113.20", 9443, {0x48}, kTcpAck, 350);
-        const auto close = MakeIpv4TcpPacket(
-            "203.0.113.20", 9443, "203.0.113.10", 52100, {0x49}, kTcpRst | kTcpAck, 360);
+        const auto first = MakeIpv4TcpPacket("203.0.113.10", 52100, "203.0.113.20", 9443, {0x48}, kTcpAck, 350);
+        const auto close =
+            MakeIpv4TcpPacket("203.0.113.20", 9443, "203.0.113.10", 52100, {0x49}, kTcpRst | kTcpAck, 360);
         auto first_view = first.View(1, 100);
         first_view.meta.timestamp_ns = 35;
         auto close_view = close.View(1, 110);
@@ -3718,25 +3589,13 @@ void TestProcessNpmPacketSamplesTerminalPayloadBeforeFinalization() {
         const std::vector<npm::INpmAnalysisModule*> modules{&module};
         std::vector<npm::NpmSessionSnapshot> ended_sessions;
 
-        assert(npm::ProcessNpmPacket(domain_map,
-                                     first_view,
-                                     first.layer,
-                                     table,
-                                     identifier,
-                                     modules,
-                                     writer,
+        assert(npm::ProcessNpmPacket(domain_map, first_view, first.layer, table, identifier, modules, writer,
                                      &ended_sessions)
                    .error == npm::NpmPacketProcessError::kNone);
         assert(identifier.calls == 1);
         events.clear();
-        const auto status = npm::ProcessNpmPacket(domain_map,
-                                                   close_view,
-                                                   close.layer,
-                                                   table,
-                                                   identifier,
-                                                   modules,
-                                                   writer,
-                                                   &ended_sessions);
+        const auto status = npm::ProcessNpmPacket(domain_map, close_view, close.layer, table, identifier, modules,
+                                                  writer, &ended_sessions);
         assert(status.error == npm::NpmPacketProcessError::kNone);
         assert(identifier.calls == 1 && ended_sessions.size() == 1 && table.size() == 0);
         assert(ended_sessions[0].protocol_status == npm::NpmProtocolStatus::kIdentified);
@@ -3748,10 +3607,8 @@ void TestProcessNpmPacketSamplesTerminalPayloadBeforeFinalization() {
     {
         auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
         config.payload_sample_packets = 1;
-        const auto first =
-            MakeIpv4TcpPacket("203.0.113.1", 52000, "203.0.113.2", 9443, {0x50}, kTcpAck, 400);
-        const auto close = MakeIpv4TcpPacket(
-            "203.0.113.2", 9443, "203.0.113.1", 52000, {0x51}, kTcpRst | kTcpAck, 500);
+        const auto first = MakeIpv4TcpPacket("203.0.113.1", 52000, "203.0.113.2", 9443, {0x50}, kTcpAck, 400);
+        const auto close = MakeIpv4TcpPacket("203.0.113.2", 9443, "203.0.113.1", 52000, {0x51}, kTcpRst | kTcpAck, 500);
         auto first_view = first.View(1, 100);
         first_view.meta.timestamp_ns = 40;
         auto close_view = close.View(1, 110);
@@ -3766,26 +3623,14 @@ void TestProcessNpmPacketSamplesTerminalPayloadBeforeFinalization() {
         const std::vector<npm::INpmAnalysisModule*> modules{&module};
         std::vector<npm::NpmSessionSnapshot> ended_sessions;
 
-        assert(npm::ProcessNpmPacket(domain_map,
-                                     first_view,
-                                     first.layer,
-                                     table,
-                                     identifier,
-                                     modules,
-                                     writer,
+        assert(npm::ProcessNpmPacket(domain_map, first_view, first.layer, table, identifier, modules, writer,
                                      &ended_sessions)
                    .error == npm::NpmPacketProcessError::kNone);
         assert(identifier.calls == 1);
         assert(module.packet_protocol_statuses.back() == npm::NpmProtocolStatus::kUnknown);
         events.clear();
-        const auto status = npm::ProcessNpmPacket(domain_map,
-                                                   close_view,
-                                                   close.layer,
-                                                   table,
-                                                   identifier,
-                                                   modules,
-                                                   writer,
-                                                   &ended_sessions);
+        const auto status = npm::ProcessNpmPacket(domain_map, close_view, close.layer, table, identifier, modules,
+                                                  writer, &ended_sessions);
         assert(status.error == npm::NpmPacketProcessError::kNone);
         assert(identifier.calls == 1 && ended_sessions.size() == 1 && table.size() == 0);
         assert(ended_sessions[0].protocol_status == npm::NpmProtocolStatus::kUnknown);
@@ -3796,41 +3641,26 @@ void TestProcessNpmPacketSamplesTerminalPayloadBeforeFinalization() {
 
     {
         auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
-        const auto old_packet =
-            MakeIpv4TcpPacket("10.0.0.1", 53000, "10.0.0.2", 443, {}, kTcpAck, 600);
-        const auto replacement = MakeIpv4TcpPacket(
-            "10.0.0.1", 53000, "10.0.0.2", 443, {0x61}, kTcpSyn | kTcpRst, 700);
+        const auto old_packet = MakeIpv4TcpPacket("10.0.0.1", 53000, "10.0.0.2", 443, {}, kTcpAck, 600);
+        const auto replacement = MakeIpv4TcpPacket("10.0.0.1", 53000, "10.0.0.2", 443, {0x61}, kTcpSyn | kTcpRst, 700);
         auto old_view = old_packet.View(1, 80);
         old_view.meta.timestamp_ns = 60;
         auto replacement_view = replacement.View(1, 100);
         replacement_view.meta.timestamp_ns = 70;
         npm::NpmSessionTable table(config);
-        SequenceProtocolIdentifier identifier(
-            {{flowsql::packet::ProtocolStatus::kIdentified, 7, 8}});
+        SequenceProtocolIdentifier identifier({{flowsql::packet::ProtocolStatus::kIdentified, 7, 8}});
         std::vector<uint64_t> events;
         PacketProcessorRecordingModule module(1, &events);
         const std::vector<npm::INpmAnalysisModule*> modules{&module};
         std::vector<npm::NpmSessionSnapshot> ended_sessions;
 
-        assert(npm::ProcessNpmPacket(domain_map,
-                                     old_view,
-                                     old_packet.layer,
-                                     table,
-                                     identifier,
-                                     modules,
-                                     writer,
+        assert(npm::ProcessNpmPacket(domain_map, old_view, old_packet.layer, table, identifier, modules, writer,
                                      &ended_sessions)
                    .error == npm::NpmPacketProcessError::kNone);
         assert(identifier.calls == 0 && table.size() == 1);
         events.clear();
-        const auto status = npm::ProcessNpmPacket(domain_map,
-                                                   replacement_view,
-                                                   replacement.layer,
-                                                   table,
-                                                   identifier,
-                                                   modules,
-                                                   writer,
-                                                   &ended_sessions);
+        const auto status = npm::ProcessNpmPacket(domain_map, replacement_view, replacement.layer, table, identifier,
+                                                  modules, writer, &ended_sessions);
         assert(status.error == npm::NpmPacketProcessError::kNone);
         assert(identifier.calls == 1 && ended_sessions.size() == 2 && table.size() == 0);
         assert(ended_sessions[0].session_id == 1);
@@ -3849,20 +3679,18 @@ void TestProcessNpmPacketSamplesTerminalPayloadBeforeFinalization() {
 
     {
         auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
-        const auto packet = MakeIpv4TcpPacket(
-            "172.16.0.1", 54000, "172.16.0.2", 443, {0x71}, kTcpRst | kTcpAck, 800);
+        const auto packet = MakeIpv4TcpPacket("172.16.0.1", 54000, "172.16.0.2", 443, {0x71}, kTcpRst | kTcpAck, 800);
         auto view = packet.View(1, 100);
         view.meta.timestamp_ns = 80;
         npm::NpmSessionTable table(config);
-        SequenceProtocolIdentifier identifier(
-            {{flowsql::packet::ProtocolStatus::kUnknown, 0, 0}});
+        SequenceProtocolIdentifier identifier({{flowsql::packet::ProtocolStatus::kUnknown, 0, 0}});
         std::vector<uint64_t> events;
         PacketProcessorRecordingModule module(1, &events);
         const std::vector<npm::INpmAnalysisModule*> modules{&module};
         std::vector<npm::NpmSessionSnapshot> ended_sessions;
 
-        const auto status = npm::ProcessNpmPacket(
-            domain_map, view, packet.layer, table, identifier, modules, writer, &ended_sessions);
+        const auto status =
+            npm::ProcessNpmPacket(domain_map, view, packet.layer, table, identifier, modules, writer, &ended_sessions);
         assert(status.error == npm::NpmPacketProcessError::kNone);
         assert(identifier.calls == 1 && ended_sessions.size() == 1);
         assert(ended_sessions[0].protocol_status == npm::NpmProtocolStatus::kUnknown);
@@ -3876,8 +3704,7 @@ void TestProcessNpmPacketErrorsAreStructuredAndAtomic() {
     auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     config.out_of_order_tolerance_ns = 0;
     const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}}};
-    const auto packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1}, kTcpAck, 100);
+    const auto packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1}, kTcpAck, 100);
     auto view = packet.View(1, 100);
     view.meta.timestamp_ns = 10;
     SequenceProtocolIdentifier identifier({});
@@ -3888,16 +3715,14 @@ void TestProcessNpmPacketErrorsAreStructuredAndAtomic() {
     std::vector<npm::INpmAnalysisModule*> modules{&first_module, &second_module};
     npm::NpmSessionTable table(config);
 
-    auto status = npm::ProcessNpmPacket(
-        domain_map, view, packet.layer, table, identifier, modules, writer, nullptr);
+    auto status = npm::ProcessNpmPacket(domain_map, view, packet.layer, table, identifier, modules, writer, nullptr);
     assert(status.error == npm::NpmPacketProcessError::kNullOutput);
     assert(table.size() == 0 && identifier.calls == 0 && events.empty());
 
     std::vector<npm::NpmSessionSnapshot> ended_sessions(1);
     ended_sessions[0].session_id = 999;
     modules[1] = nullptr;
-    status = npm::ProcessNpmPacket(
-        domain_map, view, packet.layer, table, identifier, modules, writer, &ended_sessions);
+    status = npm::ProcessNpmPacket(domain_map, view, packet.layer, table, identifier, modules, writer, &ended_sessions);
     assert(status.error == npm::NpmPacketProcessError::kNullModule);
     assert(table.size() == 0 && identifier.calls == 0 && events.empty());
     assert(ended_sessions.size() == 1 && ended_sessions[0].session_id == 999);
@@ -3905,13 +3730,7 @@ void TestProcessNpmPacketErrorsAreStructuredAndAtomic() {
     modules[1] = &second_module;
     auto unknown_source = view;
     unknown_source.meta.source_id = 2;
-    status = npm::ProcessNpmPacket(domain_map,
-                                   unknown_source,
-                                   packet.layer,
-                                   table,
-                                   identifier,
-                                   modules,
-                                   writer,
+    status = npm::ProcessNpmPacket(domain_map, unknown_source, packet.layer, table, identifier, modules, writer,
                                    &ended_sessions);
     assert(status.error == npm::NpmPacketProcessError::kBindingError);
     assert(status.binding_error == npm::NpmSessionPacketError::kUnknownSourceId);
@@ -3919,8 +3738,7 @@ void TestProcessNpmPacketErrorsAreStructuredAndAtomic() {
     assert(ended_sessions.size() == 1 && ended_sessions[0].session_id == 999);
 
     table.AdvanceCaptureProgress(OfflineProgress(20));
-    status = npm::ProcessNpmPacket(
-        domain_map, view, packet.layer, table, identifier, modules, writer, &ended_sessions);
+    status = npm::ProcessNpmPacket(domain_map, view, packet.layer, table, identifier, modules, writer, &ended_sessions);
     assert(status.error == npm::NpmPacketProcessError::kSessionError);
     assert(status.session_error == npm::NpmSessionTableError::kLatePacket);
     assert(table.size() == 0 && events.empty());
@@ -3928,13 +3746,7 @@ void TestProcessNpmPacketErrorsAreStructuredAndAtomic() {
 
     npm::NpmSessionTable callback_table(config);
     first_module.packet_error = EIO;
-    status = npm::ProcessNpmPacket(domain_map,
-                                   view,
-                                   packet.layer,
-                                   callback_table,
-                                   identifier,
-                                   modules,
-                                   writer,
+    status = npm::ProcessNpmPacket(domain_map, view, packet.layer, callback_table, identifier, modules, writer,
                                    &ended_sessions);
     assert(status.error == npm::NpmPacketProcessError::kModuleError);
     assert(status.module_error == EIO);
@@ -3944,19 +3756,12 @@ void TestProcessNpmPacketErrorsAreStructuredAndAtomic() {
 
     events.clear();
     first_module.end_error = EBUSY;
-    const auto rst_packet =
-        MakeIpv4TcpPacket("198.51.100.1", 51000, "198.51.100.2", 8443, {}, kTcpRst, 200);
+    const auto rst_packet = MakeIpv4TcpPacket("198.51.100.1", 51000, "198.51.100.2", 8443, {}, kTcpRst, 200);
     auto rst_view = rst_packet.View(1, 80);
     rst_view.meta.timestamp_ns = 30;
     npm::NpmSessionTable terminal_packet_error_table(config);
-    status = npm::ProcessNpmPacket(domain_map,
-                                   rst_view,
-                                   rst_packet.layer,
-                                   terminal_packet_error_table,
-                                   identifier,
-                                   modules,
-                                   writer,
-                                   &ended_sessions);
+    status = npm::ProcessNpmPacket(domain_map, rst_view, rst_packet.layer, terminal_packet_error_table, identifier,
+                                   modules, writer, &ended_sessions);
     assert(status.error == npm::NpmPacketProcessError::kModuleError);
     assert(status.module_error == EIO);
     assert((events == std::vector<uint64_t>{2011}));
@@ -3966,13 +3771,7 @@ void TestProcessNpmPacketErrorsAreStructuredAndAtomic() {
     events.clear();
     first_module.packet_error = 0;
     npm::NpmSessionTable end_error_table(config);
-    status = npm::ProcessNpmPacket(domain_map,
-                                   rst_view,
-                                   rst_packet.layer,
-                                   end_error_table,
-                                   identifier,
-                                   modules,
-                                   writer,
+    status = npm::ProcessNpmPacket(domain_map, rst_view, rst_packet.layer, end_error_table, identifier, modules, writer,
                                    &ended_sessions);
     assert(status.error == npm::NpmPacketProcessError::kModuleError);
     assert(status.module_error == EBUSY);
@@ -3981,10 +3780,8 @@ void TestProcessNpmPacketErrorsAreStructuredAndAtomic() {
     assert(ended_sessions.size() == 1 && ended_sessions[0].session_id == 999);
 }
 
-flowsql::packet::PacketRecord MakeBatchPacketRecord(const PacketFixture& fixture,
-                                                     uint32_t source_id,
-                                                     int64_t timestamp_ns,
-                                                     uint64_t sequence) {
+flowsql::packet::PacketRecord MakeBatchPacketRecord(const PacketFixture& fixture, uint32_t source_id,
+                                                    int64_t timestamp_ns, uint64_t sequence) {
     auto owner = std::make_shared<std::vector<uint8_t>>(fixture.bytes);
     flowsql::packet::PacketRecord record;
     record.meta.timestamp_ns = timestamp_ns;
@@ -4000,12 +3797,10 @@ flowsql::packet::PacketRecord MakeBatchPacketRecord(const PacketFixture& fixture
     return record;
 }
 
-std::shared_ptr<arrow::RecordBatch> MakeEncodedPacketBatch(
-    const std::vector<flowsql::packet::PacketRecord>& records) {
+std::shared_ptr<arrow::RecordBatch> MakeEncodedPacketBatch(const std::vector<flowsql::packet::PacketRecord>& records) {
     std::shared_ptr<arrow::RecordBatch> batch;
     std::string error;
-    assert(flowsql::packet::EncodePacketBatch(records, &batch, &error) ==
-           flowsql::packet::PacketBatchError::kNone);
+    assert(flowsql::packet::EncodePacketBatch(records, &batch, &error) == flowsql::packet::PacketBatchError::kNone);
     assert(error.empty() && batch != nullptr);
     return batch;
 }
@@ -4029,16 +3824,11 @@ void TestProcessNpmOfflinePacketBatchOrderAndWatermark() {
     config.out_of_order_tolerance_ns = 0;
     const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}}};
 
-    const auto idle_packet =
-        MakeIpv4TcpPacket("203.0.113.1", 40000, "203.0.113.2", 80, {0x10}, kTcpAck, 100);
-    const auto first_packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {0x11}, kTcpAck, 200);
-    const auto reuse_packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {0x12}, kTcpSyn, 201);
-    const auto close_packet =
-        MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpRst | kTcpAck, 202);
-    const auto later_packet =
-        MakeIpv4TcpPacket("198.51.100.1", 41000, "198.51.100.2", 8080, {0x13}, kTcpAck, 300);
+    const auto idle_packet = MakeIpv4TcpPacket("203.0.113.1", 40000, "203.0.113.2", 80, {0x10}, kTcpAck, 100);
+    const auto first_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {0x11}, kTcpAck, 200);
+    const auto reuse_packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {0x12}, kTcpSyn, 201);
+    const auto close_packet = MakeIpv4TcpPacket("192.0.2.2", 443, "192.0.2.1", 50000, {}, kTcpRst | kTcpAck, 202);
+    const auto later_packet = MakeIpv4TcpPacket("198.51.100.1", 41000, "198.51.100.2", 8080, {0x13}, kTcpAck, 300);
     auto batch = MakeValidatedPacketBatchView({
         MakeBatchPacketRecord(idle_packet, 1, second, 100),
         MakeBatchPacketRecord(first_packet, 1, 11 * second / 10, 101),
@@ -4057,22 +3847,16 @@ void TestProcessNpmOfflinePacketBatchOrderAndWatermark() {
     std::vector<npm::NpmSessionEndEvent> ended_events(1);
     ended_events[0].snapshot.session_id = 999;
 
-    const auto status = npm::ProcessNpmOfflinePacketBatch(
-        domain_map, *batch, table, identifier, modules, writer, &ended_events);
+    const auto status =
+        npm::ProcessNpmOfflinePacketBatch(domain_map, *batch, table, identifier, modules, writer, &ended_events);
     assert(status.error == npm::NpmPacketBatchProcessError::kNone && status.row == -1);
     assert(status.progress_disposition == npm::NpmCaptureProgressDisposition::kAdvanced);
-    assert((events == std::vector<uint64_t>{
-                          2011, 2012, 2021, 2022, 1021, 1022, 2031,
-                          2032, 2031, 2032, 1031, 1032, 2041, 2042, 1011, 1012}));
+    assert((events == std::vector<uint64_t>{2011, 2012, 2021, 2022, 1021, 1022, 2031, 2032, 2031, 2032, 1031, 1032,
+                                            2041, 2042, 1011, 1012}));
     assert((first_module.packet_sequences == std::vector<uint64_t>{100, 101, 102, 103, 104}));
     assert((first_module.packet_timestamps ==
-            std::vector<int64_t>{second,
-                                 11 * second / 10,
-                                 12 * second / 10,
-                                 13 * second / 10,
-                                 3 * second}));
-    assert((first_module.end_observed_ats ==
-            std::vector<int64_t>{12 * second / 10, 13 * second / 10, 3 * second}));
+            std::vector<int64_t>{second, 11 * second / 10, 12 * second / 10, 13 * second / 10, 3 * second}));
+    assert((first_module.end_observed_ats == std::vector<int64_t>{12 * second / 10, 13 * second / 10, 3 * second}));
     assert(first_module.end_observed_ats == second_module.end_observed_ats);
     assert(identifier.calls == 4 && table.size() == 1);
 
@@ -4105,34 +3889,33 @@ void TestProcessNpmOfflinePacketBatchErrorsAndAtomicOutput() {
     PacketProcessorRecordingModule second_module(2, &events);
     std::vector<npm::INpmAnalysisModule*> modules{&first_module, &second_module};
 
-    auto status = npm::ProcessNpmOfflinePacketBatch(
-        domain_map, *empty_batch, table, identifier, modules, writer, nullptr);
+    auto status =
+        npm::ProcessNpmOfflinePacketBatch(domain_map, *empty_batch, table, identifier, modules, writer, nullptr);
     assert(status.error == npm::NpmPacketBatchProcessError::kNullOutput && status.row == -1);
     assert(table.size() == 0 && events.empty());
 
     std::vector<npm::NpmSessionEndEvent> ended_events(1);
     ended_events[0].snapshot.session_id = 999;
     modules[1] = nullptr;
-    status = npm::ProcessNpmOfflinePacketBatch(
-        domain_map, *empty_batch, table, identifier, modules, writer, &ended_events);
+    status =
+        npm::ProcessNpmOfflinePacketBatch(domain_map, *empty_batch, table, identifier, modules, writer, &ended_events);
     assert(status.error == npm::NpmPacketBatchProcessError::kNullModule && status.row == -1);
     assert(ended_events.size() == 1 && ended_events[0].snapshot.session_id == 999);
     modules[1] = &second_module;
 
-    status = npm::ProcessNpmOfflinePacketBatch(
-        domain_map, *empty_batch, table, identifier, modules, writer, &ended_events);
+    status =
+        npm::ProcessNpmOfflinePacketBatch(domain_map, *empty_batch, table, identifier, modules, writer, &ended_events);
     assert(status.error == npm::NpmPacketBatchProcessError::kNone && ended_events.empty());
 
-    const auto packet =
-        MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {0x20}, kTcpAck, 400);
+    const auto packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {0x20}, kTcpAck, 400);
     auto binding_error_batch = MakeValidatedPacketBatchView({
         MakeBatchPacketRecord(packet, 1, 10, 200),
         MakeBatchPacketRecord(packet, 2, 20, 201),
         MakeBatchPacketRecord(packet, 1, 30, 202),
     });
     ended_events.emplace_back().snapshot.session_id = 998;
-    status = npm::ProcessNpmOfflinePacketBatch(
-        domain_map, *binding_error_batch, table, identifier, modules, writer, &ended_events);
+    status = npm::ProcessNpmOfflinePacketBatch(domain_map, *binding_error_batch, table, identifier, modules, writer,
+                                               &ended_events);
     assert(status.error == npm::NpmPacketBatchProcessError::kPacketError && status.row == 1);
     assert(status.packet_status.error == npm::NpmPacketProcessError::kBindingError);
     assert(status.packet_status.binding_error == npm::NpmSessionPacketError::kUnknownSourceId);
@@ -4144,8 +3927,8 @@ void TestProcessNpmOfflinePacketBatchErrorsAndAtomicOutput() {
     auto realtime_config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kRealtime);
     npm::NpmSessionTable realtime_table(realtime_config);
     auto realtime_batch = MakeValidatedPacketBatchView({MakeBatchPacketRecord(packet, 1, 40, 300)});
-    status = npm::ProcessNpmOfflinePacketBatch(
-        domain_map, *realtime_batch, realtime_table, identifier, modules, writer, &ended_events);
+    status = npm::ProcessNpmOfflinePacketBatch(domain_map, *realtime_batch, realtime_table, identifier, modules, writer,
+                                               &ended_events);
     assert(status.error == npm::NpmPacketBatchProcessError::kProgressDeferred && status.row == 0);
     assert(status.progress_disposition == npm::NpmCaptureProgressDisposition::kDeferredBacklogUnknown);
     assert(ended_events.size() == 1 && ended_events[0].snapshot.session_id == 998);
@@ -4155,8 +3938,7 @@ void TestProcessNpmOfflinePacketBatchErrorsAndAtomicOutput() {
     auto idle_config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     idle_config.tcp_idle_timeout_ns = second;
     idle_config.out_of_order_tolerance_ns = 0;
-    const auto later_packet =
-        MakeIpv4TcpPacket("198.51.100.1", 41000, "198.51.100.2", 8080, {0x21}, kTcpAck, 500);
+    const auto later_packet = MakeIpv4TcpPacket("198.51.100.1", 41000, "198.51.100.2", 8080, {0x21}, kTcpAck, 500);
     auto idle_error_batch = MakeValidatedPacketBatchView({
         MakeBatchPacketRecord(packet, 1, second, 400),
         MakeBatchPacketRecord(later_packet, 1, 3 * second, 401),
@@ -4164,13 +3946,292 @@ void TestProcessNpmOfflinePacketBatchErrorsAndAtomicOutput() {
     npm::NpmSessionTable idle_error_table(idle_config);
     events.clear();
     first_module.end_error = EBUSY;
-    status = npm::ProcessNpmOfflinePacketBatch(
-        domain_map, *idle_error_batch, idle_error_table, identifier, modules, writer, &ended_events);
+    status = npm::ProcessNpmOfflinePacketBatch(domain_map, *idle_error_batch, idle_error_table, identifier, modules,
+                                               writer, &ended_events);
     assert(status.error == npm::NpmPacketBatchProcessError::kModuleError && status.row == 1);
     assert(status.module_error == EBUSY);
     assert(ended_events.size() == 1 && ended_events[0].snapshot.session_id == 998);
     assert((events == std::vector<uint64_t>{2011, 2012, 2021, 2022, 1011}));
     assert(idle_error_table.size() == 1);
+}
+
+void TestFlowLabelingAdmissionBatchSessionReuseAndFailureAtomicity() {
+    auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
+    config.out_of_order_tolerance_ns = 0;
+    config.payload_sample_packets = 2;
+    const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}}};
+    const auto first = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {0x10}, kTcpAck, 100);
+    const auto first_reverse = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 50000, {0x11}, kTcpAck, 200);
+    const auto unmatched = MakeIpv4TcpPacket("203.0.113.1", 51000, "203.0.113.2", 53, {0x12}, kTcpAck, 300);
+
+    auto initial_batch = MakeValidatedPacketBatchView({
+        MakeBatchPacketRecord(first, 1, 10, 1),
+        MakeBatchPacketRecord(first_reverse, 1, 20, 2),
+        MakeBatchPacketRecord(unmatched, 1, 30, 3),
+        MakeBatchPacketRecord(unmatched, 1, 35, 4),
+    });
+    npm::NpmSessionTable table(config);
+    SequenceProtocolIdentifier identifier({
+        {flowsql::packet::ProtocolStatus::kUnknown, 0, 0},
+        {flowsql::packet::ProtocolStatus::kIdentified, 7, 8},
+        {flowsql::packet::ProtocolStatus::kUnknown, 0, 0},
+        {flowsql::packet::ProtocolStatus::kUnknown, 0, 0},
+    });
+    std::vector<uint64_t> events;
+    PacketProcessorRecordingModule module(1, &events);
+    const std::vector<npm::INpmAnalysisModule*> modules{&module};
+    FixtureWriter writer;
+    std::vector<npm::NpmSessionEndEvent> ended_events;
+    LabelingMatcherStats stats;
+    stats.labels_by_call = {{1001, 0}, {2002}};
+    auto* matcher = new RecordingLabelMatcher(&stats);
+
+    auto status = npm::ProcessNpmOfflinePacketBatch(domain_map, *initial_batch, table, identifier, modules, writer,
+                                                    &ended_events, matcher);
+    assert(status.error == npm::NpmPacketBatchProcessError::kNone);
+    assert(stats.classify_calls == 1 && (stats.batch_counts == std::vector<uint32_t>{2}));
+    assert(stats.facts.size() == 2);
+    assert(stats.facts[0].observation_domain_id == 77 && stats.facts[0].ip_family == 4);
+    assert(stats.facts[0].transport_valid == 1 && stats.facts[0].transport_protocol == flowsql::ipv4::eNext::TCP);
+    assert(stats.facts[0].source.port_valid == 1 && stats.facts[0].source.port == 50000);
+    assert(stats.facts[0].destination.port == 443 && stats.facts[1].destination.port == 53);
+    assert(std::memcmp(stats.facts[0].source.ip, ParseIpv4("192.0.2.1").bytes, 4) == 0);
+    assert(table.size() == 2 && ended_events.empty());
+    assert((module.packet_label_ids == std::vector<uint32_t>{1001, 1001, 0, 0}));
+    assert((module.packet_protocol_statuses ==
+            std::vector<npm::NpmProtocolStatus>{npm::NpmProtocolStatus::kPending, npm::NpmProtocolStatus::kIdentified,
+                                                npm::NpmProtocolStatus::kPending, npm::NpmProtocolStatus::kUnknown}));
+
+    flowsql::packet::PacketMeta first_meta;
+    flowsql::packet::PacketMeta unmatched_meta;
+    auto first_binding = BuildBinding(domain_map, first, 1, 10, first.bytes.size(), &first_meta);
+    auto unmatched_binding = BuildBinding(domain_map, unmatched, 1, 30, unmatched.bytes.size(), &unmatched_meta);
+    npm::NpmSessionView first_view;
+    npm::NpmSessionView unmatched_view;
+    assert(table.Find(first_binding.key, &first_view) == npm::NpmSessionTableError::kNone);
+    assert(table.Find(unmatched_binding.key, &unmatched_view) == npm::NpmSessionTableError::kNone);
+    assert(first_view.primary_label_id == 1001 && first_view.protocol_status == npm::NpmProtocolStatus::kIdentified);
+    assert(unmatched_view.primary_label_id == 0 && unmatched_view.protocol_status == npm::NpmProtocolStatus::kUnknown);
+
+    auto hits = MakeValidatedPacketBatchView({
+        MakeBatchPacketRecord(first, 1, 40, 4),
+        MakeBatchPacketRecord(unmatched, 1, 50, 5),
+    });
+    status = npm::ProcessNpmOfflinePacketBatch(domain_map, *hits, table, identifier, modules, writer, &ended_events,
+                                               matcher);
+    assert(status.error == npm::NpmPacketBatchProcessError::kNone);
+    assert(stats.classify_calls == 1);
+    assert(module.packet_label_ids[module.packet_label_ids.size() - 2] == 1001);
+    assert(module.packet_label_ids.back() == 0);
+
+    const auto reuse = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {0x13}, kTcpSyn, 900);
+    auto reuse_batch = MakeValidatedPacketBatchView({MakeBatchPacketRecord(reuse, 1, 60, 6)});
+    status = npm::ProcessNpmOfflinePacketBatch(domain_map, *reuse_batch, table, identifier, modules, writer,
+                                               &ended_events, matcher);
+    assert(status.error == npm::NpmPacketBatchProcessError::kNone);
+    assert(stats.classify_calls == 2 && (stats.batch_counts == std::vector<uint32_t>{2, 1}));
+    assert(ended_events.size() == 1);
+    assert(ended_events[0].snapshot.end_reason == npm::NpmSessionEndReason::kTupleReuse);
+    assert(ended_events[0].snapshot.primary_label_id == 1001);
+    assert(table.Find(first_binding.key, &first_view) == npm::NpmSessionTableError::kNone);
+    assert(first_view.primary_label_id == 2002 && first_view.session_id != ended_events[0].snapshot.session_id);
+    assert(module.end_label_ids.back() == 1001 && module.packet_label_ids.back() == 2002);
+    matcher->Release();
+    assert(stats.release_calls == 1);
+
+    npm::NpmSessionTable failed_table(config);
+    SequenceProtocolIdentifier failed_identifier({});
+    std::vector<uint64_t> failed_events;
+    PacketProcessorRecordingModule failed_module(1, &failed_events);
+    const std::vector<npm::INpmAnalysisModule*> failed_modules{&failed_module};
+    std::vector<npm::NpmSessionEndEvent> unchanged_events(1);
+    unchanged_events[0].snapshot.session_id = 999;
+    LabelingMatcherStats failed_stats;
+    failed_stats.classify_error = EIO;
+    auto* failed_matcher = new RecordingLabelMatcher(&failed_stats);
+    status = npm::ProcessNpmOfflinePacketBatch(domain_map, *initial_batch, failed_table, failed_identifier,
+                                               failed_modules, writer, &unchanged_events, failed_matcher);
+    assert(status.error == npm::NpmPacketBatchProcessError::kLabelingError);
+    assert(status.labeling_error == EIO && failed_stats.classify_calls == 1);
+    assert(failed_table.size() == 0 && failed_identifier.calls == 0 && failed_events.empty());
+    assert(unchanged_events.size() == 1 && unchanged_events[0].snapshot.session_id == 999);
+    failed_matcher->Release();
+    assert(failed_stats.release_calls == 1);
+
+    std::vector<flowsql::packet::PacketRecord> bounded_records;
+    bounded_records.reserve(257);
+    for (uint32_t index = 0; index < 257; ++index) {
+        const auto candidate =
+            MakeIpv4TcpPacket("10.0.0.1", static_cast<uint16_t>(10'000 + index), "10.0.0.2", 443, {}, kTcpAck, index);
+        bounded_records.push_back(MakeBatchPacketRecord(candidate, 1, 1000 + index, 1000 + index));
+    }
+    auto bounded_batch = MakeValidatedPacketBatchView(bounded_records);
+    npm::NpmSessionTable bounded_table(config);
+    SequenceProtocolIdentifier bounded_identifier({});
+    std::vector<uint64_t> bounded_events;
+    PacketProcessorRecordingModule bounded_module(1, &bounded_events);
+    const std::vector<npm::INpmAnalysisModule*> bounded_modules{&bounded_module};
+    std::vector<npm::NpmSessionEndEvent> bounded_ended_events;
+    LabelingMatcherStats bounded_stats;
+    bounded_stats.classify_error = EIO;
+    bounded_stats.fail_call = 1;
+    auto* bounded_matcher = new RecordingLabelMatcher(&bounded_stats);
+    status = npm::ProcessNpmOfflinePacketBatch(domain_map, *bounded_batch, bounded_table, bounded_identifier,
+                                               bounded_modules, writer, &bounded_ended_events, bounded_matcher);
+    assert(status.error == npm::NpmPacketBatchProcessError::kLabelingError && status.labeling_error == EIO);
+    assert(bounded_stats.classify_calls == 2 && (bounded_stats.batch_counts == std::vector<uint32_t>{256, 1}));
+    assert(bounded_table.size() == 0 && bounded_identifier.calls == 0 && bounded_events.empty() &&
+           bounded_ended_events.empty());
+    bounded_matcher->Release();
+    assert(bounded_stats.release_calls == 1);
+
+    std::vector<flowsql::packet::PacketRecord> boundary_hit_records;
+    boundary_hit_records.reserve(257);
+    for (uint32_t index = 0; index < 256; ++index) {
+        const auto candidate =
+            MakeIpv4TcpPacket("10.1.0.1", static_cast<uint16_t>(20'000 + index), "10.1.0.2", 443, {}, kTcpAck, index);
+        boundary_hit_records.push_back(MakeBatchPacketRecord(candidate, 1, 2000 + index, 2000 + index));
+    }
+    const auto first_candidate_hit = MakeIpv4TcpPacket("10.1.0.1", 20'000, "10.1.0.2", 443, {}, kTcpAck, 999);
+    boundary_hit_records.push_back(MakeBatchPacketRecord(first_candidate_hit, 1, 2256, 2256));
+    auto boundary_hit_batch = MakeValidatedPacketBatchView(boundary_hit_records);
+    npm::NpmSessionTable boundary_hit_table(config);
+    SequenceProtocolIdentifier boundary_hit_identifier({});
+    std::vector<uint64_t> boundary_hit_events;
+    PacketProcessorRecordingModule boundary_hit_module(1, &boundary_hit_events);
+    const std::vector<npm::INpmAnalysisModule*> boundary_hit_modules{&boundary_hit_module};
+    std::vector<npm::NpmSessionEndEvent> boundary_hit_ended_events;
+    LabelingMatcherStats boundary_hit_stats;
+    auto* boundary_hit_matcher = new RecordingLabelMatcher(&boundary_hit_stats);
+    status = npm::ProcessNpmOfflinePacketBatch(domain_map, *boundary_hit_batch, boundary_hit_table,
+                                               boundary_hit_identifier, boundary_hit_modules, writer,
+                                               &boundary_hit_ended_events, boundary_hit_matcher);
+    assert(status.error == npm::NpmPacketBatchProcessError::kNone);
+    assert(boundary_hit_stats.classify_calls == 1 && (boundary_hit_stats.batch_counts == std::vector<uint32_t>{256}));
+    assert(boundary_hit_module.packet_label_ids.size() == 257);
+    assert(boundary_hit_module.packet_label_ids.front() == 1001 && boundary_hit_module.packet_label_ids.back() == 1001);
+    boundary_hit_matcher->Release();
+    assert(boundary_hit_stats.release_calls == 1);
+}
+
+void TestFlowLabelingAdmissionTracksIntraBlockSessionLifecycles() {
+    constexpr int64_t second = npm::kNpmNanosecondsPerSecond;
+    auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
+    config.tcp_idle_timeout_ns = second;
+    config.out_of_order_tolerance_ns = 0;
+    const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}}};
+    SequenceProtocolIdentifier identifier({});
+    FixtureWriter writer;
+
+    const auto first = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {0x10}, kTcpAck, 100);
+    flowsql::packet::PacketMeta first_meta;
+    const auto first_binding = BuildBinding(domain_map, first, 1, 1, first.bytes.size(), &first_meta);
+
+    {
+        npm::NpmSessionTable table(config);
+        std::vector<uint64_t> events;
+        PacketProcessorRecordingModule module(1, &events);
+        const std::vector<npm::INpmAnalysisModule*> modules{&module};
+        std::vector<npm::NpmSessionEndEvent> ended_events;
+        LabelingMatcherStats stats;
+        stats.labels_by_call = {{1001}, {2002, 3003}};
+        auto* matcher = new RecordingLabelMatcher(&stats);
+
+        auto initial_batch = MakeValidatedPacketBatchView({MakeBatchPacketRecord(first, 1, 1, 1)});
+        auto status = npm::ProcessNpmOfflinePacketBatch(domain_map, *initial_batch, table, identifier, modules, writer,
+                                                        &ended_events, matcher);
+        assert(status.error == npm::NpmPacketBatchProcessError::kNone);
+
+        const auto rst = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpRst, 101);
+        const auto replacement = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {0x11}, kTcpAck, 102);
+        const auto fin = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpFin | kTcpAck, 103);
+        const auto reverse_fin = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 50000, {}, kTcpFin | kTcpAck, 104);
+        const auto second_replacement =
+            MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {0x12}, kTcpAck, 105);
+        auto lifecycle_batch = MakeValidatedPacketBatchView({
+            MakeBatchPacketRecord(rst, 1, 2, 2),
+            MakeBatchPacketRecord(replacement, 1, 3, 3),
+            MakeBatchPacketRecord(fin, 1, 4, 4),
+            MakeBatchPacketRecord(reverse_fin, 1, 5, 5),
+            MakeBatchPacketRecord(second_replacement, 1, 6, 6),
+        });
+        status = npm::ProcessNpmOfflinePacketBatch(domain_map, *lifecycle_batch, table, identifier, modules, writer,
+                                                   &ended_events, matcher);
+        assert(status.error == npm::NpmPacketBatchProcessError::kNone);
+        assert(stats.classify_calls == 2 && (stats.batch_counts == std::vector<uint32_t>{1, 2}));
+        assert(ended_events.size() == 2 && ended_events[0].snapshot.primary_label_id == 1001);
+        assert(ended_events[1].snapshot.primary_label_id == 2002);
+        npm::NpmSessionView replacement_view;
+        assert(table.Find(first_binding.key, &replacement_view) == npm::NpmSessionTableError::kNone);
+        assert(replacement_view.primary_label_id == 3003);
+        assert((module.packet_label_ids == std::vector<uint32_t>{1001, 1001, 2002, 2002, 2002, 3003}));
+        matcher->Release();
+    }
+
+    {
+        npm::NpmSessionTable table(config);
+        std::vector<uint64_t> events;
+        PacketProcessorRecordingModule module(1, &events);
+        const std::vector<npm::INpmAnalysisModule*> modules{&module};
+        std::vector<npm::NpmSessionEndEvent> ended_events;
+        LabelingMatcherStats stats;
+        stats.labels_by_call = {{1001}, {3003, 2002}};
+        auto* matcher = new RecordingLabelMatcher(&stats);
+
+        auto initial_batch = MakeValidatedPacketBatchView({MakeBatchPacketRecord(first, 1, 1, 1)});
+        auto status = npm::ProcessNpmOfflinePacketBatch(domain_map, *initial_batch, table, identifier, modules, writer,
+                                                        &ended_events, matcher);
+        assert(status.error == npm::NpmPacketBatchProcessError::kNone);
+
+        const auto watermark_driver =
+            MakeIpv4TcpPacket("203.0.113.1", 51000, "203.0.113.2", 8443, {0x20}, kTcpAck, 200);
+        const auto replacement = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {0x21}, kTcpAck, 201);
+        auto lifecycle_batch = MakeValidatedPacketBatchView({
+            MakeBatchPacketRecord(watermark_driver, 1, 2 * second, 2),
+            MakeBatchPacketRecord(replacement, 1, 2 * second + 1, 3),
+        });
+        status = npm::ProcessNpmOfflinePacketBatch(domain_map, *lifecycle_batch, table, identifier, modules, writer,
+                                                   &ended_events, matcher);
+        assert(status.error == npm::NpmPacketBatchProcessError::kNone);
+        assert(stats.classify_calls == 2 && (stats.batch_counts == std::vector<uint32_t>{1, 2}));
+        assert(ended_events.size() == 1);
+        assert(ended_events[0].snapshot.end_reason == npm::NpmSessionEndReason::kIdleTimeout);
+        assert(ended_events[0].snapshot.primary_label_id == 1001);
+        npm::NpmSessionView replacement_view;
+        assert(table.Find(first_binding.key, &replacement_view) == npm::NpmSessionTableError::kNone);
+        assert(replacement_view.primary_label_id == 2002);
+        matcher->Release();
+    }
+
+    {
+        npm::NpmSessionTable table(config);
+        std::vector<uint64_t> events;
+        PacketProcessorRecordingModule module(1, &events);
+        const std::vector<npm::INpmAnalysisModule*> modules{&module};
+        std::vector<npm::NpmSessionEndEvent> ended_events;
+        LabelingMatcherStats stats;
+        stats.labels_by_call = {{1001, 2002}};
+        auto* matcher = new RecordingLabelMatcher(&stats);
+
+        const auto initial_syn = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpSyn, 300);
+        const auto reuse_syn = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpSyn, 301);
+        auto lifecycle_batch = MakeValidatedPacketBatchView({
+            MakeBatchPacketRecord(initial_syn, 1, 10, 1),
+            MakeBatchPacketRecord(reuse_syn, 1, 20, 2),
+        });
+        const auto status = npm::ProcessNpmOfflinePacketBatch(domain_map, *lifecycle_batch, table, identifier, modules,
+                                                              writer, &ended_events, matcher);
+        assert(status.error == npm::NpmPacketBatchProcessError::kNone);
+        assert(stats.classify_calls == 1 && (stats.batch_counts == std::vector<uint32_t>{2}));
+        assert(ended_events.size() == 1);
+        assert(ended_events[0].snapshot.end_reason == npm::NpmSessionEndReason::kTupleReuse);
+        assert(ended_events[0].snapshot.primary_label_id == 1001);
+        npm::NpmSessionView replacement_view;
+        assert(table.Find(first_binding.key, &replacement_view) == npm::NpmSessionTableError::kNone);
+        assert(replacement_view.primary_label_id == 2002);
+        assert((module.packet_label_ids == std::vector<uint32_t>{1001, 2002}));
+        matcher->Release();
+    }
 }
 
 void TestNpmProtocolContextErrorsDictionaryAndRaii() {
@@ -4182,8 +4243,7 @@ void TestNpmProtocolContextErrorsDictionaryAndRaii() {
     std::unique_ptr<npm::NpmProtocolContext> context;
     SinglePoolQuerier missing_querier(nullptr);
     assert(npm::NpmProtocolContext::Create(nullptr, &context) == npm::NpmProtocolContextError::kNullQuerier);
-    assert(npm::NpmProtocolContext::Create(&missing_querier, nullptr) ==
-           npm::NpmProtocolContextError::kNullOutput);
+    assert(npm::NpmProtocolContext::Create(&missing_querier, nullptr) == npm::NpmProtocolContextError::kNullOutput);
     assert(npm::NpmProtocolContext::Create(&missing_querier, &context) ==
            npm::NpmProtocolContextError::kProviderNotFound);
     assert(context == nullptr);
@@ -4243,8 +4303,7 @@ void TestNpmProtocolContextErrorsDictionaryAndRaii() {
     assert(pool.release_calls == 2);
 }
 
-void TestNpmProtocolContextRealNpi(flowsql::IProtocolPipelinePoolV1* real_pool,
-                                   flowsql::IProtocol* real_protocol) {
+void TestNpmProtocolContextRealNpi(flowsql::IProtocolPipelinePoolV1* real_pool, flowsql::IProtocol* real_protocol) {
     CountingProtocolProxy protocol(real_protocol);
     DelegatingPipelinePool pool(real_pool, &protocol);
     SinglePoolQuerier querier(&pool);
@@ -4289,10 +4348,7 @@ void TestNpmProtocolContextRealNpi(flowsql::IProtocolPipelinePoolV1* real_pool,
     npm::NpmSessionObserveResult observed;
     assert(table.Observe(binding, meta, &observed) == npm::NpmSessionTableError::kNone);
     npm::NpmSessionView sampled;
-    assert(table.SampleProtocol(binding.key,
-                                observed.active_session.session_id,
-                                npm_packet,
-                                *contexts[0]->Identifier(),
+    assert(table.SampleProtocol(binding.key, observed.active_session.session_id, npm_packet, *contexts[0]->Identifier(),
                                 &sampled) == npm::NpmSessionTableError::kNone);
 
     const auto second = contexts[1]->Identifier()->Identify(packet_view, packet.layer);
@@ -4309,8 +4365,7 @@ void TestNpmProtocolContextRealNpi(flowsql::IProtocolPipelinePoolV1* real_pool,
     assert(protocol.identify_pipelines[1] == contexts[1]->Pipeno());
 
     std::unique_ptr<npm::NpmProtocolContext> exhausted;
-    assert(npm::NpmProtocolContext::Create(&querier, &exhausted) ==
-           npm::NpmProtocolContextError::kPipelineExhausted);
+    assert(npm::NpmProtocolContext::Create(&querier, &exhausted) == npm::NpmProtocolContextError::kPipelineExhausted);
     assert(exhausted == nullptr);
 
     const int32_t released_pipeline = contexts[0]->Pipeno();
@@ -4323,11 +4378,8 @@ void TestNpmProtocolContextRealNpi(flowsql::IProtocolPipelinePoolV1* real_pool,
 
 void TestNpiPipelinePoolOptionAndLeaseContract() {
     const char* invalid_options[] = {
-        "{\"concurrency\":0}",
-        "{\"concurrency\":-1}",
-        "{\"concurrency\":17}",
-        "{\"concurrency\":\"2\"}",
-        "{\"concurrency\":1.5}",
+        "{\"concurrency\":0}",     "{\"concurrency\":-1}",  "{\"concurrency\":17}",
+        "{\"concurrency\":\"2\"}", "{\"concurrency\":1.5}",
     };
     for (const char* option : invalid_options) {
         NpiInterfaceRegistry invalid_registry;
@@ -4350,8 +4402,7 @@ void TestNpiPipelinePoolOptionAndLeaseContract() {
     assert(max_registry.pipeline_pool != nullptr);
     assert(max_registry.pipeline_pool->Capacity() == flowsql::kProtocolPipelineMaxCapacityV1);
 
-    const std::string option = std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH +
-                               "\",\"concurrency\":2}";
+    const std::string option = std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\",\"concurrency\":2}";
     NpiInterfaceRegistry registry;
     flowsql::IPlugin* configured_plugin = pluginregist(&registry, option.c_str());
     assert(configured_plugin == plugin);
@@ -4451,8 +4502,7 @@ template <typename Builder, typename Value>
 std::shared_ptr<arrow::Array> MakeFixedListArray(const std::array<Value, flowsql::packet::kMaxLayerDepth>& values,
                                                  bool null_first_value = false) {
     auto value_builder = std::make_shared<Builder>();
-    arrow::FixedSizeListBuilder builder(
-        arrow::default_memory_pool(), value_builder, flowsql::packet::kMaxLayerDepth);
+    arrow::FixedSizeListBuilder builder(arrow::default_memory_pool(), value_builder, flowsql::packet::kMaxLayerDepth);
     assert(builder.Append().ok());
     for (size_t index = 0; index < values.size(); ++index) {
         if (null_first_value && index == 0) {
@@ -4477,11 +4527,11 @@ std::shared_ptr<arrow::RecordBatch> ReplacePacketBatchColumns(
 }
 
 std::shared_ptr<arrow::RecordBatch> MakeNpmPacketViewBatch() {
-    const auto fixture = MakeIpv4TcpPacket(
-        "192.0.2.1", 41000, "198.51.100.2", 443, std::vector<uint8_t>{0x11, 0x22, 0x33}, kTcpAck, 91);
+    const auto fixture =
+        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, std::vector<uint8_t>{0x11, 0x22, 0x33}, kTcpAck, 91);
     auto bytes = std::make_shared<std::vector<uint8_t>>(fixture.bytes);
-    const auto ipv6_fixture = MakeIpv6UdpPacket(
-        "2001:db8::1", 53000, "2001:db8::2", 53, std::vector<uint8_t>{0x44, 0x55});
+    const auto ipv6_fixture =
+        MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, std::vector<uint8_t>{0x44, 0x55});
     auto ipv6_bytes = std::make_shared<std::vector<uint8_t>>(ipv6_fixture.bytes);
 
     flowsql::packet::PacketRecord first;
@@ -4529,10 +4579,8 @@ std::shared_ptr<arrow::RecordBatch> MakeNpmPacketViewBatch() {
     return batch;
 }
 
-void AssertPacketBatchCreateError(const std::shared_ptr<arrow::RecordBatch>& batch,
-                                  npm::NpmPacketBatchError expected,
-                                  const char* error_fragment,
-                                  std::unique_ptr<npm::NpmPacketBatchView>* output) {
+void AssertPacketBatchCreateError(const std::shared_ptr<arrow::RecordBatch>& batch, npm::NpmPacketBatchError expected,
+                                  const char* error_fragment, std::unique_ptr<npm::NpmPacketBatchView>* output) {
     auto* original = output->get();
     std::string error = "unchanged";
     assert(npm::NpmPacketBatchView::Create(batch, output, &error) == expected);
@@ -4651,11 +4699,9 @@ void TestNpmPacketBatchViewRejectsSchemaAndColumnErrors() {
     for (int index = 0; index < batch->num_columns(); ++index) columns.push_back(batch->column(index));
     auto no_metadata_schema = arrow::schema(flowsql::packet::PacketSchema()->fields());
     auto schema_mismatch = arrow::RecordBatch::Make(no_metadata_schema, batch->num_rows(), columns);
-    AssertPacketBatchCreateError(
-        schema_mismatch, npm::NpmPacketBatchError::kSchemaMismatch, "schema", &output);
+    AssertPacketBatchCreateError(schema_mismatch, npm::NpmPacketBatchError::kSchemaMismatch, "schema", &output);
 
-    auto wrong_type = ReplacePacketBatchColumns(
-        batch, {{0, MakeOneValueArray<arrow::UInt32Builder>(uint32_t{1})}});
+    auto wrong_type = ReplacePacketBatchColumns(batch, {{0, MakeOneValueArray<arrow::UInt32Builder>(uint32_t{1})}});
     AssertPacketBatchCreateError(wrong_type, npm::NpmPacketBatchError::kInvalidColumn, "timestamp_ns", &output);
 
     arrow::Int64Builder empty_builder;
@@ -4668,10 +4714,9 @@ void TestNpmPacketBatchViewRejectsSchemaAndColumnErrors() {
     AssertPacketBatchCreateError(required_null, npm::NpmPacketBatchError::kInvalidColumn, "timestamp_ns", &output);
 
     std::array<uint16_t, flowsql::packet::kMaxLayerDepth> layer_ids{};
-    auto null_list_value = ReplacePacketBatchColumns(
-        batch, {{9, MakeFixedListArray<arrow::UInt16Builder>(layer_ids, true)}});
-    AssertPacketBatchCreateError(
-        null_list_value, npm::NpmPacketBatchError::kInvalidColumn, "layer_ids", &output);
+    auto null_list_value =
+        ReplacePacketBatchColumns(batch, {{9, MakeFixedListArray<arrow::UInt16Builder>(layer_ids, true)}});
+    AssertPacketBatchCreateError(null_list_value, npm::NpmPacketBatchError::kInvalidColumn, "layer_ids", &output);
 }
 
 void TestNpmPacketBatchViewRejectsInvalidRows() {
@@ -4679,19 +4724,16 @@ void TestNpmPacketBatchViewRejectsInvalidRows() {
     std::unique_ptr<npm::NpmPacketBatchView> output;
     assert(npm::NpmPacketBatchView::Create(batch, &output) == npm::NpmPacketBatchError::kNone);
 
-    const uint32_t captured_len =
-        std::static_pointer_cast<arrow::UInt32Array>(batch->column(1))->Value(0);
-    auto captured_mismatch = ReplacePacketBatchColumns(
-        batch, {{1, MakeOneValueArray<arrow::UInt32Builder>(captured_len - 1)}});
-    AssertPacketBatchCreateError(
-        captured_mismatch, npm::NpmPacketBatchError::kInvalidRow, "captured_len", &output);
+    const uint32_t captured_len = std::static_pointer_cast<arrow::UInt32Array>(batch->column(1))->Value(0);
+    auto captured_mismatch =
+        ReplacePacketBatchColumns(batch, {{1, MakeOneValueArray<arrow::UInt32Builder>(captured_len - 1)}});
+    AssertPacketBatchCreateError(captured_mismatch, npm::NpmPacketBatchError::kInvalidRow, "captured_len", &output);
 
-    auto wire_too_small = ReplacePacketBatchColumns(
-        batch, {{2, MakeOneValueArray<arrow::UInt32Builder>(captured_len - 1)}});
+    auto wire_too_small =
+        ReplacePacketBatchColumns(batch, {{2, MakeOneValueArray<arrow::UInt32Builder>(captured_len - 1)}});
     AssertPacketBatchCreateError(wire_too_small, npm::NpmPacketBatchError::kInvalidRow, "wire_len", &output);
 
-    auto invalid_status = ReplacePacketBatchColumns(
-        batch, {{7, MakeOneValueArray<arrow::UInt8Builder>(uint8_t{9})}});
+    auto invalid_status = ReplacePacketBatchColumns(batch, {{7, MakeOneValueArray<arrow::UInt8Builder>(uint8_t{9})}});
     AssertPacketBatchCreateError(invalid_status, npm::NpmPacketBatchError::kInvalidRow, "layer_status", &output);
 
     auto invalid_count = ReplacePacketBatchColumns(
@@ -4700,31 +4742,30 @@ void TestNpmPacketBatchViewRejectsInvalidRows() {
 
     std::array<uint32_t, flowsql::packet::kMaxLayerDepth> layer_offsets{};
     layer_offsets[0] = captured_len + 1;
-    auto invalid_offset = ReplacePacketBatchColumns(
-        batch, {{10, MakeFixedListArray<arrow::UInt32Builder>(layer_offsets)}});
+    auto invalid_offset =
+        ReplacePacketBatchColumns(batch, {{10, MakeFixedListArray<arrow::UInt32Builder>(layer_offsets)}});
     AssertPacketBatchCreateError(invalid_offset, npm::NpmPacketBatchError::kInvalidRow, "layer_offsets", &output);
 
-    auto invalid_scope = ReplacePacketBatchColumns(
-        batch, {{11, MakeOneValueArray<arrow::UInt8Builder>(uint8_t{2})}});
+    auto invalid_scope = ReplacePacketBatchColumns(batch, {{11, MakeOneValueArray<arrow::UInt8Builder>(uint8_t{2})}});
     AssertPacketBatchCreateError(invalid_scope, npm::NpmPacketBatchError::kInvalidRow, "endpoint_scope", &output);
 
-    auto invalid_network_index = ReplacePacketBatchColumns(
-        batch, {{12, MakeOneValueArray<arrow::UInt8Builder>(uint8_t{2})}});
-    AssertPacketBatchCreateError(
-        invalid_network_index, npm::NpmPacketBatchError::kInvalidRow, "network_layer_index", &output);
+    auto invalid_network_index =
+        ReplacePacketBatchColumns(batch, {{12, MakeOneValueArray<arrow::UInt8Builder>(uint8_t{2})}});
+    AssertPacketBatchCreateError(invalid_network_index, npm::NpmPacketBatchError::kInvalidRow, "network_layer_index",
+                                 &output);
 
-    auto invalid_transport_index = ReplacePacketBatchColumns(
-        batch, {{13, MakeOneValueArray<arrow::UInt8Builder>(uint8_t{2})}});
-    AssertPacketBatchCreateError(
-        invalid_transport_index, npm::NpmPacketBatchError::kInvalidRow, "transport_layer_index", &output);
+    auto invalid_transport_index =
+        ReplacePacketBatchColumns(batch, {{13, MakeOneValueArray<arrow::UInt8Builder>(uint8_t{2})}});
+    AssertPacketBatchCreateError(invalid_transport_index, npm::NpmPacketBatchError::kInvalidRow,
+                                 "transport_layer_index", &output);
 
-    auto invalid_payload = ReplacePacketBatchColumns(
-        batch, {{14, MakeOneValueArray<arrow::UInt32Builder>(captured_len + 1)}});
+    auto invalid_payload =
+        ReplacePacketBatchColumns(batch, {{14, MakeOneValueArray<arrow::UInt32Builder>(captured_len + 1)}});
     AssertPacketBatchCreateError(invalid_payload, npm::NpmPacketBatchError::kInvalidRow, "payload_offset", &output);
 
     auto invalid_ip_family = ReplacePacketBatchColumns(
-        batch, {{21, MakeOneValueArray<arrow::UInt8Builder>(
-                         static_cast<uint8_t>(flowsql::packet::AddressFamily::kNone))}});
+        batch,
+        {{21, MakeOneValueArray<arrow::UInt8Builder>(static_cast<uint8_t>(flowsql::packet::AddressFamily::kNone))}});
     AssertPacketBatchCreateError(invalid_ip_family, npm::NpmPacketBatchError::kInvalidRow, "src_ip", &output);
 
     std::vector<uint8_t> short_ipv6(15, 0x22);
@@ -4732,19 +4773,16 @@ void TestNpmPacketBatchViewRejectsInvalidRows() {
         batch,
         {{17, MakeOneNullArray<arrow::UInt32Builder>()},
          {19, MakeOneBinaryArray(short_ipv6)},
-         {21, MakeOneValueArray<arrow::UInt8Builder>(
-                  static_cast<uint8_t>(flowsql::packet::AddressFamily::kIPv6))}});
+         {21, MakeOneValueArray<arrow::UInt8Builder>(static_cast<uint8_t>(flowsql::packet::AddressFamily::kIPv6))}});
     AssertPacketBatchCreateError(invalid_ipv6, npm::NpmPacketBatchError::kInvalidRow, "src_ip_v6", &output);
 
-    auto invalid_ports = ReplacePacketBatchColumns(
-        batch, {{26, MakeOneValueArray<arrow::BooleanBuilder>(false)}});
+    auto invalid_ports = ReplacePacketBatchColumns(batch, {{26, MakeOneValueArray<arrow::BooleanBuilder>(false)}});
     AssertPacketBatchCreateError(invalid_ports, npm::NpmPacketBatchError::kInvalidRow, "ports_valid", &output);
 
-    auto invalid_protocol = ReplacePacketBatchColumns(
-        batch, {{27, MakeOneValueArray<arrow::UInt8Builder>(
-                         static_cast<uint8_t>(flowsql::packet::ProtocolStatus::kUnknown))}});
-    AssertPacketBatchCreateError(
-        invalid_protocol, npm::NpmPacketBatchError::kInvalidRow, "protocol_status", &output);
+    auto invalid_protocol =
+        ReplacePacketBatchColumns(batch, {{27, MakeOneValueArray<arrow::UInt8Builder>(
+                                                   static_cast<uint8_t>(flowsql::packet::ProtocolStatus::kUnknown))}});
+    AssertPacketBatchCreateError(invalid_protocol, npm::NpmPacketBatchError::kInvalidRow, "protocol_status", &output);
 }
 
 npm::NpmSessionView MakeProjectionSession(const npm::NpmSessionKey* key, uint64_t session_id) {
@@ -4909,8 +4947,7 @@ void TestNpmBasicResultProjectionErrorsDoNotConsumeRevision() {
     assert(projector.ProjectActive(invalid, 1000, &output) == npm::NpmBasicProjectionError::kInvalidSession);
 
     invalid.protocol_id = 99;
-    assert(projector.ProjectActive(invalid, 1000, &output) ==
-           npm::NpmBasicProjectionError::kProtocolNameUnavailable);
+    assert(projector.ProjectActive(invalid, 1000, &output) == npm::NpmBasicProjectionError::kProtocolNameUnavailable);
     assert(output.session_id == 999 && output.revision == 88 && output.a_ip == "sentinel");
     assert(projector.tracked_sessions() == 0);
 
@@ -4944,12 +4981,10 @@ npm::NpmBasicResult MakeBasicEncodingResult(uint64_t index) {
     result.observation_domain_id = 100 + index;
     result.revision = 10 + index;
     result.observed_at = 1000 + static_cast<int64_t>(index);
-    result.ip_family = index % 2 == 0
-                           ? static_cast<uint8_t>(flowsql::packet::AddressFamily::kIPv6)
-                           : static_cast<uint8_t>(flowsql::packet::AddressFamily::kIPv4);
-    result.transport_protocol =
-        index % 2 == 0 ? static_cast<uint8_t>(flowsql::ipv6::eNext::UDP)
-                       : static_cast<uint8_t>(flowsql::ipv4::eNext::TCP);
+    result.ip_family = index % 2 == 0 ? static_cast<uint8_t>(flowsql::packet::AddressFamily::kIPv6)
+                                      : static_cast<uint8_t>(flowsql::packet::AddressFamily::kIPv4);
+    result.transport_protocol = index % 2 == 0 ? static_cast<uint8_t>(flowsql::ipv6::eNext::UDP)
+                                               : static_cast<uint8_t>(flowsql::ipv4::eNext::TCP);
     result.a_ip = "a-" + std::to_string(index);
     result.b_ip = "b-" + std::to_string(index);
     result.a_port = static_cast<uint16_t>(1000 + index);
@@ -5087,16 +5122,14 @@ void TestNpmBasicResultArrowEncodingRejectsInvalidInput() {
 
     results[1].protocol_id = 80;
     error = "stale";
-    assert(npm::EncodeNpmBasicResults(results, &output, &error) ==
-           npm::NpmBasicEncodeError::kInvalidResult);
+    assert(npm::EncodeNpmBasicResults(results, &output, &error) == npm::NpmBasicEncodeError::kInvalidResult);
     assert(output == original);
     assert(error.find("result[1]") != std::string::npos);
 
     results[1].protocol_id.reset();
     results[1].a_ip = std::string(1, static_cast<char>(0xff));
     error = "stale";
-    assert(npm::EncodeNpmBasicResults(results, &output, &error) ==
-           npm::NpmBasicEncodeError::kInvalidResult);
+    assert(npm::EncodeNpmBasicResults(results, &output, &error) == npm::NpmBasicEncodeError::kInvalidResult);
     assert(output == original);
     assert(error.find("result[1].a_ip") != std::string::npos);
 
@@ -5117,8 +5150,7 @@ struct PendingOutputBudgetStats {
 
 class PendingOutputBudget final : public npm::INpmTaskBudget {
  public:
-    PendingOutputBudget(npm::NpmAnalysisConfig config,
-                        std::shared_ptr<PendingOutputBudgetStats> stats)
+    PendingOutputBudget(npm::NpmAnalysisConfig config, std::shared_ptr<PendingOutputBudgetStats> stats)
         : config_(config), stats_(std::move(stats)) {}
 
     npm::NpmBudgetError Reserve(npm::NpmBudgetCategory category, uint64_t bytes) override {
@@ -5248,11 +5280,9 @@ std::vector<npm::NpmSessionResult> MakeSessionEncodingResults() {
     udp.is_final = true;
     udp.protocol_status = npm::NpmProtocolStatus::kUnknown;
     udp.end_reason = npm::NpmSessionEndReason::kIdleTimeout;
-    udp.measurement_flags = npm::kNpmMeasurementTruncatedPayload |
-                            npm::kNpmMeasurementTimestampRegression;
+    udp.measurement_flags = npm::kNpmMeasurementTruncatedPayload | npm::kNpmMeasurementTimestampRegression;
 
-    std::vector<npm::NpmSessionResult> results{
-        complete, partial, not_observed, ambiguous, udp};
+    std::vector<npm::NpmSessionResult> results{complete, partial, not_observed, ambiguous, udp};
     for (const auto& result : results) {
         assert(npm::ValidateNpmSessionResult(result) == npm::NpmSessionResultError::kNone);
     }
@@ -5260,9 +5290,7 @@ std::vector<npm::NpmSessionResult> MakeSessionEncodingResults() {
 }
 
 template <typename ArrayType>
-std::shared_ptr<ArrayType> SessionResultColumn(
-    const std::shared_ptr<arrow::RecordBatch>& batch,
-    int index) {
+std::shared_ptr<ArrayType> SessionResultColumn(const std::shared_ptr<arrow::RecordBatch>& batch, int index) {
     return std::static_pointer_cast<ArrayType>(batch->column(index));
 }
 
@@ -5270,16 +5298,14 @@ void TestNpmSessionResultArrowEncoding() {
     std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
     const auto original = output;
     std::string error = "stale";
-    assert(npm::EncodeNpmSessionResults({}, &output, &error) ==
-           npm::NpmSessionEncodeError::kNone);
+    assert(npm::EncodeNpmSessionResults({}, &output, &error) == npm::NpmSessionEncodeError::kNone);
     assert(error.empty() && output != original);
     assert(output->schema().get() == npm::NpmSessionResultSchema().get());
     assert(output->num_rows() == 0 && output->num_columns() == 49);
     assert(output->ValidateFull().ok());
 
     auto results = MakeSessionEncodingResults();
-    assert(npm::EncodeNpmSessionResults(results, &output, &error) ==
-           npm::NpmSessionEncodeError::kNone);
+    assert(npm::EncodeNpmSessionResults(results, &output, &error) == npm::NpmSessionEncodeError::kNone);
     assert(error.empty() && output->schema().get() == npm::NpmSessionResultSchema().get());
     assert(output->num_rows() == 5 && output->num_columns() == 49);
     assert(output->ValidateFull().ok());
@@ -5393,46 +5419,39 @@ void TestNpmSessionResultArrowEncodingRejectsInvalidInput() {
     auto results = MakeSessionEncodingResults();
     std::shared_ptr<arrow::RecordBatch> output;
     std::string error;
-    assert(npm::EncodeNpmSessionResults(results, &output, &error) ==
-           npm::NpmSessionEncodeError::kNone);
+    assert(npm::EncodeNpmSessionResults(results, &output, &error) == npm::NpmSessionEncodeError::kNone);
     const auto original = output;
 
     results[1].revision = 0;
     error = "stale";
-    assert(npm::EncodeNpmSessionResults(results, &output, &error) ==
-           npm::NpmSessionEncodeError::kInvalidResult);
+    assert(npm::EncodeNpmSessionResults(results, &output, &error) == npm::NpmSessionEncodeError::kInvalidResult);
     assert(output == original && error.find("result[1]") != std::string::npos);
 
     const std::string invalid_utf8(1, static_cast<char>(0xff));
     results = MakeSessionEncodingResults();
     results[0].a_ip = invalid_utf8;
-    assert(npm::EncodeNpmSessionResults(results, &output, &error) ==
-           npm::NpmSessionEncodeError::kInvalidResult);
+    assert(npm::EncodeNpmSessionResults(results, &output, &error) == npm::NpmSessionEncodeError::kInvalidResult);
     assert(output == original && error.find("result[0].a_ip") != std::string::npos);
 
     results = MakeSessionEncodingResults();
     results[0].b_ip = invalid_utf8;
-    assert(npm::EncodeNpmSessionResults(results, &output, &error) ==
-           npm::NpmSessionEncodeError::kInvalidResult);
+    assert(npm::EncodeNpmSessionResults(results, &output, &error) == npm::NpmSessionEncodeError::kInvalidResult);
     assert(output == original && error.find("result[0].b_ip") != std::string::npos);
 
     results = MakeSessionEncodingResults();
     results[0].protocol = invalid_utf8;
-    assert(npm::EncodeNpmSessionResults(results, &output, &error) ==
-           npm::NpmSessionEncodeError::kInvalidResult);
+    assert(npm::EncodeNpmSessionResults(results, &output, &error) == npm::NpmSessionEncodeError::kInvalidResult);
     assert(output == original && error.find("result[0].protocol") != std::string::npos);
 
     error = "stale";
-    assert(npm::EncodeNpmSessionResults(results, nullptr, &error) ==
-           npm::NpmSessionEncodeError::kNullOutput);
+    assert(npm::EncodeNpmSessionResults(results, nullptr, &error) == npm::NpmSessionEncodeError::kNullOutput);
     assert(output == original && error.find("output") != std::string::npos);
 }
 
 void TestNpmSessionResultPendingOutputLeaseAndErrors() {
     const auto results = MakeSessionEncodingResults();
     std::shared_ptr<arrow::RecordBatch> reference;
-    assert(npm::EncodeNpmSessionResults(results, &reference) ==
-           npm::NpmSessionEncodeError::kNone);
+    assert(npm::EncodeNpmSessionResults(results, &reference) == npm::NpmSessionEncodeError::kNone);
     const uint64_t expected_bytes = BasicResultBufferBytes(reference);
     assert(expected_bytes > 0);
 
@@ -5463,8 +5482,7 @@ void TestNpmSessionResultPendingOutputLeaseAndErrors() {
     std::shared_ptr<arrow::RecordBatch> blocked_output = reference;
     const auto original = blocked_output;
     error = "stale";
-    assert(npm::EncodeNpmSessionResultsWithBudget(
-               results, blocked_budget, &blocked_output, &error) ==
+    assert(npm::EncodeNpmSessionResultsWithBudget(results, blocked_budget, &blocked_output, &error) ==
            npm::NpmSessionEncodeError::kBudgetError);
     assert(blocked_output == original && error.find("pending output budget") != std::string::npos);
     assert(blocked_stats->reserve_calls == 1 && blocked_stats->release_calls == 0);
@@ -5484,8 +5502,7 @@ void TestNpmSessionResultPendingOutputLeaseAndErrors() {
     auto lifetime_budget = std::make_shared<PendingOutputBudget>(config, lifetime_stats);
     std::weak_ptr<PendingOutputBudget> weak_budget = lifetime_budget;
     std::shared_ptr<arrow::RecordBatch> lifetime_output;
-    assert(npm::EncodeNpmSessionResultsWithBudget(
-               results, lifetime_budget, &lifetime_output) ==
+    assert(npm::EncodeNpmSessionResultsWithBudget(results, lifetime_budget, &lifetime_output) ==
            npm::NpmSessionEncodeError::kNone);
     lifetime_budget.reset();
     assert(!weak_budget.expired() && lifetime_stats->release_calls == 0);
@@ -5493,8 +5510,7 @@ void TestNpmSessionResultPendingOutputLeaseAndErrors() {
     assert(weak_budget.expired() && lifetime_stats->release_calls == 1);
 }
 
-npm::NpmSessionEndEvent MakeCollectorEndEvent(uint64_t session_id,
-                                              npm::NpmSessionEndReason reason,
+npm::NpmSessionEndEvent MakeCollectorEndEvent(uint64_t session_id, npm::NpmSessionEndReason reason,
                                               int64_t observed_at) {
     npm::NpmSessionEndEvent event;
     event.snapshot.key.input_namespace = "pcapfile.capture";
@@ -5649,8 +5665,7 @@ void TestNpmBasicResultCollectorRoutesEnabledEntities() {
     ContextPool pool(&protocol);
     SinglePoolQuerier querier(&pool);
     std::unique_ptr<npm::NpmProtocolContext> context;
-    assert(npm::NpmProtocolContext::Create(&querier, &context) ==
-           npm::NpmProtocolContextError::kNone);
+    assert(npm::NpmProtocolContext::Create(&querier, &context) == npm::NpmProtocolContextError::kNone);
     npm::NpmBasicResultProjector projector(*context);
 
     auto analysis = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
@@ -5685,8 +5700,7 @@ void TestNpmBasicResultCollectorRoutesEnabledEntities() {
     assert(status.session_encode_error == npm::NpmSessionEncodeError::kNone);
     assert(session_collector.pending_results() == 0 && output->num_rows() == 1);
     assert(output->schema()->Equals(*npm::NpmSessionResultSchema(), true));
-    assert(SessionResultColumn<arrow::StringArray>(output, 7)->GetString(0) ==
-           "session-original");
+    assert(SessionResultColumn<arrow::StringArray>(output, 7)->GetString(0) == "session-original");
 
     output.reset();
     status = session_collector.Drain({}, projector, budget, &output);
@@ -5711,8 +5725,7 @@ void TestNpmBasicResultCollectorRoutesEnabledEntities() {
     assert(status.error == npm::NpmBasicDrainError::kNone);
     assert(basic_collector.pending_results() == 0 && output->num_rows() == 1);
     assert(output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
-    assert(BasicResultColumn<arrow::UInt64Array>(output, 0)->Value(0) ==
-           basic_result.session_id);
+    assert(BasicResultColumn<arrow::UInt64Array>(output, 0)->Value(0) == basic_result.session_id);
     output.reset();
 
     npm::NpmBasicFeatureConfig both_session = both_basic;
@@ -5727,8 +5740,7 @@ void TestNpmBasicResultCollectorRoutesEnabledEntities() {
     auto observed_session = MakeValidUdpSessionResult();
     observed_session.session_id = 115;
     assert(both_session_collector.WriteSession(observed_session) == 0);
-    auto projected_event =
-        MakeCollectorEndEvent(116, npm::NpmSessionEndReason::kIdleTimeout, 11600);
+    auto projected_event = MakeCollectorEndEvent(116, npm::NpmSessionEndReason::kIdleTimeout, 11600);
     npm::NpmBasicResult projected_active;
     assert(projector.ProjectActive(projected_event.snapshot.View(), 11500, &projected_active) ==
            npm::NpmBasicProjectionError::kNone);
@@ -5738,8 +5750,7 @@ void TestNpmBasicResultCollectorRoutesEnabledEntities() {
     assert(projector.tracked_sessions() == 0);
     assert(both_session_collector.pending_results() == 0 && output->num_rows() == 1);
     assert(output->schema()->Equals(*npm::NpmSessionResultSchema(), true));
-    assert(SessionResultColumn<arrow::UInt64Array>(output, 0)->Value(0) ==
-           observed_session.session_id);
+    assert(SessionResultColumn<arrow::UInt64Array>(output, 0)->Value(0) == observed_session.session_id);
     output.reset();
 
     npm::NpmBasicResultCollector blocked_collector(session_only);
@@ -5757,10 +5768,8 @@ void TestNpmBasicResultCollectorRoutesEnabledEntities() {
     assert(small_stats->reserve_calls == 1 && small_stats->release_calls == 0);
 }
 
-void AddEofFlushSession(npm::NpmSessionTable& table,
-                        const npm::NpmObservationDomainMap& domain_map,
-                        const PacketFixture& fixture,
-                        int64_t timestamp_ns) {
+void AddEofFlushSession(npm::NpmSessionTable& table, const npm::NpmObservationDomainMap& domain_map,
+                        const PacketFixture& fixture, int64_t timestamp_ns) {
     flowsql::packet::PacketMeta meta;
     const auto binding = BuildBinding(domain_map, fixture, 1, timestamp_ns, 100, &meta);
     npm::NpmSessionView view;
@@ -5769,24 +5778,13 @@ void AddEofFlushSession(npm::NpmSessionTable& table,
 
 class EofWritingModule final : public npm::INpmAnalysisModule {
  public:
-    EofWritingModule(uint64_t marker, std::vector<uint64_t>* events)
-        : marker_(marker), events_(events) {}
+    EofWritingModule(uint64_t marker, std::vector<uint64_t>* events) : marker_(marker), events_(events) {}
 
-    int OnPacket(const npm::NpmPacketView&,
-                 const npm::NpmSessionView&,
-                 npm::INpmResultWriter&) override {
-        return 0;
-    }
+    int OnPacket(const npm::NpmPacketView&, const npm::NpmSessionView&, npm::INpmResultWriter&) override { return 0; }
 
-    int OnSessionSnapshot(const npm::NpmSessionView&,
-                          int64_t,
-                          npm::INpmResultWriter&) override {
-        return 0;
-    }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultWriter&) override { return 0; }
 
-    int OnSessionEnd(const npm::NpmSessionView& session,
-                     npm::NpmSessionEndReason reason,
-                     int64_t observed_at_ns,
+    int OnSessionEnd(const npm::NpmSessionView& session, npm::NpmSessionEndReason reason, int64_t observed_at_ns,
                      npm::INpmResultWriter& writer) override {
         assert(reason == npm::NpmSessionEndReason::kEof);
         events_->push_back(1000 + session.session_id * 10 + marker_);
@@ -5877,8 +5875,7 @@ void TestNpmEofFlusherSuccessEmptyAndRepeated() {
     npm::NpmBasicResultProjector empty_projector(*context);
     npm::NpmEofFlusher empty_flusher;
     std::shared_ptr<arrow::RecordBatch> empty_output;
-    status = empty_flusher.Flush(
-        7000, empty_table, {}, empty_collector, empty_projector, budget, &empty_output);
+    status = empty_flusher.Flush(7000, empty_table, {}, empty_collector, empty_projector, budget, &empty_output);
     assert(status.error == npm::NpmEofFlushError::kNone);
     assert(empty_flusher.state() == npm::NpmEofFlushState::kFlushed);
     assert(empty_output != nullptr && empty_output->num_rows() == 0);
@@ -5912,8 +5909,8 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
     assert(cancelled.state() == npm::NpmEofFlushState::kCancelled);
     std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
     const auto original = output;
-    auto status = cancelled.Flush(
-        1000, cancelled_table, modules, cancelled_collector, cancelled_projector, budget, &output);
+    auto status =
+        cancelled.Flush(1000, cancelled_table, modules, cancelled_collector, cancelled_projector, budget, &output);
     assert(status.error == npm::NpmEofFlushError::kCancelled);
     assert(cancelled_table.size() == 1 && cancelled_collector.pending_results() == 1);
     assert(output == original && events.empty() && stats->reserve_calls == 0);
@@ -5935,8 +5932,8 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
     npm::NpmBasicResultCollector null_output_collector;
     npm::NpmBasicResultProjector null_output_projector(*context);
     npm::NpmEofFlusher null_output;
-    status = null_output.Flush(
-        1000, null_output_table, modules, null_output_collector, null_output_projector, budget, nullptr);
+    status = null_output.Flush(1000, null_output_table, modules, null_output_collector, null_output_projector, budget,
+                               nullptr);
     assert(status.error == npm::NpmEofFlushError::kNullOutput);
     assert(null_output.state() == npm::NpmEofFlushState::kFailed && null_output_table.size() == 1);
 
@@ -5945,8 +5942,8 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
     npm::NpmBasicResultCollector null_budget_collector;
     npm::NpmBasicResultProjector null_budget_projector(*context);
     npm::NpmEofFlusher null_budget;
-    status = null_budget.Flush(
-        1000, null_budget_table, modules, null_budget_collector, null_budget_projector, {}, &output);
+    status =
+        null_budget.Flush(1000, null_budget_table, modules, null_budget_collector, null_budget_projector, {}, &output);
     assert(status.error == npm::NpmEofFlushError::kNullBudget);
     assert(null_budget.state() == npm::NpmEofFlushState::kFailed && null_budget_table.size() == 1);
 
@@ -5956,8 +5953,8 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
     npm::NpmBasicResultProjector null_module_projector(*context);
     npm::NpmEofFlusher null_module;
     modules.push_back(nullptr);
-    status = null_module.Flush(
-        1000, null_module_table, modules, null_module_collector, null_module_projector, budget, &output);
+    status = null_module.Flush(1000, null_module_table, modules, null_module_collector, null_module_projector, budget,
+                               &output);
     assert(status.error == npm::NpmEofFlushError::kNullModule);
     assert(null_module.state() == npm::NpmEofFlushState::kFailed && null_module_table.size() == 1);
     modules.pop_back();
@@ -5969,25 +5966,15 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
     npm::NpmBasicResultProjector module_error_projector(*context);
     npm::NpmEofFlusher module_error;
     module.end_error = EBUSY;
-    status = module_error.Flush(1000,
-                                module_error_table,
-                                modules,
-                                module_error_collector,
-                                module_error_projector,
-                                budget,
-                                &output);
+    status = module_error.Flush(1000, module_error_table, modules, module_error_collector, module_error_projector,
+                                budget, &output);
     assert(status.error == npm::NpmEofFlushError::kModuleError && status.module_error == EBUSY);
     assert(module_error.state() == npm::NpmEofFlushState::kFailed && module_error_table.size() == 0);
     assert(module_error_collector.pending_results() == 1 && output == original);
     assert((events == std::vector<uint64_t>{1011}));
     module.end_error = 0;
-    status = module_error.Flush(2000,
-                                module_error_table,
-                                modules,
-                                module_error_collector,
-                                module_error_projector,
-                                budget,
-                                &output);
+    status = module_error.Flush(2000, module_error_table, modules, module_error_collector, module_error_projector,
+                                budget, &output);
     assert(status.error == npm::NpmEofFlushError::kFailedState && events.size() == 1);
 
     npm::NpmSessionTable drain_error_table(config);
@@ -6000,13 +5987,8 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
     auto small_stats = std::make_shared<PendingOutputBudgetStats>();
     auto small_budget = std::make_shared<PendingOutputBudget>(config, small_stats);
     events.clear();
-    status = drain_error.Flush(3000,
-                               drain_error_table,
-                               modules,
-                               drain_error_collector,
-                               drain_error_projector,
-                               small_budget,
-                               &output);
+    status = drain_error.Flush(3000, drain_error_table, modules, drain_error_collector, drain_error_projector,
+                               small_budget, &output);
     assert(status.error == npm::NpmEofFlushError::kDrainError);
     assert(status.drain_status.error == npm::NpmBasicDrainError::kEncodeError);
     assert(status.drain_status.encode_error == npm::NpmBasicEncodeError::kBudgetError);
@@ -6029,8 +6011,7 @@ void TestNpmBasicResultPendingOutputLease() {
     auto budget = std::make_shared<PendingOutputBudget>(config, stats);
     std::shared_ptr<arrow::RecordBatch> output;
     std::string error = "stale";
-    assert(npm::EncodeNpmBasicResultsWithBudget(results, budget, &output, &error) ==
-           npm::NpmBasicEncodeError::kNone);
+    assert(npm::EncodeNpmBasicResultsWithBudget(results, budget, &output, &error) == npm::NpmBasicEncodeError::kNone);
     assert(error.empty() && output != nullptr);
     assert(BasicResultBufferBytes(output) == expected_bytes);
     assert(stats->reserve_calls == 1 && stats->release_calls == 0);
@@ -6051,8 +6032,7 @@ void TestNpmBasicResultPendingOutputLease() {
     auto empty_stats = std::make_shared<PendingOutputBudgetStats>();
     auto empty_budget = std::make_shared<PendingOutputBudget>(config, empty_stats);
     std::shared_ptr<arrow::RecordBatch> empty_output;
-    assert(npm::EncodeNpmBasicResultsWithBudget({}, empty_budget, &empty_output) ==
-           npm::NpmBasicEncodeError::kNone);
+    assert(npm::EncodeNpmBasicResultsWithBudget({}, empty_budget, &empty_output) == npm::NpmBasicEncodeError::kNone);
     const uint64_t empty_bytes = BasicResultBufferBytes(empty_output);
     assert(empty_stats->last_reserved_bytes == empty_bytes);
     assert(empty_budget->Usage().pending_output_bytes == empty_bytes);
@@ -6073,8 +6053,7 @@ void TestNpmBasicResultPendingOutputBudgetAndLifetime() {
     auto stats = std::make_shared<PendingOutputBudgetStats>();
     auto budget = std::make_shared<PendingOutputBudget>(config, stats);
     std::shared_ptr<arrow::RecordBatch> normal_output;
-    assert(npm::EncodeNpmBasicResultsWithBudget(results, budget, &normal_output) ==
-           npm::NpmBasicEncodeError::kNone);
+    assert(npm::EncodeNpmBasicResultsWithBudget(results, budget, &normal_output) == npm::NpmBasicEncodeError::kNone);
     assert(budget->Usage().pending_output_bytes == expected_bytes);
 
     std::shared_ptr<arrow::RecordBatch> flush_output;
@@ -6134,8 +6113,7 @@ void TestNpmBasicResultPendingOutputFailuresAreAtomic() {
     assert(error.find("output") != std::string::npos && stats->reserve_calls == 0);
 
     error = "stale";
-    assert(npm::EncodeNpmBasicResultsWithBudget(results, {}, &output, &error) ==
-           npm::NpmBasicEncodeError::kNullBudget);
+    assert(npm::EncodeNpmBasicResultsWithBudget(results, {}, &output, &error) == npm::NpmBasicEncodeError::kNullBudget);
     assert(error.find("budget") != std::string::npos && output == original);
 
     results[0].protocol_id = 80;
@@ -6147,9 +6125,7 @@ void TestNpmBasicResultPendingOutputFailuresAreAtomic() {
 }
 
 npm::NpmBasicTaskConfigStatus ParseTaskConfigFailure(
-    const char* json,
-    npm::NpmBasicTaskConfigError expected_error,
-    const char* expected_field = "",
+    const char* json, npm::NpmBasicTaskConfigError expected_error, const char* expected_field = "",
     npm::NpmParameterErrorV1 expected_parameter_error = npm::NpmParameterErrorV1::kNone,
     const char* expected_parameter_path = "") {
     npm::NpmBasicTaskConfig output;
@@ -6185,8 +6161,8 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
     static_assert(std::is_same_v<decltype(npm::NpmBasicTaskConfigStatus::field), std::string>);
 
     npm::NpmBasicTaskConfig minimal;
-    const auto minimal_status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"input_namespace":"minimal","source_domains":"0:0"})JSON", &minimal);
+    const auto minimal_status =
+        npm::ParseNpmBasicTaskConfig(R"JSON({"input_namespace":"minimal","source_domains":"0:0"})JSON", &minimal);
     assert(minimal_status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(minimal.analysis.run_mode == npm::NpmRunMode::kOffline);
     assert(minimal.analysis.result_mode == npm::NpmResultMode::kFinal);
@@ -6194,8 +6170,7 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
     assert(minimal.analysis.payload_sample_packets == npm::kNpmDefaultPayloadSamplePackets);
     assert(minimal.features.basic_enabled && !minimal.features.session_enabled);
     assert(minimal.features.observing == npm::NpmResultEntity::kBasic);
-    assert(minimal.features.session_max_tcp_ranges_per_direction ==
-           npm::kNpmDefaultSessionTcpRangesPerDirection);
+    assert(minimal.features.session_max_tcp_ranges_per_direction == npm::kNpmDefaultSessionTcpRangesPerDirection);
     assert(minimal.domains.bindings.size() == 1);
     assert(minimal.domains.bindings[0].source_id == 0);
     assert(minimal.domains.bindings[0].observation_domain_id == 0);
@@ -6234,20 +6209,16 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
     assert(output.analysis.overload_policy == npm::NpmOverloadPolicy::kFail);
     assert(output.domains.input_namespace == "pcapfile.capture");
     assert(output.domains.bindings.size() == 3);
-    assert(output.domains.bindings[0].source_id == 0 &&
-           output.domains.bindings[0].observation_domain_id == 7);
-    assert(output.domains.bindings[1].source_id == 1 &&
-           output.domains.bindings[1].observation_domain_id == 7);
-    assert(output.domains.bindings[2].source_id == 2 &&
-           output.domains.bindings[2].observation_domain_id == 8);
+    assert(output.domains.bindings[0].source_id == 0 && output.domains.bindings[0].observation_domain_id == 7);
+    assert(output.domains.bindings[1].source_id == 1 && output.domains.bindings[1].observation_domain_id == 7);
+    assert(output.domains.bindings[2].source_id == 2 && output.domains.bindings[2].observation_domain_id == 8);
 
     json.assign(json.size(), 'x');
     assert(output.domains.input_namespace == "pcapfile.capture");
     assert(output.domains.bindings[2].observation_domain_id == 8);
 
     status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"source_domains":"9:10","input_namespace":"live","run_mode":"realtime"})JSON",
-        &output);
+        R"JSON({"source_domains":"9:10","input_namespace":"live","run_mode":"realtime"})JSON", &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.analysis.run_mode == npm::NpmRunMode::kRealtime);
     assert(output.analysis.result_mode == npm::NpmResultMode::kPeriodicSnapshot);
@@ -6265,8 +6236,7 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
     assert(output.analysis.result_mode == npm::NpmResultMode::kFinal);
 
     status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"input_namespace":"limits","source_domains":"4294967295:18446744073709551615"})JSON",
-        &output);
+        R"JSON({"input_namespace":"limits","source_domains":"4294967295:18446744073709551615"})JSON", &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.domains.bindings[0].source_id == UINT32_MAX);
     assert(output.domains.bindings[0].observation_domain_id == UINT64_MAX);
@@ -6280,87 +6250,57 @@ void TestNpmBasicTaskConfigRejectsMalformedFieldsAtomically() {
     assert(status.error == npm::NpmBasicTaskConfigError::kNullOutput);
     ParseTaskConfigFailure("{", npm::NpmBasicTaskConfigError::kInvalidJson);
     ParseTaskConfigFailure("[]", npm::NpmBasicTaskConfigError::kInvalidJson);
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","input_namespace":"b","source_domains":"0:0"})JSON",
-        npm::NpmBasicTaskConfigError::kDuplicateField,
-        "input_namespace");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","mystery":"x"})JSON",
-        npm::NpmBasicTaskConfigError::kUnknownField,
-        "mystery");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":7,"source_domains":"0:0"})JSON",
-        npm::NpmBasicTaskConfigError::kNonStringValue,
-        "input_namespace");
-    ParseTaskConfigFailure(
-        R"JSON({"source_domains":"0:0"})JSON",
-        npm::NpmBasicTaskConfigError::kMissingRequiredField,
-        "input_namespace");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a"})JSON",
-        npm::NpmBasicTaskConfigError::kMissingRequiredField,
-        "source_domains");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","input_namespace":"b","source_domains":"0:0"})JSON",
+                           npm::NpmBasicTaskConfigError::kDuplicateField, "input_namespace");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","mystery":"x"})JSON",
+                           npm::NpmBasicTaskConfigError::kUnknownField, "mystery");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":7,"source_domains":"0:0"})JSON",
+                           npm::NpmBasicTaskConfigError::kNonStringValue, "input_namespace");
+    ParseTaskConfigFailure(R"JSON({"source_domains":"0:0"})JSON", npm::NpmBasicTaskConfigError::kMissingRequiredField,
+                           "input_namespace");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a"})JSON", npm::NpmBasicTaskConfigError::kMissingRequiredField,
+                           "source_domains");
 
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","run_mode":"batch"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidEnum,
-        "run_mode");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","result_mode":"latest"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidEnum,
-        "result_mode");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","overload_policy":"drop"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidEnum,
-        "overload_policy");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","output_interval_ns":"-1"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidInteger,
-        "output_interval_ns");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","run_mode":"batch"})JSON",
+                           npm::NpmBasicTaskConfigError::kInvalidEnum, "run_mode");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","result_mode":"latest"})JSON",
+                           npm::NpmBasicTaskConfigError::kInvalidEnum, "result_mode");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","overload_policy":"drop"})JSON",
+                           npm::NpmBasicTaskConfigError::kInvalidEnum, "overload_policy");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","output_interval_ns":"-1"})JSON",
+                           npm::NpmBasicTaskConfigError::kInvalidInteger, "output_interval_ns");
     ParseTaskConfigFailure(
         R"JSON({"input_namespace":"a","source_domains":"0:0","payload_sample_packets":"4294967296"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidInteger,
-        "payload_sample_packets");
+        npm::NpmBasicTaskConfigError::kInvalidInteger, "payload_sample_packets");
     ParseTaskConfigFailure(
         R"JSON({"input_namespace":"a","source_domains":"0:0","max_tracked_bytes":"18446744073709551616"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidInteger,
-        "max_tracked_bytes");
+        npm::NpmBasicTaskConfigError::kInvalidInteger, "max_tracked_bytes");
 }
 
 void TestNpmBasicTaskConfigRejectsMappingsAndRanges() {
     const std::vector<std::string> invalid_domains = {
-        "",          "0",     ":1",          "1:",
-        "1:2;",      "1::2",  " 1:2",        "1:2 ",
-        "+1:2",      "1:-2",  "4294967296:1", "1:18446744073709551616",
+        "", "0", ":1", "1:", "1:2;", "1::2", " 1:2", "1:2 ", "+1:2", "1:-2", "4294967296:1", "1:18446744073709551616",
     };
     for (const auto& domains : invalid_domains) {
-        const std::string json =
-            R"JSON({"input_namespace":"a","source_domains":")JSON" + domains + R"JSON("})JSON";
-        ParseTaskConfigFailure(
-            json.c_str(), npm::NpmBasicTaskConfigError::kInvalidSourceDomains, "source_domains");
+        const std::string json = R"JSON({"input_namespace":"a","source_domains":")JSON" + domains + R"JSON("})JSON";
+        ParseTaskConfigFailure(json.c_str(), npm::NpmBasicTaskConfigError::kInvalidSourceDomains, "source_domains");
     }
 
-    auto status = ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"1:2;1:3"})JSON",
-        npm::NpmBasicTaskConfigError::kDomainValidationError,
-        "source_domains");
+    auto status = ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"1:2;1:3"})JSON",
+                                         npm::NpmBasicTaskConfigError::kDomainValidationError, "source_domains");
     assert(status.domain_error == npm::NpmObservationDomainError::kDuplicateSourceId);
 
-    status = ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"","source_domains":"1:2"})JSON",
-        npm::NpmBasicTaskConfigError::kDomainValidationError,
-        "input_namespace");
+    status = ParseTaskConfigFailure(R"JSON({"input_namespace":"","source_domains":"1:2"})JSON",
+                                    npm::NpmBasicTaskConfigError::kDomainValidationError, "input_namespace");
     assert(status.domain_error == npm::NpmObservationDomainError::kEmptyInputNamespace);
 
-    status = ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"1:2","output_interval_ns":"1"})JSON",
-        npm::NpmBasicTaskConfigError::kAnalysisValidationError,
-        "output_interval_ns");
+    status =
+        ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"1:2","output_interval_ns":"1"})JSON",
+                               npm::NpmBasicTaskConfigError::kAnalysisValidationError, "output_interval_ns");
     assert(status.analysis_error == npm::NpmAnalysisConfigError::kOutputIntervalOutOfRange);
-    status = ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"1:2","max_active_sessions":"0"})JSON",
-        npm::NpmBasicTaskConfigError::kAnalysisValidationError,
-        "max_active_sessions");
+    status =
+        ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"1:2","max_active_sessions":"0"})JSON",
+                               npm::NpmBasicTaskConfigError::kAnalysisValidationError, "max_active_sessions");
     assert(status.analysis_error == npm::NpmAnalysisConfigError::kActiveSessionsOutOfRange);
 }
 
@@ -6390,8 +6330,8 @@ void TestNpmBasicTaskConfigNumericBoundaries() {
          npm::NpmAnalysisConfigError::kPendingOutputBytesOutOfRange},
     };
     const auto make_json = [](const char* field, const std::string& value) {
-        return std::string(R"JSON({"input_namespace":"a","source_domains":"0:0",")JSON") + field +
-               R"JSON(":")JSON" + value + R"JSON("})JSON";
+        return std::string(R"JSON({"input_namespace":"a","source_domains":"0:0",")JSON") + field + R"JSON(":")JSON" +
+               value + R"JSON("})JSON";
     };
     for (const auto& boundary : boundaries) {
         for (const uint64_t value : {boundary.minimum, boundary.maximum}) {
@@ -6410,8 +6350,7 @@ void TestNpmBasicTaskConfigNumericBoundaries() {
         }
         for (const char* text : {"", "+1", "-1", " 1", "1 ", "1.0", "1e3", "abc"}) {
             const auto json = make_json(boundary.field, text);
-            ParseTaskConfigFailure(
-                json.c_str(), npm::NpmBasicTaskConfigError::kInvalidInteger, boundary.field);
+            ParseTaskConfigFailure(json.c_str(), npm::NpmBasicTaskConfigError::kInvalidInteger, boundary.field);
         }
     }
     const auto json = make_json("tcp_idle_timeout_ns", "9223372036854775808");
@@ -6424,15 +6363,14 @@ void TestNpmBasicTaskConfigFeatureSelection() {
     static_assert(npm::kNpmMaxSessionTcpRangesPerDirection == 65536);
 
     npm::NpmBasicTaskConfig output;
-    auto status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-        R"JSON("observing":"session","session_max_tcp_ranges_per_direction":"8"})JSON",
-        &output);
+    auto status =
+        npm::ParseNpmBasicTaskConfig(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
+                                     R"JSON("observing":"session","session_max_tcp_ranges_per_direction":"8"})JSON",
+                                     &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(!output.features.basic_enabled && output.features.session_enabled);
     assert(output.features.observing == npm::NpmResultEntity::kSession);
-    assert(output.features.session_max_tcp_ranges_per_direction ==
-           npm::kNpmMinSessionTcpRangesPerDirection);
+    assert(output.features.session_max_tcp_ranges_per_direction == npm::kNpmMinSessionTcpRangesPerDirection);
 
     status = npm::ParseNpmBasicTaskConfig(
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,session",)JSON"
@@ -6441,8 +6379,7 @@ void TestNpmBasicTaskConfigFeatureSelection() {
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.features.basic_enabled && output.features.session_enabled);
     assert(output.features.observing == npm::NpmResultEntity::kBasic);
-    assert(output.features.session_max_tcp_ranges_per_direction ==
-           npm::kNpmMaxSessionTcpRangesPerDirection);
+    assert(output.features.session_max_tcp_ranges_per_direction == npm::kNpmMaxSessionTcpRangesPerDirection);
 
     status = npm::ParseNpmBasicTaskConfig(
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":" session , basic ",)JSON"
@@ -6451,62 +6388,71 @@ void TestNpmBasicTaskConfigFeatureSelection() {
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.features.basic_enabled && output.features.session_enabled);
     assert(output.features.observing == npm::NpmResultEntity::kSession);
-    assert(output.features.session_max_tcp_ranges_per_direction ==
-           npm::kNpmDefaultSessionTcpRangesPerDirection);
+    assert(output.features.session_max_tcp_ranges_per_direction == npm::kNpmDefaultSessionTcpRangesPerDirection);
+
+    const char* labeling_json = R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,labeling",)JSON"
+                                R"JSON("parameters":"{\"schema_version\":1,\"framework\":{)JSON"
+                                R"JSON(\"labeling\":\"config.corp-labels@7\"}}"})JSON";
+    status = npm::ParseNpmBasicTaskConfig(labeling_json, &output, true);
+    assert(status.error == npm::NpmBasicTaskConfigError::kNone);
+    assert(output.features.basic_enabled && !output.features.session_enabled && output.features.labeling_enabled);
+    assert(output.labeling_reference == "config.corp-labels@7");
+    assert(output.labeling_memory_mib == npm::kNpmDefaultLabelingMemoryMiB);
+
+    const char* sized_labeling_json =
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,labeling",)JSON"
+        R"JSON("parameters":"{\"schema_version\":1,\"framework\":{)JSON"
+        R"JSON(\"labeling\":\"config.corp-labels@7\",\"labeling_memory_mib\":128}}"})JSON";
+    status = npm::ParseNpmBasicTaskConfig(sized_labeling_json, &output, true);
+    assert(status.error == npm::NpmBasicTaskConfigError::kNone);
+    assert(output.labeling_reference == "config.corp-labels@7");
+    assert(output.labeling_memory_mib == 128);
+
+    status = npm::ParseNpmBasicTaskConfig(labeling_json, &output);
+    assert(status.error == npm::NpmBasicTaskConfigError::kInvalidParameters);
+    assert(status.parameter_status.error == npm::NpmParameterErrorV1::kUnavailableFeature);
+    assert(status.parameter_status.path == "/labeling");
 
     const char* invalid_features[] = {
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":""})JSON",
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,,session"})JSON",
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,basic"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,labeling,labeling"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"labeling"})JSON",
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,dns"})JSON",
     };
     for (const char* json : invalid_features) {
         ParseTaskConfigFailure(json, npm::NpmBasicTaskConfigError::kInvalidFeatures, "features");
     }
 
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"session"})JSON",
-        npm::NpmBasicTaskConfigError::kObservingFeatureDisabled,
-        "observing");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session"})JSON",
-        npm::NpmBasicTaskConfigError::kObservingFeatureDisabled,
-        "observing");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"session"})JSON",
+                           npm::NpmBasicTaskConfigError::kObservingFeatureDisabled, "observing");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session"})JSON",
+                           npm::NpmBasicTaskConfigError::kObservingFeatureDisabled, "observing");
     ParseTaskConfigFailure(
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic","observing":"session"})JSON",
-        npm::NpmBasicTaskConfigError::kObservingFeatureDisabled,
-        "observing");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"basic,session"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidObserving,
-        "observing");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"dns"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidObserving,
-        "observing");
+        npm::NpmBasicTaskConfigError::kObservingFeatureDisabled, "observing");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"basic,session"})JSON",
+                           npm::NpmBasicTaskConfigError::kInvalidObserving, "observing");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"dns"})JSON",
+                           npm::NpmBasicTaskConfigError::kInvalidObserving, "observing");
     ParseTaskConfigFailure(
         R"JSON({"input_namespace":"a","source_domains":"0:0","session_max_tcp_ranges_per_direction":"1024"})JSON",
-        npm::NpmBasicTaskConfigError::kSessionConfigWithoutFeature,
-        "session_max_tcp_ranges_per_direction");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-        R"JSON("observing":"session","session_max_tcp_ranges_per_direction":"x"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidInteger,
-        "session_max_tcp_ranges_per_direction");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-        R"JSON("observing":"session","session_max_tcp_ranges_per_direction":"7"})JSON",
-        npm::NpmBasicTaskConfigError::kSessionTcpRangesOutOfRange,
-        "session_max_tcp_ranges_per_direction");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-        R"JSON("observing":"session","session_max_tcp_ranges_per_direction":"65537"})JSON",
-        npm::NpmBasicTaskConfigError::kSessionTcpRangesOutOfRange,
-        "session_max_tcp_ranges_per_direction");
+        npm::NpmBasicTaskConfigError::kSessionConfigWithoutFeature, "session_max_tcp_ranges_per_direction");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
+                           R"JSON("observing":"session","session_max_tcp_ranges_per_direction":"x"})JSON",
+                           npm::NpmBasicTaskConfigError::kInvalidInteger, "session_max_tcp_ranges_per_direction");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
+                           R"JSON("observing":"session","session_max_tcp_ranges_per_direction":"7"})JSON",
+                           npm::NpmBasicTaskConfigError::kSessionTcpRangesOutOfRange,
+                           "session_max_tcp_ranges_per_direction");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
+                           R"JSON("observing":"session","session_max_tcp_ranges_per_direction":"65537"})JSON",
+                           npm::NpmBasicTaskConfigError::kSessionTcpRangesOutOfRange,
+                           "session_max_tcp_ranges_per_direction");
 }
 
-void AssertEquivalentTaskConfig(const npm::NpmBasicTaskConfig& left,
-                                const npm::NpmBasicTaskConfig& right) {
+void AssertEquivalentTaskConfig(const npm::NpmBasicTaskConfig& left, const npm::NpmBasicTaskConfig& right) {
     assert(left.analysis.run_mode == right.analysis.run_mode);
     assert(left.analysis.result_mode == right.analysis.result_mode);
     assert(left.analysis.overload_policy == right.analysis.overload_policy);
@@ -6520,9 +6466,11 @@ void AssertEquivalentTaskConfig(const npm::NpmBasicTaskConfig& left,
     assert(left.analysis.max_pending_output_bytes == right.analysis.max_pending_output_bytes);
     assert(left.features.basic_enabled == right.features.basic_enabled);
     assert(left.features.session_enabled == right.features.session_enabled);
+    assert(left.features.labeling_enabled == right.features.labeling_enabled);
+    assert(left.labeling_reference == right.labeling_reference);
+    assert(left.labeling_memory_mib == right.labeling_memory_mib);
     assert(left.features.observing == right.features.observing);
-    assert(left.features.session_max_tcp_ranges_per_direction ==
-           right.features.session_max_tcp_ranges_per_direction);
+    assert(left.features.session_max_tcp_ranges_per_direction == right.features.session_max_tcp_ranges_per_direction);
     assert(left.domains.input_namespace == right.domains.input_namespace);
     assert(left.domains.bindings.size() == right.domains.bindings.size());
     for (std::size_t index = 0; index < left.domains.bindings.size(); ++index) {
@@ -6539,11 +6487,8 @@ struct EquivalentRuntimeTaskConfigs {
     npm::NpmBasicTaskConfig parameters_v1;
 };
 
-EquivalentRuntimeTaskConfigs MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode run_mode,
-                                                              bool observing_session) {
-    const char* feature_fields = observing_session
-                                     ? R"JSON(,"features":"session","observing":"session")JSON"
-                                     : "";
+EquivalentRuntimeTaskConfigs MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode run_mode, bool observing_session) {
+    const char* feature_fields = observing_session ? R"JSON(,"features":"session","observing":"session")JSON" : "";
     const char* legacy_framework = run_mode == npm::NpmRunMode::kRealtime
                                        ? R"JSON(,"run_mode":"realtime",)JSON"
                                          R"JSON("result_mode":"periodic_snapshot",)JSON"
@@ -6581,24 +6526,21 @@ EquivalentRuntimeTaskConfigs MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode ru
               R"JSON(\"max_tracked_bytes\":1048576,\"max_pending_output_bytes\":1048576})JSON";
 
     EquivalentRuntimeTaskConfigs configs;
-    configs.legacy_json =
-        std::string(R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77")JSON") +
-        feature_fields + legacy_framework;
+    configs.legacy_json = std::string(R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77")JSON") +
+                          feature_fields + legacy_framework;
     configs.parameters_v1_json =
-        std::string(R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77")JSON") +
-        feature_fields + parameters_framework;
+        std::string(R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77")JSON") + feature_fields +
+        parameters_framework;
     if (observing_session) {
         configs.legacy_json += R"JSON(,"session_max_tcp_ranges_per_direction":"8")JSON";
-        configs.parameters_v1_json +=
-            R"JSON(,\"session\":{\"max_tcp_ranges_per_direction\":8})JSON";
+        configs.parameters_v1_json += R"JSON(,\"session\":{\"max_tcp_ranges_per_direction\":8})JSON";
     }
     configs.legacy_json += "}";
     configs.parameters_v1_json += R"JSON(}"})JSON";
 
-    const auto legacy_status =
-        npm::ParseNpmBasicTaskConfig(configs.legacy_json.c_str(), &configs.legacy);
-    const auto parameters_status = npm::ParseNpmBasicTaskConfig(
-        configs.parameters_v1_json.c_str(), &configs.parameters_v1);
+    const auto legacy_status = npm::ParseNpmBasicTaskConfig(configs.legacy_json.c_str(), &configs.legacy);
+    const auto parameters_status =
+        npm::ParseNpmBasicTaskConfig(configs.parameters_v1_json.c_str(), &configs.parameters_v1);
     assert(legacy_status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(parameters_status.error == npm::NpmBasicTaskConfigError::kNone);
     AssertEquivalentTaskConfig(configs.legacy, configs.parameters_v1);
@@ -6606,8 +6548,7 @@ EquivalentRuntimeTaskConfigs MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode ru
 }
 
 void TestNpmBasicTaskConfigNormalizesParametersV1() {
-    static_assert(std::is_same_v<decltype(npm::NpmBasicTaskConfigStatus::parameter_status),
-                                 npm::NpmParameterStatusV1>);
+    static_assert(std::is_same_v<decltype(npm::NpmBasicTaskConfigStatus::parameter_status), npm::NpmParameterStatusV1>);
 
     std::string v1_json = R"JSON({
         "input_namespace":"pcapfile.capture",
@@ -6642,8 +6583,7 @@ void TestNpmBasicTaskConfigNormalizesParametersV1() {
     assert(v1.analysis.max_pending_output_bytes == npm::kNpmMaxPendingOutputBytes);
     assert(v1.features.basic_enabled && v1.features.session_enabled);
     assert(v1.features.observing == npm::NpmResultEntity::kSession);
-    assert(v1.features.session_max_tcp_ranges_per_direction ==
-           npm::kNpmMinSessionTcpRangesPerDirection);
+    assert(v1.features.session_max_tcp_ranges_per_direction == npm::kNpmMinSessionTcpRangesPerDirection);
     assert(v1.domains.input_namespace == "pcapfile.capture");
     assert(v1.domains.bindings.size() == 2);
 
@@ -6673,30 +6613,27 @@ void TestNpmBasicTaskConfigNormalizesParametersV1() {
     v1_json.assign(v1_json.size(), 'x');
     assert(v1.domains.input_namespace == "pcapfile.capture");
     assert(v1.domains.bindings[1].observation_domain_id == 8);
-    assert(v1.features.session_max_tcp_ranges_per_direction ==
-           npm::kNpmMinSessionTcpRangesPerDirection);
+    assert(v1.features.session_max_tcp_ranges_per_direction == npm::kNpmMinSessionTcpRangesPerDirection);
 
     npm::NpmBasicTaskConfig basic_only;
-    status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
-        R"JSON("parameters":"{\"schema_version\":1,\"session\":{\"unknown\":null},)JSON"
-        R"JSON(\"future\":{\"anything\":[1,2]}}"})JSON",
-        &basic_only);
+    status =
+        npm::ParseNpmBasicTaskConfig(R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
+                                     R"JSON("parameters":"{\"schema_version\":1,\"session\":{\"unknown\":null},)JSON"
+                                     R"JSON(\"future\":{\"anything\":[1,2]}}"})JSON",
+                                     &basic_only);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(basic_only.features.basic_enabled && !basic_only.features.session_enabled);
-    assert(basic_only.features.session_max_tcp_ranges_per_direction ==
-           npm::kNpmDefaultSessionTcpRangesPerDirection);
+    assert(basic_only.features.session_max_tcp_ranges_per_direction == npm::kNpmDefaultSessionTcpRangesPerDirection);
 
     npm::NpmBasicTaskConfig session_only;
-    status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-        R"JSON("observing":"session",)JSON"
-        R"JSON("parameters":"{\"schema_version\":1,\"basic\":{\"unknown\":1}}"})JSON",
-        &session_only);
+    status =
+        npm::ParseNpmBasicTaskConfig(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
+                                     R"JSON("observing":"session",)JSON"
+                                     R"JSON("parameters":"{\"schema_version\":1,\"basic\":{\"unknown\":1}}"})JSON",
+                                     &session_only);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(!session_only.features.basic_enabled && session_only.features.session_enabled);
-    assert(session_only.features.session_max_tcp_ranges_per_direction ==
-           npm::kNpmDefaultSessionTcpRangesPerDirection);
+    assert(session_only.features.session_max_tcp_ranges_per_direction == npm::kNpmDefaultSessionTcpRangesPerDirection);
 }
 
 void TestNpmBasicTaskConfigRejectsParameterSourceConflicts() {
@@ -6715,81 +6652,62 @@ void TestNpmBasicTaskConfigRejectsParameterSourceConflicts() {
         "session_max_tcp_ranges_per_direction",
     };
     for (const char* field : kLegacyTuningFields) {
-        const std::string json =
-            std::string(R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON") +
-            R"JSON("parameters":"{\"schema_version\":1}",")JSON" + field +
-            R"JSON(":"ignored"})JSON";
+        const std::string json = std::string(R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON") +
+                                 R"JSON("parameters":"{\"schema_version\":1}",")JSON" + field +
+                                 R"JSON(":"ignored"})JSON";
         const std::string path = std::string("/") + field;
-        ParseTaskConfigFailure(json.c_str(),
-                               npm::NpmBasicTaskConfigError::kParameterSourceConflict,
-                               field,
-                               npm::NpmParameterErrorV1::kLegacyConflict,
-                               path.c_str());
+        ParseTaskConfigFailure(json.c_str(), npm::NpmBasicTaskConfigError::kParameterSourceConflict, field,
+                               npm::NpmParameterErrorV1::kLegacyConflict, path.c_str());
     }
 
     npm::NpmBasicTaskConfig output;
-    const auto status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-        R"JSON("observing":"session","parameters":"{\"schema_version\":1}"})JSON",
-        &output);
+    const auto status =
+        npm::ParseNpmBasicTaskConfig(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
+                                     R"JSON("observing":"session","parameters":"{\"schema_version\":1}"})JSON",
+                                     &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(!output.features.basic_enabled && output.features.session_enabled);
 }
 
 void TestNpmBasicTaskConfigPreservesParameterFailuresAtomically() {
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":""})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidParameters,
-        "parameters",
-        npm::NpmParameterErrorV1::kEmptyInput);
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
-        R"JSON("parameters":"{\"schema_version\":1,\"framework\":{)JSON"
-        R"JSON(\"max_active_sessions\":\"1\"}}"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidParameters,
-        "parameters",
-        npm::NpmParameterErrorV1::kInvalidType,
-        "/framework/max_active_sessions");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-        R"JSON("observing":"session",)JSON"
-        R"JSON("parameters":"{\"schema_version\":1,\"session\":{)JSON"
-        R"JSON(\"max_tcp_ranges_per_direction\":7}}"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidParameters,
-        "parameters",
-        npm::NpmParameterErrorV1::kInvalidRange,
-        "/session/max_tcp_ranges_per_direction");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":{}})JSON",
-        npm::NpmBasicTaskConfigError::kNonStringValue,
-        "parameters");
-    ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
-        R"JSON("parameters":"{\"schema_version\":1}\u0000trailing"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidParameters,
-        "parameters",
-        npm::NpmParameterErrorV1::kInvalidJson);
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":""})JSON",
+                           npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
+                           npm::NpmParameterErrorV1::kEmptyInput);
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
+                           R"JSON("parameters":"{\"schema_version\":1,\"framework\":{)JSON"
+                           R"JSON(\"max_active_sessions\":\"1\"}}"})JSON",
+                           npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
+                           npm::NpmParameterErrorV1::kInvalidType, "/framework/max_active_sessions");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
+                           R"JSON("observing":"session",)JSON"
+                           R"JSON("parameters":"{\"schema_version\":1,\"session\":{)JSON"
+                           R"JSON(\"max_tcp_ranges_per_direction\":7}}"})JSON",
+                           npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
+                           npm::NpmParameterErrorV1::kInvalidRange, "/session/max_tcp_ranges_per_direction");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":{}})JSON",
+                           npm::NpmBasicTaskConfigError::kNonStringValue, "parameters");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
+                           R"JSON("parameters":"{\"schema_version\":1}\u0000trailing"})JSON",
+                           npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
+                           npm::NpmParameterErrorV1::kInvalidJson);
 
     std::string oversized = R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":")JSON";
     oversized.append(npm::kNpmParametersMaxJsonBytesV1 + 1, 'x');
     oversized += R"JSON("})JSON";
-    ParseTaskConfigFailure(oversized.c_str(),
-                           npm::NpmBasicTaskConfigError::kInvalidParameters,
-                           "parameters",
+    ParseTaskConfigFailure(oversized.c_str(), npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
                            npm::NpmParameterErrorV1::kJsonTooLarge);
 }
 
-npm::NpmParameterStatusV1 ParseParametersFailure(
-    const char* json,
-    const npm::NpmParameterConsumersV1& consumers,
-    npm::NpmParameterErrorV1 expected_error,
-    const char* expected_path = "") {
+npm::NpmParameterStatusV1 ParseParametersFailure(const char* json, const npm::NpmParameterConsumersV1& consumers,
+                                                 npm::NpmParameterErrorV1 expected_error,
+                                                 const char* expected_path = "") {
     npm::NpmTaskParametersV1 output;
     output.schema_version = 99;
     output.source = npm::NpmParameterSourceV1::kLegacyWith;
     output.framework.analysis = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kRealtime);
     output.framework.analysis.max_active_sessions = 123;
     output.framework.labeling_reference = "sentinel";
+    output.framework.labeling_memory_mib = 8;
     output.basic.reset();
     output.session = npm::NpmSessionModuleParametersV1{321};
 
@@ -6801,36 +6719,33 @@ npm::NpmParameterStatusV1 ParseParametersFailure(
     assert(output.framework.analysis.run_mode == npm::NpmRunMode::kRealtime);
     assert(output.framework.analysis.max_active_sessions == 123);
     assert(output.framework.labeling_reference == "sentinel");
+    assert(output.framework.labeling_memory_mib == 8);
     assert(!output.basic.has_value());
     assert(output.session.has_value());
     assert(output.session->max_tcp_ranges_per_direction == 321);
     return status;
 }
 
-void AssertEquivalentParameters(const npm::NpmTaskParametersV1& left,
-                                const npm::NpmTaskParametersV1& right) {
+void AssertEquivalentParameters(const npm::NpmTaskParametersV1& left, const npm::NpmTaskParametersV1& right) {
     assert(left.schema_version == right.schema_version);
     assert(left.source == right.source);
     assert(left.framework.analysis.run_mode == right.framework.analysis.run_mode);
     assert(left.framework.analysis.result_mode == right.framework.analysis.result_mode);
     assert(left.framework.analysis.output_interval_ns == right.framework.analysis.output_interval_ns);
-    assert(left.framework.analysis.payload_sample_packets ==
-           right.framework.analysis.payload_sample_packets);
+    assert(left.framework.analysis.payload_sample_packets == right.framework.analysis.payload_sample_packets);
     assert(left.framework.analysis.tcp_idle_timeout_ns == right.framework.analysis.tcp_idle_timeout_ns);
     assert(left.framework.analysis.udp_idle_timeout_ns == right.framework.analysis.udp_idle_timeout_ns);
-    assert(left.framework.analysis.out_of_order_tolerance_ns ==
-           right.framework.analysis.out_of_order_tolerance_ns);
+    assert(left.framework.analysis.out_of_order_tolerance_ns == right.framework.analysis.out_of_order_tolerance_ns);
     assert(left.framework.analysis.max_active_sessions == right.framework.analysis.max_active_sessions);
     assert(left.framework.analysis.max_tracked_bytes == right.framework.analysis.max_tracked_bytes);
-    assert(left.framework.analysis.max_pending_output_bytes ==
-           right.framework.analysis.max_pending_output_bytes);
+    assert(left.framework.analysis.max_pending_output_bytes == right.framework.analysis.max_pending_output_bytes);
     assert(left.framework.analysis.overload_policy == right.framework.analysis.overload_policy);
     assert(left.framework.labeling_reference == right.framework.labeling_reference);
+    assert(left.framework.labeling_memory_mib == right.framework.labeling_memory_mib);
     assert(left.basic.has_value() == right.basic.has_value());
     assert(left.session.has_value() == right.session.has_value());
     if (left.session) {
-        assert(left.session->max_tcp_ranges_per_direction ==
-               right.session->max_tcp_ranges_per_direction);
+        assert(left.session->max_tcp_ranges_per_direction == right.session->max_tcp_ranges_per_direction);
     }
 }
 
@@ -6848,6 +6763,7 @@ void TestNpmParametersV1OwnsCanonicalConfig() {
     assert(minimal.framework.analysis.run_mode == npm::NpmRunMode::kOffline);
     assert(minimal.framework.analysis.result_mode == npm::NpmResultMode::kFinal);
     assert(!minimal.framework.labeling_reference.has_value());
+    assert(!minimal.framework.labeling_memory_mib.has_value());
     assert(minimal.basic.has_value() && !minimal.session.has_value());
 
     npm::NpmParameterConsumersV1 consumers;
@@ -6881,15 +6797,14 @@ void TestNpmParametersV1OwnsCanonicalConfig() {
     assert(first.framework.analysis.payload_sample_packets == npm::kNpmMaxPayloadSamplePackets);
     assert(first.framework.analysis.tcp_idle_timeout_ns == npm::kNpmMinIdleTimeoutNs);
     assert(first.framework.analysis.udp_idle_timeout_ns == npm::kNpmMaxIdleTimeoutNs);
-    assert(first.framework.analysis.out_of_order_tolerance_ns ==
-           npm::kNpmMaxOutOfOrderToleranceNs);
+    assert(first.framework.analysis.out_of_order_tolerance_ns == npm::kNpmMaxOutOfOrderToleranceNs);
     assert(first.framework.analysis.max_active_sessions == npm::kNpmMaxActiveSessions);
     assert(first.framework.analysis.max_tracked_bytes == npm::kNpmMaxTrackedBytes);
     assert(first.framework.analysis.max_pending_output_bytes == npm::kNpmMaxPendingOutputBytes);
     assert(!first.framework.labeling_reference.has_value());
+    assert(!first.framework.labeling_memory_mib.has_value());
     assert(first.basic.has_value() && first.session.has_value());
-    assert(first.session->max_tcp_ranges_per_direction ==
-           npm::kNpmMaxSessionTcpRangesPerDirection);
+    assert(first.session->max_tcp_ranges_per_direction == npm::kNpmMaxSessionTcpRangesPerDirection);
 
     const char* reordered = R"JSON({
         "schema_version":1,
@@ -6907,8 +6822,7 @@ void TestNpmParametersV1OwnsCanonicalConfig() {
     AssertEquivalentParameters(first, second);
 
     json.assign(json.size(), 'x');
-    assert(first.session->max_tcp_ranges_per_direction ==
-           npm::kNpmMaxSessionTcpRangesPerDirection);
+    assert(first.session->max_tcp_ranges_per_direction == npm::kNpmMaxSessionTcpRangesPerDirection);
 }
 
 void TestNpmParametersV1RejectsEnvelopeAndDuplicatesAtomically() {
@@ -6919,36 +6833,30 @@ void TestNpmParametersV1RejectsEnvelopeAndDuplicatesAtomically() {
     assert(status.error == npm::NpmParameterErrorV1::kNullOutput && status.path.empty());
     ParseParametersFailure("{", consumers, npm::NpmParameterErrorV1::kInvalidJson);
     ParseParametersFailure("[]", consumers, npm::NpmParameterErrorV1::kInvalidEnvelope);
-    ParseParametersFailure("{}", consumers, npm::NpmParameterErrorV1::kMissingSchemaVersion,
+    ParseParametersFailure("{}", consumers, npm::NpmParameterErrorV1::kMissingSchemaVersion, "/schema_version");
+    ParseParametersFailure(R"JSON({"schema_version":"1"})JSON", consumers, npm::NpmParameterErrorV1::kInvalidType,
                            "/schema_version");
-    ParseParametersFailure(R"JSON({"schema_version":"1"})JSON", consumers,
-                           npm::NpmParameterErrorV1::kInvalidType, "/schema_version");
-    ParseParametersFailure(R"JSON({"schema_version":2})JSON", consumers,
-                           npm::NpmParameterErrorV1::kUnsupportedVersion, "/schema_version");
+    ParseParametersFailure(R"JSON({"schema_version":2})JSON", consumers, npm::NpmParameterErrorV1::kUnsupportedVersion,
+                           "/schema_version");
     ParseParametersFailure(R"JSON({"schema_version":1,"schema_version":1})JSON", consumers,
                            npm::NpmParameterErrorV1::kDuplicateField, "/schema_version");
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"framework":{"run_mode":"offline","run_mode":"realtime"}})JSON",
-        consumers, npm::NpmParameterErrorV1::kDuplicateField, "/framework/run_mode");
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"future":{"nested":{"value":1,"value":2}}})JSON",
-        consumers, npm::NpmParameterErrorV1::kDuplicateField, "/future/nested/value");
-    ParseParametersFailure(R"JSON({"schema_version":1,"":7})JSON", consumers,
-                           npm::NpmParameterErrorV1::kInvalidType, "/");
+    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"run_mode":"offline","run_mode":"realtime"}})JSON",
+                           consumers, npm::NpmParameterErrorV1::kDuplicateField, "/framework/run_mode");
+    ParseParametersFailure(R"JSON({"schema_version":1,"future":{"nested":{"value":1,"value":2}}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kDuplicateField, "/future/nested/value");
+    ParseParametersFailure(R"JSON({"schema_version":1,"":7})JSON", consumers, npm::NpmParameterErrorV1::kInvalidType,
+                           "/");
 
     const std::string size_prefix = R"JSON({"schema_version":1,"future":{"padding":")JSON";
     const std::string size_suffix = R"JSON("}})JSON";
     std::string maximum_size = size_prefix;
-    maximum_size.append(npm::kNpmParametersMaxJsonBytesV1 -
-                            size_prefix.size() - size_suffix.size(),
-                        'x');
+    maximum_size.append(npm::kNpmParametersMaxJsonBytesV1 - size_prefix.size() - size_suffix.size(), 'x');
     maximum_size += size_suffix;
     npm::NpmTaskParametersV1 maximum_size_output;
     status = npm::ParseNpmParametersV1(maximum_size.c_str(), consumers, &maximum_size_output);
     assert(status.error == npm::NpmParameterErrorV1::kNone);
     std::string oversized = maximum_size + " ";
-    ParseParametersFailure(oversized.c_str(), consumers,
-                           npm::NpmParameterErrorV1::kJsonTooLarge);
+    ParseParametersFailure(oversized.c_str(), consumers, npm::NpmParameterErrorV1::kJsonTooLarge);
 
     const auto nested_json = [](std::size_t depth) {
         std::string json = R"JSON({"schema_version":1,"future":{"nested":)JSON";
@@ -6968,24 +6876,21 @@ void TestNpmParametersV1RejectsEnvelopeAndDuplicatesAtomically() {
     for (std::size_t depth = 0; depth < npm::kNpmParametersMaxDepthV1 - 1; ++depth) {
         deep_path += "/0";
     }
-    ParseParametersFailure(deep.c_str(), consumers,
-                           npm::NpmParameterErrorV1::kNestingTooDeep,
-                           deep_path.c_str());
+    ParseParametersFailure(deep.c_str(), consumers, npm::NpmParameterErrorV1::kNestingTooDeep, deep_path.c_str());
 }
 
 void TestNpmParametersV1ConsumesOnlyEnabledAvailableModules() {
     npm::NpmParameterConsumersV1 basic_only;
     npm::NpmTaskParametersV1 output;
-    auto status = npm::ParseNpmParametersV1(
-        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":null},)JSON"
-        R"JSON("future":{"anything":false},"basic":{}})JSON",
-        basic_only, &output);
+    auto status =
+        npm::ParseNpmParametersV1(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":null},)JSON"
+                                  R"JSON("future":{"anything":false},"basic":{}})JSON",
+                                  basic_only, &output);
     assert(status.error == npm::NpmParameterErrorV1::kNone);
     assert(output.basic.has_value() && !output.session.has_value());
 
-    status = npm::ParseNpmParametersV1(
-        R"JSON({"schema_version":1,"session":{"unknown":"ignored"}})JSON",
-        basic_only, &output);
+    status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1,"session":{"unknown":"ignored"}})JSON", basic_only,
+                                       &output);
     assert(status.error == npm::NpmParameterErrorV1::kNone && !output.session.has_value());
     ParseParametersFailure(R"JSON({"schema_version":1,"future":7})JSON", basic_only,
                            npm::NpmParameterErrorV1::kInvalidType, "/future");
@@ -7000,32 +6905,19 @@ void TestNpmParametersV1ConsumesOnlyEnabledAvailableModules() {
     status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1})JSON", session, &output);
     assert(status.error == npm::NpmParameterErrorV1::kNone);
     assert(!output.basic.has_value() && output.session.has_value());
-    assert(output.session->max_tcp_ranges_per_direction ==
-           npm::kNpmDefaultSessionTcpRangesPerDirection);
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":null}})JSON",
-        session, npm::NpmParameterErrorV1::kInvalidType,
-        "/session/max_tcp_ranges_per_direction");
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":"1024"}})JSON",
-        session, npm::NpmParameterErrorV1::kInvalidType,
-        "/session/max_tcp_ranges_per_direction");
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":7}})JSON",
-        session, npm::NpmParameterErrorV1::kInvalidRange,
-        "/session/max_tcp_ranges_per_direction");
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":65537}})JSON",
-        session, npm::NpmParameterErrorV1::kInvalidRange,
-        "/session/max_tcp_ranges_per_direction");
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":4294967296}})JSON",
-        session, npm::NpmParameterErrorV1::kInvalidRange,
-        "/session/max_tcp_ranges_per_direction");
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":-1}})JSON",
-        session, npm::NpmParameterErrorV1::kInvalidType,
-        "/session/max_tcp_ranges_per_direction");
+    assert(output.session->max_tcp_ranges_per_direction == npm::kNpmDefaultSessionTcpRangesPerDirection);
+    ParseParametersFailure(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":null}})JSON", session,
+                           npm::NpmParameterErrorV1::kInvalidType, "/session/max_tcp_ranges_per_direction");
+    ParseParametersFailure(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":"1024"}})JSON", session,
+                           npm::NpmParameterErrorV1::kInvalidType, "/session/max_tcp_ranges_per_direction");
+    ParseParametersFailure(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":7}})JSON", session,
+                           npm::NpmParameterErrorV1::kInvalidRange, "/session/max_tcp_ranges_per_direction");
+    ParseParametersFailure(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":65537}})JSON", session,
+                           npm::NpmParameterErrorV1::kInvalidRange, "/session/max_tcp_ranges_per_direction");
+    ParseParametersFailure(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":4294967296}})JSON",
+                           session, npm::NpmParameterErrorV1::kInvalidRange, "/session/max_tcp_ranges_per_direction");
+    ParseParametersFailure(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":-1}})JSON", session,
+                           npm::NpmParameterErrorV1::kInvalidType, "/session/max_tcp_ranges_per_direction");
     ParseParametersFailure(R"JSON({"schema_version":1,"session":{"unknown":1}})JSON", session,
                            npm::NpmParameterErrorV1::kUnknownConsumedField, "/session/unknown");
 
@@ -7033,65 +6925,87 @@ void TestNpmParametersV1ConsumesOnlyEnabledAvailableModules() {
     ParseParametersFailure(R"JSON({"schema_version":1,"session":{}})JSON", session,
                            npm::NpmParameterErrorV1::kUnavailableFeature, "/session");
     session.session_enabled = false;
-    status = npm::ParseNpmParametersV1(
-        R"JSON({"schema_version":1,"session":{"unknown":null}})JSON", session, &output);
+    status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1,"session":{"unknown":null}})JSON", session, &output);
     assert(status.error == npm::NpmParameterErrorV1::kNone && !output.session.has_value());
 }
 
 void TestNpmParametersV1ValidatesFrameworkAndConditionalLabeling() {
     npm::NpmParameterConsumersV1 consumers;
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"framework":{"unknown":1}})JSON", consumers,
-        npm::NpmParameterErrorV1::kUnknownConsumedField, "/framework/unknown");
+    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"unknown":1}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/framework/unknown");
     ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"":1}})JSON", consumers,
                            npm::NpmParameterErrorV1::kUnknownConsumedField, "/framework/");
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"framework":{"run_mode":null}})JSON", consumers,
-        npm::NpmParameterErrorV1::kInvalidType, "/framework/run_mode");
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"framework":{"run_mode":"batch"}})JSON", consumers,
-        npm::NpmParameterErrorV1::kInvalidValue, "/framework/run_mode");
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"framework":{"max_active_sessions":"1"}})JSON", consumers,
-        npm::NpmParameterErrorV1::kInvalidType, "/framework/max_active_sessions");
-    ParseParametersFailure(
-        R"JSON({"schema_version":1,"framework":{"max_active_sessions":0}})JSON", consumers,
-        npm::NpmParameterErrorV1::kInvalidRange, "/framework/max_active_sessions");
+    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"run_mode":null}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kInvalidType, "/framework/run_mode");
+    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"run_mode":"batch"}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kInvalidValue, "/framework/run_mode");
+    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"max_active_sessions":"1"}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kInvalidType, "/framework/max_active_sessions");
+    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"max_active_sessions":0}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kInvalidRange, "/framework/max_active_sessions");
     ParseParametersFailure(R"JSON({"schema_version":1,"framework":null})JSON", consumers,
                            npm::NpmParameterErrorV1::kInvalidType, "/framework");
 
     npm::NpmTaskParametersV1 output;
     auto status = npm::ParseNpmParametersV1(
-        R"JSON({"schema_version":1,"framework":{"labeling":null}})JSON", consumers, &output);
+        R"JSON({"schema_version":1,"framework":{"labeling":null,"labeling_memory_mib":"ignored"}})JSON", consumers,
+        &output);
     assert(status.error == npm::NpmParameterErrorV1::kNone);
     assert(!output.framework.labeling_reference.has_value());
+    assert(!output.framework.labeling_memory_mib.has_value());
 
     consumers.labeling_enabled = true;
     consumers.labeling_available = true;
-    for (const char* reference : {"", "rules@1", "config.rules", "config.rules@latest",
-                                  "config.rules@0", "config.Rules@1", "config.rules@01"}) {
+    for (const char* reference : {"", "rules@1", "config.rules", "config.rules@latest", "config.rules@0",
+                                  "config.Rules@1", "config.rules@01"}) {
         const std::string json =
-            std::string(R"JSON({"schema_version":1,"framework":{"labeling":")JSON") + reference +
-            R"JSON("}})JSON";
-        ParseParametersFailure(json.c_str(), consumers,
-                               npm::NpmParameterErrorV1::kInvalidExactReference,
+            std::string(R"JSON({"schema_version":1,"framework":{"labeling":")JSON") + reference + R"JSON("}})JSON";
+        ParseParametersFailure(json.c_str(), consumers, npm::NpmParameterErrorV1::kInvalidExactReference,
                                "/framework/labeling");
     }
     status = npm::ParseNpmParametersV1(
-        R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7"}})JSON",
-        consumers, &output);
+        R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7"}})JSON", consumers, &output);
     assert(status.error == npm::NpmParameterErrorV1::kNone);
     assert(output.framework.labeling_reference == "config.corp-labels@7");
+    assert(output.framework.labeling_memory_mib == npm::kNpmDefaultLabelingMemoryMiB);
+
+    for (uint32_t memory_mib : {8U, 16U, 32U, 64U, 128U}) {
+        const std::string json =
+            R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7","labeling_memory_mib":)JSON" +
+            std::to_string(memory_mib) + "}}";
+        status = npm::ParseNpmParametersV1(json.c_str(), consumers, &output);
+        assert(status.error == npm::NpmParameterErrorV1::kNone);
+        assert(output.framework.labeling_memory_mib == memory_mib);
+    }
+    status = npm::ParseNpmParametersV1(
+        R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7","max_tracked_bytes":536870912,"labeling_memory_mib":256}})JSON",
+        consumers, &output);
+    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    assert(output.framework.labeling_memory_mib == 256);
+
+    for (const char* invalid : {"null", "\"64\"", "0", "7", "24", "512"}) {
+        const std::string json =
+            std::string(
+                R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7","labeling_memory_mib":)JSON") +
+            invalid + "}}";
+        ParseParametersFailure(json.c_str(), consumers,
+                               invalid[0] == '"' || invalid[0] == 'n' ? npm::NpmParameterErrorV1::kInvalidType
+                                                                      : npm::NpmParameterErrorV1::kInvalidRange,
+                               "/framework/labeling_memory_mib");
+    }
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7","labeling_memory_mib":256}})JSON",
+        consumers, npm::NpmParameterErrorV1::kInvalidRange, "/framework/labeling_memory_mib");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7","max_tracked_bytes":268435455,"labeling_memory_mib":128}})JSON",
+        consumers, npm::NpmParameterErrorV1::kInvalidRange, "/framework/labeling_memory_mib");
 
     consumers.labeling_available = false;
-    ParseParametersFailure(R"JSON({"schema_version":1})JSON", consumers,
-                           npm::NpmParameterErrorV1::kUnavailableFeature, "/labeling");
+    ParseParametersFailure(R"JSON({"schema_version":1})JSON", consumers, npm::NpmParameterErrorV1::kUnavailableFeature,
+                           "/labeling");
 }
 
-void AssertTaskBudgetUsage(const npm::NpmBudgetUsage& usage,
-                           uint64_t session,
-                           uint64_t module,
-                           uint64_t input,
+void AssertTaskBudgetUsage(const npm::NpmBudgetUsage& usage, uint64_t session, uint64_t module, uint64_t input,
                            uint64_t output) {
     assert(usage.session_state_bytes == session);
     assert(usage.module_state_bytes == module);
@@ -7099,8 +7013,7 @@ void AssertTaskBudgetUsage(const npm::NpmBudgetUsage& usage,
     assert(usage.pending_output_bytes == output);
 }
 
-void AssertEquivalentBudgetUsage(const npm::NpmBudgetUsage& left,
-                                 const npm::NpmBudgetUsage& right) {
+void AssertEquivalentBudgetUsage(const npm::NpmBudgetUsage& left, const npm::NpmBudgetUsage& right) {
     assert(left.session_state_bytes == right.session_state_bytes);
     assert(left.module_state_bytes == right.module_state_bytes);
     assert(left.input_batch_bytes == right.input_batch_bytes);
@@ -7124,12 +7037,9 @@ void AssertEquivalentOfflineBatchStatus(const npm::NpmBasicOfflineBatchStatus& l
     assert(left.process_status.row == right.process_status.row);
     assert(left.process_status.batch_error == right.process_status.batch_error);
     assert(left.process_status.packet_status.error == right.process_status.packet_status.error);
-    assert(left.process_status.packet_status.binding_error ==
-           right.process_status.packet_status.binding_error);
-    assert(left.process_status.packet_status.session_error ==
-           right.process_status.packet_status.session_error);
-    assert(left.process_status.packet_status.module_error ==
-           right.process_status.packet_status.module_error);
+    assert(left.process_status.packet_status.binding_error == right.process_status.packet_status.binding_error);
+    assert(left.process_status.packet_status.session_error == right.process_status.packet_status.session_error);
+    assert(left.process_status.packet_status.module_error == right.process_status.packet_status.module_error);
     assert(left.process_status.progress_disposition == right.process_status.progress_disposition);
     assert(left.process_status.module_error == right.process_status.module_error);
     assert(left.drain_status.error == right.drain_status.error);
@@ -7160,8 +7070,7 @@ void AssertEquivalentRealtimeStatus(const npm::NpmBasicRealtimeMaintenanceStatus
     assert(left.drain_status.session_encode_error == right.drain_status.session_encode_error);
 }
 
-void AssertEquivalentEofStatus(const npm::NpmEofFlushStatus& left,
-                               const npm::NpmEofFlushStatus& right) {
+void AssertEquivalentEofStatus(const npm::NpmEofFlushStatus& left, const npm::NpmEofFlushStatus& right) {
     assert(left.error == right.error);
     assert(left.session_error == right.session_error);
     assert(left.module_error == right.module_error);
@@ -7192,25 +7101,19 @@ void TestNpmTaskBudgetLimitsAtomicityAndIsolation() {
     assert(budget.Reserve(npm::NpmBudgetCategory::kModuleState, 1) == npm::NpmBudgetError::kNone);
     assert(budget.Reserve(npm::NpmBudgetCategory::kInputBatch, 1) == npm::NpmBudgetError::kNone);
     AssertTaskBudgetUsage(budget.Usage(), npm::kNpmMinTrackedBytes - 2, 1, 1, 0);
-    assert(budget.Reserve(npm::NpmBudgetCategory::kSessionState, 1) ==
-           npm::NpmBudgetError::kTrackedLimitExceeded);
+    assert(budget.Reserve(npm::NpmBudgetCategory::kSessionState, 1) == npm::NpmBudgetError::kTrackedLimitExceeded);
     AssertTaskBudgetUsage(budget.Usage(), npm::kNpmMinTrackedBytes - 2, 1, 1, 0);
 
     assert(budget.Reserve(npm::NpmBudgetCategory::kPendingOutput, npm::kNpmMinPendingOutputBytes) ==
            npm::NpmBudgetError::kNone);
     assert(budget.Reserve(npm::NpmBudgetCategory::kPendingOutput, 1) ==
            npm::NpmBudgetError::kPendingOutputLimitExceeded);
-    AssertTaskBudgetUsage(
-        budget.Usage(), npm::kNpmMinTrackedBytes - 2, 1, 1, npm::kNpmMinPendingOutputBytes);
+    AssertTaskBudgetUsage(budget.Usage(), npm::kNpmMinTrackedBytes - 2, 1, 1, npm::kNpmMinPendingOutputBytes);
 
-    assert(budget.Release(npm::NpmBudgetCategory::kInputBatch, 2) ==
-           npm::NpmBudgetError::kReleaseUnderflow);
-    assert(budget.Reserve(static_cast<npm::NpmBudgetCategory>(99), 1) ==
-           npm::NpmBudgetError::kInvalidCategory);
-    assert(budget.Release(static_cast<npm::NpmBudgetCategory>(99), 1) ==
-           npm::NpmBudgetError::kInvalidCategory);
-    AssertTaskBudgetUsage(
-        budget.Usage(), npm::kNpmMinTrackedBytes - 2, 1, 1, npm::kNpmMinPendingOutputBytes);
+    assert(budget.Release(npm::NpmBudgetCategory::kInputBatch, 2) == npm::NpmBudgetError::kReleaseUnderflow);
+    assert(budget.Reserve(static_cast<npm::NpmBudgetCategory>(99), 1) == npm::NpmBudgetError::kInvalidCategory);
+    assert(budget.Release(static_cast<npm::NpmBudgetCategory>(99), 1) == npm::NpmBudgetError::kInvalidCategory);
+    AssertTaskBudgetUsage(budget.Usage(), npm::kNpmMinTrackedBytes - 2, 1, 1, npm::kNpmMinPendingOutputBytes);
 
     assert(budget.Release(npm::NpmBudgetCategory::kSessionState, npm::kNpmMinTrackedBytes - 2) ==
            npm::NpmBudgetError::kNone);
@@ -7269,13 +7172,12 @@ npm::NpmBasicTaskConfig MakeRuntimeTaskConfig(npm::NpmRunMode mode = npm::NpmRun
     return config;
 }
 
-std::unique_ptr<npm::NpmBasicTaskRuntime> CreateRuntimeForTest(
-    const npm::NpmBasicTaskConfig& config,
-    flowsql::IQuerier* querier) {
+std::unique_ptr<npm::NpmBasicTaskRuntime> CreateRuntimeForTest(const npm::NpmBasicTaskConfig& config,
+                                                               flowsql::IQuerier* querier) {
     std::shared_ptr<arrow::Schema> output_schema;
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
-    const auto status = npm::NpmBasicTaskRuntime::Create(
-        config, querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+    const auto status =
+        npm::NpmBasicTaskRuntime::Create(config, querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
     assert(output_schema != nullptr && output_schema->Equals(*npm::NpmBasicResultSchema(), true));
     assert(runtime != nullptr);
@@ -7291,18 +7193,12 @@ npm::NpmTimeCapabilities AllRealtimeTimeCapabilities() {
     return capabilities;
 }
 
-std::unique_ptr<npm::NpmBasicTaskRuntime> CreateRealtimeRuntimeForTest(
-    const npm::NpmBasicTaskConfig& config,
-    flowsql::IQuerier* querier) {
+std::unique_ptr<npm::NpmBasicTaskRuntime> CreateRealtimeRuntimeForTest(const npm::NpmBasicTaskConfig& config,
+                                                                       flowsql::IQuerier* querier) {
     std::shared_ptr<arrow::Schema> output_schema;
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
     const auto status = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
-        config,
-        querier,
-        flowsql::packet::PacketSchema(),
-        AllRealtimeTimeCapabilities(),
-        &output_schema,
-        &runtime);
+        config, querier, flowsql::packet::PacketSchema(), AllRealtimeTimeCapabilities(), &output_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
     const auto expected_schema = config.features.observing == npm::NpmResultEntity::kSession
                                      ? npm::NpmSessionResultSchema()
@@ -7314,8 +7210,7 @@ std::unique_ptr<npm::NpmBasicTaskRuntime> CreateRealtimeRuntimeForTest(
 
 void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Offline() {
     for (const bool observing_session : {false, true}) {
-        auto configs =
-            MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kOffline, observing_session);
+        auto configs = MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kOffline, observing_session);
         configs.legacy_json.assign(configs.legacy_json.size(), 'x');
         configs.parameters_v1_json.assign(configs.parameters_v1_json.size(), 'y');
         assert(configs.legacy.domains.input_namespace == "pcapfile.capture");
@@ -7329,18 +7224,10 @@ void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Offline() {
         std::shared_ptr<arrow::Schema> parameters_schema;
         std::unique_ptr<npm::NpmBasicTaskRuntime> legacy_runtime;
         std::unique_ptr<npm::NpmBasicTaskRuntime> parameters_runtime;
-        auto legacy_create = npm::NpmBasicTaskRuntime::Create(
-            configs.legacy,
-            &querier,
-            flowsql::packet::PacketSchema(),
-            &legacy_schema,
-            &legacy_runtime);
+        auto legacy_create = npm::NpmBasicTaskRuntime::Create(configs.legacy, &querier, flowsql::packet::PacketSchema(),
+                                                              &legacy_schema, &legacy_runtime);
         auto parameters_create = npm::NpmBasicTaskRuntime::Create(
-            configs.parameters_v1,
-            &querier,
-            flowsql::packet::PacketSchema(),
-            &parameters_schema,
-            &parameters_runtime);
+            configs.parameters_v1, &querier, flowsql::packet::PacketSchema(), &parameters_schema, &parameters_runtime);
         assert(legacy_create.error == npm::NpmBasicTaskRuntimeError::kNone);
         assert(parameters_create.error == npm::NpmBasicTaskRuntimeError::kNone);
         assert(legacy_schema != nullptr && parameters_schema != nullptr);
@@ -7351,27 +7238,23 @@ void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Offline() {
         assert(parameters_runtime->State() == npm::NpmEofFlushState::kOpen);
         assert(pool.acquire_calls == 2 && pool.release_calls == 0);
 
-        const auto packet = MakeIpv4TcpPacket(
-            "192.0.2.10", 41000, "198.51.100.20", 443, {0x16, 0x03}, kTcpAck, 101);
+        const auto packet = MakeIpv4TcpPacket("192.0.2.10", 41000, "198.51.100.20", 443, {0x16, 0x03}, kTcpAck, 101);
         auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 1)});
         std::shared_ptr<arrow::RecordBatch> legacy_output;
         std::shared_ptr<arrow::RecordBatch> parameters_output;
         const auto legacy_status = legacy_runtime->ProcessOfflineBatch(input, &legacy_output);
-        const auto parameters_status =
-            parameters_runtime->ProcessOfflineBatch(input, &parameters_output);
+        const auto parameters_status = parameters_runtime->ProcessOfflineBatch(input, &parameters_output);
         AssertEquivalentOfflineBatchStatus(legacy_status, parameters_status);
         assert(legacy_status.error == npm::NpmBasicOfflineBatchError::kNone);
         AssertEquivalentRecordBatch(legacy_output, parameters_output);
         assert(legacy_output->num_rows() == 0);
         assert(legacy_runtime->Sessions().size() == 1);
         assert(parameters_runtime->Sessions().size() == 1);
-        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(),
-                                    parameters_runtime->Budget()->Usage());
+        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(), parameters_runtime->Budget()->Usage());
 
         legacy_output.reset();
         parameters_output.reset();
-        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(),
-                                    parameters_runtime->Budget()->Usage());
+        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(), parameters_runtime->Budget()->Usage());
         std::shared_ptr<arrow::RecordBatch> legacy_final;
         std::shared_ptr<arrow::RecordBatch> parameters_final;
         const auto legacy_flush = legacy_runtime->FlushOffline(100, &legacy_final);
@@ -7383,8 +7266,7 @@ void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Offline() {
         assert(legacy_runtime->State() == npm::NpmEofFlushState::kFlushed);
         assert(parameters_runtime->State() == npm::NpmEofFlushState::kFlushed);
         assert(pool.release_calls == 2);
-        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(),
-                                    parameters_runtime->Budget()->Usage());
+        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(), parameters_runtime->Budget()->Usage());
         assert(legacy_runtime->Budget()->Usage().pending_output_bytes > 0);
 
         legacy_final.reset();
@@ -7408,8 +7290,8 @@ void TestNpmBasicTaskRuntimeCreatesExclusiveInitialState() {
     auto config = MakeRuntimeTaskConfig();
     std::shared_ptr<arrow::Schema> output_schema;
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
-    auto status = npm::NpmBasicTaskRuntime::Create(
-        config, &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+    auto status =
+        npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
     assert(status.time_error == npm::NpmTimeCapabilityError::kNone);
     assert(status.protocol_error == npm::NpmProtocolContextError::kNone);
@@ -7431,8 +7313,7 @@ void TestNpmBasicTaskRuntimeCreatesExclusiveInitialState() {
     auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
     const auto original_sentinel_schema = sentinel_schema;
     const auto wrong_schema = arrow::schema({arrow::field("wrong", arrow::int64(), false)});
-    status = npm::NpmBasicTaskRuntime::Create(
-        config, &querier, wrong_schema, &sentinel_schema, &runtime);
+    status = npm::NpmBasicTaskRuntime::Create(config, &querier, wrong_schema, &sentinel_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kSchemaMismatch);
     assert(runtime.get() == original_runtime && sentinel_schema == original_sentinel_schema);
     assert(pool.acquire_calls == 1 && pool.release_calls == 0);
@@ -7456,8 +7337,8 @@ void TestNpmBasicTaskRuntimeCreatesExclusiveInitialState() {
     std::unique_ptr<npm::NpmBasicTaskRuntime> blocked;
     std::shared_ptr<arrow::Schema> blocked_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
     const auto original_schema = blocked_schema;
-    status = npm::NpmBasicTaskRuntime::Create(
-        MakeRuntimeTaskConfig(), &querier, flowsql::packet::PacketSchema(), &blocked_schema, &blocked);
+    status = npm::NpmBasicTaskRuntime::Create(MakeRuntimeTaskConfig(), &querier, flowsql::packet::PacketSchema(),
+                                              &blocked_schema, &blocked);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kProtocolContextError);
     assert(status.protocol_error == npm::NpmProtocolContextError::kPipelineExhausted);
     assert(blocked == nullptr && blocked_schema == original_schema);
@@ -7471,8 +7352,8 @@ void TestNpmBasicTaskRuntimeCreatesExclusiveInitialState() {
     retained_budget.reset();
     assert(weak_budget.expired());
 
-    status = npm::NpmBasicTaskRuntime::Create(
-        MakeRuntimeTaskConfig(), &querier, flowsql::packet::PacketSchema(), &blocked_schema, &blocked);
+    status = npm::NpmBasicTaskRuntime::Create(MakeRuntimeTaskConfig(), &querier, flowsql::packet::PacketSchema(),
+                                              &blocked_schema, &blocked);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
     assert(blocked != nullptr && pool.acquire_calls == 3 && pool.release_calls == 1);
     blocked.reset();
@@ -7485,17 +7366,15 @@ void TestNpmBasicTaskRuntimeSelectsObservedSchema() {
     ContextPool pool(&protocol);
     SinglePoolQuerier querier(&pool);
     size_t completed_cases = 0;
-    const auto packet = MakeIpv4TcpPacket(
-        "192.0.2.1", 50000, "198.51.100.2", 443, {1}, kTcpAck, 100, 90, 2048);
+    const auto packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {1}, kTcpAck, 100, 90, 2048);
 
     const auto assert_schema = [&](const npm::NpmBasicTaskConfig& config,
-                                   const std::shared_ptr<arrow::Schema>& expected_schema,
-                                   bool expect_session_module) {
+                                   const std::shared_ptr<arrow::Schema>& expected_schema, bool expect_session_module) {
         auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
         std::shared_ptr<arrow::Schema> output_schema = sentinel_schema;
         std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
-        const auto status = npm::NpmBasicTaskRuntime::Create(
-            config, &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+        const auto status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(),
+                                                             &output_schema, &runtime);
 
         assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
         assert(output_schema.get() == expected_schema.get());
@@ -7516,19 +7395,13 @@ void TestNpmBasicTaskRuntimeSelectsObservedSchema() {
         auto view = packet.View(0, 100);
         view.meta.timestamp_ns = static_cast<int64_t>(completed_cases + 1) * 10;
         std::vector<npm::NpmSessionSnapshot> ended_sessions;
-        const auto process_status = npm::ProcessNpmPacket(runtime->Config().domains,
-                                                          view,
-                                                          packet.layer,
-                                                          runtime->Sessions(),
-                                                          *runtime->ProtocolContext().Identifier(),
-                                                          runtime->Modules(),
-                                                          runtime->Collector(),
-                                                          &ended_sessions);
+        const auto process_status = npm::ProcessNpmPacket(runtime->Config().domains, view, packet.layer,
+                                                          runtime->Sessions(), *runtime->ProtocolContext().Identifier(),
+                                                          runtime->Modules(), runtime->Collector(), &ended_sessions);
         assert(process_status.error == npm::NpmPacketProcessError::kNone);
         assert(ended_sessions.empty() && runtime->Sessions().size() == 1);
         std::vector<npm::NpmSessionView> active_sessions;
-        assert(runtime->Sessions().SnapshotActive(&active_sessions) ==
-               npm::NpmSessionTableError::kNone);
+        assert(runtime->Sessions().SnapshotActive(&active_sessions) == npm::NpmSessionTableError::kNone);
         assert(active_sessions.size() == 1);
         assert(active_sessions[0].packets_ab + active_sessions[0].packets_ba == 1);
         assert(protocol.identify_pipelines.size() == completed_cases + 1);
@@ -7596,45 +7469,43 @@ void TestNpmBasicTaskRuntimeRejectsOpenFailuresAtomically() {
     assert(output_schema == original_schema && runtime == nullptr && pool.acquire_calls == 0);
 
     const auto packet_without_metadata = arrow::schema(flowsql::packet::PacketSchema()->fields());
-    status = npm::NpmBasicTaskRuntime::Create(
-        config, &querier, packet_without_metadata, &output_schema, &runtime);
+    status = npm::NpmBasicTaskRuntime::Create(config, &querier, packet_without_metadata, &output_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kSchemaMismatch);
     assert(output_schema == original_schema && runtime == nullptr && pool.acquire_calls == 0);
 
-    status = npm::NpmBasicTaskRuntime::Create(
-        config, &querier, flowsql::packet::PacketSchema(), nullptr, &runtime);
+    status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), nullptr, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kNullOutputSchema);
     assert(runtime == nullptr && pool.acquire_calls == 0);
-    status = npm::NpmBasicTaskRuntime::Create(
-        config, &querier, flowsql::packet::PacketSchema(), &output_schema, nullptr);
+    status =
+        npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &output_schema, nullptr);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kNullRuntimeOutput);
     assert(output_schema == original_schema && pool.acquire_calls == 0);
 
     config = MakeRuntimeTaskConfig(npm::NpmRunMode::kRealtime);
-    status = npm::NpmBasicTaskRuntime::Create(
-        config, &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+    status =
+        npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kTimeCapabilityError);
     assert(status.time_error == npm::NpmTimeCapabilityError::kMissingMonotonicTimeDrive);
     assert(output_schema == original_schema && runtime == nullptr && pool.acquire_calls == 0);
 
     config = MakeRuntimeTaskConfig();
-    status = npm::NpmBasicTaskRuntime::Create(
-        config, nullptr, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+    status =
+        npm::NpmBasicTaskRuntime::Create(config, nullptr, flowsql::packet::PacketSchema(), &output_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kProtocolContextError);
     assert(status.protocol_error == npm::NpmProtocolContextError::kNullQuerier);
     assert(output_schema == original_schema && runtime == nullptr && pool.acquire_calls == 0);
 
     SinglePoolQuerier missing_querier(nullptr);
-    status = npm::NpmBasicTaskRuntime::Create(
-        config, &missing_querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+    status = npm::NpmBasicTaskRuntime::Create(config, &missing_querier, flowsql::packet::PacketSchema(), &output_schema,
+                                              &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kProtocolContextError);
     assert(status.protocol_error == npm::NpmProtocolContextError::kProviderNotFound);
     assert(output_schema == original_schema && runtime == nullptr);
 
     ContextPool exhausted_pool(&protocol, flowsql::ProtocolPipelinePoolError::kExhausted);
     SinglePoolQuerier exhausted_querier(&exhausted_pool);
-    status = npm::NpmBasicTaskRuntime::Create(
-        config, &exhausted_querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+    status = npm::NpmBasicTaskRuntime::Create(config, &exhausted_querier, flowsql::packet::PacketSchema(),
+                                              &output_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kProtocolContextError);
     assert(status.protocol_error == npm::NpmProtocolContextError::kPipelineExhausted);
     assert(output_schema == original_schema && runtime == nullptr);
@@ -7642,8 +7513,8 @@ void TestNpmBasicTaskRuntimeRejectsOpenFailuresAtomically() {
 
     ContextPool unavailable_pool(&protocol, flowsql::ProtocolPipelinePoolError::kUnavailable);
     SinglePoolQuerier unavailable_querier(&unavailable_pool);
-    status = npm::NpmBasicTaskRuntime::Create(
-        config, &unavailable_querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+    status = npm::NpmBasicTaskRuntime::Create(config, &unavailable_querier, flowsql::packet::PacketSchema(),
+                                              &output_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kProtocolContextError);
     assert(status.protocol_error == npm::NpmProtocolContextError::kPipelineUnavailable);
     assert(output_schema == original_schema && runtime == nullptr);
@@ -7651,8 +7522,8 @@ void TestNpmBasicTaskRuntimeRejectsOpenFailuresAtomically() {
 
     ContextPool no_protocol_pool(nullptr);
     SinglePoolQuerier no_protocol_querier(&no_protocol_pool);
-    status = npm::NpmBasicTaskRuntime::Create(
-        config, &no_protocol_querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+    status = npm::NpmBasicTaskRuntime::Create(config, &no_protocol_querier, flowsql::packet::PacketSchema(),
+                                              &output_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kProtocolContextError);
     assert(status.protocol_error == npm::NpmProtocolContextError::kProtocolUnavailable);
     assert(output_schema == original_schema && runtime == nullptr);
@@ -7661,8 +7532,8 @@ void TestNpmBasicTaskRuntimeRejectsOpenFailuresAtomically() {
     ContextProtocol no_dictionary_protocol(nullptr);
     ContextPool no_dictionary_pool(&no_dictionary_protocol);
     SinglePoolQuerier no_dictionary_querier(&no_dictionary_pool);
-    status = npm::NpmBasicTaskRuntime::Create(
-        config, &no_dictionary_querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+    status = npm::NpmBasicTaskRuntime::Create(config, &no_dictionary_querier, flowsql::packet::PacketSchema(),
+                                              &output_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kProtocolContextError);
     assert(status.protocol_error == npm::NpmProtocolContextError::kDictionaryUnavailable);
     assert(output_schema == original_schema && runtime == nullptr);
@@ -7686,12 +7557,7 @@ void TestNpmBasicTaskRuntimeRealtimeCapabilityInjection() {
     assert(sentinel_schema == original_schema && runtime == nullptr && pool.acquire_calls == 0);
 
     status = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
-        config,
-        &querier,
-        flowsql::packet::PacketSchema(),
-        AllRealtimeTimeCapabilities(),
-        &sentinel_schema,
-        &runtime);
+        config, &querier, flowsql::packet::PacketSchema(), AllRealtimeTimeCapabilities(), &sentinel_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
     assert(status.time_error == npm::NpmTimeCapabilityError::kNone);
     assert(sentinel_schema != original_schema && sentinel_schema->Equals(*npm::NpmBasicResultSchema(), true));
@@ -7699,14 +7565,10 @@ void TestNpmBasicTaskRuntimeRealtimeCapabilityInjection() {
     assert(pool.acquire_calls == 1 && pool.release_calls == 0);
 }
 
-npm::NpmBasicRealtimeMaintenanceInput RealtimeMaintenanceInput(
-    int64_t monotonic_now_ns,
-    int64_t observed_at_ns,
-    int64_t capture_time_ns,
-    bool packet_observed,
-    bool source_idle_confirmed,
-    bool source_backlog_known,
-    bool source_has_backlog) {
+npm::NpmBasicRealtimeMaintenanceInput RealtimeMaintenanceInput(int64_t monotonic_now_ns, int64_t observed_at_ns,
+                                                               int64_t capture_time_ns, bool packet_observed,
+                                                               bool source_idle_confirmed, bool source_backlog_known,
+                                                               bool source_has_backlog) {
     npm::NpmBasicRealtimeMaintenanceInput input;
     input.monotonic_now_ns = monotonic_now_ns;
     input.observed_at_ns = observed_at_ns;
@@ -7722,8 +7584,7 @@ void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Realtime() {
     constexpr int64_t interval_ns = 10'000'000;
     constexpr int64_t observed_start_ns = 1'700'000'000'000'000'000LL;
     for (const bool observing_session : {false, true}) {
-        auto configs =
-            MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kRealtime, observing_session);
+        auto configs = MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kRealtime, observing_session);
         configs.legacy_json.assign(configs.legacy_json.size(), 'x');
         configs.parameters_v1_json.assign(configs.parameters_v1_json.size(), 'y');
 
@@ -7736,19 +7597,11 @@ void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Realtime() {
         std::unique_ptr<npm::NpmBasicTaskRuntime> legacy_runtime;
         std::unique_ptr<npm::NpmBasicTaskRuntime> parameters_runtime;
         const auto legacy_create = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
-            configs.legacy,
-            &querier,
-            flowsql::packet::PacketSchema(),
-            AllRealtimeTimeCapabilities(),
-            &legacy_schema,
+            configs.legacy, &querier, flowsql::packet::PacketSchema(), AllRealtimeTimeCapabilities(), &legacy_schema,
             &legacy_runtime);
         const auto parameters_create = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
-            configs.parameters_v1,
-            &querier,
-            flowsql::packet::PacketSchema(),
-            AllRealtimeTimeCapabilities(),
-            &parameters_schema,
-            &parameters_runtime);
+            configs.parameters_v1, &querier, flowsql::packet::PacketSchema(), AllRealtimeTimeCapabilities(),
+            &parameters_schema, &parameters_runtime);
         assert(legacy_create.error == npm::NpmBasicTaskRuntimeError::kNone);
         assert(parameters_create.error == npm::NpmBasicTaskRuntimeError::kNone);
         assert(legacy_schema != nullptr && parameters_schema != nullptr);
@@ -7756,30 +7609,19 @@ void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Realtime() {
         AssertEquivalentTaskConfig(legacy_runtime->Config(), parameters_runtime->Config());
         assert(pool.acquire_calls == 2 && pool.release_calls == 0);
 
-        const auto packet = MakeIpv6UdpPacket(
-            "2001:db8::10", 53010, "2001:db8::20", 53, {0x12, 0x34});
+        const auto packet = MakeIpv6UdpPacket("2001:db8::10", 53010, "2001:db8::20", 53, {0x12, 0x34});
         auto packet_view = packet.View(0, 100);
         packet_view.meta.timestamp_ns = 1'000;
         std::vector<npm::NpmSessionSnapshot> legacy_ended;
         std::vector<npm::NpmSessionSnapshot> parameters_ended;
-        const auto legacy_process = npm::ProcessNpmPacket(
-            legacy_runtime->Config().domains,
-            packet_view,
-            packet.layer,
-            legacy_runtime->Sessions(),
-            *legacy_runtime->ProtocolContext().Identifier(),
-            legacy_runtime->Modules(),
-            legacy_runtime->Collector(),
-            &legacy_ended);
-        const auto parameters_process = npm::ProcessNpmPacket(
-            parameters_runtime->Config().domains,
-            packet_view,
-            packet.layer,
-            parameters_runtime->Sessions(),
-            *parameters_runtime->ProtocolContext().Identifier(),
-            parameters_runtime->Modules(),
-            parameters_runtime->Collector(),
-            &parameters_ended);
+        const auto legacy_process =
+            npm::ProcessNpmPacket(legacy_runtime->Config().domains, packet_view, packet.layer,
+                                  legacy_runtime->Sessions(), *legacy_runtime->ProtocolContext().Identifier(),
+                                  legacy_runtime->Modules(), legacy_runtime->Collector(), &legacy_ended);
+        const auto parameters_process =
+            npm::ProcessNpmPacket(parameters_runtime->Config().domains, packet_view, packet.layer,
+                                  parameters_runtime->Sessions(), *parameters_runtime->ProtocolContext().Identifier(),
+                                  parameters_runtime->Modules(), parameters_runtime->Collector(), &parameters_ended);
         assert(legacy_process.error == npm::NpmPacketProcessError::kNone);
         assert(parameters_process.error == legacy_process.error);
         assert(parameters_process.binding_error == legacy_process.binding_error);
@@ -7788,30 +7630,17 @@ void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Realtime() {
         assert(legacy_ended.empty() && parameters_ended.empty());
         assert(legacy_runtime->Sessions().size() == 1);
         assert(parameters_runtime->Sessions().size() == 1);
-        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(),
-                                    parameters_runtime->Budget()->Usage());
+        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(), parameters_runtime->Budget()->Usage());
 
         auto legacy_output = MakeNpmPacketViewBatch();
         auto parameters_output = MakeNpmPacketViewBatch();
         const auto legacy_sentinel = legacy_output;
         const auto parameters_sentinel = parameters_output;
         auto legacy_status = legacy_runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(100,
-                                     observed_start_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     true,
-                                     false,
-                                     true,
-                                     false),
+            RealtimeMaintenanceInput(100, observed_start_ns, packet_view.meta.timestamp_ns, true, false, true, false),
             &legacy_output);
         auto parameters_status = parameters_runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(100,
-                                     observed_start_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     true,
-                                     false,
-                                     true,
-                                     false),
+            RealtimeMaintenanceInput(100, observed_start_ns, packet_view.meta.timestamp_ns, true, false, true, false),
             &parameters_output);
         AssertEquivalentRealtimeStatus(legacy_status, parameters_status);
         assert(legacy_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
@@ -7819,22 +7648,12 @@ void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Realtime() {
         assert(legacy_output == legacy_sentinel && parameters_output == parameters_sentinel);
 
         legacy_status = legacy_runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(100 + interval_ns,
-                                     observed_start_ns + interval_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(100 + interval_ns, observed_start_ns + interval_ns, packet_view.meta.timestamp_ns,
+                                     false, false, true, true),
             &legacy_output);
         parameters_status = parameters_runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(100 + interval_ns,
-                                     observed_start_ns + interval_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(100 + interval_ns, observed_start_ns + interval_ns, packet_view.meta.timestamp_ns,
+                                     false, false, true, true),
             &parameters_output);
         AssertEquivalentRealtimeStatus(legacy_status, parameters_status);
         assert(legacy_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
@@ -7847,8 +7666,7 @@ void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Realtime() {
         } else {
             assert(BasicResultColumn<arrow::UInt64Array>(legacy_output, 2)->Value(0) == 1);
         }
-        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(),
-                                    parameters_runtime->Budget()->Usage());
+        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(), parameters_runtime->Budget()->Usage());
         assert(legacy_runtime->Budget()->Usage().pending_output_bytes > 0);
 
         legacy_runtime->Cancel();
@@ -7856,8 +7674,7 @@ void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Realtime() {
         assert(legacy_runtime->State() == npm::NpmEofFlushState::kCancelled);
         assert(parameters_runtime->State() == npm::NpmEofFlushState::kCancelled);
         assert(pool.release_calls == 2);
-        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(),
-                                    parameters_runtime->Budget()->Usage());
+        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(), parameters_runtime->Budget()->Usage());
         legacy_output.reset();
         parameters_output.reset();
         AssertTaskBudgetUsage(legacy_runtime->Budget()->Usage(), 0, 0, 0, 0);
@@ -7887,47 +7704,30 @@ void TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions() {
     const auto tcp_binding = BuildBinding(config.domains, tcp, 0, 0, 100, &tcp_meta);
     const auto udp_binding = BuildBinding(config.domains, udp, 0, 0, 80, &udp_meta);
     npm::NpmSessionView observed;
-    assert(ObserveActive(runtime->Sessions(), tcp_binding, tcp_meta, &observed) ==
-           npm::NpmSessionTableError::kNone);
+    assert(ObserveActive(runtime->Sessions(), tcp_binding, tcp_meta, &observed) == npm::NpmSessionTableError::kNone);
     assert(observed.session_id == 1);
-    assert(ObserveActive(runtime->Sessions(), udp_binding, udp_meta, &observed) ==
-           npm::NpmSessionTableError::kNone);
+    assert(ObserveActive(runtime->Sessions(), udp_binding, udp_meta, &observed) == npm::NpmSessionTableError::kNone);
     assert(observed.session_id == 2);
     const uint64_t session_bytes = runtime->Sessions().tracked_bytes();
 
     std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
     auto original_output = output;
     auto status = runtime->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(100, 1'700'000'000'000'000'000LL, 0, true, false, true, false),
-        &output);
+        RealtimeMaintenanceInput(100, 1'700'000'000'000'000'000LL, 0, true, false, true, false), &output);
     assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
     assert(status.progress_disposition == npm::NpmCaptureProgressDisposition::kAdvanced);
     assert(!status.snapshot_due && !status.emitted && output == original_output);
     assert(runtime->Sessions().size() == 2 && runtime->Projector().tracked_sessions() == 0);
 
     status = runtime->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(10 * millisecond,
-                                 1'700'000'000'010'000'000LL,
-                                 0,
-                                 false,
-                                 false,
-                                 true,
-                                 true),
-        &output);
+        RealtimeMaintenanceInput(10 * millisecond, 1'700'000'000'010'000'000LL, 0, false, false, true, true), &output);
     assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
     assert(status.progress_disposition == npm::NpmCaptureProgressDisposition::kDeferredBacklogged);
     assert(!status.snapshot_due && !status.emitted && output == original_output);
 
     const int64_t first_due = 100 + 10 * millisecond;
     status = runtime->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(first_due,
-                                 1'700'000'000'020'000'000LL,
-                                 0,
-                                 false,
-                                 false,
-                                 true,
-                                 true),
-        &output);
+        RealtimeMaintenanceInput(first_due, 1'700'000'000'020'000'000LL, 0, false, false, true, true), &output);
     assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
     assert(status.snapshot_due && status.emitted);
     assert(status.active_sessions == 2 && status.ended_sessions == 0);
@@ -7949,32 +7749,18 @@ void TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions() {
 
     output = original_output;
     status = runtime->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(first_due,
-                                 1'700'000'000'021'000'000LL,
-                                 0,
-                                 false,
-                                 false,
-                                 true,
-                                 true),
-        &output);
+        RealtimeMaintenanceInput(first_due, 1'700'000'000'021'000'000LL, 0, false, false, true, true), &output);
     assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
     assert(!status.snapshot_due && !status.emitted && output == original_output);
 
     tcp_meta.timestamp_ns = 500 * millisecond;
     tcp_meta.wire_len = 110;
-    assert(ObserveActive(runtime->Sessions(), tcp_binding, tcp_meta, &observed) ==
-           npm::NpmSessionTableError::kNone);
+    assert(ObserveActive(runtime->Sessions(), tcp_binding, tcp_meta, &observed) == npm::NpmSessionTableError::kNone);
     assert(observed.session_id == 1 && observed.packets_ba + observed.packets_ab == 2);
     const int64_t coalesced_due = first_due + 10 * config.analysis.output_interval_ns;
-    status = runtime->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(coalesced_due,
-                                 1'700'000'000'100'000'000LL,
-                                 500 * millisecond,
-                                 true,
-                                 false,
-                                 true,
-                                 false),
-        &output);
+    status = runtime->DriveRealtimeMaintenance(RealtimeMaintenanceInput(coalesced_due, 1'700'000'000'100'000'000LL,
+                                                                        500 * millisecond, true, false, true, false),
+                                               &output);
     assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
     assert(status.snapshot_due && status.emitted && output->num_rows() == 2);
     const auto second_ids = BasicResultColumn<arrow::UInt64Array>(output, 0);
@@ -7989,13 +7775,7 @@ void TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions() {
 
     output = original_output;
     status = runtime->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(coalesced_due + 1,
-                                 1'700'000'002'000'000'000LL,
-                                 2 * second,
-                                 false,
-                                 true,
-                                 true,
-                                 false),
+        RealtimeMaintenanceInput(coalesced_due + 1, 1'700'000'002'000'000'000LL, 2 * second, false, true, true, false),
         &output);
     assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
     assert(!status.snapshot_due && status.emitted);
@@ -8019,13 +7799,7 @@ void TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions() {
 
     output = original_output;
     status = runtime->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(coalesced_due,
-                                 1'700'000'002'001'000'000LL,
-                                 2 * second,
-                                 false,
-                                 true,
-                                 true,
-                                 false),
+        RealtimeMaintenanceInput(coalesced_due, 1'700'000'002'001'000'000LL, 2 * second, false, true, true, false),
         &output);
     assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kMonotonicTimeRegression);
     assert(status.runtime_state == npm::NpmEofFlushState::kFailed);
@@ -8053,8 +7827,7 @@ void TestNpmBasicTaskRuntimeRoutesRealtimePeriodicSnapshots() {
     auto both_session = basic_only;
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
-    const std::array<npm::NpmBasicTaskConfig, 4> configs{
-        basic_only, both_basic, session_only, both_session};
+    const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         const auto& config = configs[index];
@@ -8073,23 +7846,17 @@ void TestNpmBasicTaskRuntimeRoutesRealtimePeriodicSnapshots() {
             assert(runtime->Modules().empty());
         }
 
-        const auto packet = MakeIpv6UdpPacket(
-            "2001:db8::30", 53030, "2001:db8::40", 53, {static_cast<uint8_t>(index + 1)});
+        const auto packet =
+            MakeIpv6UdpPacket("2001:db8::30", 53030, "2001:db8::40", 53, {static_cast<uint8_t>(index + 1)});
         auto packet_view = packet.View(0, 100);
         packet_view.meta.timestamp_ns = 1'000 + static_cast<int64_t>(index);
         std::vector<npm::NpmSessionSnapshot> ended_sessions;
-        const auto process_status = npm::ProcessNpmPacket(runtime->Config().domains,
-                                                          packet_view,
-                                                          packet.layer,
-                                                          runtime->Sessions(),
-                                                          *runtime->ProtocolContext().Identifier(),
-                                                          runtime->Modules(),
-                                                          runtime->Collector(),
-                                                          &ended_sessions);
+        const auto process_status = npm::ProcessNpmPacket(runtime->Config().domains, packet_view, packet.layer,
+                                                          runtime->Sessions(), *runtime->ProtocolContext().Identifier(),
+                                                          runtime->Modules(), runtime->Collector(), &ended_sessions);
         assert(process_status.error == npm::NpmPacketProcessError::kNone);
         assert(ended_sessions.empty() && runtime->Sessions().size() == 1);
-        const uint64_t module_bytes_after_packet =
-            session_module == nullptr ? 0 : session_module->tracked_bytes();
+        const uint64_t module_bytes_after_packet = session_module == nullptr ? 0 : session_module->tracked_bytes();
         if (session_module != nullptr) {
             assert(session_module->tracked_sessions() == 1 && module_bytes_after_packet > 0);
         }
@@ -8097,13 +7864,8 @@ void TestNpmBasicTaskRuntimeRoutesRealtimePeriodicSnapshots() {
         std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
         const auto original_output = output;
         auto status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns,
-                                     observed_start_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     true,
-                                     false,
-                                     true,
-                                     false),
+            RealtimeMaintenanceInput(monotonic_start_ns, observed_start_ns, packet_view.meta.timestamp_ns, true, false,
+                                     true, false),
             &output);
         assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(!status.snapshot_due && !status.emitted && output == original_output);
@@ -8129,13 +7891,8 @@ void TestNpmBasicTaskRuntimeRoutesRealtimePeriodicSnapshots() {
 
         const int64_t first_observed_at_ns = observed_start_ns + interval_ns;
         status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns,
-                                     first_observed_at_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns, first_observed_at_ns,
+                                     packet_view.meta.timestamp_ns, false, false, true, true),
             &output);
         assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(status.snapshot_due && status.emitted);
@@ -8151,13 +7908,8 @@ void TestNpmBasicTaskRuntimeRoutesRealtimePeriodicSnapshots() {
         output.reset();
         const int64_t second_observed_at_ns = observed_start_ns + 2 * interval_ns;
         status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + 2 * interval_ns,
-                                     second_observed_at_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + 2 * interval_ns, second_observed_at_ns,
+                                     packet_view.meta.timestamp_ns, false, false, true, true),
             &output);
         assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(status.snapshot_due && status.emitted);
@@ -8196,8 +7948,7 @@ void TestNpmBasicTaskRuntimeClosesRealtimeSessionsAfterPeriodicSnapshots() {
     auto both_session = basic_only;
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
-    const std::array<npm::NpmBasicTaskConfig, 4> configs{
-        basic_only, both_basic, session_only, both_session};
+    const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (const bool close_with_fin : {false, true}) {
         for (const auto& config : configs) {
@@ -8205,8 +7956,7 @@ void TestNpmBasicTaskRuntimeClosesRealtimeSessionsAfterPeriodicSnapshots() {
             ContextProtocol protocol(&dictionary);
             ContextPool pool(&protocol);
             SinglePoolQuerier querier(&pool);
-            const bool observing_session =
-                config.features.observing == npm::NpmResultEntity::kSession;
+            const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
             auto runtime = CreateRealtimeRuntimeForTest(config, &querier);
             auto budget = runtime->Budget();
             assert(pool.acquire_calls == 1 && pool.release_calls == 0);
@@ -8214,72 +7964,49 @@ void TestNpmBasicTaskRuntimeClosesRealtimeSessionsAfterPeriodicSnapshots() {
             npm::NpmSessionAnalysisModule* session_module = nullptr;
             if (config.features.session_enabled) {
                 assert(runtime->Modules().size() == 1);
-                session_module =
-                    dynamic_cast<npm::NpmSessionAnalysisModule*>(runtime->Modules()[0]);
+                session_module = dynamic_cast<npm::NpmSessionAnalysisModule*>(runtime->Modules()[0]);
                 assert(session_module != nullptr);
             } else {
                 assert(runtime->Modules().empty());
             }
 
             const std::vector<uint8_t> first_payload{0x10, 0x11, 0x12};
-            const auto first_packet = MakeIpv4TcpPacket("192.0.2.1",
-                                                        41000,
-                                                        "198.51.100.2",
-                                                        443,
-                                                        first_payload,
-                                                        kTcpAck,
-                                                        100,
-                                                        90,
-                                                        2048);
+            const auto first_packet =
+                MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, first_payload, kTcpAck, 100, 90, 2048);
             auto first_view = first_packet.View(0);
             first_view.meta.timestamp_ns = first_timestamp_ns;
             std::vector<npm::NpmSessionSnapshot> ended_sessions;
-            auto process_status = npm::ProcessNpmPacket(runtime->Config().domains,
-                                                        first_view,
-                                                        first_packet.layer,
-                                                        runtime->Sessions(),
-                                                        *runtime->ProtocolContext().Identifier(),
-                                                        runtime->Modules(),
-                                                        runtime->Collector(),
-                                                        &ended_sessions);
+            auto process_status = npm::ProcessNpmPacket(runtime->Config().domains, first_view, first_packet.layer,
+                                                        runtime->Sessions(), *runtime->ProtocolContext().Identifier(),
+                                                        runtime->Modules(), runtime->Collector(), &ended_sessions);
             assert(process_status.error == npm::NpmPacketProcessError::kNone);
             assert(ended_sessions.empty() && runtime->Sessions().size() == 1);
             assert(protocol.identify_pipelines.size() == 1);
             if (session_module != nullptr) {
-                assert(session_module->tracked_sessions() == 1 &&
-                       session_module->tracked_bytes() > 0);
+                assert(session_module->tracked_sessions() == 1 && session_module->tracked_bytes() > 0);
             }
 
             std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
             const auto initial_output = output;
             auto maintenance_status = runtime->DriveRealtimeMaintenance(
-                RealtimeMaintenanceInput(monotonic_start_ns,
-                                         observed_start_ns,
-                                         first_timestamp_ns,
-                                         true,
-                                         false,
-                                         true,
+                RealtimeMaintenanceInput(monotonic_start_ns, observed_start_ns, first_timestamp_ns, true, false, true,
                                          false),
                 &output);
             assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
             assert(!maintenance_status.snapshot_due && !maintenance_status.emitted);
             assert(output == initial_output);
 
-            const auto assert_periodic_output = [&](uint64_t revision,
-                                                    int64_t observed_at_ns) -> uint64_t {
+            const auto assert_periodic_output = [&](uint64_t revision, int64_t observed_at_ns) -> uint64_t {
                 assert(output != nullptr && output->num_rows() == 1);
                 assert(output->ValidateFull().ok());
                 if (observing_session) {
                     assert(output->schema().get() == npm::NpmSessionResultSchema().get());
                     assert(output->num_columns() == 49);
                     assert(SessionResultColumn<arrow::UInt64Array>(output, 2)->Value(0) == revision);
-                    assert(SessionResultColumn<arrow::Int64Array>(output, 3)->Value(0) ==
-                           observed_at_ns);
+                    assert(SessionResultColumn<arrow::Int64Array>(output, 3)->Value(0) == observed_at_ns);
                     assert(!SessionResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
-                    assert(SessionResultColumn<arrow::StringArray>(output, 14)->GetString(0) ==
-                           "identified");
-                    assert(SessionResultColumn<arrow::StringArray>(output, 17)->GetString(0) ==
-                           "SUB");
+                    assert(SessionResultColumn<arrow::StringArray>(output, 14)->GetString(0) == "identified");
+                    assert(SessionResultColumn<arrow::StringArray>(output, 17)->GetString(0) == "SUB");
                     assert(SessionResultColumn<arrow::StringArray>(output, 18)->IsNull(0));
                     return SessionResultColumn<arrow::UInt64Array>(output, 0)->Value(0);
                 }
@@ -8288,8 +8015,7 @@ void TestNpmBasicTaskRuntimeClosesRealtimeSessionsAfterPeriodicSnapshots() {
                 assert(BasicResultColumn<arrow::UInt64Array>(output, 2)->Value(0) == revision);
                 assert(BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0) == observed_at_ns);
                 assert(!BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
-                assert(BasicResultColumn<arrow::StringArray>(output, 17)->GetString(0) ==
-                       "identified");
+                assert(BasicResultColumn<arrow::StringArray>(output, 17)->GetString(0) == "identified");
                 assert(BasicResultColumn<arrow::StringArray>(output, 20)->GetString(0) == "SUB");
                 assert(BasicResultColumn<arrow::StringArray>(output, 21)->IsNull(0));
                 return BasicResultColumn<arrow::UInt64Array>(output, 0)->Value(0);
@@ -8297,90 +8023,53 @@ void TestNpmBasicTaskRuntimeClosesRealtimeSessionsAfterPeriodicSnapshots() {
 
             const int64_t first_observed_at_ns = observed_start_ns + interval_ns;
             maintenance_status = runtime->DriveRealtimeMaintenance(
-                RealtimeMaintenanceInput(monotonic_start_ns + interval_ns,
-                                         first_observed_at_ns,
-                                         first_timestamp_ns,
-                                         false,
-                                         false,
-                                         true,
-                                         true),
+                RealtimeMaintenanceInput(monotonic_start_ns + interval_ns, first_observed_at_ns, first_timestamp_ns,
+                                         false, false, true, true),
                 &output);
             assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
             assert(maintenance_status.snapshot_due && maintenance_status.emitted);
-            assert(maintenance_status.active_sessions == 1 &&
-                   maintenance_status.ended_sessions == 0);
+            assert(maintenance_status.active_sessions == 1 && maintenance_status.ended_sessions == 0);
             const uint64_t session_id = assert_periodic_output(1, first_observed_at_ns);
             auto first_snapshot_output = output;
 
             const int64_t second_observed_at_ns = observed_start_ns + 2 * interval_ns;
             maintenance_status = runtime->DriveRealtimeMaintenance(
-                RealtimeMaintenanceInput(monotonic_start_ns + 2 * interval_ns,
-                                         second_observed_at_ns,
-                                         first_timestamp_ns,
-                                         false,
-                                         false,
-                                         true,
-                                         true),
+                RealtimeMaintenanceInput(monotonic_start_ns + 2 * interval_ns, second_observed_at_ns,
+                                         first_timestamp_ns, false, false, true, true),
                 &output);
             assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
             assert(maintenance_status.snapshot_due && maintenance_status.emitted);
-            assert(maintenance_status.active_sessions == 1 &&
-                   maintenance_status.ended_sessions == 0);
+            assert(maintenance_status.active_sessions == 1 && maintenance_status.ended_sessions == 0);
             assert(assert_periodic_output(2, second_observed_at_ns) == session_id);
             auto second_snapshot_output = output;
-            assert(runtime->Projector().tracked_sessions() ==
-                   (config.features.basic_enabled ? 1 : 0));
+            assert(runtime->Projector().tracked_sessions() == (config.features.basic_enabled ? 1 : 0));
 
             CapturingForwardingWriter terminal_writer(runtime->Collector());
             std::vector<uint8_t> half_close_payload;
             PacketFixture half_close_packet;
             if (close_with_fin) {
                 half_close_payload = {0x13};
-                half_close_packet = MakeIpv4TcpPacket("192.0.2.1",
-                                                      41000,
-                                                      "198.51.100.2",
-                                                      443,
-                                                      half_close_payload,
-                                                      kTcpFin | kTcpAck,
-                                                      103,
-                                                      500,
-                                                      2048);
+                half_close_packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, half_close_payload,
+                                                      kTcpFin | kTcpAck, 103, 500, 2048);
                 auto half_close_view = half_close_packet.View(0);
                 half_close_view.meta.timestamp_ns = half_close_timestamp_ns;
-                process_status = npm::ProcessNpmPacket(runtime->Config().domains,
-                                                       half_close_view,
-                                                       half_close_packet.layer,
-                                                       runtime->Sessions(),
-                                                       *runtime->ProtocolContext().Identifier(),
-                                                       runtime->Modules(),
-                                                       terminal_writer,
-                                                       &ended_sessions);
+                process_status = npm::ProcessNpmPacket(
+                    runtime->Config().domains, half_close_view, half_close_packet.layer, runtime->Sessions(),
+                    *runtime->ProtocolContext().Identifier(), runtime->Modules(), terminal_writer, &ended_sessions);
                 assert(process_status.error == npm::NpmPacketProcessError::kNone);
                 assert(ended_sessions.empty() && runtime->Sessions().size() == 1);
                 assert(terminal_writer.session_writes == 0);
             }
 
             const std::vector<uint8_t> terminal_payload{0x20, 0x21};
-            const auto terminal_packet = MakeIpv4TcpPacket("198.51.100.2",
-                                                           443,
-                                                           "192.0.2.1",
-                                                           41000,
-                                                           terminal_payload,
-                                                           (close_with_fin ? kTcpFin : kTcpRst) |
-                                                               kTcpAck,
-                                                           500,
-                                                           close_with_fin ? 105 : 103,
-                                                           4096);
+            const auto terminal_packet = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 41000, terminal_payload,
+                                                           (close_with_fin ? kTcpFin : kTcpRst) | kTcpAck, 500,
+                                                           close_with_fin ? 105 : 103, 4096);
             auto terminal_view = terminal_packet.View(0);
             terminal_view.meta.timestamp_ns = closed_timestamp_ns;
-            process_status = npm::ProcessNpmPacket(runtime->Config().domains,
-                                                   terminal_view,
-                                                   terminal_packet.layer,
-                                                   runtime->Sessions(),
-                                                   *runtime->ProtocolContext().Identifier(),
-                                                   runtime->Modules(),
-                                                   terminal_writer,
-                                                   &ended_sessions);
+            process_status = npm::ProcessNpmPacket(runtime->Config().domains, terminal_view, terminal_packet.layer,
+                                                   runtime->Sessions(), *runtime->ProtocolContext().Identifier(),
+                                                   runtime->Modules(), terminal_writer, &ended_sessions);
             assert(process_status.error == npm::NpmPacketProcessError::kNone);
             assert(ended_sessions.size() == 1 && runtime->Sessions().size() == 0);
             assert(ended_sessions[0].session_id == session_id);
@@ -8395,8 +8084,7 @@ void TestNpmBasicTaskRuntimeClosesRealtimeSessionsAfterPeriodicSnapshots() {
             const uint64_t expected_wire_bytes_ab =
                 first_packet.bytes.size() + (close_with_fin ? half_close_packet.bytes.size() : 0);
             const uint64_t expected_wire_bytes_ba = terminal_packet.bytes.size();
-            const uint64_t expected_payload_bytes_ab =
-                first_payload.size() + half_close_payload.size();
+            const uint64_t expected_payload_bytes_ab = first_payload.size() + half_close_payload.size();
             const uint64_t expected_payload_bytes_ba = terminal_payload.size();
             if (session_module != nullptr) {
                 assert(terminal_writer.session_writes == 1);
@@ -8424,8 +8112,7 @@ void TestNpmBasicTaskRuntimeClosesRealtimeSessionsAfterPeriodicSnapshots() {
             for (auto& ended_session : ended_sessions) {
                 events.push_back({std::move(ended_session), closed_timestamp_ns});
             }
-            const auto drain_status = runtime->Collector().Drain(
-                events, runtime->Projector(), budget, &output);
+            const auto drain_status = runtime->Collector().Drain(events, runtime->Projector(), budget, &output);
             assert(drain_status.error == npm::NpmBasicDrainError::kNone);
             assert(output != nullptr && output->num_rows() == 1 && output->ValidateFull().ok());
             if (observing_session) {
@@ -8433,60 +8120,39 @@ void TestNpmBasicTaskRuntimeClosesRealtimeSessionsAfterPeriodicSnapshots() {
                 assert(output->num_columns() == 49);
                 assert(SessionResultColumn<arrow::UInt64Array>(output, 0)->Value(0) == session_id);
                 assert(SessionResultColumn<arrow::UInt64Array>(output, 2)->Value(0) == 3);
-                assert(SessionResultColumn<arrow::Int64Array>(output, 3)->Value(0) ==
-                       closed_timestamp_ns);
+                assert(SessionResultColumn<arrow::Int64Array>(output, 3)->Value(0) == closed_timestamp_ns);
                 assert(SessionResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
-                assert(SessionResultColumn<arrow::Int64Array>(output, 11)->Value(0) ==
-                       first_timestamp_ns);
-                assert(SessionResultColumn<arrow::Int64Array>(output, 12)->Value(0) ==
-                       closed_timestamp_ns);
+                assert(SessionResultColumn<arrow::Int64Array>(output, 11)->Value(0) == first_timestamp_ns);
+                assert(SessionResultColumn<arrow::Int64Array>(output, 12)->Value(0) == closed_timestamp_ns);
                 assert(SessionResultColumn<arrow::Int64Array>(output, 13)->Value(0) ==
                        closed_timestamp_ns - first_timestamp_ns);
-                assert(SessionResultColumn<arrow::StringArray>(output, 14)->GetString(0) ==
-                       "identified");
+                assert(SessionResultColumn<arrow::StringArray>(output, 14)->GetString(0) == "identified");
                 assert(SessionResultColumn<arrow::UInt16Array>(output, 15)->Value(0) == 7);
                 assert(SessionResultColumn<arrow::UInt16Array>(output, 16)->Value(0) == 8);
                 assert(SessionResultColumn<arrow::StringArray>(output, 17)->GetString(0) == "SUB");
-                assert(SessionResultColumn<arrow::StringArray>(output, 18)->GetString(0) ==
-                       "closed");
-                assert(SessionResultColumn<arrow::UInt64Array>(output, 19)->Value(0) ==
-                       expected_packets_ab);
-                assert(SessionResultColumn<arrow::UInt64Array>(output, 20)->Value(0) ==
-                       expected_packets_ba);
-                assert(SessionResultColumn<arrow::UInt64Array>(output, 21)->Value(0) ==
-                       expected_wire_bytes_ab);
-                assert(SessionResultColumn<arrow::UInt64Array>(output, 22)->Value(0) ==
-                       expected_wire_bytes_ba);
-                assert(SessionResultColumn<arrow::UInt64Array>(output, 23)->Value(0) ==
-                       expected_payload_bytes_ab);
-                assert(SessionResultColumn<arrow::UInt64Array>(output, 24)->Value(0) ==
-                       expected_payload_bytes_ba);
-                assert(SessionResultColumn<arrow::UInt64Array>(output, 30)->Value(0) ==
-                       expected_payload_bytes_ab);
-                assert(SessionResultColumn<arrow::UInt64Array>(output, 31)->Value(0) ==
-                       expected_payload_bytes_ba);
+                assert(SessionResultColumn<arrow::StringArray>(output, 18)->GetString(0) == "closed");
+                assert(SessionResultColumn<arrow::UInt64Array>(output, 19)->Value(0) == expected_packets_ab);
+                assert(SessionResultColumn<arrow::UInt64Array>(output, 20)->Value(0) == expected_packets_ba);
+                assert(SessionResultColumn<arrow::UInt64Array>(output, 21)->Value(0) == expected_wire_bytes_ab);
+                assert(SessionResultColumn<arrow::UInt64Array>(output, 22)->Value(0) == expected_wire_bytes_ba);
+                assert(SessionResultColumn<arrow::UInt64Array>(output, 23)->Value(0) == expected_payload_bytes_ab);
+                assert(SessionResultColumn<arrow::UInt64Array>(output, 24)->Value(0) == expected_payload_bytes_ba);
+                assert(SessionResultColumn<arrow::UInt64Array>(output, 30)->Value(0) == expected_payload_bytes_ab);
+                assert(SessionResultColumn<arrow::UInt64Array>(output, 31)->Value(0) == expected_payload_bytes_ba);
             } else {
                 assert(output->schema().get() == npm::NpmBasicResultSchema().get());
                 assert(output->num_columns() == 22);
                 assert(BasicResultColumn<arrow::UInt64Array>(output, 0)->Value(0) == session_id);
                 assert(BasicResultColumn<arrow::UInt64Array>(output, 2)->Value(0) == 3);
-                assert(BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0) ==
-                       closed_timestamp_ns);
+                assert(BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0) == closed_timestamp_ns);
                 assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
-                assert(BasicResultColumn<arrow::Int64Array>(output, 11)->Value(0) ==
-                       first_timestamp_ns);
-                assert(BasicResultColumn<arrow::Int64Array>(output, 12)->Value(0) ==
-                       closed_timestamp_ns);
-                assert(BasicResultColumn<arrow::UInt64Array>(output, 13)->Value(0) ==
-                       expected_packets_ab);
-                assert(BasicResultColumn<arrow::UInt64Array>(output, 14)->Value(0) ==
-                       expected_packets_ba);
-                assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) ==
-                       expected_wire_bytes_ab);
-                assert(BasicResultColumn<arrow::UInt64Array>(output, 16)->Value(0) ==
-                       expected_wire_bytes_ba);
-                assert(BasicResultColumn<arrow::StringArray>(output, 17)->GetString(0) ==
-                       "identified");
+                assert(BasicResultColumn<arrow::Int64Array>(output, 11)->Value(0) == first_timestamp_ns);
+                assert(BasicResultColumn<arrow::Int64Array>(output, 12)->Value(0) == closed_timestamp_ns);
+                assert(BasicResultColumn<arrow::UInt64Array>(output, 13)->Value(0) == expected_packets_ab);
+                assert(BasicResultColumn<arrow::UInt64Array>(output, 14)->Value(0) == expected_packets_ba);
+                assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) == expected_wire_bytes_ab);
+                assert(BasicResultColumn<arrow::UInt64Array>(output, 16)->Value(0) == expected_wire_bytes_ba);
+                assert(BasicResultColumn<arrow::StringArray>(output, 17)->GetString(0) == "identified");
                 assert(BasicResultColumn<arrow::UInt16Array>(output, 18)->Value(0) == 7);
                 assert(BasicResultColumn<arrow::UInt16Array>(output, 19)->Value(0) == 8);
                 assert(BasicResultColumn<arrow::StringArray>(output, 20)->GetString(0) == "SUB");
@@ -8497,34 +8163,27 @@ void TestNpmBasicTaskRuntimeClosesRealtimeSessionsAfterPeriodicSnapshots() {
             assert(runtime->Projector().tracked_sessions() == 0);
             assert(runtime->Collector().pending_results() == 0);
             if (session_module != nullptr) {
-                assert(session_module->tracked_sessions() == 0 &&
-                       session_module->tracked_bytes() == 0);
+                assert(session_module->tracked_sessions() == 0 && session_module->tracked_bytes() == 0);
             }
 
             const uint64_t first_output_bytes = BasicResultBufferBytes(first_snapshot_output);
             const uint64_t second_output_bytes = BasicResultBufferBytes(second_snapshot_output);
             const uint64_t final_output_bytes = BasicResultBufferBytes(output);
-            AssertTaskBudgetUsage(budget->Usage(),
-                                  0,
-                                  0,
-                                  0,
+            AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0,
                                   first_output_bytes + second_output_bytes + final_output_bytes);
             first_snapshot_output.reset();
-            AssertTaskBudgetUsage(
-                budget->Usage(), 0, 0, 0, second_output_bytes + final_output_bytes);
+            AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, second_output_bytes + final_output_bytes);
             second_snapshot_output.reset();
             AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, final_output_bytes);
             output.reset();
             AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
 
             std::shared_ptr<arrow::RecordBatch> empty_output;
-            const auto empty_drain_status = runtime->Collector().Drain(
-                {}, runtime->Projector(), budget, &empty_output);
+            const auto empty_drain_status = runtime->Collector().Drain({}, runtime->Projector(), budget, &empty_output);
             assert(empty_drain_status.error == npm::NpmBasicDrainError::kNone);
             assert(empty_output != nullptr && empty_output->num_rows() == 0);
             assert(empty_output->schema().get() ==
-                   (observing_session ? npm::NpmSessionResultSchema().get()
-                                      : npm::NpmBasicResultSchema().get()));
+                   (observing_session ? npm::NpmSessionResultSchema().get() : npm::NpmBasicResultSchema().get()));
             assert(terminal_writer.session_writes == (session_module == nullptr ? 0 : 1));
             empty_output.reset();
             AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
@@ -8532,18 +8191,12 @@ void TestNpmBasicTaskRuntimeClosesRealtimeSessionsAfterPeriodicSnapshots() {
             output = MakeNpmPacketViewBatch();
             const auto repeated_output = output;
             maintenance_status = runtime->DriveRealtimeMaintenance(
-                RealtimeMaintenanceInput(monotonic_start_ns + 3 * interval_ns,
-                                         observed_start_ns + 3 * interval_ns,
-                                         closed_timestamp_ns,
-                                         false,
-                                         false,
-                                         true,
-                                         true),
+                RealtimeMaintenanceInput(monotonic_start_ns + 3 * interval_ns, observed_start_ns + 3 * interval_ns,
+                                         closed_timestamp_ns, false, false, true, true),
                 &output);
             assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
             assert(maintenance_status.snapshot_due && !maintenance_status.emitted);
-            assert(maintenance_status.active_sessions == 0 &&
-                   maintenance_status.ended_sessions == 0);
+            assert(maintenance_status.active_sessions == 0 && maintenance_status.ended_sessions == 0);
             assert(output == repeated_output && runtime->Collector().pending_results() == 0);
             assert(terminal_writer.session_writes == (session_module == nullptr ? 0 : 1));
 
@@ -8574,16 +8227,14 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
     auto both_session = basic_only;
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
-    const std::array<npm::NpmBasicTaskConfig, 4> configs{
-        basic_only, both_basic, session_only, both_session};
+    const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (const auto& config : configs) {
         ContextDictionary dictionary;
         ContextProtocol protocol(&dictionary);
         ContextPool pool(&protocol);
         SinglePoolQuerier querier(&pool);
-        const bool observing_session =
-            config.features.observing == npm::NpmResultEntity::kSession;
+        const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
         auto runtime = CreateRealtimeRuntimeForTest(config, &querier);
         auto budget = runtime->Budget();
         assert(pool.acquire_calls == 1 && pool.release_calls == 0);
@@ -8597,19 +8248,10 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
             assert(runtime->Modules().empty());
         }
 
-        const auto assert_output = [&](const std::shared_ptr<arrow::RecordBatch>& batch,
-                                       uint64_t session_id,
-                                       uint64_t revision,
-                                       int64_t observed_at_ns,
-                                       bool is_final,
-                                       const char* end_reason,
-                                       int64_t first_ns,
-                                       int64_t last_ns,
-                                       uint64_t packets_ab,
-                                       uint64_t packets_ba,
-                                       uint64_t wire_bytes_ab,
-                                       uint64_t wire_bytes_ba,
-                                       uint64_t payload_bytes_ab,
+        const auto assert_output = [&](const std::shared_ptr<arrow::RecordBatch>& batch, uint64_t session_id,
+                                       uint64_t revision, int64_t observed_at_ns, bool is_final, const char* end_reason,
+                                       int64_t first_ns, int64_t last_ns, uint64_t packets_ab, uint64_t packets_ba,
+                                       uint64_t wire_bytes_ab, uint64_t wire_bytes_ba, uint64_t payload_bytes_ab,
                                        uint64_t payload_bytes_ba) {
             assert(batch != nullptr && batch->num_rows() == 1 && batch->ValidateFull().ok());
             if (observing_session) {
@@ -8621,10 +8263,8 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
                 assert(SessionResultColumn<arrow::BooleanArray>(batch, 4)->Value(0) == is_final);
                 assert(SessionResultColumn<arrow::Int64Array>(batch, 11)->Value(0) == first_ns);
                 assert(SessionResultColumn<arrow::Int64Array>(batch, 12)->Value(0) == last_ns);
-                assert(SessionResultColumn<arrow::Int64Array>(batch, 13)->Value(0) ==
-                       last_ns - first_ns);
-                assert(SessionResultColumn<arrow::StringArray>(batch, 14)->GetString(0) ==
-                       "identified");
+                assert(SessionResultColumn<arrow::Int64Array>(batch, 13)->Value(0) == last_ns - first_ns);
+                assert(SessionResultColumn<arrow::StringArray>(batch, 14)->GetString(0) == "identified");
                 assert(SessionResultColumn<arrow::UInt16Array>(batch, 15)->Value(0) == 7);
                 assert(SessionResultColumn<arrow::UInt16Array>(batch, 16)->Value(0) == 8);
                 assert(SessionResultColumn<arrow::StringArray>(batch, 17)->GetString(0) == "SUB");
@@ -8636,18 +8276,12 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
                 }
                 assert(SessionResultColumn<arrow::UInt64Array>(batch, 19)->Value(0) == packets_ab);
                 assert(SessionResultColumn<arrow::UInt64Array>(batch, 20)->Value(0) == packets_ba);
-                assert(SessionResultColumn<arrow::UInt64Array>(batch, 21)->Value(0) ==
-                       wire_bytes_ab);
-                assert(SessionResultColumn<arrow::UInt64Array>(batch, 22)->Value(0) ==
-                       wire_bytes_ba);
-                assert(SessionResultColumn<arrow::UInt64Array>(batch, 23)->Value(0) ==
-                       payload_bytes_ab);
-                assert(SessionResultColumn<arrow::UInt64Array>(batch, 24)->Value(0) ==
-                       payload_bytes_ba);
-                assert(SessionResultColumn<arrow::UInt64Array>(batch, 30)->Value(0) ==
-                       payload_bytes_ab);
-                assert(SessionResultColumn<arrow::UInt64Array>(batch, 31)->Value(0) ==
-                       payload_bytes_ba);
+                assert(SessionResultColumn<arrow::UInt64Array>(batch, 21)->Value(0) == wire_bytes_ab);
+                assert(SessionResultColumn<arrow::UInt64Array>(batch, 22)->Value(0) == wire_bytes_ba);
+                assert(SessionResultColumn<arrow::UInt64Array>(batch, 23)->Value(0) == payload_bytes_ab);
+                assert(SessionResultColumn<arrow::UInt64Array>(batch, 24)->Value(0) == payload_bytes_ba);
+                assert(SessionResultColumn<arrow::UInt64Array>(batch, 30)->Value(0) == payload_bytes_ab);
+                assert(SessionResultColumn<arrow::UInt64Array>(batch, 31)->Value(0) == payload_bytes_ba);
                 return;
             }
 
@@ -8676,26 +8310,14 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
         };
 
         const std::vector<uint8_t> old_payload{0x10, 0x11, 0x12};
-        const auto old_packet = MakeIpv4TcpPacket("192.0.2.1",
-                                                  41000,
-                                                  "198.51.100.2",
-                                                  443,
-                                                  old_payload,
-                                                  kTcpAck,
-                                                  100,
-                                                  90,
-                                                  2048);
+        const auto old_packet =
+            MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, old_payload, kTcpAck, 100, 90, 2048);
         auto old_view = old_packet.View(0);
         old_view.meta.timestamp_ns = old_timestamp_ns;
         std::vector<npm::NpmSessionSnapshot> ended_sessions;
-        auto process_status = npm::ProcessNpmPacket(runtime->Config().domains,
-                                                    old_view,
-                                                    old_packet.layer,
-                                                    runtime->Sessions(),
-                                                    *runtime->ProtocolContext().Identifier(),
-                                                    runtime->Modules(),
-                                                    runtime->Collector(),
-                                                    &ended_sessions);
+        auto process_status = npm::ProcessNpmPacket(runtime->Config().domains, old_view, old_packet.layer,
+                                                    runtime->Sessions(), *runtime->ProtocolContext().Identifier(),
+                                                    runtime->Modules(), runtime->Collector(), &ended_sessions);
         assert(process_status.error == npm::NpmPacketProcessError::kNone);
         assert(ended_sessions.empty() && runtime->Sessions().size() == 1);
         assert(protocol.identify_pipelines.size() == 1);
@@ -8706,13 +8328,7 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
         std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
         const auto initial_output = output;
         auto maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns,
-                                     observed_start_ns,
-                                     old_timestamp_ns,
-                                     true,
-                                     false,
-                                     true,
-                                     false),
+            RealtimeMaintenanceInput(monotonic_start_ns, observed_start_ns, old_timestamp_ns, true, false, true, false),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(!maintenance_status.snapshot_due && !maintenance_status.emitted);
@@ -8720,85 +8336,38 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
 
         const int64_t first_observed_at_ns = observed_start_ns + interval_ns;
         maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns,
-                                     first_observed_at_ns,
-                                     old_timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns, first_observed_at_ns, old_timestamp_ns, false,
+                                     false, true, true),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(maintenance_status.snapshot_due && maintenance_status.emitted);
         assert(maintenance_status.active_sessions == 1 && maintenance_status.ended_sessions == 0);
-        assert_output(output,
-                      1,
-                      1,
-                      first_observed_at_ns,
-                      false,
-                      nullptr,
-                      old_timestamp_ns,
-                      old_timestamp_ns,
-                      1,
-                      0,
-                      old_packet.bytes.size(),
-                      0,
-                      old_payload.size(),
-                      0);
+        assert_output(output, 1, 1, first_observed_at_ns, false, nullptr, old_timestamp_ns, old_timestamp_ns, 1, 0,
+                      old_packet.bytes.size(), 0, old_payload.size(), 0);
         auto first_snapshot_output = output;
 
         const int64_t second_observed_at_ns = observed_start_ns + 2 * interval_ns;
         maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + 2 * interval_ns,
-                                     second_observed_at_ns,
-                                     old_timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + 2 * interval_ns, second_observed_at_ns, old_timestamp_ns,
+                                     false, false, true, true),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(maintenance_status.snapshot_due && maintenance_status.emitted);
         assert(maintenance_status.active_sessions == 1 && maintenance_status.ended_sessions == 0);
-        assert_output(output,
-                      1,
-                      2,
-                      second_observed_at_ns,
-                      false,
-                      nullptr,
-                      old_timestamp_ns,
-                      old_timestamp_ns,
-                      1,
-                      0,
-                      old_packet.bytes.size(),
-                      0,
-                      old_payload.size(),
-                      0);
+        assert_output(output, 1, 2, second_observed_at_ns, false, nullptr, old_timestamp_ns, old_timestamp_ns, 1, 0,
+                      old_packet.bytes.size(), 0, old_payload.size(), 0);
         auto second_snapshot_output = output;
-        assert(runtime->Projector().tracked_sessions() ==
-               (config.features.basic_enabled ? 1 : 0));
+        assert(runtime->Projector().tracked_sessions() == (config.features.basic_enabled ? 1 : 0));
 
         CapturingForwardingWriter terminal_writer(runtime->Collector());
         const std::vector<uint8_t> replacement_payload{0x20, 0x21};
-        const auto replacement_packet = MakeIpv4TcpPacket("192.0.2.1",
-                                                          41000,
-                                                          "198.51.100.2",
-                                                          443,
-                                                          replacement_payload,
-                                                          kTcpSyn,
-                                                          200,
-                                                          0,
-                                                          4096);
+        const auto replacement_packet =
+            MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, replacement_payload, kTcpSyn, 200, 0, 4096);
         auto replacement_view = replacement_packet.View(0);
         replacement_view.meta.timestamp_ns = reuse_timestamp_ns;
-        process_status = npm::ProcessNpmPacket(runtime->Config().domains,
-                                               replacement_view,
-                                               replacement_packet.layer,
-                                               runtime->Sessions(),
-                                               *runtime->ProtocolContext().Identifier(),
-                                               runtime->Modules(),
-                                               terminal_writer,
-                                               &ended_sessions);
+        process_status = npm::ProcessNpmPacket(runtime->Config().domains, replacement_view, replacement_packet.layer,
+                                               runtime->Sessions(), *runtime->ProtocolContext().Identifier(),
+                                               runtime->Modules(), terminal_writer, &ended_sessions);
         assert(process_status.error == npm::NpmPacketProcessError::kNone);
         assert(ended_sessions.size() == 1 && runtime->Sessions().size() == 1);
         assert(ended_sessions[0].session_id == 1);
@@ -8834,20 +8403,8 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
         events.push_back({std::move(ended_sessions[0]), reuse_timestamp_ns});
         auto drain_status = runtime->Collector().Drain(events, runtime->Projector(), budget, &output);
         assert(drain_status.error == npm::NpmBasicDrainError::kNone);
-        assert_output(output,
-                      1,
-                      3,
-                      reuse_timestamp_ns,
-                      true,
-                      "tuple_reuse",
-                      old_timestamp_ns,
-                      old_timestamp_ns,
-                      1,
-                      0,
-                      old_packet.bytes.size(),
-                      0,
-                      old_payload.size(),
-                      0);
+        assert_output(output, 1, 3, reuse_timestamp_ns, true, "tuple_reuse", old_timestamp_ns, old_timestamp_ns, 1, 0,
+                      old_packet.bytes.size(), 0, old_payload.size(), 0);
         auto reuse_output = output;
 
         std::vector<npm::NpmSessionView> active;
@@ -8867,66 +8424,34 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
         const uint64_t first_snapshot_bytes = BasicResultBufferBytes(first_snapshot_output);
         const uint64_t second_snapshot_bytes = BasicResultBufferBytes(second_snapshot_output);
         const uint64_t reuse_output_bytes = BasicResultBufferBytes(reuse_output);
-        AssertTaskBudgetUsage(budget->Usage(),
-                              runtime->Sessions().tracked_bytes(),
-                              session_module == nullptr ? 0 : session_module->tracked_bytes(),
-                              0,
+        AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(),
+                              session_module == nullptr ? 0 : session_module->tracked_bytes(), 0,
                               first_snapshot_bytes + second_snapshot_bytes + reuse_output_bytes);
 
         const int64_t replacement_observed_at_ns = observed_start_ns + 3 * interval_ns;
         maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + 3 * interval_ns,
-                                     replacement_observed_at_ns,
-                                     reuse_timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + 3 * interval_ns, replacement_observed_at_ns,
+                                     reuse_timestamp_ns, false, false, true, true),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(maintenance_status.snapshot_due && maintenance_status.emitted);
         assert(maintenance_status.active_sessions == 1 && maintenance_status.ended_sessions == 0);
-        assert_output(output,
-                      2,
-                      1,
-                      replacement_observed_at_ns,
-                      false,
-                      nullptr,
-                      reuse_timestamp_ns,
-                      reuse_timestamp_ns,
-                      1,
-                      0,
-                      replacement_packet.bytes.size(),
-                      0,
-                      replacement_payload.size(),
-                      0);
+        assert_output(output, 2, 1, replacement_observed_at_ns, false, nullptr, reuse_timestamp_ns, reuse_timestamp_ns,
+                      1, 0, replacement_packet.bytes.size(), 0, replacement_payload.size(), 0);
         auto replacement_snapshot_output = output;
-        assert(runtime->Projector().tracked_sessions() ==
-               (config.features.basic_enabled ? 1 : 0));
+        assert(runtime->Projector().tracked_sessions() == (config.features.basic_enabled ? 1 : 0));
         if (session_module != nullptr) {
             assert(session_module->tracked_sessions() == 1 && session_module->tracked_bytes() > 0);
         }
 
         const std::vector<uint8_t> closed_payload{0x30};
-        const auto closed_packet = MakeIpv4TcpPacket("198.51.100.2",
-                                                     443,
-                                                     "192.0.2.1",
-                                                     41000,
-                                                     closed_payload,
-                                                     kTcpRst | kTcpAck,
-                                                     500,
-                                                     203,
-                                                     1024);
+        const auto closed_packet = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 41000, closed_payload,
+                                                     kTcpRst | kTcpAck, 500, 203, 1024);
         auto closed_view = closed_packet.View(0);
         closed_view.meta.timestamp_ns = closed_timestamp_ns;
-        process_status = npm::ProcessNpmPacket(runtime->Config().domains,
-                                               closed_view,
-                                               closed_packet.layer,
-                                               runtime->Sessions(),
-                                               *runtime->ProtocolContext().Identifier(),
-                                               runtime->Modules(),
-                                               terminal_writer,
-                                               &ended_sessions);
+        process_status = npm::ProcessNpmPacket(runtime->Config().domains, closed_view, closed_packet.layer,
+                                               runtime->Sessions(), *runtime->ProtocolContext().Identifier(),
+                                               runtime->Modules(), terminal_writer, &ended_sessions);
         assert(process_status.error == npm::NpmPacketProcessError::kNone);
         assert(ended_sessions.size() == 1 && runtime->Sessions().size() == 0);
         assert(ended_sessions[0].session_id == 2);
@@ -8963,19 +8488,8 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
         events.push_back({std::move(ended_sessions[0]), closed_timestamp_ns});
         drain_status = runtime->Collector().Drain(events, runtime->Projector(), budget, &output);
         assert(drain_status.error == npm::NpmBasicDrainError::kNone);
-        assert_output(output,
-                      2,
-                      2,
-                      closed_timestamp_ns,
-                      true,
-                      "closed",
-                      reuse_timestamp_ns,
-                      closed_timestamp_ns,
-                      1,
-                      1,
-                      replacement_packet.bytes.size(),
-                      closed_packet.bytes.size(),
-                      replacement_payload.size(),
+        assert_output(output, 2, 2, closed_timestamp_ns, true, "closed", reuse_timestamp_ns, closed_timestamp_ns, 1, 1,
+                      replacement_packet.bytes.size(), closed_packet.bytes.size(), replacement_payload.size(),
                       closed_payload.size());
 
         assert(runtime->Sessions().size() == 0 && runtime->Sessions().tracked_bytes() == 0);
@@ -8985,12 +8499,10 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
             assert(session_module->tracked_sessions() == 0 && session_module->tracked_bytes() == 0);
         }
 
-        const uint64_t replacement_snapshot_bytes =
-            BasicResultBufferBytes(replacement_snapshot_output);
+        const uint64_t replacement_snapshot_bytes = BasicResultBufferBytes(replacement_snapshot_output);
         const uint64_t closed_output_bytes = BasicResultBufferBytes(output);
-        uint64_t retained_output_bytes = first_snapshot_bytes + second_snapshot_bytes +
-                                         reuse_output_bytes + replacement_snapshot_bytes +
-                                         closed_output_bytes;
+        uint64_t retained_output_bytes = first_snapshot_bytes + second_snapshot_bytes + reuse_output_bytes +
+                                         replacement_snapshot_bytes + closed_output_bytes;
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, retained_output_bytes);
         first_snapshot_output.reset();
         retained_output_bytes -= first_snapshot_bytes;
@@ -9008,13 +8520,11 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
 
         std::shared_ptr<arrow::RecordBatch> empty_output;
-        const auto empty_drain_status = runtime->Collector().Drain(
-            {}, runtime->Projector(), budget, &empty_output);
+        const auto empty_drain_status = runtime->Collector().Drain({}, runtime->Projector(), budget, &empty_output);
         assert(empty_drain_status.error == npm::NpmBasicDrainError::kNone);
         assert(empty_output != nullptr && empty_output->num_rows() == 0);
         assert(empty_output->schema().get() ==
-               (observing_session ? npm::NpmSessionResultSchema().get()
-                                  : npm::NpmBasicResultSchema().get()));
+               (observing_session ? npm::NpmSessionResultSchema().get() : npm::NpmBasicResultSchema().get()));
         assert(terminal_writer.session_writes == (session_module == nullptr ? 0 : 2));
         empty_output.reset();
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
@@ -9022,13 +8532,8 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
         output = MakeNpmPacketViewBatch();
         const auto repeated_output = output;
         maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + 4 * interval_ns,
-                                     observed_start_ns + 4 * interval_ns,
-                                     closed_timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + 4 * interval_ns, observed_start_ns + 4 * interval_ns,
+                                     closed_timestamp_ns, false, false, true, true),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(maintenance_status.snapshot_due && !maintenance_status.emitted);
@@ -9062,16 +8567,14 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
     auto both_session = basic_only;
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
-    const std::array<npm::NpmBasicTaskConfig, 4> configs{
-        basic_only, both_basic, session_only, both_session};
+    const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (const auto& config : configs) {
         ContextDictionary dictionary;
         ContextProtocol protocol(&dictionary);
         ContextPool pool(&protocol);
         SinglePoolQuerier querier(&pool);
-        const bool observing_session =
-            config.features.observing == npm::NpmResultEntity::kSession;
+        const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
         auto runtime = CreateRealtimeRuntimeForTest(config, &querier);
         auto budget = runtime->Budget();
         assert(pool.acquire_calls == 1 && pool.release_calls == 0);
@@ -9086,41 +8589,21 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
         }
 
         const std::vector<uint8_t> tcp_payload_ab{0x10, 0x11, 0x12};
-        const auto tcp_packet_ab = MakeIpv4TcpPacket("192.0.2.1",
-                                                     41000,
-                                                     "198.51.100.2",
-                                                     443,
-                                                     tcp_payload_ab,
-                                                     kTcpAck,
-                                                     100,
-                                                     90,
-                                                     2048);
+        const auto tcp_packet_ab =
+            MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, tcp_payload_ab, kTcpAck, 100, 90, 2048);
         const std::vector<uint8_t> udp_payload{0x20, 0x21};
-        const auto udp_packet =
-            MakeIpv6UdpPacket("2001:db8::10", 53000, "2001:db8::20", 53, udp_payload);
+        const auto udp_packet = MakeIpv6UdpPacket("2001:db8::10", 53000, "2001:db8::20", 53, udp_payload);
         const std::vector<uint8_t> tcp_payload_ba{0x30};
-        const auto tcp_packet_ba = MakeIpv4TcpPacket("198.51.100.2",
-                                                     443,
-                                                     "192.0.2.1",
-                                                     41000,
-                                                     tcp_payload_ba,
-                                                     kTcpAck,
-                                                     500,
-                                                     103,
-                                                     4096);
+        const auto tcp_packet_ba =
+            MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 41000, tcp_payload_ba, kTcpAck, 500, 103, 4096);
 
         const auto process_packet = [&](const PacketFixture& packet, int64_t timestamp_ns) {
             auto view = packet.View(0);
             view.meta.timestamp_ns = timestamp_ns;
             std::vector<npm::NpmSessionSnapshot> ended_sessions;
-            const auto status = npm::ProcessNpmPacket(runtime->Config().domains,
-                                                      view,
-                                                      packet.layer,
-                                                      runtime->Sessions(),
-                                                      *runtime->ProtocolContext().Identifier(),
-                                                      runtime->Modules(),
-                                                      runtime->Collector(),
-                                                      &ended_sessions);
+            const auto status = npm::ProcessNpmPacket(runtime->Config().domains, view, packet.layer,
+                                                      runtime->Sessions(), *runtime->ProtocolContext().Identifier(),
+                                                      runtime->Modules(), runtime->Collector(), &ended_sessions);
             assert(status.error == npm::NpmPacketProcessError::kNone);
             assert(ended_sessions.empty());
         };
@@ -9132,14 +8615,10 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
             assert(session_module->tracked_sessions() == 2 && session_module->tracked_bytes() > 0);
         }
 
-        const auto assert_output = [&](const std::shared_ptr<arrow::RecordBatch>& batch,
-                                       uint64_t revision,
-                                       int64_t observed_at_ns,
-                                       bool is_final,
-                                       bool tcp_updated) {
+        const auto assert_output = [&](const std::shared_ptr<arrow::RecordBatch>& batch, uint64_t revision,
+                                       int64_t observed_at_ns, bool is_final, bool tcp_updated) {
             assert(batch != nullptr && batch->num_rows() == 2 && batch->ValidateFull().ok());
-            const int64_t tcp_last_ns =
-                tcp_updated ? tcp_last_timestamp_ns : tcp_first_timestamp_ns;
+            const int64_t tcp_last_ns = tcp_updated ? tcp_last_timestamp_ns : tcp_first_timestamp_ns;
             const uint64_t tcp_packets_ba = tcp_updated ? 1 : 0;
             const uint64_t tcp_wire_bytes_ba = tcp_updated ? tcp_packet_ba.bytes.size() : 0;
             const uint64_t tcp_payload_bytes_ba = tcp_updated ? tcp_payload_ba.size() : 0;
@@ -9166,15 +8645,12 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
                 const auto wire_bytes_ba = SessionResultColumn<arrow::UInt64Array>(batch, 22);
                 const auto payload_bytes_ab = SessionResultColumn<arrow::UInt64Array>(batch, 23);
                 const auto payload_bytes_ba = SessionResultColumn<arrow::UInt64Array>(batch, 24);
-                const auto unique_payload_bytes_ab =
-                    SessionResultColumn<arrow::UInt64Array>(batch, 30);
-                const auto unique_payload_bytes_ba =
-                    SessionResultColumn<arrow::UInt64Array>(batch, 31);
+                const auto unique_payload_bytes_ab = SessionResultColumn<arrow::UInt64Array>(batch, 30);
+                const auto unique_payload_bytes_ba = SessionResultColumn<arrow::UInt64Array>(batch, 31);
 
                 assert(session_ids->Value(0) == 1 && session_ids->Value(1) == 2);
                 assert(revisions->Value(0) == revision && revisions->Value(1) == revision);
-                assert(observed_at->Value(0) == observed_at_ns &&
-                       observed_at->Value(1) == observed_at_ns);
+                assert(observed_at->Value(0) == observed_at_ns && observed_at->Value(1) == observed_at_ns);
                 assert(final_flags->Value(0) == is_final && final_flags->Value(1) == is_final);
                 assert(transports->Value(0) == 6 && transports->Value(1) == 17);
                 assert(first_ns->Value(0) == tcp_first_timestamp_ns);
@@ -9186,8 +8662,7 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
                 assert(protocol_status->GetString(1) == "identified");
                 assert(protocol_ids->Value(0) == 7 && protocol_ids->Value(1) == 7);
                 assert(protocol_sub_ids->Value(0) == 8 && protocol_sub_ids->Value(1) == 8);
-                assert(protocol_names->GetString(0) == "SUB" &&
-                       protocol_names->GetString(1) == "SUB");
+                assert(protocol_names->GetString(0) == "SUB" && protocol_names->GetString(1) == "SUB");
                 if (is_final) {
                     assert(end_reasons->GetString(0) == "eof");
                     assert(end_reasons->GetString(1) == "eof");
@@ -9231,8 +8706,7 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
 
             assert(session_ids->Value(0) == 1 && session_ids->Value(1) == 2);
             assert(revisions->Value(0) == revision && revisions->Value(1) == revision);
-            assert(observed_at->Value(0) == observed_at_ns &&
-                   observed_at->Value(1) == observed_at_ns);
+            assert(observed_at->Value(0) == observed_at_ns && observed_at->Value(1) == observed_at_ns);
             assert(final_flags->Value(0) == is_final && final_flags->Value(1) == is_final);
             assert(transports->Value(0) == 6 && transports->Value(1) == 17);
             assert(first_ns->Value(0) == tcp_first_timestamp_ns);
@@ -9249,8 +8723,7 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
             assert(protocol_sub_ids->Value(0) == 8 && protocol_sub_ids->Value(1) == 8);
             assert(protocol_names->GetString(0) == "SUB" && protocol_names->GetString(1) == "SUB");
             if (is_final) {
-                assert(end_reasons->GetString(0) == "eof" &&
-                       end_reasons->GetString(1) == "eof");
+                assert(end_reasons->GetString(0) == "eof" && end_reasons->GetString(1) == "eof");
             } else {
                 assert(end_reasons->IsNull(0) && end_reasons->IsNull(1));
             }
@@ -9259,13 +8732,7 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
         std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
         const auto initial_output = output;
         auto maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns,
-                                     observed_start_ns,
-                                     udp_timestamp_ns,
-                                     true,
-                                     false,
-                                     true,
-                                     false),
+            RealtimeMaintenanceInput(monotonic_start_ns, observed_start_ns, udp_timestamp_ns, true, false, true, false),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(!maintenance_status.snapshot_due && !maintenance_status.emitted);
@@ -9273,13 +8740,8 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
 
         const int64_t first_observed_at_ns = observed_start_ns + interval_ns;
         maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns,
-                                     first_observed_at_ns,
-                                     udp_timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns, first_observed_at_ns, udp_timestamp_ns, false,
+                                     false, true, true),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(maintenance_status.snapshot_due && maintenance_status.emitted);
@@ -9291,31 +8753,23 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
         assert(runtime->Sessions().size() == 2 && protocol.identify_pipelines.size() == 2);
         const int64_t second_observed_at_ns = observed_start_ns + 2 * interval_ns;
         maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + 2 * interval_ns,
-                                     second_observed_at_ns,
-                                     tcp_last_timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + 2 * interval_ns, second_observed_at_ns, tcp_last_timestamp_ns,
+                                     false, false, true, true),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(maintenance_status.snapshot_due && maintenance_status.emitted);
         assert(maintenance_status.active_sessions == 2 && maintenance_status.ended_sessions == 0);
         assert_output(output, 2, second_observed_at_ns, false, true);
         auto second_snapshot_output = output;
-        assert(runtime->Projector().tracked_sessions() ==
-               (config.features.basic_enabled ? 2 : 0));
+        assert(runtime->Projector().tracked_sessions() == (config.features.basic_enabled ? 2 : 0));
         if (session_module != nullptr) {
             assert(session_module->tracked_sessions() == 2 && session_module->tracked_bytes() > 0);
         }
 
         const uint64_t first_snapshot_bytes = BasicResultBufferBytes(first_snapshot_output);
         const uint64_t second_snapshot_bytes = BasicResultBufferBytes(second_snapshot_output);
-        AssertTaskBudgetUsage(budget->Usage(),
-                              runtime->Sessions().tracked_bytes(),
-                              session_module == nullptr ? 0 : session_module->tracked_bytes(),
-                              0,
+        AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(),
+                              session_module == nullptr ? 0 : session_module->tracked_bytes(), 0,
                               first_snapshot_bytes + second_snapshot_bytes);
 
         const int64_t eof_observed_at_ns = observed_start_ns + 3 * interval_ns;
@@ -9328,10 +8782,7 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
         assert_output(output, 3, eof_observed_at_ns, true, true);
 
         const uint64_t eof_output_bytes = BasicResultBufferBytes(output);
-        AssertTaskBudgetUsage(budget->Usage(),
-                              0,
-                              0,
-                              0,
+        AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0,
                               first_snapshot_bytes + second_snapshot_bytes + eof_output_bytes);
         const auto* eof_output_pointer = output.get();
         flush_status = runtime->FlushOffline(eof_observed_at_ns + 1, &output);
@@ -9347,8 +8798,7 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
         assert_output(output, 3, eof_observed_at_ns, true, true);
 
         output.reset();
-        AssertTaskBudgetUsage(
-            budget->Usage(), 0, 0, 0, first_snapshot_bytes + second_snapshot_bytes);
+        AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, first_snapshot_bytes + second_snapshot_bytes);
         first_snapshot_output.reset();
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, second_snapshot_bytes);
         second_snapshot_output.reset();
@@ -9372,23 +8822,16 @@ void TestNpmBasicTaskRuntimeCleansSessionModuleFailures() {
     session_only.features.observing = npm::NpmResultEntity::kSession;
     auto both_session = both_basic;
     both_session.features.observing = npm::NpmResultEntity::kSession;
-    const std::array<npm::NpmBasicTaskConfig, 3> configs{
-        both_basic, session_only, both_session};
+    const std::array<npm::NpmBasicTaskConfig, 3> configs{both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         const auto& config = configs[index];
-        const bool observing_session =
-            config.features.observing == npm::NpmResultEntity::kSession;
-        const auto expected_schema =
-            observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
+        const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
+        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
         std::shared_ptr<arrow::Schema> output_schema;
         std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
-        const auto create_status = npm::NpmBasicTaskRuntime::Create(
-            config,
-            &querier,
-            flowsql::packet::PacketSchema(),
-            &output_schema,
-            &runtime);
+        const auto create_status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(),
+                                                                    &output_schema, &runtime);
         assert(create_status.error == npm::NpmBasicTaskRuntimeError::kNone);
         assert(runtime != nullptr && output_schema.get() == expected_schema.get());
         assert(runtime->Modules().size() == 1);
@@ -9397,17 +8840,11 @@ void TestNpmBasicTaskRuntimeCleansSessionModuleFailures() {
 
         std::vector<flowsql::packet::PacketRecord> records;
         for (uint32_t packet_index = 0; packet_index < 5; ++packet_index) {
-            const auto packet = MakeIpv4TcpPacket("192.0.2.1",
-                                                  41000,
-                                                  "198.51.100.2",
-                                                  443,
-                                                  std::vector<uint8_t>(10, 0x11),
-                                                  kTcpAck,
-                                                  100 + packet_index * 20,
-                                                  1,
-                                                  1024);
-            records.push_back(MakeBatchPacketRecord(
-                packet, 0, 100 + static_cast<int64_t>(packet_index), packet_index + 1));
+            const auto packet =
+                MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, std::vector<uint8_t>(10, 0x11), kTcpAck,
+                                  100 + packet_index * 20, 1, 1024);
+            records.push_back(
+                MakeBatchPacketRecord(packet, 0, 100 + static_cast<int64_t>(packet_index), packet_index + 1));
         }
         auto input = MakeEncodedPacketBatch(records);
         std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
@@ -9453,8 +8890,7 @@ void TestNpmBasicTaskRuntimeCleansRealtimeBackpressureFailures() {
     session_only.features.observing = npm::NpmResultEntity::kSession;
     auto both_session = both_basic;
     both_session.features.observing = npm::NpmResultEntity::kSession;
-    const std::array<npm::NpmBasicTaskConfig, 4> configs{
-        basic_only, both_basic, session_only, both_session};
+    const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         ContextDictionary dictionary;
@@ -9462,53 +8898,36 @@ void TestNpmBasicTaskRuntimeCleansRealtimeBackpressureFailures() {
         ContextPool pool(&protocol);
         SinglePoolQuerier querier(&pool);
         const auto& config = configs[index];
-        const bool observing_session =
-            config.features.observing == npm::NpmResultEntity::kSession;
+        const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
         auto runtime = CreateRealtimeRuntimeForTest(config, &querier);
         auto budget = runtime->Budget();
 
-        const auto packet = MakeIpv6UdpPacket(
-            "2001:db8::70", 53070, "2001:db8::80", 53, {static_cast<uint8_t>(index + 1)});
+        const auto packet =
+            MakeIpv6UdpPacket("2001:db8::70", 53070, "2001:db8::80", 53, {static_cast<uint8_t>(index + 1)});
         auto packet_view = packet.View(0, 100);
         packet_view.meta.timestamp_ns = 3'000 + static_cast<int64_t>(index);
         std::vector<npm::NpmSessionSnapshot> ended_sessions;
-        const auto process_status = npm::ProcessNpmPacket(runtime->Config().domains,
-                                                          packet_view,
-                                                          packet.layer,
-                                                          runtime->Sessions(),
-                                                          *runtime->ProtocolContext().Identifier(),
-                                                          runtime->Modules(),
-                                                          runtime->Collector(),
-                                                          &ended_sessions);
+        const auto process_status = npm::ProcessNpmPacket(runtime->Config().domains, packet_view, packet.layer,
+                                                          runtime->Sessions(), *runtime->ProtocolContext().Identifier(),
+                                                          runtime->Modules(), runtime->Collector(), &ended_sessions);
         assert(process_status.error == npm::NpmPacketProcessError::kNone);
         assert(ended_sessions.empty() && runtime->Sessions().size() == 1);
 
         std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
         const auto original_output = output;
         auto maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns,
-                                     observed_start_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     true,
-                                     false,
-                                     true,
-                                     false),
+            RealtimeMaintenanceInput(monotonic_start_ns, observed_start_ns, packet_view.meta.timestamp_ns, true, false,
+                                     true, false),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(!maintenance_status.snapshot_due && !maintenance_status.emitted);
         assert(output == original_output);
 
         const uint64_t output_limit = config.analysis.max_pending_output_bytes;
-        assert(budget->Reserve(npm::NpmBudgetCategory::kPendingOutput, output_limit) ==
-               npm::NpmBudgetError::kNone);
+        assert(budget->Reserve(npm::NpmBudgetCategory::kPendingOutput, output_limit) == npm::NpmBudgetError::kNone);
         maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns,
-                                     observed_start_ns + interval_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns, observed_start_ns + interval_ns,
+                                     packet_view.meta.timestamp_ns, false, false, true, true),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kDrainError);
         assert(maintenance_status.runtime_state == npm::NpmEofFlushState::kFailed);
@@ -9516,13 +8935,10 @@ void TestNpmBasicTaskRuntimeCleansRealtimeBackpressureFailures() {
         assert(maintenance_status.drain_status.error == npm::NpmBasicDrainError::kEncodeError);
         if (observing_session) {
             assert(maintenance_status.drain_status.encode_error == npm::NpmBasicEncodeError::kNone);
-            assert(maintenance_status.drain_status.session_encode_error ==
-                   npm::NpmSessionEncodeError::kBudgetError);
+            assert(maintenance_status.drain_status.session_encode_error == npm::NpmSessionEncodeError::kBudgetError);
         } else {
-            assert(maintenance_status.drain_status.encode_error ==
-                   npm::NpmBasicEncodeError::kBudgetError);
-            assert(maintenance_status.drain_status.session_encode_error ==
-                   npm::NpmSessionEncodeError::kNone);
+            assert(maintenance_status.drain_status.encode_error == npm::NpmBasicEncodeError::kBudgetError);
+            assert(maintenance_status.drain_status.session_encode_error == npm::NpmSessionEncodeError::kNone);
         }
         assert(output == original_output && runtime->State() == npm::NpmEofFlushState::kFailed);
         const auto first_error = runtime->LastError();
@@ -9530,28 +8946,22 @@ void TestNpmBasicTaskRuntimeCleansRealtimeBackpressureFailures() {
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, output_limit);
 
         maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + 2 * interval_ns,
-                                     observed_start_ns + 2 * interval_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + 2 * interval_ns, observed_start_ns + 2 * interval_ns,
+                                     packet_view.meta.timestamp_ns, false, false, true, true),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kTerminalState);
         assert(maintenance_status.runtime_state == npm::NpmEofFlushState::kFailed);
         const auto flush_status = runtime->FlushOffline(observed_start_ns + 2 * interval_ns, &output);
         assert(flush_status.error == npm::NpmEofFlushError::kFailedState);
-        auto input = MakeEncodedPacketBatch(
-            {MakeBatchPacketRecord(packet, 0, packet_view.meta.timestamp_ns + 1, index + 1)});
+        auto input =
+            MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, packet_view.meta.timestamp_ns + 1, index + 1)});
         const auto terminal_process = runtime->ProcessOfflineBatch(input, &output);
         assert(terminal_process.error == npm::NpmBasicOfflineBatchError::kTerminalState);
         assert(terminal_process.runtime_state == npm::NpmEofFlushState::kFailed);
         runtime->Cancel();
         assert(runtime->LastError() == first_error && output == original_output);
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, output_limit);
-        assert(budget->Release(npm::NpmBudgetCategory::kPendingOutput, output_limit) ==
-               npm::NpmBudgetError::kNone);
+        assert(budget->Release(npm::NpmBudgetCategory::kPendingOutput, output_limit) == npm::NpmBudgetError::kNone);
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
     }
 }
@@ -9571,8 +8981,7 @@ void TestNpmBasicTaskRuntimeCancelsSessionStateWithoutTerminalResults() {
     session_only.features.observing = npm::NpmResultEntity::kSession;
     auto both_session = both_basic;
     both_session.features.observing = npm::NpmResultEntity::kSession;
-    const std::array<npm::NpmBasicTaskConfig, 4> configs{
-        basic_only, both_basic, session_only, both_session};
+    const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         ContextDictionary dictionary;
@@ -9580,52 +8989,35 @@ void TestNpmBasicTaskRuntimeCancelsSessionStateWithoutTerminalResults() {
         ContextPool pool(&protocol);
         SinglePoolQuerier querier(&pool);
         const auto& config = configs[index];
-        const bool observing_session =
-            config.features.observing == npm::NpmResultEntity::kSession;
+        const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
         auto runtime = CreateRealtimeRuntimeForTest(config, &querier);
 
-        const auto packet = MakeIpv6UdpPacket(
-            "2001:db8::90", 53090, "2001:db8::a0", 53, {static_cast<uint8_t>(index + 1)});
+        const auto packet =
+            MakeIpv6UdpPacket("2001:db8::90", 53090, "2001:db8::a0", 53, {static_cast<uint8_t>(index + 1)});
         auto packet_view = packet.View(0, 100);
         packet_view.meta.timestamp_ns = 4'000 + static_cast<int64_t>(index);
         std::vector<npm::NpmSessionSnapshot> ended_sessions;
-        const auto packet_status = npm::ProcessNpmPacket(runtime->Config().domains,
-                                                         packet_view,
-                                                         packet.layer,
-                                                         runtime->Sessions(),
-                                                         *runtime->ProtocolContext().Identifier(),
-                                                         runtime->Modules(),
-                                                         runtime->Collector(),
-                                                         &ended_sessions);
+        const auto packet_status = npm::ProcessNpmPacket(runtime->Config().domains, packet_view, packet.layer,
+                                                         runtime->Sessions(), *runtime->ProtocolContext().Identifier(),
+                                                         runtime->Modules(), runtime->Collector(), &ended_sessions);
         assert(packet_status.error == npm::NpmPacketProcessError::kNone);
         assert(ended_sessions.empty() && runtime->Sessions().size() == 1);
 
         std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
         auto maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns,
-                                     observed_start_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     true,
-                                     false,
-                                     true,
-                                     false),
+            RealtimeMaintenanceInput(monotonic_start_ns, observed_start_ns, packet_view.meta.timestamp_ns, true, false,
+                                     true, false),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns,
-                                     observed_start_ns + interval_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns, observed_start_ns + interval_ns,
+                                     packet_view.meta.timestamp_ns, false, false, true, true),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(maintenance_status.snapshot_due && maintenance_status.emitted);
         assert(output != nullptr && output->num_rows() == 1);
         assert(runtime->Sessions().size() == 1);
-        assert(runtime->Projector().tracked_sessions() ==
-               (config.features.basic_enabled ? 1 : 0));
+        assert(runtime->Projector().tracked_sessions() == (config.features.basic_enabled ? 1 : 0));
         if (config.features.session_enabled) {
             auto* module = dynamic_cast<npm::NpmSessionAnalysisModule*>(runtime->Modules()[0]);
             assert(module != nullptr && module->tracked_sessions() == 1);
@@ -9666,19 +9058,14 @@ void TestNpmBasicTaskRuntimeCancelsSessionStateWithoutTerminalResults() {
         const auto flush_status = runtime->FlushOffline(observed_start_ns + 2 * interval_ns, &output);
         assert(flush_status.error == npm::NpmEofFlushError::kCancelled);
         assert(output.get() == output_pointer);
-        auto input = MakeEncodedPacketBatch(
-            {MakeBatchPacketRecord(packet, 0, packet_view.meta.timestamp_ns + 1, index + 1)});
+        auto input =
+            MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, packet_view.meta.timestamp_ns + 1, index + 1)});
         const auto terminal_process = runtime->ProcessOfflineBatch(input, &output);
         assert(terminal_process.error == npm::NpmBasicOfflineBatchError::kTerminalState);
         assert(terminal_process.runtime_state == npm::NpmEofFlushState::kCancelled);
         maintenance_status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + 2 * interval_ns,
-                                     observed_start_ns + 2 * interval_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + 2 * interval_ns, observed_start_ns + 2 * interval_ns,
+                                     packet_view.meta.timestamp_ns, false, false, true, true),
             &output);
         assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kTerminalState);
         assert(maintenance_status.runtime_state == npm::NpmEofFlushState::kCancelled);
@@ -9716,8 +9103,7 @@ void TestNpmBasicTaskRuntimeRetiresRealtimeIdleSessionsOnce() {
     auto both_session = basic_only;
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
-    const std::array<npm::NpmBasicTaskConfig, 4> configs{
-        basic_only, both_basic, session_only, both_session};
+    const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         const auto& config = configs[index];
@@ -9736,19 +9122,14 @@ void TestNpmBasicTaskRuntimeRetiresRealtimeIdleSessionsOnce() {
             assert(runtime->Modules().empty());
         }
 
-        const auto packet = MakeIpv6UdpPacket(
-            "2001:db8::50", 53050, "2001:db8::60", 53, {static_cast<uint8_t>(index + 1)});
+        const auto packet =
+            MakeIpv6UdpPacket("2001:db8::50", 53050, "2001:db8::60", 53, {static_cast<uint8_t>(index + 1)});
         auto packet_view = packet.View(0, 100);
         packet_view.meta.timestamp_ns = 2'000 + static_cast<int64_t>(index);
         std::vector<npm::NpmSessionSnapshot> ended_sessions;
-        const auto process_status = npm::ProcessNpmPacket(runtime->Config().domains,
-                                                          packet_view,
-                                                          packet.layer,
-                                                          runtime->Sessions(),
-                                                          *runtime->ProtocolContext().Identifier(),
-                                                          runtime->Modules(),
-                                                          runtime->Collector(),
-                                                          &ended_sessions);
+        const auto process_status = npm::ProcessNpmPacket(runtime->Config().domains, packet_view, packet.layer,
+                                                          runtime->Sessions(), *runtime->ProtocolContext().Identifier(),
+                                                          runtime->Modules(), runtime->Collector(), &ended_sessions);
         assert(process_status.error == npm::NpmPacketProcessError::kNone);
         assert(ended_sessions.empty() && runtime->Sessions().size() == 1);
         if (session_module != nullptr) {
@@ -9758,26 +9139,16 @@ void TestNpmBasicTaskRuntimeRetiresRealtimeIdleSessionsOnce() {
         std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
         const auto initial_output = output;
         auto status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns,
-                                     observed_start_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     true,
-                                     false,
-                                     true,
-                                     false),
+            RealtimeMaintenanceInput(monotonic_start_ns, observed_start_ns, packet_view.meta.timestamp_ns, true, false,
+                                     true, false),
             &output);
         assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(!status.snapshot_due && !status.emitted && output == initial_output);
 
         const int64_t snapshot_observed_at_ns = observed_start_ns + interval_ns;
         status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns,
-                                     snapshot_observed_at_ns,
-                                     packet_view.meta.timestamp_ns,
-                                     false,
-                                     false,
-                                     true,
-                                     true),
+            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns, snapshot_observed_at_ns,
+                                     packet_view.meta.timestamp_ns, false, false, true, true),
             &output);
         assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(status.progress_disposition == npm::NpmCaptureProgressDisposition::kDeferredBacklogged);
@@ -9805,13 +9176,8 @@ void TestNpmBasicTaskRuntimeRetiresRealtimeIdleSessionsOnce() {
         const int64_t idle_capture_time_ns = packet_view.meta.timestamp_ns + idle_timeout_ns;
         const int64_t idle_observed_at_ns = observed_start_ns + idle_timeout_ns;
         status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns + 1,
-                                     idle_observed_at_ns,
-                                     idle_capture_time_ns,
-                                     false,
-                                     true,
-                                     true,
-                                     false),
+            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns + 1, idle_observed_at_ns, idle_capture_time_ns,
+                                     false, true, true, false),
             &output);
         assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(status.progress_disposition == npm::NpmCaptureProgressDisposition::kAdvanced);
@@ -9844,13 +9210,8 @@ void TestNpmBasicTaskRuntimeRetiresRealtimeIdleSessionsOnce() {
         output = MakeNpmPacketViewBatch();
         const auto repeated_output = output;
         status = runtime->DriveRealtimeMaintenance(
-            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns + 2,
-                                     idle_observed_at_ns + 1,
-                                     idle_capture_time_ns,
-                                     false,
-                                     true,
-                                     true,
-                                     false),
+            RealtimeMaintenanceInput(monotonic_start_ns + interval_ns + 2, idle_observed_at_ns + 1,
+                                     idle_capture_time_ns, false, true, true, false),
             &output);
         assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(status.progress_disposition == npm::NpmCaptureProgressDisposition::kUnchanged);
@@ -9892,18 +9253,15 @@ void TestNpmBasicRealtimeTaskIsolationAndSlowSinkBudget() {
     assert(runtime_a->ProtocolContext().Pipeno() != runtime_b->ProtocolContext().Pipeno());
     assert(budget_a != budget_b);
 
-    const auto packet =
-        MakeIpv4TcpPacket("192.0.2.30", 50030, "198.51.100.30", 443, {});
+    const auto packet = MakeIpv4TcpPacket("192.0.2.30", 50030, "198.51.100.30", 443, {});
     flowsql::packet::PacketMeta meta_a;
     flowsql::packet::PacketMeta meta_b;
     const auto binding_a = BuildBinding(config_a.domains, packet, 0, 100, 90, &meta_a);
     const auto binding_b = BuildBinding(config_b.domains, packet, 0, 100, 110, &meta_b);
     npm::NpmSessionView session_a;
     npm::NpmSessionView session_b;
-    assert(ObserveActive(runtime_a->Sessions(), binding_a, meta_a, &session_a) ==
-           npm::NpmSessionTableError::kNone);
-    assert(ObserveActive(runtime_b->Sessions(), binding_b, meta_b, &session_b) ==
-           npm::NpmSessionTableError::kNone);
+    assert(ObserveActive(runtime_a->Sessions(), binding_a, meta_a, &session_a) == npm::NpmSessionTableError::kNone);
+    assert(ObserveActive(runtime_b->Sessions(), binding_b, meta_b, &session_b) == npm::NpmSessionTableError::kNone);
     assert(session_a.session_id == 1 && session_b.session_id == 1);
     assert(session_a.key->input_namespace == "pcapfile.live-a");
     assert(session_b.key->input_namespace == "pcapfile.live-b");
@@ -9915,45 +9273,19 @@ void TestNpmBasicRealtimeTaskIsolationAndSlowSinkBudget() {
     std::shared_ptr<arrow::RecordBatch> slow_output_a;
     std::shared_ptr<arrow::RecordBatch> slow_output_b;
     auto status_a = runtime_a->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(monotonic_start_ns,
-                                 observed_start_ns,
-                                 100,
-                                 true,
-                                 false,
-                                 true,
-                                 false),
-        &slow_output_a);
+        RealtimeMaintenanceInput(monotonic_start_ns, observed_start_ns, 100, true, false, true, false), &slow_output_a);
     auto status_b = runtime_b->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(monotonic_start_ns,
-                                 observed_start_ns,
-                                 100,
-                                 true,
-                                 false,
-                                 true,
-                                 false),
-        &slow_output_b);
+        RealtimeMaintenanceInput(monotonic_start_ns, observed_start_ns, 100, true, false, true, false), &slow_output_b);
     assert(status_a.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
     assert(status_b.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
     assert(!status_a.emitted && !status_b.emitted && !slow_output_a && !slow_output_b);
 
     const int64_t first_due_ns = monotonic_start_ns + interval_ns;
     status_a = runtime_a->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(first_due_ns,
-                                 observed_start_ns + interval_ns,
-                                 100,
-                                 false,
-                                 false,
-                                 true,
-                                 true),
+        RealtimeMaintenanceInput(first_due_ns, observed_start_ns + interval_ns, 100, false, false, true, true),
         &slow_output_a);
     status_b = runtime_b->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(first_due_ns,
-                                 observed_start_ns + interval_ns,
-                                 100,
-                                 false,
-                                 false,
-                                 true,
-                                 true),
+        RealtimeMaintenanceInput(first_due_ns, observed_start_ns + interval_ns, 100, false, false, true, true),
         &slow_output_b);
     assert(status_a.error == npm::NpmBasicRealtimeMaintenanceError::kNone && status_a.emitted);
     assert(status_b.error == npm::NpmBasicRealtimeMaintenanceError::kNone && status_b.emitted);
@@ -9976,23 +9308,16 @@ void TestNpmBasicRealtimeTaskIsolationAndSlowSinkBudget() {
     AssertTaskBudgetUsage(budget_b->Usage(), session_bytes_b, 0, 0, output_bytes_b);
 
     const uint64_t backlog_bytes = config_a.analysis.max_pending_output_bytes - output_bytes_a;
-    assert(budget_a->Reserve(npm::NpmBudgetCategory::kPendingOutput, backlog_bytes) ==
-           npm::NpmBudgetError::kNone);
+    assert(budget_a->Reserve(npm::NpmBudgetCategory::kPendingOutput, backlog_bytes) == npm::NpmBudgetError::kNone);
     assert(budget_a->Reserve(npm::NpmBudgetCategory::kPendingOutput, 1) ==
            npm::NpmBudgetError::kPendingOutputLimitExceeded);
-    AssertTaskBudgetUsage(
-        budget_a->Usage(), session_bytes_a, 0, 0, config_a.analysis.max_pending_output_bytes);
+    AssertTaskBudgetUsage(budget_a->Usage(), session_bytes_a, 0, 0, config_a.analysis.max_pending_output_bytes);
 
     auto blocked_output = MakeNpmPacketViewBatch();
     const auto original_blocked_output = blocked_output;
     status_a = runtime_a->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(first_due_ns + interval_ns,
-                                 observed_start_ns + 2 * interval_ns,
-                                 100,
-                                 false,
-                                 false,
-                                 true,
-                                 true),
+        RealtimeMaintenanceInput(first_due_ns + interval_ns, observed_start_ns + 2 * interval_ns, 100, false, false,
+                                 true, true),
         &blocked_output);
     assert(status_a.error == npm::NpmBasicRealtimeMaintenanceError::kDrainError);
     assert(status_a.runtime_state == npm::NpmEofFlushState::kFailed);
@@ -10001,18 +9326,12 @@ void TestNpmBasicRealtimeTaskIsolationAndSlowSinkBudget() {
     assert(blocked_output == original_blocked_output);
     assert(runtime_a->State() == npm::NpmEofFlushState::kFailed);
     assert(!runtime_a->LastError().empty() && pool.release_calls == 1);
-    AssertTaskBudgetUsage(
-        budget_a->Usage(), 0, 0, 0, config_a.analysis.max_pending_output_bytes);
+    AssertTaskBudgetUsage(budget_a->Usage(), 0, 0, 0, config_a.analysis.max_pending_output_bytes);
 
     std::shared_ptr<arrow::RecordBatch> second_output_b;
     status_b = runtime_b->DriveRealtimeMaintenance(
-        RealtimeMaintenanceInput(first_due_ns + interval_ns,
-                                 observed_start_ns + 2 * interval_ns,
-                                 100,
-                                 false,
-                                 false,
-                                 true,
-                                 true),
+        RealtimeMaintenanceInput(first_due_ns + interval_ns, observed_start_ns + 2 * interval_ns, 100, false, false,
+                                 true, true),
         &second_output_b);
     assert(status_b.error == npm::NpmBasicRealtimeMaintenanceError::kNone && status_b.emitted);
     assert(status_b.runtime_state == npm::NpmEofFlushState::kOpen);
@@ -10022,11 +9341,9 @@ void TestNpmBasicRealtimeTaskIsolationAndSlowSinkBudget() {
     assert(BasicResultColumn<arrow::UInt64Array>(second_output_b, 2)->Value(0) == 2);
     assert(pool.release_calls == 1);
     const uint64_t second_output_bytes_b = BasicResultBufferBytes(second_output_b);
-    AssertTaskBudgetUsage(
-        budget_b->Usage(), session_bytes_b, 0, 0, output_bytes_b + second_output_bytes_b);
+    AssertTaskBudgetUsage(budget_b->Usage(), session_bytes_b, 0, 0, output_bytes_b + second_output_bytes_b);
 
-    assert(budget_a->Release(npm::NpmBudgetCategory::kPendingOutput, backlog_bytes) ==
-           npm::NpmBudgetError::kNone);
+    assert(budget_a->Release(npm::NpmBudgetCategory::kPendingOutput, backlog_bytes) == npm::NpmBudgetError::kNone);
     AssertTaskBudgetUsage(budget_a->Usage(), 0, 0, 0, output_bytes_a);
     slow_output_a.reset();
     AssertTaskBudgetUsage(budget_a->Usage(), 0, 0, 0, 0);
@@ -10034,8 +9351,7 @@ void TestNpmBasicRealtimeTaskIsolationAndSlowSinkBudget() {
     runtime_b->Cancel();
     assert(runtime_b->State() == npm::NpmEofFlushState::kCancelled);
     assert(pool.release_calls == 2);
-    AssertTaskBudgetUsage(
-        budget_b->Usage(), 0, 0, 0, output_bytes_b + second_output_bytes_b);
+    AssertTaskBudgetUsage(budget_b->Usage(), 0, 0, 0, output_bytes_b + second_output_bytes_b);
     slow_output_b.reset();
     second_output_b.reset();
     AssertTaskBudgetUsage(budget_b->Usage(), 0, 0, 0, 0);
@@ -10052,8 +9368,7 @@ void TestNpmBasicTaskRuntimeProcessesAndDrainsOfflineBatch() {
         MakeRuntimeTaskConfig(), &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
     assert(create_status.error == npm::NpmBasicTaskRuntimeError::kNone && runtime != nullptr);
 
-    const auto rst =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 91);
+    const auto rst = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 91);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 100, 1)});
     const uint64_t input_bytes = BasicResultBufferBytes(input);
     std::weak_ptr<arrow::RecordBatch> input_owner = input;
@@ -10105,14 +9420,13 @@ void TestNpmBasicTaskRuntimeProcessesImmediateClosedSession() {
 
     std::shared_ptr<arrow::Schema> output_schema;
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
-    const auto create_status = npm::NpmBasicTaskRuntime::Create(
-        config, &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+    const auto create_status =
+        npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
     assert(create_status.error == npm::NpmBasicTaskRuntimeError::kNone);
     assert(runtime != nullptr && output_schema.get() == npm::NpmSessionResultSchema().get());
     assert(runtime->Modules().size() == 1);
 
-    const auto rst =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 91);
+    const auto rst = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 91);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 100, 1)});
     std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
     const auto status = runtime->ProcessOfflineBatch(input, &output);
@@ -10159,22 +9473,20 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
     auto both_session = MakeRuntimeTaskConfig();
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
-    const std::array<npm::NpmBasicTaskConfig, 4> configs{
-        basic_only, both_basic, session_only, both_session};
+    const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         const auto& config = configs[index];
         const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
-        const auto expected_schema =
-            observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
+        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
         const int expected_columns = observing_session ? 49 : 22;
         const int64_t active_timestamp_ns = 100 + static_cast<int64_t>(index);
         const int64_t closed_timestamp_ns = 200 + static_cast<int64_t>(index);
 
         std::shared_ptr<arrow::Schema> output_schema;
         std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
-        const auto create_status = npm::NpmBasicTaskRuntime::Create(
-            config, &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+        const auto create_status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(),
+                                                                    &output_schema, &runtime);
         assert(create_status.error == npm::NpmBasicTaskRuntimeError::kNone);
         assert(runtime != nullptr && output_schema.get() == expected_schema.get());
         assert(pool.acquire_calls == static_cast<int>(index + 1));
@@ -10190,17 +9502,10 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
         }
 
         const std::vector<uint8_t> active_payload{0x10, 0x11, 0x12};
-        const auto active_packet = MakeIpv4TcpPacket("192.0.2.1",
-                                                     41000,
-                                                     "198.51.100.2",
-                                                     443,
-                                                     active_payload,
-                                                     kTcpAck,
-                                                     100,
-                                                     90,
-                                                     2048);
-        auto active_input = MakeEncodedPacketBatch(
-            {MakeBatchPacketRecord(active_packet, 0, active_timestamp_ns, 2 * index + 1)});
+        const auto active_packet =
+            MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, active_payload, kTcpAck, 100, 90, 2048);
+        auto active_input =
+            MakeEncodedPacketBatch({MakeBatchPacketRecord(active_packet, 0, active_timestamp_ns, 2 * index + 1)});
         std::weak_ptr<arrow::RecordBatch> active_input_owner = active_input;
         std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
         auto status = runtime->ProcessOfflineBatch(active_input, &output);
@@ -10220,25 +9525,17 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
             assert(session_module->tracked_sessions() == 1 && module_bytes > 0);
         }
         auto budget = runtime->Budget();
-        AssertTaskBudgetUsage(
-            budget->Usage(), session_bytes, module_bytes, 0, BasicResultBufferBytes(output));
+        AssertTaskBudgetUsage(budget->Usage(), session_bytes, module_bytes, 0, BasicResultBufferBytes(output));
         active_input.reset();
         assert(active_input_owner.expired());
         output.reset();
         AssertTaskBudgetUsage(budget->Usage(), session_bytes, module_bytes, 0, 0);
 
         const std::vector<uint8_t> closed_payload{0x20, 0x21};
-        const auto closed_packet = MakeIpv4TcpPacket("198.51.100.2",
-                                                     443,
-                                                     "192.0.2.1",
-                                                     41000,
-                                                     closed_payload,
-                                                     kTcpRst | kTcpAck,
-                                                     500,
-                                                     103,
-                                                     4096);
-        auto closed_input = MakeEncodedPacketBatch(
-            {MakeBatchPacketRecord(closed_packet, 0, closed_timestamp_ns, 2 * index + 2)});
+        const auto closed_packet = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 41000, closed_payload,
+                                                     kTcpRst | kTcpAck, 500, 103, 4096);
+        auto closed_input =
+            MakeEncodedPacketBatch({MakeBatchPacketRecord(closed_packet, 0, closed_timestamp_ns, 2 * index + 2)});
         std::weak_ptr<arrow::RecordBatch> closed_input_owner = closed_input;
         status = runtime->ProcessOfflineBatch(closed_input, &output);
         assert(status.error == npm::NpmBasicOfflineBatchError::kNone);
@@ -10257,14 +9554,10 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
             assert(SessionResultColumn<arrow::StringArray>(output, 18)->GetString(0) == "closed");
             assert(SessionResultColumn<arrow::UInt64Array>(output, 19)->Value(0) == 1);
             assert(SessionResultColumn<arrow::UInt64Array>(output, 20)->Value(0) == 1);
-            assert(SessionResultColumn<arrow::UInt64Array>(output, 21)->Value(0) ==
-                   active_packet.bytes.size());
-            assert(SessionResultColumn<arrow::UInt64Array>(output, 22)->Value(0) ==
-                   closed_packet.bytes.size());
-            assert(SessionResultColumn<arrow::UInt64Array>(output, 23)->Value(0) ==
-                   active_payload.size());
-            assert(SessionResultColumn<arrow::UInt64Array>(output, 24)->Value(0) ==
-                   closed_payload.size());
+            assert(SessionResultColumn<arrow::UInt64Array>(output, 21)->Value(0) == active_packet.bytes.size());
+            assert(SessionResultColumn<arrow::UInt64Array>(output, 22)->Value(0) == closed_packet.bytes.size());
+            assert(SessionResultColumn<arrow::UInt64Array>(output, 23)->Value(0) == active_payload.size());
+            assert(SessionResultColumn<arrow::UInt64Array>(output, 24)->Value(0) == closed_payload.size());
         } else {
             assert(BasicResultColumn<arrow::UInt64Array>(output, 2)->Value(0) == 1);
             assert(BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0) == closed_timestamp_ns);
@@ -10273,10 +9566,8 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
             assert(BasicResultColumn<arrow::Int64Array>(output, 12)->Value(0) == closed_timestamp_ns);
             assert(BasicResultColumn<arrow::UInt64Array>(output, 13)->Value(0) == 1);
             assert(BasicResultColumn<arrow::UInt64Array>(output, 14)->Value(0) == 1);
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) ==
-                   active_packet.bytes.size());
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 16)->Value(0) ==
-                   closed_packet.bytes.size());
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) == active_packet.bytes.size());
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 16)->Value(0) == closed_packet.bytes.size());
             assert(BasicResultColumn<arrow::StringArray>(output, 21)->GetString(0) == "closed");
         }
 
@@ -10331,14 +9622,12 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
     auto both_session = MakeRuntimeTaskConfig();
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
-    const std::array<npm::NpmBasicTaskConfig, 4> configs{
-        basic_only, both_basic, session_only, both_session};
+    const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         const auto& config = configs[index];
         const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
-        const auto expected_schema =
-            observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
+        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
         const int expected_columns = observing_session ? 49 : 22;
         const int64_t old_timestamp_ns = 100 + static_cast<int64_t>(index);
         const int64_t reuse_timestamp_ns = 200 + static_cast<int64_t>(index);
@@ -10346,8 +9635,8 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
 
         std::shared_ptr<arrow::Schema> output_schema;
         std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
-        const auto create_status = npm::NpmBasicTaskRuntime::Create(
-            config, &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+        const auto create_status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(),
+                                                                    &output_schema, &runtime);
         assert(create_status.error == npm::NpmBasicTaskRuntimeError::kNone);
         assert(runtime != nullptr && output_schema.get() == expected_schema.get());
         assert(pool.acquire_calls == static_cast<int>(index + 1));
@@ -10363,17 +9652,10 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
         }
 
         const std::vector<uint8_t> old_payload{0x10, 0x11, 0x12};
-        const auto old_packet = MakeIpv4TcpPacket("192.0.2.1",
-                                                  41000,
-                                                  "198.51.100.2",
-                                                  443,
-                                                  old_payload,
-                                                  kTcpAck,
-                                                  100,
-                                                  90,
-                                                  2048);
-        auto old_input = MakeEncodedPacketBatch(
-            {MakeBatchPacketRecord(old_packet, 0, old_timestamp_ns, 3 * index + 1)});
+        const auto old_packet =
+            MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, old_payload, kTcpAck, 100, 90, 2048);
+        auto old_input =
+            MakeEncodedPacketBatch({MakeBatchPacketRecord(old_packet, 0, old_timestamp_ns, 3 * index + 1)});
         std::weak_ptr<arrow::RecordBatch> old_input_owner = old_input;
         std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
         auto status = runtime->ProcessOfflineBatch(old_input, &output);
@@ -10390,32 +9672,20 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
         }
 
         auto budget = runtime->Budget();
-        AssertTaskBudgetUsage(budget->Usage(),
-                              runtime->Sessions().tracked_bytes(),
-                              session_module == nullptr ? 0 : session_module->tracked_bytes(),
-                              0,
+        AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(),
+                              session_module == nullptr ? 0 : session_module->tracked_bytes(), 0,
                               BasicResultBufferBytes(output));
         old_input.reset();
         assert(old_input_owner.expired());
         output.reset();
-        AssertTaskBudgetUsage(budget->Usage(),
-                              runtime->Sessions().tracked_bytes(),
-                              session_module == nullptr ? 0 : session_module->tracked_bytes(),
-                              0,
-                              0);
+        AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(),
+                              session_module == nullptr ? 0 : session_module->tracked_bytes(), 0, 0);
 
         const std::vector<uint8_t> replacement_payload{0x20, 0x21};
-        const auto replacement_packet = MakeIpv4TcpPacket("192.0.2.1",
-                                                          41000,
-                                                          "198.51.100.2",
-                                                          443,
-                                                          replacement_payload,
-                                                          kTcpSyn,
-                                                          200,
-                                                          0,
-                                                          4096);
-        auto replacement_input = MakeEncodedPacketBatch({MakeBatchPacketRecord(
-            replacement_packet, 0, reuse_timestamp_ns, 3 * index + 2)});
+        const auto replacement_packet =
+            MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, replacement_payload, kTcpSyn, 200, 0, 4096);
+        auto replacement_input =
+            MakeEncodedPacketBatch({MakeBatchPacketRecord(replacement_packet, 0, reuse_timestamp_ns, 3 * index + 2)});
         std::weak_ptr<arrow::RecordBatch> replacement_input_owner = replacement_input;
         status = runtime->ProcessOfflineBatch(replacement_input, &output);
         assert(status.error == npm::NpmBasicOfflineBatchError::kNone);
@@ -10439,11 +9709,9 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
             assert(SessionResultColumn<arrow::StringArray>(output, 18)->GetString(0) == "tuple_reuse");
             assert(SessionResultColumn<arrow::UInt64Array>(output, 19)->Value(0) == 1);
             assert(SessionResultColumn<arrow::UInt64Array>(output, 20)->Value(0) == 0);
-            assert(SessionResultColumn<arrow::UInt64Array>(output, 21)->Value(0) ==
-                   old_packet.bytes.size());
+            assert(SessionResultColumn<arrow::UInt64Array>(output, 21)->Value(0) == old_packet.bytes.size());
             assert(SessionResultColumn<arrow::UInt64Array>(output, 22)->Value(0) == 0);
-            assert(SessionResultColumn<arrow::UInt64Array>(output, 23)->Value(0) ==
-                   old_payload.size());
+            assert(SessionResultColumn<arrow::UInt64Array>(output, 23)->Value(0) == old_payload.size());
             assert(SessionResultColumn<arrow::UInt64Array>(output, 24)->Value(0) == 0);
         } else {
             assert(BasicResultColumn<arrow::UInt64Array>(output, 0)->Value(0) == 1);
@@ -10454,8 +9722,7 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
             assert(BasicResultColumn<arrow::Int64Array>(output, 12)->Value(0) == old_timestamp_ns);
             assert(BasicResultColumn<arrow::UInt64Array>(output, 13)->Value(0) == 1);
             assert(BasicResultColumn<arrow::UInt64Array>(output, 14)->Value(0) == 0);
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) ==
-                   old_packet.bytes.size());
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) == old_packet.bytes.size());
             assert(BasicResultColumn<arrow::UInt64Array>(output, 16)->Value(0) == 0);
             assert(BasicResultColumn<arrow::StringArray>(output, 17)->GetString(0) == "identified");
             assert(BasicResultColumn<arrow::UInt16Array>(output, 18)->Value(0) == 7);
@@ -10481,25 +9748,15 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
             assert(session_module->tracked_sessions() == 1 && session_module->tracked_bytes() > 0);
         }
         const uint64_t old_output_bytes = BasicResultBufferBytes(output);
-        AssertTaskBudgetUsage(budget->Usage(),
-                              runtime->Sessions().tracked_bytes(),
-                              session_module == nullptr ? 0 : session_module->tracked_bytes(),
-                              0,
-                              old_output_bytes);
+        AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(),
+                              session_module == nullptr ? 0 : session_module->tracked_bytes(), 0, old_output_bytes);
         auto old_output = output;
 
         const std::vector<uint8_t> closed_payload{0x30};
-        const auto closed_packet = MakeIpv4TcpPacket("198.51.100.2",
-                                                     443,
-                                                     "192.0.2.1",
-                                                     41000,
-                                                     closed_payload,
-                                                     kTcpRst | kTcpAck,
-                                                     500,
-                                                     203,
-                                                     1024);
-        auto closed_input = MakeEncodedPacketBatch(
-            {MakeBatchPacketRecord(closed_packet, 0, closed_timestamp_ns, 3 * index + 3)});
+        const auto closed_packet = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 41000, closed_payload,
+                                                     kTcpRst | kTcpAck, 500, 203, 1024);
+        auto closed_input =
+            MakeEncodedPacketBatch({MakeBatchPacketRecord(closed_packet, 0, closed_timestamp_ns, 3 * index + 3)});
         std::weak_ptr<arrow::RecordBatch> closed_input_owner = closed_input;
         status = runtime->ProcessOfflineBatch(closed_input, &output);
         assert(status.error == npm::NpmBasicOfflineBatchError::kNone);
@@ -10523,14 +9780,10 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
             assert(SessionResultColumn<arrow::StringArray>(output, 18)->GetString(0) == "closed");
             assert(SessionResultColumn<arrow::UInt64Array>(output, 19)->Value(0) == 1);
             assert(SessionResultColumn<arrow::UInt64Array>(output, 20)->Value(0) == 1);
-            assert(SessionResultColumn<arrow::UInt64Array>(output, 21)->Value(0) ==
-                   replacement_packet.bytes.size());
-            assert(SessionResultColumn<arrow::UInt64Array>(output, 22)->Value(0) ==
-                   closed_packet.bytes.size());
-            assert(SessionResultColumn<arrow::UInt64Array>(output, 23)->Value(0) ==
-                   replacement_payload.size());
-            assert(SessionResultColumn<arrow::UInt64Array>(output, 24)->Value(0) ==
-                   closed_payload.size());
+            assert(SessionResultColumn<arrow::UInt64Array>(output, 21)->Value(0) == replacement_packet.bytes.size());
+            assert(SessionResultColumn<arrow::UInt64Array>(output, 22)->Value(0) == closed_packet.bytes.size());
+            assert(SessionResultColumn<arrow::UInt64Array>(output, 23)->Value(0) == replacement_payload.size());
+            assert(SessionResultColumn<arrow::UInt64Array>(output, 24)->Value(0) == closed_payload.size());
         } else {
             assert(BasicResultColumn<arrow::UInt64Array>(output, 0)->Value(0) == 2);
             assert(BasicResultColumn<arrow::UInt64Array>(output, 2)->Value(0) == 1);
@@ -10540,10 +9793,8 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
             assert(BasicResultColumn<arrow::Int64Array>(output, 12)->Value(0) == closed_timestamp_ns);
             assert(BasicResultColumn<arrow::UInt64Array>(output, 13)->Value(0) == 1);
             assert(BasicResultColumn<arrow::UInt64Array>(output, 14)->Value(0) == 1);
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) ==
-                   replacement_packet.bytes.size());
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 16)->Value(0) ==
-                   closed_packet.bytes.size());
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) == replacement_packet.bytes.size());
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 16)->Value(0) == closed_packet.bytes.size());
             assert(BasicResultColumn<arrow::StringArray>(output, 17)->GetString(0) == "identified");
             assert(BasicResultColumn<arrow::UInt16Array>(output, 18)->Value(0) == 7);
             assert(BasicResultColumn<arrow::UInt16Array>(output, 19)->Value(0) == 8);
@@ -10601,22 +9852,20 @@ void TestNpmBasicTaskRuntimeClosesTupleReuseReplacementImmediately() {
     auto both_session = MakeRuntimeTaskConfig();
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
-    const std::array<npm::NpmBasicTaskConfig, 4> configs{
-        basic_only, both_basic, session_only, both_session};
+    const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         const auto& config = configs[index];
         const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
-        const auto expected_schema =
-            observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
+        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
         const int expected_columns = observing_session ? 49 : 22;
         const int64_t old_timestamp_ns = 100 + static_cast<int64_t>(index);
         const int64_t replacement_timestamp_ns = 200 + static_cast<int64_t>(index);
 
         std::shared_ptr<arrow::Schema> output_schema;
         std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
-        const auto create_status = npm::NpmBasicTaskRuntime::Create(
-            config, &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+        const auto create_status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(),
+                                                                    &output_schema, &runtime);
         assert(create_status.error == npm::NpmBasicTaskRuntimeError::kNone);
         assert(runtime != nullptr && output_schema.get() == expected_schema.get());
         assert(pool.acquire_calls == static_cast<int>(index + 1));
@@ -10632,17 +9881,10 @@ void TestNpmBasicTaskRuntimeClosesTupleReuseReplacementImmediately() {
         }
 
         const std::vector<uint8_t> old_payload{0x10, 0x11};
-        const auto old_packet = MakeIpv4TcpPacket("192.0.2.1",
-                                                  41000,
-                                                  "198.51.100.2",
-                                                  443,
-                                                  old_payload,
-                                                  kTcpAck,
-                                                  100,
-                                                  90,
-                                                  2048);
-        auto old_input = MakeEncodedPacketBatch(
-            {MakeBatchPacketRecord(old_packet, 0, old_timestamp_ns, 2 * index + 1)});
+        const auto old_packet =
+            MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, old_payload, kTcpAck, 100, 90, 2048);
+        auto old_input =
+            MakeEncodedPacketBatch({MakeBatchPacketRecord(old_packet, 0, old_timestamp_ns, 2 * index + 1)});
         std::weak_ptr<arrow::RecordBatch> old_input_owner = old_input;
         std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
         auto status = runtime->ProcessOfflineBatch(old_input, &output);
@@ -10660,32 +9902,20 @@ void TestNpmBasicTaskRuntimeClosesTupleReuseReplacementImmediately() {
         }
 
         auto budget = runtime->Budget();
-        AssertTaskBudgetUsage(budget->Usage(),
-                              runtime->Sessions().tracked_bytes(),
-                              session_module == nullptr ? 0 : session_module->tracked_bytes(),
-                              0,
+        AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(),
+                              session_module == nullptr ? 0 : session_module->tracked_bytes(), 0,
                               BasicResultBufferBytes(output));
         old_input.reset();
         assert(old_input_owner.expired());
         output.reset();
-        AssertTaskBudgetUsage(budget->Usage(),
-                              runtime->Sessions().tracked_bytes(),
-                              session_module == nullptr ? 0 : session_module->tracked_bytes(),
-                              0,
-                              0);
+        AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(),
+                              session_module == nullptr ? 0 : session_module->tracked_bytes(), 0, 0);
 
         const std::vector<uint8_t> replacement_payload{0x20, 0x21, 0x22};
-        const auto replacement_packet = MakeIpv4TcpPacket("192.0.2.1",
-                                                          41000,
-                                                          "198.51.100.2",
-                                                          443,
-                                                          replacement_payload,
-                                                          kTcpSyn | kTcpRst,
-                                                          200,
-                                                          0,
-                                                          4096);
-        auto replacement_input = MakeEncodedPacketBatch({MakeBatchPacketRecord(
-            replacement_packet, 0, replacement_timestamp_ns, 2 * index + 2)});
+        const auto replacement_packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, replacement_payload,
+                                                          kTcpSyn | kTcpRst, 200, 0, 4096);
+        auto replacement_input = MakeEncodedPacketBatch(
+            {MakeBatchPacketRecord(replacement_packet, 0, replacement_timestamp_ns, 2 * index + 2)});
         std::weak_ptr<arrow::RecordBatch> replacement_input_owner = replacement_input;
         status = runtime->ProcessOfflineBatch(replacement_input, &output);
         assert(status.error == npm::NpmBasicOfflineBatchError::kNone);
@@ -10824,30 +10054,28 @@ void TestNpmBasicTaskRuntimeRoutesObservedEntity() {
     auto both_session = MakeRuntimeTaskConfig();
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
-    const std::array<npm::NpmBasicTaskConfig, 4> configs{
-        basic_only, both_basic, session_only, both_session};
+    const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         const auto& config = configs[index];
         const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
-        const auto expected_schema =
-            observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
+        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
         const int expected_columns = observing_session ? 49 : 22;
 
         std::shared_ptr<arrow::Schema> output_schema;
         std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
-        const auto create_status = npm::NpmBasicTaskRuntime::Create(
-            config, &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
+        const auto create_status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(),
+                                                                    &output_schema, &runtime);
         assert(create_status.error == npm::NpmBasicTaskRuntimeError::kNone);
         assert(runtime != nullptr && output_schema.get() == expected_schema.get());
         assert(runtime->Modules().size() == (config.features.session_enabled ? 1 : 0));
         assert(pool.acquire_calls == static_cast<int>(index + 1));
         assert(pool.release_calls == static_cast<int>(index));
 
-        const auto packet = MakeIpv6UdpPacket(
-            "2001:db8::10", 53000, "2001:db8::20", 53, {static_cast<uint8_t>(index + 1)});
-        auto input = MakeEncodedPacketBatch(
-            {MakeBatchPacketRecord(packet, 0, 100 + static_cast<int64_t>(index), index + 1)});
+        const auto packet =
+            MakeIpv6UdpPacket("2001:db8::10", 53000, "2001:db8::20", 53, {static_cast<uint8_t>(index + 1)});
+        auto input =
+            MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100 + static_cast<int64_t>(index), index + 1)});
         std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
         const auto process_status = runtime->ProcessOfflineBatch(input, &output);
         assert(process_status.error == npm::NpmBasicOfflineBatchError::kNone);
@@ -10904,15 +10132,13 @@ void TestNpmBasicTaskRuntimeUsesExactOfflineInputBudget() {
     config.analysis.max_tracked_bytes = npm::kNpmMinTrackedBytes;
     auto runtime = CreateRuntimeForTest(config, &querier);
 
-    const auto packet =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 92);
+    const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 92);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 99, 100, 2)});
     const uint64_t input_bytes = BasicResultBufferBytes(input);
     assert(input_bytes > 0 && input_bytes < config.analysis.max_tracked_bytes);
     auto budget = runtime->Budget();
     const uint64_t exact_existing_bytes = config.analysis.max_tracked_bytes - input_bytes;
-    assert(budget->Reserve(npm::NpmBudgetCategory::kModuleState, exact_existing_bytes) ==
-           npm::NpmBudgetError::kNone);
+    assert(budget->Reserve(npm::NpmBudgetCategory::kModuleState, exact_existing_bytes) == npm::NpmBudgetError::kNone);
     std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
     auto original_output = output;
 
@@ -10923,13 +10149,11 @@ void TestNpmBasicTaskRuntimeUsesExactOfflineInputBudget() {
     assert(status.process_status.error == npm::NpmPacketBatchProcessError::kPacketError);
     assert(status.process_status.row == 0);
     assert(status.process_status.packet_status.error == npm::NpmPacketProcessError::kBindingError);
-    assert(status.process_status.packet_status.binding_error ==
-           npm::NpmSessionPacketError::kUnknownSourceId);
+    assert(status.process_status.packet_status.binding_error == npm::NpmSessionPacketError::kUnknownSourceId);
     assert(output == original_output && runtime->State() == npm::NpmEofFlushState::kFailed);
     assert(!runtime->LastError().empty() && pool.release_calls == pool.acquire_calls);
     AssertTaskBudgetUsage(budget->Usage(), 0, exact_existing_bytes, 0, 0);
-    assert(budget->Release(npm::NpmBudgetCategory::kModuleState, exact_existing_bytes) ==
-           npm::NpmBudgetError::kNone);
+    assert(budget->Release(npm::NpmBudgetCategory::kModuleState, exact_existing_bytes) == npm::NpmBudgetError::kNone);
     auto flush_status = runtime->FlushOffline(200, &output);
     assert(flush_status.error == npm::NpmEofFlushError::kFailedState);
     assert(output == original_output);
@@ -10961,8 +10185,7 @@ void TestNpmBasicTaskRuntimeRejectsOfflineBatchFailuresAtomically() {
     const auto config = MakeRuntimeTaskConfig();
     auto runtime = CreateRuntimeForTest(config, &querier);
 
-    const auto packet =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 93);
+    const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 93);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 3)});
     std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
     const auto original_output = output;
@@ -10997,8 +10220,7 @@ void TestNpmBasicTaskRuntimeRejectsOfflineBatchFailuresAtomically() {
 
     reset_runtime();
     auto schema_without_metadata = arrow::schema(input->schema()->fields());
-    auto wrong_input =
-        arrow::RecordBatch::Make(schema_without_metadata, input->num_rows(), input->columns());
+    auto wrong_input = arrow::RecordBatch::Make(schema_without_metadata, input->num_rows(), input->columns());
     const uint64_t wrong_input_bytes = BasicResultBufferBytes(wrong_input);
     status = runtime->ProcessOfflineBatch(wrong_input, &output);
     assert(status.error == npm::NpmBasicOfflineBatchError::kBatchViewError);
@@ -11012,12 +10234,9 @@ void TestNpmBasicTaskRuntimeRejectsOfflineBatchFailuresAtomically() {
     reset_runtime();
     auto budget = runtime->Budget();
     const uint64_t output_limit = runtime->Config().analysis.max_pending_output_bytes;
-    assert(budget->Reserve(npm::NpmBudgetCategory::kPendingOutput, output_limit) ==
-           npm::NpmBudgetError::kNone);
-    const auto rst =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 94);
-    auto drain_failure_input =
-        MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 200, 4)});
+    assert(budget->Reserve(npm::NpmBudgetCategory::kPendingOutput, output_limit) == npm::NpmBudgetError::kNone);
+    const auto rst = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 94);
+    auto drain_failure_input = MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 200, 4)});
     status = runtime->ProcessOfflineBatch(drain_failure_input, &output);
     assert(status.error == npm::NpmBasicOfflineBatchError::kDrainError);
     assert(status.runtime_state == npm::NpmEofFlushState::kFailed);
@@ -11025,8 +10244,7 @@ void TestNpmBasicTaskRuntimeRejectsOfflineBatchFailuresAtomically() {
     assert(status.drain_status.encode_error == npm::NpmBasicEncodeError::kBudgetError);
     assert(output == original_output);
     AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, output_limit);
-    assert(budget->Release(npm::NpmBudgetCategory::kPendingOutput, output_limit) ==
-           npm::NpmBudgetError::kNone);
+    assert(budget->Release(npm::NpmBudgetCategory::kPendingOutput, output_limit) == npm::NpmBudgetError::kNone);
     assert_failed_terminal();
 }
 
@@ -11039,8 +10257,7 @@ void TestNpmBasicTaskRuntimeFlushesOfflineExactlyOnce() {
     auto runtime = CreateRuntimeForTest(config, &querier);
     auto budget = runtime->Budget();
 
-    const auto packet =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 95);
+    const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 95);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 5)});
     std::shared_ptr<arrow::RecordBatch> output;
     const auto process_status = runtime->ProcessOfflineBatch(input, &output);
@@ -11049,8 +10266,7 @@ void TestNpmBasicTaskRuntimeFlushesOfflineExactlyOnce() {
     assert(output != nullptr && output->num_rows() == 0 && runtime->Sessions().size() == 1);
     const uint64_t session_bytes = runtime->Sessions().tracked_bytes();
     assert(session_bytes > 0);
-    AssertTaskBudgetUsage(
-        budget->Usage(), session_bytes, 0, 0, BasicResultBufferBytes(output));
+    AssertTaskBudgetUsage(budget->Usage(), session_bytes, 0, 0, BasicResultBufferBytes(output));
     output.reset();
     AssertTaskBudgetUsage(budget->Usage(), session_bytes, 0, 0, 0);
 
@@ -11099,8 +10315,7 @@ void TestNpmBasicTaskRuntimeEofFailureIsTerminal() {
     const auto config = MakeRuntimeTaskConfig();
     auto runtime = CreateRuntimeForTest(config, &querier);
 
-    const auto packet =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 96);
+    const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 96);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 6)});
     std::shared_ptr<arrow::RecordBatch> batch_output;
     const auto process_status = runtime->ProcessOfflineBatch(input, &batch_output);
@@ -11110,8 +10325,7 @@ void TestNpmBasicTaskRuntimeEofFailureIsTerminal() {
 
     auto budget = runtime->Budget();
     const uint64_t output_limit = config.analysis.max_pending_output_bytes;
-    assert(budget->Reserve(npm::NpmBudgetCategory::kPendingOutput, output_limit) ==
-           npm::NpmBudgetError::kNone);
+    assert(budget->Reserve(npm::NpmBudgetCategory::kPendingOutput, output_limit) == npm::NpmBudgetError::kNone);
     std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
     const auto original_output = output;
     auto flush_status = runtime->FlushOffline(500, &output);
@@ -11131,8 +10345,7 @@ void TestNpmBasicTaskRuntimeEofFailureIsTerminal() {
     assert(terminal_process.runtime_state == npm::NpmEofFlushState::kFailed);
     runtime->Cancel();
     assert(output == original_output && runtime->LastError() == first_error);
-    assert(budget->Release(npm::NpmBudgetCategory::kPendingOutput, output_limit) ==
-           npm::NpmBudgetError::kNone);
+    assert(budget->Release(npm::NpmBudgetCategory::kPendingOutput, output_limit) == npm::NpmBudgetError::kNone);
 
     runtime = CreateRuntimeForTest(config, &querier);
     flush_status = runtime->FlushOffline(700, nullptr);
@@ -11155,8 +10368,7 @@ void TestNpmBasicTaskRuntimeConcurrentCancelIsNonBlockingAndStable() {
     auto budget = runtime->Budget();
     assert(runtime->State() == npm::NpmEofFlushState::kOpen && runtime->LastError().empty());
 
-    const auto packet =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 97);
+    const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 97);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 7)});
     std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
     const auto original_output = output;
@@ -11194,8 +10406,7 @@ void TestNpmBasicTaskRuntimeCancelKeepsDeliveredOutputAlive() {
     auto runtime = CreateRuntimeForTest(MakeRuntimeTaskConfig(), &querier);
     auto budget = runtime->Budget();
 
-    const auto rst =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 98);
+    const auto rst = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 98);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 100, 8)});
     std::shared_ptr<arrow::RecordBatch> output;
     const auto status = runtime->ProcessOfflineBatch(input, &output);
@@ -11215,10 +10426,9 @@ void TestNpmBasicTaskRuntimeCancelKeepsDeliveredOutputAlive() {
     AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
 }
 
-flowsql::BlockTransformTaskConfigV1 MakeOperatorTaskConfig(
-    const std::string& task_id,
-    const std::string& with_params_json,
-    const std::string& pushed_filter_plan_json) {
+flowsql::BlockTransformTaskConfigV1 MakeOperatorTaskConfig(const std::string& task_id,
+                                                           const std::string& with_params_json,
+                                                           const std::string& pushed_filter_plan_json) {
     flowsql::BlockTransformTaskConfigV1 config;
     config.task_id = task_id.c_str();
     config.with_params_json = with_params_json.c_str();
@@ -11237,8 +10447,7 @@ void TestNpmBasicOperatorCopiesConfigAndOwnsTasks() {
     assert(!provider.Description().empty());
 
     std::string task_id = "task-owned-one";
-    std::string with_json =
-        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    std::string with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
     std::string filter_plan = R"({"version":1,"root":null})";
     auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
     flowsql::IBlockTransformTaskV1* first = nullptr;
@@ -11250,8 +10459,7 @@ void TestNpmBasicOperatorCopiesConfigAndOwnsTasks() {
     with_json.assign("mutated-with");
     filter_plan.assign("mutated-plan");
     assert(concrete->TaskId() == "task-owned-one");
-    assert(concrete->WithParamsJson() ==
-           R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})");
+    assert(concrete->WithParamsJson() == R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})");
     assert(concrete->PushedFilterPlanJson() == R"({"version":1,"root":null})");
 
     other_provider.ReleaseTask(first);
@@ -11301,8 +10509,7 @@ void TestNpmBasicTaskObservingSchemaProbe() {
     const std::string filter_plan = R"({"version":1,"root":null})";
     size_t completed_probes = 0;
 
-    const auto assert_probe = [&](const std::string& task_id,
-                                  const std::string& with_json,
+    const auto assert_probe = [&](const std::string& task_id, const std::string& with_json,
                                   const std::shared_ptr<arrow::Schema>& expected_schema) {
         const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
         flowsql::IBlockTransformTaskV1* task = nullptr;
@@ -11322,29 +10529,25 @@ void TestNpmBasicTaskObservingSchemaProbe() {
         assert(pool.release_calls == static_cast<int>(completed_probes));
     };
 
-    assert_probe("probe-default",
-                 R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})",
+    assert_probe("probe-default", R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})",
                  npm::NpmBasicResultSchema());
-    assert_probe(
-        "probe-both-basic",
-        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"basic,session",)"
-        R"("observing":"basic"})",
-        npm::NpmBasicResultSchema());
+    assert_probe("probe-both-basic",
+                 R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"basic,session",)"
+                 R"("observing":"basic"})",
+                 npm::NpmBasicResultSchema());
     assert_probe(
         "probe-session-only",
         R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"session","observing":"session"})",
         npm::NpmSessionResultSchema());
-    assert_probe(
-        "probe-both-session",
-        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"basic,session",)"
-        R"("observing":"session"})",
-        npm::NpmSessionResultSchema());
+    assert_probe("probe-both-session",
+                 R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"basic,session",)"
+                 R"("observing":"session"})",
+                 npm::NpmSessionResultSchema());
 }
 
 void TestNpmBasicTaskProbeMatchesLegacyAndParametersV1() {
     for (const bool observing_session : {false, true}) {
-        auto configs =
-            MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kOffline, observing_session);
+        auto configs = MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kOffline, observing_session);
         const std::string expected_legacy_json = configs.legacy_json;
         const std::string expected_parameters_json = configs.parameters_v1_json;
         ContextDictionary dictionary;
@@ -11356,15 +10559,13 @@ void TestNpmBasicTaskProbeMatchesLegacyAndParametersV1() {
         const std::string legacy_task_id = observing_session ? "probe-legacy-session" : "probe-legacy-basic";
         const std::string parameters_task_id =
             observing_session ? "probe-parameters-session" : "probe-parameters-basic";
-        const auto legacy_config =
-            MakeOperatorTaskConfig(legacy_task_id, configs.legacy_json, filter_plan);
+        const auto legacy_config = MakeOperatorTaskConfig(legacy_task_id, configs.legacy_json, filter_plan);
         const auto parameters_config =
             MakeOperatorTaskConfig(parameters_task_id, configs.parameters_v1_json, filter_plan);
         flowsql::IBlockTransformTaskV1* legacy_task = nullptr;
         flowsql::IBlockTransformTaskV1* parameters_task = nullptr;
         assert(provider.CreateTask(legacy_config, &legacy_task) == 0 && legacy_task != nullptr);
-        assert(provider.CreateTask(parameters_config, &parameters_task) == 0 &&
-               parameters_task != nullptr);
+        assert(provider.CreateTask(parameters_config, &parameters_task) == 0 && parameters_task != nullptr);
 
         configs.legacy_json.assign(configs.legacy_json.size(), 'x');
         configs.parameters_v1_json.assign(configs.parameters_v1_json.size(), 'y');
@@ -11380,8 +10581,7 @@ void TestNpmBasicTaskProbeMatchesLegacyAndParametersV1() {
         assert(parameters_task->Open(flowsql::packet::PacketSchema(), &parameters_schema) == 0);
         assert(legacy_schema != nullptr && parameters_schema != nullptr);
         assert(legacy_schema->Equals(*parameters_schema, true));
-        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema()
-                                                       : npm::NpmBasicResultSchema();
+        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
         assert(legacy_schema->Equals(*expected_schema, true));
         assert(legacy_task->LastError().empty() && parameters_task->LastError().empty());
         assert(pool.acquire_calls == 2 && pool.release_calls == 0);
@@ -11403,8 +10603,7 @@ void TestNpmBasicTaskOpenProcessAndFlush() {
     SinglePoolQuerier querier(&pool);
     npm::NpmBasicOperator provider(&querier);
     const std::string task_id = "task-happy";
-    const std::string with_json =
-        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
     const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
 
@@ -11417,8 +10616,7 @@ void TestNpmBasicTaskOpenProcessAndFlush() {
     assert(output_schema->Equals(*npm::NpmBasicResultSchema(), true));
     assert(pool.acquire_calls == 1 && pool.release_calls == 0 && task->LastError().empty());
 
-    const auto packet =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpAck, 101);
+    const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpAck, 101);
     auto first_input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 1)});
     std::vector<flowsql::BlockTransformOutputV1> outputs;
     assert(task->ProcessBlock(first_input, 11, &outputs) ==
@@ -11427,12 +10625,10 @@ void TestNpmBasicTaskOpenProcessAndFlush() {
     assert(outputs[0].batch->num_rows() == 0 && outputs[0].ts_ms == 11);
     outputs.clear();
 
-    auto out_of_order_input =
-        MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 50, 2)});
+    auto out_of_order_input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 50, 2)});
     assert(task->ProcessBlock(out_of_order_input, 22, &outputs) ==
            static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
-    assert(outputs.size() == 1 && outputs[0].batch->num_rows() == 0 &&
-           outputs[0].ts_ms == 22);
+    assert(outputs.size() == 1 && outputs[0].batch->num_rows() == 0 && outputs[0].ts_ms == 22);
     outputs.clear();
 
     assert(task->Flush(&outputs) == 0);
@@ -11521,8 +10717,7 @@ void TestNpmBasicTaskReportsConfigurationFailurePaths() {
     SinglePoolQuerier querier(&pool);
     npm::NpmBasicOperator provider(&querier);
     const std::string filter_plan = R"({"version":1,"root":null})";
-    const auto assert_failure = [&](const std::string& task_id,
-                                    const std::string& with_json,
+    const auto assert_failure = [&](const std::string& task_id, const std::string& with_json,
                                     const std::vector<std::string>& expected_fragments) {
         const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
         flowsql::IBlockTransformTaskV1* task = nullptr;
@@ -11538,23 +10733,276 @@ void TestNpmBasicTaskReportsConfigurationFailurePaths() {
         provider.ReleaseTask(task);
     };
 
-    assert_failure(
-        "task-invalid-framework-parameter",
-        R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
-        R"JSON("parameters":"{\"schema_version\":1,\"framework\":{\"max_active_sessions\":\"1\"}}"})JSON",
-        {"invalid parameters", "/framework/max_active_sessions"});
-    assert_failure(
-        "task-invalid-session-parameter",
-        R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
-        R"JSON("features":"basic,session","observing":"session",)JSON"
-        R"JSON("parameters":"{\"schema_version\":1,\"session\":{\"max_tcp_ranges_per_direction\":7}}"})JSON",
-        {"invalid parameters", "/session/max_tcp_ranges_per_direction"});
-    assert_failure(
-        "task-parameter-source-conflict",
-        R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
-        R"JSON("run_mode":"offline","parameters":"{\"schema_version\":1}"})JSON",
-        {"configuration source conflict", "/run_mode"});
+    assert_failure("task-invalid-framework-parameter",
+                   R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
+                   R"JSON("parameters":"{\"schema_version\":1,\"framework\":{\"max_active_sessions\":\"1\"}}"})JSON",
+                   {"invalid parameters", "/framework/max_active_sessions"});
+    assert_failure("task-invalid-session-parameter",
+                   R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
+                   R"JSON("features":"basic,session","observing":"session",)JSON"
+                   R"JSON("parameters":"{\"schema_version\":1,\"session\":{\"max_tcp_ranges_per_direction\":7}}"})JSON",
+                   {"invalid parameters", "/session/max_tcp_ranges_per_direction"});
+    assert_failure("task-parameter-source-conflict",
+                   R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
+                   R"JSON("run_mode":"offline","parameters":"{\"schema_version\":1}"})JSON",
+                   {"configuration source conflict", "/run_mode"});
 }
+
+void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    LabelingStatusProvider labeling_provider;
+    querier.labeling_provider = &labeling_provider;
+
+    npm::NpmBasicOperator lifecycle_provider;
+    assert(lifecycle_provider.Option(nullptr) == 0);
+    assert(lifecycle_provider.Load(&querier) == 0);
+    assert(lifecycle_provider.Start() == 0);
+    assert(querier.labeling_queries == 0);
+    assert(lifecycle_provider.Stop() == 0);
+    assert(lifecycle_provider.Unload() == 0);
+
+    npm::NpmBasicOperator provider(&querier);
+    const std::string filter_plan = R"({"version":1,"root":null})";
+    auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
+
+    const std::string ordinary_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
+                                      R"("features":"basic,session","parameters":"{\"schema_version\":1}"})";
+    const std::string ordinary_task_id = "ordinary-with-labeling-provider";
+    auto config = MakeOperatorTaskConfig(ordinary_task_id, ordinary_json, filter_plan);
+    flowsql::IBlockTransformTaskV1* task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
+    std::shared_ptr<arrow::Schema> output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    assert(output_schema != sentinel_schema);
+    assert(querier.labeling_queries == 0);
+    assert(querier.config_registry_queries == 0);
+    assert(labeling_provider.runtime_status_calls == 0 && labeling_provider.create_matcher_calls == 0);
+    provider.ReleaseTask(task);
+
+    const std::string ignored_labeling_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
+        R"("parameters":"{\"schema_version\":1,\"framework\":{\"labeling\":null}}"})";
+    querier.labeling_provider = nullptr;
+    const std::string ignored_task_id = "ordinary-ignores-labeling-field";
+    config = MakeOperatorTaskConfig(ignored_task_id, ignored_labeling_json, filter_plan);
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
+    output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    assert(output_schema != sentinel_schema && querier.labeling_queries == 0);
+    provider.ReleaseTask(task);
+
+    const std::string labeling_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
+                                      R"("features":"basic,labeling",)"
+                                      R"("parameters":"{\"schema_version\":1,\"framework\":{)"
+                                      R"(\"labeling\":\"config.corp-labels@7\",)"
+                                      R"(\"labeling_memory_mib\":128}}"})";
+
+    querier.labeling_provider = nullptr;
+    const std::string missing_task_id = "missing-labeling-provider";
+    config = MakeOperatorTaskConfig(missing_task_id, labeling_json, filter_plan);
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
+    output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == ENODEV);
+    assert(output_schema == sentinel_schema);
+    assert(task->LastError() == "npm.basic labeling provider is unavailable");
+    assert(querier.labeling_queries == 1);
+    assert(labeling_provider.runtime_status_calls == 0 && labeling_provider.create_matcher_calls == 0);
+    provider.ReleaseTask(task);
+
+    querier.labeling_provider = &labeling_provider;
+    labeling_provider.ready = false;
+    const std::string unready_task_id = "unready-labeling-provider";
+    config = MakeOperatorTaskConfig(unready_task_id, labeling_json, filter_plan);
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
+    output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == ENODEV);
+    assert(output_schema == sentinel_schema);
+    assert(task->LastError() ==
+           "npm.basic labeling provider is unavailable at /runtime: mock labeling runtime unavailable");
+    assert(querier.labeling_queries == 2);
+    assert(labeling_provider.runtime_status_calls == 1 && labeling_provider.create_matcher_calls == 0);
+    provider.ReleaseTask(task);
+
+    labeling_provider.ready = true;
+    const std::string ready_task_id = "ready-labeling-provider-without-config-registry";
+    config = MakeOperatorTaskConfig(ready_task_id, labeling_json, filter_plan);
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
+    output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == ENODEV);
+    assert(output_schema == sentinel_schema);
+    assert(task->LastError() == "npm.basic labeling config registry is unavailable");
+    assert(querier.labeling_queries == 3);
+    assert(querier.config_registry_queries == 1);
+    assert(labeling_provider.runtime_status_calls == 2 && labeling_provider.create_matcher_calls == 0);
+    provider.ReleaseTask(task);
+
+    LabelingConfigRegistry config_registry;
+    querier.config_registry = &config_registry;
+    labeling_provider.create_succeeds = true;
+    const std::string connected_task_id = "connected-labeling-matcher";
+    config = MakeOperatorTaskConfig(connected_task_id, labeling_json, filter_plan);
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
+    output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    assert(output_schema != sentinel_schema && output_schema->GetFieldIndex("primary_label_id") == 17);
+    assert(querier.labeling_queries == 4 && querier.config_registry_queries == 2);
+    assert(config_registry.resolve_calls == 1 && config_registry.last_reference == "config.corp-labels@7");
+    assert(labeling_provider.runtime_status_calls == 3 && labeling_provider.create_matcher_calls == 1);
+    assert(labeling_provider.captured_reference == "corp-labels@7");
+    assert(labeling_provider.captured_reserved_bytes == 128ULL * 1024ULL * 1024ULL);
+    assert(labeling_provider.captured_max_labels == 10'000);
+    assert(labeling_provider.captured_max_logical_rules == 50'000);
+    assert(labeling_provider.captured_max_compiled_rules == 100'000);
+    assert(labeling_provider.matcher_stats.release_calls == 0);
+
+    const auto labeled_packet =
+        MakeIpv4TcpPacket("192.0.2.10", 51000, "198.51.100.20", 443, {0x16, 0x03}, kTcpAck, 700);
+    auto labeled_input = MakeEncodedPacketBatch({MakeBatchPacketRecord(labeled_packet, 0, 100, 1)});
+    std::vector<flowsql::BlockTransformOutputV1> labeled_outputs;
+    assert(task->ProcessBlock(labeled_input, 17, &labeled_outputs) ==
+           static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+    assert(labeled_outputs.size() == 1 && labeled_outputs[0].batch->num_rows() == 0);
+    labeled_outputs.clear();
+    assert(task->Flush(&labeled_outputs) == 0);
+    assert(labeled_outputs.size() == 1 && labeled_outputs[0].batch->num_rows() == 1);
+    const int label_column = labeled_outputs[0].batch->schema()->GetFieldIndex("primary_label_id");
+    const int protocol_column = labeled_outputs[0].batch->schema()->GetFieldIndex("protocol");
+    assert(label_column == 17 && protocol_column == 21);
+    assert(BasicResultColumn<arrow::UInt32Array>(labeled_outputs[0].batch, label_column)->Value(0) == 1001);
+    assert(BasicResultColumn<arrow::StringArray>(labeled_outputs[0].batch, protocol_column)->GetString(0) == "SUB");
+    assert(labeling_provider.matcher_stats.classify_calls == 1);
+    assert((labeling_provider.matcher_stats.batch_counts == std::vector<uint32_t>{1}));
+    assert(labeling_provider.matcher_stats.release_calls == 1);
+    provider.ReleaseTask(task);
+    assert(labeling_provider.matcher_stats.release_calls == 1);
+
+    const std::string session_labeling_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
+                                              R"("features":"basic,session,labeling","observing":"session",)"
+                                              R"("parameters":"{\"schema_version\":1,\"framework\":{)"
+                                              R"(\"labeling\":\"config.corp-labels@7\"}}"})";
+    const std::string session_task_id = "connected-labeling-session-result";
+    config = MakeOperatorTaskConfig(session_task_id, session_labeling_json, filter_plan);
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
+    output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+    assert(output_schema->GetFieldIndex("primary_label_id") == 14);
+    assert(labeling_provider.captured_reserved_bytes == 64ULL * 1024ULL * 1024ULL);
+    labeled_outputs.clear();
+    assert(task->ProcessBlock(labeled_input, 18, &labeled_outputs) ==
+           static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+    labeled_outputs.clear();
+    assert(task->Flush(&labeled_outputs) == 0);
+    assert(labeled_outputs.size() == 1 && labeled_outputs[0].batch->num_rows() == 1);
+    const int session_label_column = labeled_outputs[0].batch->schema()->GetFieldIndex("primary_label_id");
+    const int session_protocol_column = labeled_outputs[0].batch->schema()->GetFieldIndex("protocol");
+    assert(session_label_column == 14 && session_protocol_column == 18);
+    assert(BasicResultColumn<arrow::UInt32Array>(labeled_outputs[0].batch, session_label_column)->Value(0) == 1001);
+    assert(BasicResultColumn<arrow::StringArray>(labeled_outputs[0].batch, session_protocol_column)->GetString(0) ==
+           "SUB");
+    assert(labeling_provider.matcher_stats.classify_calls == 2);
+    assert(labeling_provider.matcher_stats.release_calls == 2);
+    provider.ReleaseTask(task);
+    assert(labeling_provider.create_matcher_calls == 2 && config_registry.resolve_calls == 2);
+
+    const std::string invalid_labeling_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
+        R"("features":"basic,labeling",)"
+        R"("parameters":"{\"schema_version\":1,\"framework\":{\"labeling\":\"@latest\"}}"})";
+    const std::string invalid_task_id = "invalid-labeling-reference";
+    config = MakeOperatorTaskConfig(invalid_task_id, invalid_labeling_json, filter_plan);
+    task = nullptr;
+    assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
+    output_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == EINVAL);
+    assert(output_schema == sentinel_schema);
+    assert(task->LastError().find("/framework/labeling") != std::string::npos);
+    assert(querier.labeling_queries == 6);
+    assert(labeling_provider.runtime_status_calls == 5 && labeling_provider.create_matcher_calls == 2);
+    provider.ReleaseTask(task);
+}
+
+#ifdef FLOWSQL_FLOW_LABELING_PLUGIN_PATH
+void TestRealFlowLabelingMatcherWithNpmBasicTask() {
+    flowsql::PluginLoader* loader = flowsql::PluginLoader::Single();
+    const char* libraries[] = {FLOWSQL_FLOW_LABELING_PLUGIN_PATH};
+    assert(loader->Load(libraries, 1) == 0);
+    assert(loader->StartAll() == 0);
+    auto* labeling_provider =
+        static_cast<flowsql::IFlowLabelingProviderV1*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER_V1));
+    auto* plugin = static_cast<flowsql::IPlugin*>(loader->First(flowsql::IID_PLUGIN));
+    assert(labeling_provider != nullptr && plugin != nullptr);
+
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    RealLabelingSnapshotRegistry registry;
+    querier.labeling_provider = labeling_provider;
+    querier.config_registry = &registry;
+    npm::NpmBasicOperator provider(&querier);
+
+    const auto first = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpAck);
+    const auto reply = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 50000, {}, kTcpAck);
+    const auto reverse_first = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.9", 50001, {}, kTcpAck);
+    const auto unmatched = MakeIpv4TcpPacket("192.0.2.20", 50002, "198.51.100.2", 80, {}, kTcpAck);
+    const auto input = MakeEncodedPacketBatch(
+        {MakeBatchPacketRecord(first, 0, 100, 1), MakeBatchPacketRecord(reply, 0, 200, 2),
+         MakeBatchPacketRecord(reverse_first, 0, 300, 3), MakeBatchPacketRecord(unmatched, 0, 400, 4)});
+    const std::string filter_plan = R"({"version":1,"root":null})";
+    const std::string params =
+        R"("parameters":"{\"schema_version\":1,\"framework\":{\"labeling\":\"config.corp-labels@7\"}}")";
+
+    for (bool session_result : {false, true}) {
+        const std::string task_id = session_result ? "real-labeling-session" : "real-labeling-basic";
+        const std::string with_json =
+            R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)" +
+            std::string(session_result ? R"("features":"basic,session,labeling","observing":"session",)"
+                                       : R"("features":"basic,labeling",)") +
+            params + "}";
+        const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
+        flowsql::IBlockTransformTaskV1* task = nullptr;
+        assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
+        std::shared_ptr<arrow::Schema> output_schema;
+        assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
+        assert(output_schema != nullptr && output_schema->GetFieldIndex("primary_label_id") >= 0);
+        if (!session_result) assert(plugin->Stop() != 0 && "live task matcher prevents plugin Stop");
+
+        std::vector<flowsql::BlockTransformOutputV1> outputs;
+        assert(task->ProcessBlock(input, 1, &outputs) == static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+        outputs.clear();
+        assert(task->Flush(&outputs) == 0 && outputs.size() == 1);
+        const auto& batch = outputs[0].batch;
+        assert(batch != nullptr && batch->num_rows() == 3);
+        const int label_column = batch->schema()->GetFieldIndex("primary_label_id");
+        const int a_port_column = batch->schema()->GetFieldIndex("a_port");
+        assert(label_column >= 0 && a_port_column >= 0);
+        auto labels = BasicResultColumn<arrow::UInt32Array>(batch, label_column);
+        auto ports = BasicResultColumn<arrow::UInt16Array>(batch, a_port_column);
+        assert(labels->null_count() == 0);
+        for (int64_t row = 0; row < batch->num_rows(); ++row) {
+            const uint32_t expected = ports->Value(row) == 50002 ? 0 : 1001;
+            assert(labels->Value(row) == expected);
+        }
+        assert(querier.labeling_queries == registry.resolve_calls);
+        provider.ReleaseTask(task);
+    }
+
+    assert(registry.resolve_calls == 2);
+    loader->StopAll();
+    flowsql::FlowLabelingDiagnosticV1 diagnostic;
+    assert(labeling_provider->RuntimeStatus(&diagnostic) == flowsql::FlowLabelingErrorV1::kUnavailable);
+    assert(loader->Unload() == 0);
+}
+#endif
 
 void TestNpmBasicTaskMethodPreconditions() {
     ContextDictionary dictionary;
@@ -11563,12 +11011,10 @@ void TestNpmBasicTaskMethodPreconditions() {
     SinglePoolQuerier querier(&pool);
     npm::NpmBasicOperator provider(&querier);
     const std::string task_id = "task-preconditions";
-    const std::string with_json =
-        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
     const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
-    const auto packet =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpAck, 103);
+    const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpAck, 103);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 4)});
     auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
     std::vector<flowsql::BlockTransformOutputV1> outputs;
@@ -11662,8 +11108,7 @@ void TestNpmBasicTaskCancelBeforeOpenAndDuringProcess() {
     SinglePoolQuerier querier(&pool);
     npm::NpmBasicOperator provider(&querier);
     const std::string task_id = "task-cancel";
-    const std::string with_json =
-        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
     const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
 
@@ -11687,8 +11132,7 @@ void TestNpmBasicTaskCancelBeforeOpenAndDuringProcess() {
     task = nullptr;
     assert(provider.CreateTask(config, &task) == 0);
     assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
-    const auto packet =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 102);
+    const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 102);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 3)});
     std::vector<flowsql::BlockTransformOutputV1> outputs;
     std::atomic<bool> process_finished{false};
@@ -11770,8 +11214,7 @@ void TestNpmBasicV2PluginExports() {
     assert(provider->Category() == "npm" && provider->Name() == "basic");
 
     const std::string task_id = "v2-capability";
-    const std::string with_json =
-        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
     const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
     flowsql::IBlockTransformTaskV1* task = nullptr;
@@ -11780,12 +11223,10 @@ void TestNpmBasicV2PluginExports() {
     assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
     assert(output_schema != nullptr && output_schema->Equals(*npm::NpmBasicResultSchema(), true));
 
-    const auto rst =
-        MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 104);
+    const auto rst = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 104);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 100, 6)});
     std::vector<flowsql::BlockTransformOutputV1> outputs;
-    assert(task->ProcessBlock(input, 44, &outputs) ==
-           static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+    assert(task->ProcessBlock(input, 44, &outputs) == static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
     assert(outputs.size() == 1 && outputs[0].batch != nullptr && outputs[0].ts_ms == 44);
     assert(outputs[0].batch->num_rows() == 1);
     assert(BasicResultColumn<arrow::StringArray>(outputs[0].batch, 21)->GetString(0) == "closed");
@@ -11850,6 +11291,8 @@ int main() {
     TestProcessNpmPacketErrorsAreStructuredAndAtomic();
     TestProcessNpmOfflinePacketBatchOrderAndWatermark();
     TestProcessNpmOfflinePacketBatchErrorsAndAtomicOutput();
+    TestFlowLabelingAdmissionBatchSessionReuseAndFailureAtomicity();
+    TestFlowLabelingAdmissionTracksIntraBlockSessionLifecycles();
     TestNpmProtocolContextErrorsDictionaryAndRaii();
     TestNpiPipelinePoolOptionAndLeaseContract();
     TestNpmPacketBatchViewBorrowedDecodeAndOwnership();
@@ -11918,6 +11361,10 @@ int main() {
     TestNpmBasicTaskOpenProcessAndFlush();
     TestNpmBasicTaskRejectsInvalidCallsAtomically();
     TestNpmBasicTaskReportsConfigurationFailurePaths();
+    TestNpmBasicTaskQueriesLabelingProviderConditionally();
+#ifdef FLOWSQL_FLOW_LABELING_PLUGIN_PATH
+    TestRealFlowLabelingMatcherWithNpmBasicTask();
+#endif
     TestNpmBasicTaskMethodPreconditions();
     TestNpmBasicTaskCancelBeforeOpenAndDuringProcess();
     TestNpmBasicV2PluginExports();

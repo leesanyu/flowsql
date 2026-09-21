@@ -15,6 +15,7 @@ namespace flowsql::npm {
 
 constexpr std::size_t kNpmParametersMaxJsonBytesV1 = 64 * 1024;
 constexpr std::size_t kNpmParametersMaxDepthV1 = 64;
+constexpr uint32_t kNpmDefaultLabelingMemoryMiB = 64;
 
 enum class NpmParameterSourceV1 : uint8_t {
     kLegacyWith = 0,
@@ -24,6 +25,7 @@ enum class NpmParameterSourceV1 : uint8_t {
 struct NpmFrameworkParametersV1 {
     NpmAnalysisConfig analysis;
     std::optional<std::string> labeling_reference;
+    std::optional<uint32_t> labeling_memory_mib;
 };
 
 struct NpmBasicModuleParametersV1 {};
@@ -77,9 +79,8 @@ struct NpmParameterStatusV1 {
 };
 
 /** Parses an owned V1 parameters envelope. Output is replaced only after complete validation. */
-NpmParameterStatusV1 ParseNpmParametersV1(const char* parameters_json,
-                                         const NpmParameterConsumersV1& consumers,
-                                         NpmTaskParametersV1* output);
+NpmParameterStatusV1 ParseNpmParametersV1(const char* parameters_json, const NpmParameterConsumersV1& consumers,
+                                          NpmTaskParametersV1* output);
 
 }  // namespace flowsql::npm
 

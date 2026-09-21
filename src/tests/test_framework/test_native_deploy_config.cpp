@@ -16,6 +16,7 @@ constexpr const char* kUploadRoot = "./uploads";
 constexpr const char* kNpiPlugin = "libflowsql_npi.so";
 constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
 constexpr const char* kConfigChannelPlugin = "libflowsql_config_channel.so";
+constexpr const char* kFlowLabelingPlugin = "libflowsql_flow_labeling.so";
 constexpr const char* kNpmBasicPlugin = "libflowsql_npm_basic.so";
 constexpr const char* kSchedulerPlugin = "libflowsql_scheduler.so";
 constexpr const char* kCatalogPlugin = "libflowsql_catalog.so";
@@ -80,6 +81,8 @@ bool ExpectSchedulerRuntime(const flowsql::gateway::ServiceConfig& service, cons
     }
     const std::string* npm_basic = FindPlugin(service, kNpmBasicPlugin);
     ok = Expect(npm_basic == nullptr, deployment + " must not statically load the npm.basic operator plugin") && ok;
+    const std::string* flow_labeling = FindPlugin(service, kFlowLabelingPlugin);
+    ok = Expect(flow_labeling != nullptr, deployment + " Scheduler process must load Flow Labeling") && ok;
     const std::string* catalog = FindPlugin(service, kCatalogPlugin);
     ok = Expect(catalog != nullptr, deployment + " Scheduler process must load Catalog") && ok;
     if (catalog) {
@@ -104,13 +107,17 @@ bool ExpectSchedulerRuntime(const flowsql::gateway::ServiceConfig& service, cons
     const size_t npi_index = plugin_index(kNpiPlugin);
     const size_t pcapfile_index = plugin_index(kPcapFilePlugin);
     const size_t config_channel_index = plugin_index(kConfigChannelPlugin);
+    const size_t flow_labeling_index = plugin_index(kFlowLabelingPlugin);
     const size_t scheduler_index = plugin_index(kSchedulerPlugin);
     const size_t catalog_index = plugin_index(kCatalogPlugin);
     const size_t binaddon_index = plugin_index(kBinAddonPlugin);
     ok = Expect(npi_index < pcapfile_index && pcapfile_index < config_channel_index &&
-                    config_channel_index < scheduler_index && scheduler_index < catalog_index &&
-                    catalog_index < binaddon_index && binaddon_index < service.plugins.size(),
-                deployment + " must register Config Channel before Scheduler and publish Catalog before BinAddon") &&
+                    config_channel_index < flow_labeling_index && flow_labeling_index < scheduler_index &&
+                    scheduler_index < catalog_index && catalog_index < binaddon_index &&
+                    binaddon_index < service.plugins.size(),
+                deployment +
+                    " must register Config Channel and Flow Labeling before Scheduler, then publish Catalog before "
+                    "BinAddon") &&
          ok;
     return ok;
 }
@@ -152,10 +159,15 @@ bool TestGuardianConfig() {
     bool ok = Expect(flowsql::gateway::LoadConfig(FLOWSQL_DEPLOY_MULTI_PATH, &config) == 0,
                      "Guardian deployment YAML must parse");
     const auto* web = FindService(config, "web");
+    const auto* gateway = FindService(config, "gateway");
     const auto* scheduler = FindService(config, "scheduler");
+    ok = Expect(gateway != nullptr, "Guardian deployment must contain the Gateway service") && ok;
     ok = Expect(web != nullptr, "Guardian deployment must contain the Web service") && ok;
     ok = Expect(scheduler != nullptr, "Guardian deployment must contain the Scheduler service") && ok;
-    if (!web || !scheduler) return false;
+    if (!gateway || !web || !scheduler) return false;
+    ok = Expect(FindPlugin(*gateway, kFlowLabelingPlugin) == nullptr, "Guardian Gateway must not load Flow Labeling") &&
+         ok;
+    ok = Expect(FindPlugin(*web, kFlowLabelingPlugin) == nullptr, "Guardian Web must not load Flow Labeling") && ok;
     const bool web_ok = ExpectWebUploadRoot(*web, "Guardian deployment");
     const bool providers_ok = ExpectSchedulerRuntime(*scheduler, "Guardian deployment");
     return web_ok && providers_ok && ok;
@@ -211,6 +223,11 @@ bool TestStartScriptRuntimeLayout() {
     ok = Expect(std::filesystem::is_regular_file(runtime_root / kConfigChannelPlugin),
                 "start.sh runtime must contain the Config Channel provider") &&
          ok;
+#if FLOWSQL_FLOW_LABELING_BUILT
+    ok = Expect(std::filesystem::is_regular_file(runtime_root / kFlowLabelingPlugin),
+                "ON/AUTO-enabled runtime must contain the Flow Labeling provider") &&
+         ok;
+#endif
     return ok;
 }
 

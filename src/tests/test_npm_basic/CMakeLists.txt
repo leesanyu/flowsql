@@ -33,6 +33,12 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 )
 
 add_dependencies(${PROJECT_NAME} flowsql_common flowsql_npi flowsql_npm_basic)
+if(TARGET flowsql_flow_labeling)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        FLOWSQL_FLOW_LABELING_PLUGIN_PATH="$<TARGET_FILE:flowsql_flow_labeling>"
+    )
+    add_dependencies(${PROJECT_NAME} flowsql_flow_labeling)
+endif()
 target_link_libraries(${PROJECT_NAME} flowsql_common flowsql_npi Threads::Threads)
 
 set_target_properties(${PROJECT_NAME} PROPERTIES

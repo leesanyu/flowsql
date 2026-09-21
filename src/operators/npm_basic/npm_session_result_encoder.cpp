@@ -83,10 +83,9 @@ class PendingOutputOwner {
 
 }  // namespace
 
-NpmSessionEncodeError EncodeNpmSessionResults(
-    const std::vector<NpmSessionResult>& results,
-    std::shared_ptr<arrow::RecordBatch>* output,
-    std::string* error) {
+NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult>& results,
+                                              std::shared_ptr<arrow::RecordBatch>* output, std::string* error,
+                                              bool labeling_enabled) {
     if (output == nullptr) {
         return Fail(NpmSessionEncodeError::kNullOutput, "output is null", error);
     }
@@ -123,6 +122,7 @@ NpmSessionEncodeError EncodeNpmSessionResults(
         arrow::Int64Builder first_ns;
         arrow::Int64Builder last_ns;
         arrow::Int64Builder duration_ns;
+        arrow::UInt32Builder primary_label_id;
         arrow::StringBuilder protocol_status;
         arrow::UInt16Builder protocol_id;
         arrow::UInt16Builder protocol_sub_id;
@@ -220,6 +220,9 @@ NpmSessionEncodeError EncodeNpmSessionResults(
                 !append_optional_string(result.protocol, &protocol, "protocol")) {
                 return NpmSessionEncodeError::kArrowError;
             }
+            if (labeling_enabled && !check(primary_label_id.Append(result.primary_label_id), "primary_label_id")) {
+                return NpmSessionEncodeError::kArrowError;
+            }
             if (result.end_reason.has_value()) {
                 if (!check(end_reason.Append(NpmSessionEndReasonName(*result.end_reason)),
                            "end_reason")) {
@@ -303,49 +306,41 @@ NpmSessionEncodeError EncodeNpmSessionResults(
         }
 
         std::vector<std::shared_ptr<arrow::Array>> arrays;
-        arrays.reserve(49);
+        arrays.reserve(labeling_enabled ? 50 : 49);
         const auto finish = [&](auto* builder, const char* field) {
             std::shared_ptr<arrow::Array> array;
             if (!check(builder->Finish(&array), field)) return false;
             arrays.push_back(std::move(array));
             return true;
         };
-        if (!finish(&session_id, "session_id") ||
-            !finish(&observation_domain_id, "observation_domain_id") ||
-            !finish(&revision, "revision") || !finish(&observed_at, "observed_at") ||
-            !finish(&is_final, "is_final") || !finish(&ip_family, "ip_family") ||
-            !finish(&transport_protocol, "transport_protocol") ||
-            !finish(&a_ip, "a_ip") || !finish(&b_ip, "b_ip") ||
-            !finish(&a_port, "a_port") || !finish(&b_port, "b_port") ||
-            !finish(&first_ns, "first_ns") || !finish(&last_ns, "last_ns") ||
-            !finish(&duration_ns, "duration_ns") ||
-            !finish(&protocol_status, "protocol_status") ||
-            !finish(&protocol_id, "protocol_id") ||
-            !finish(&protocol_sub_id, "protocol_sub_id") ||
-            !finish(&protocol, "protocol") || !finish(&end_reason, "end_reason") ||
-            !finish(&packets_ab, "packets_ab") || !finish(&packets_ba, "packets_ba") ||
-            !finish(&wire_bytes_ab, "wire_bytes_ab") ||
-            !finish(&wire_bytes_ba, "wire_bytes_ba") ||
-            !finish(&payload_bytes_ab, "payload_bytes_ab") ||
-            !finish(&payload_bytes_ba, "payload_bytes_ba") ||
-            !finish(&rate_status, "rate_status") ||
-            !finish(&wire_bps_ab, "wire_bps_ab") ||
-            !finish(&wire_bps_ba, "wire_bps_ba") ||
-            !finish(&payload_bps_ab, "payload_bps_ab") ||
-            !finish(&payload_bps_ba, "payload_bps_ba") ||
+        if (!finish(&session_id, "session_id") || !finish(&observation_domain_id, "observation_domain_id") ||
+            !finish(&revision, "revision") || !finish(&observed_at, "observed_at") || !finish(&is_final, "is_final") ||
+            !finish(&ip_family, "ip_family") || !finish(&transport_protocol, "transport_protocol") ||
+            !finish(&a_ip, "a_ip") || !finish(&b_ip, "b_ip") || !finish(&a_port, "a_port") ||
+            !finish(&b_port, "b_port") || !finish(&first_ns, "first_ns") || !finish(&last_ns, "last_ns") ||
+            !finish(&duration_ns, "duration_ns")) {
+            return NpmSessionEncodeError::kArrowError;
+        }
+        if (labeling_enabled && !finish(&primary_label_id, "primary_label_id")) {
+            return NpmSessionEncodeError::kArrowError;
+        }
+        if (!finish(&protocol_status, "protocol_status") || !finish(&protocol_id, "protocol_id") ||
+            !finish(&protocol_sub_id, "protocol_sub_id") || !finish(&protocol, "protocol") ||
+            !finish(&end_reason, "end_reason") || !finish(&packets_ab, "packets_ab") ||
+            !finish(&packets_ba, "packets_ba") || !finish(&wire_bytes_ab, "wire_bytes_ab") ||
+            !finish(&wire_bytes_ba, "wire_bytes_ba") || !finish(&payload_bytes_ab, "payload_bytes_ab") ||
+            !finish(&payload_bytes_ba, "payload_bytes_ba") || !finish(&rate_status, "rate_status") ||
+            !finish(&wire_bps_ab, "wire_bps_ab") || !finish(&wire_bps_ba, "wire_bps_ba") ||
+            !finish(&payload_bps_ab, "payload_bps_ab") || !finish(&payload_bps_ba, "payload_bps_ba") ||
             !finish(&tcp_unique_payload_bytes_ab, "tcp_unique_payload_bytes_ab") ||
             !finish(&tcp_unique_payload_bytes_ba, "tcp_unique_payload_bytes_ba") ||
             !finish(&tcp_unique_payload_bps_ab, "tcp_unique_payload_bps_ab") ||
             !finish(&tcp_unique_payload_bps_ba, "tcp_unique_payload_bps_ba") ||
-            !finish(&tcp_handshake_status, "tcp_handshake_status") ||
-            !finish(&tcp_initiator, "tcp_initiator") ||
+            !finish(&tcp_handshake_status, "tcp_handshake_status") || !finish(&tcp_initiator, "tcp_initiator") ||
             !finish(&tcp_handshake_duration_ns, "tcp_handshake_duration_ns") ||
-            !finish(&tcp_synack_rtt_ns, "tcp_synack_rtt_ns") ||
-            !finish(&tcp_rtt_status, "tcp_rtt_status") ||
-            !finish(&tcp_rtt_samples, "tcp_rtt_samples") ||
-            !finish(&tcp_rtt_min_ns, "tcp_rtt_min_ns") ||
-            !finish(&tcp_rtt_mean_ns, "tcp_rtt_mean_ns") ||
-            !finish(&tcp_rtt_max_ns, "tcp_rtt_max_ns") ||
+            !finish(&tcp_synack_rtt_ns, "tcp_synack_rtt_ns") || !finish(&tcp_rtt_status, "tcp_rtt_status") ||
+            !finish(&tcp_rtt_samples, "tcp_rtt_samples") || !finish(&tcp_rtt_min_ns, "tcp_rtt_min_ns") ||
+            !finish(&tcp_rtt_mean_ns, "tcp_rtt_mean_ns") || !finish(&tcp_rtt_max_ns, "tcp_rtt_max_ns") ||
             !finish(&tcp_retransmission_status, "tcp_retransmission_status") ||
             !finish(&tcp_retrans_packets_ab, "tcp_retrans_packets_ab") ||
             !finish(&tcp_retrans_packets_ba, "tcp_retrans_packets_ba") ||
@@ -355,8 +350,8 @@ NpmSessionEncodeError EncodeNpmSessionResults(
             return NpmSessionEncodeError::kArrowError;
         }
 
-        auto batch = arrow::RecordBatch::Make(
-            NpmSessionResultSchema(), static_cast<int64_t>(results.size()), std::move(arrays));
+        auto batch = arrow::RecordBatch::Make(NpmSessionResultSchema(labeling_enabled),
+                                              static_cast<int64_t>(results.size()), std::move(arrays));
         const auto validation = batch->ValidateFull();
         if (!validation.ok()) {
             return Fail(NpmSessionEncodeError::kArrowError,
@@ -373,11 +368,10 @@ NpmSessionEncodeError EncodeNpmSessionResults(
     }
 }
 
-NpmSessionEncodeError EncodeNpmSessionResultsWithBudget(
-    const std::vector<NpmSessionResult>& results,
-    const std::shared_ptr<INpmTaskBudget>& budget,
-    std::shared_ptr<arrow::RecordBatch>* output,
-    std::string* error) {
+NpmSessionEncodeError EncodeNpmSessionResultsWithBudget(const std::vector<NpmSessionResult>& results,
+                                                        const std::shared_ptr<INpmTaskBudget>& budget,
+                                                        std::shared_ptr<arrow::RecordBatch>* output, std::string* error,
+                                                        bool labeling_enabled) {
     if (output == nullptr) {
         return Fail(NpmSessionEncodeError::kNullOutput, "output is null", error);
     }
@@ -387,7 +381,7 @@ NpmSessionEncodeError EncodeNpmSessionResultsWithBudget(
 
     try {
         std::shared_ptr<arrow::RecordBatch> batch;
-        const auto encode_result = EncodeNpmSessionResults(results, &batch, error);
+        const auto encode_result = EncodeNpmSessionResults(results, &batch, error, labeling_enabled);
         if (encode_result != NpmSessionEncodeError::kNone) return encode_result;
 
         const int64_t signed_bytes = arrow::util::TotalBufferSize(*batch);

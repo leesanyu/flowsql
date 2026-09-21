@@ -30,15 +30,14 @@ enum class NpmBasicEncodeError : uint8_t {
 
 /** Encodes valid active/final results into the fixed NpmBasicResultSchema. Output is unchanged on error. */
 NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& results,
-                                          std::shared_ptr<arrow::RecordBatch>* output,
-                                          std::string* error = nullptr);
+                                          std::shared_ptr<arrow::RecordBatch>* output, std::string* error = nullptr,
+                                          bool labeling_enabled = false);
 
 /** Encodes, reserves exact Arrow buffer bytes, and releases the reservation with the last output owner. */
-NpmBasicEncodeError EncodeNpmBasicResultsWithBudget(
-    const std::vector<NpmBasicResult>& results,
-    const std::shared_ptr<INpmTaskBudget>& budget,
-    std::shared_ptr<arrow::RecordBatch>* output,
-    std::string* error = nullptr);
+NpmBasicEncodeError EncodeNpmBasicResultsWithBudget(const std::vector<NpmBasicResult>& results,
+                                                    const std::shared_ptr<INpmTaskBudget>& budget,
+                                                    std::shared_ptr<arrow::RecordBatch>* output,
+                                                    std::string* error = nullptr, bool labeling_enabled = false);
 
 }  // namespace flowsql::npm
 

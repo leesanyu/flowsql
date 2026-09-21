@@ -30,6 +30,9 @@ using flowsql::channels::config::ConfigRevisionListItem;
 
 namespace {
 
+constexpr size_t kMaxContentBytes = 8 * 1024 * 1024;
+constexpr size_t kMaxControlRequestBytes = 12 * 1024 * 1024;
+
 std::string NestedJson(size_t depth) {
     std::string value;
     value.reserve(depth * 6 + 1);
@@ -128,9 +131,13 @@ int main() {
     assert(provider.Publish(validation, &validation_result, &error) == 0);
     validation.name = "valid-max-size";
     validation.format = "json";
-    validation.content = std::string(R"({"pad":")") + std::string(512 * 1024 - 10, 'x') + R"("})";
-    assert(validation.content.size() == 512 * 1024);
+    validation.content = std::string(R"({"pad":")") + std::string(kMaxContentBytes - 10, 'x') + R"("})";
+    assert(validation.content.size() == kMaxContentBytes);
     assert(provider.Publish(validation, &validation_result, &error) == 0);
+    ConfigChannelSnapshot maximum;
+    assert(provider.Resolve("config.valid-max-size@1", &maximum, &error) == 0);
+    assert(maximum.content_bytes == kMaxContentBytes && *maximum.content == validation.content);
+    assert(maximum.sha256_hex == validation_result.sha256_hex && maximum.sha256_hex.size() == 64);
 
     ConfigPublishRequest request;
     request.name = "rules";
@@ -160,8 +167,12 @@ int main() {
     request.name = "INVALID";
     assert(provider.Publish(request, &result, &error) == EINVAL);
     request.name = "rules";
-    request.content.assign(512 * 1024 + 1, 'x');
+    request.content.assign(kMaxContentBytes + 1, 'x');
     assert(provider.Publish(request, &result, &error) == EFBIG);
+    ConfigChannelSnapshot unchanged;
+    assert(provider.Resolve("config.rules@2", &unchanged, &error) == 0);
+    assert(*unchanged.content == R"({"version":2})");
+    assert(provider.Resolve("config.rules@3", &unchanged, &error) == ENOENT);
     request.content.assign(1, static_cast<char>(0xff));
     assert(provider.Publish(request, &result, &error) == EINVAL);
     request.content = "{\"restore\":1}";
@@ -371,7 +382,7 @@ int main() {
     assert(call("/channels/config/list", R"({"unknown":1})") == flowsql::error::BAD_REQUEST);
     assert(call("/channels/config/list", std::string("{\"cursor\":\"") + static_cast<char>(0xff) + "\"}") ==
            flowsql::error::BAD_REQUEST);
-    assert(call("/channels/config/list", std::string(1024 * 1024 + 1, ' ')) ==
+    assert(call("/channels/config/list", std::string(kMaxControlRequestBytes + 1, ' ')) ==
            flowsql::error::PAYLOAD_TOO_LARGE);
     assert(call("/channels/config/list", NestedJson(10000)) == flowsql::error::BAD_REQUEST);
     assert(call("/channels/config/history", R"({"name":"rules","cursor":"01"})") ==
@@ -395,9 +406,9 @@ int main() {
     assert(call("/channels/config/publish",
                 R"({"name":"bad-utf8","expected_current_revision":0,"format":"json",)"
                 R"("schema_id":"wire-v1","content_base64":"/w=="})") == flowsql::error::BAD_REQUEST);
-    assert(call("/channels/config/publish",
-                R"({"name":"bad","expected_current_revision":0,"format":"json",)"
-                R"("schema_id":"wire-v1","content_base64":")" + std::string(700000, 'A') + R"("})") ==
+    assert(call("/channels/config/publish", R"({"name":"bad","expected_current_revision":0,"format":"json",)"
+                                            R"("schema_id":"wire-v1","content_base64":")" +
+                                                std::string(((kMaxContentBytes + 2) / 3) * 4, 'A') + R"("})") ==
            flowsql::error::PAYLOAD_TOO_LARGE);
     assert(call("/channels/config/publish",
                 R"({"name":"bad","expected_current_revision":0,"format":"json",)"

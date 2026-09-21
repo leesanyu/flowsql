@@ -64,6 +64,7 @@ struct NpmSessionSnapshot {
     uint64_t packets_ba = 0;
     uint64_t wire_bytes_ab = 0;
     uint64_t wire_bytes_ba = 0;
+    uint32_t primary_label_id = 0;
     NpmProtocolStatus protocol_status = NpmProtocolStatus::kPending;
     std::optional<uint16_t> protocol_id;
     std::optional<uint16_t> protocol_sub_id;
@@ -86,6 +87,8 @@ struct NpmCaptureProgressResult {
     std::vector<NpmSessionSnapshot> ended_sessions;
 };
 
+class NpmSessionAdmissionPlanner;
+
 class NpmSessionTable {
  public:
     explicit NpmSessionTable(uint64_t max_active_sessions);
@@ -94,9 +97,8 @@ class NpmSessionTable {
     ~NpmSessionTable();
 
     /** Observes one normalized packet. Active keys borrow from this table; ended snapshots own their keys. */
-    NpmSessionTableError Observe(const NpmSessionPacketBinding& binding,
-                                 const packet::PacketMeta& meta,
-                                 NpmSessionObserveResult* output);
+    NpmSessionTableError Observe(const NpmSessionPacketBinding& binding, const packet::PacketMeta& meta,
+                                 NpmSessionObserveResult* output, uint32_t new_session_primary_label_id = 0);
 
     /** Samples one active session payload. Output keys borrow from this table. */
     NpmSessionTableError SampleProtocol(const NpmSessionKey& key,
@@ -121,6 +123,8 @@ class NpmSessionTable {
     uint64_t tracked_bytes() const noexcept { return tracked_session_bytes_; }
 
  private:
+    friend class NpmSessionAdmissionPlanner;
+
     struct State {
         uint64_t session_id = 0;
         int64_t first_ns = 0;
@@ -129,6 +133,7 @@ class NpmSessionTable {
         uint64_t packets_ba = 0;
         uint64_t wire_bytes_ab = 0;
         uint64_t wire_bytes_ba = 0;
+        uint32_t primary_label_id = 0;
         uint32_t payload_samples = 0;
         NpmProtocolStatus protocol_status = NpmProtocolStatus::kPending;
         std::optional<uint16_t> protocol_id;
@@ -162,6 +167,33 @@ class NpmSessionTable {
     DeadlineMap deadlines_;
     std::shared_ptr<INpmTaskBudget> budget_;
     uint64_t tracked_session_bytes_ = 0;
+};
+
+/** Predicts per-row session admission and lifecycle transitions without mutating the real session table. */
+class NpmSessionAdmissionPlanner {
+ public:
+    explicit NpmSessionAdmissionPlanner(const NpmSessionTable& sessions) noexcept;
+
+    /** Mirrors Observe followed by offline capture progress for admission decisions only. */
+    NpmSessionTableError ObserveAndAdvance(const NpmSessionPacketBinding& binding, const packet::PacketMeta& meta,
+                                           bool* requires_admission);
+
+ private:
+    struct State {
+        bool active = false;
+        int64_t last_ns = 0;
+        int64_t idle_deadline_ns = 0;
+        bool initial_syn_observed = false;
+        NpmPacketDirection initial_syn_direction = NpmPacketDirection::kAToB;
+        uint32_t initial_syn_sequence = 0;
+        bool fin_ab = false;
+        bool fin_ba = false;
+    };
+
+    const NpmSessionTable* sessions_ = nullptr;
+    bool watermark_initialized_ = false;
+    int64_t watermark_ns_ = 0;
+    std::unordered_map<NpmSessionKey, State, NpmSessionKeyHash, NpmSessionKeyEqual> states_;
 };
 
 /** Synchronously notifies every module in registration order for each owned ended-session snapshot. */

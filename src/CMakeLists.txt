@@ -40,6 +40,41 @@ set(THIRDPARTS_DIR ${CMAKE_SOURCE_DIR}/../thirdparts)
 include(${CMAKE_SOURCE_DIR}/subjects.cmake)
 add_thirdparts()
 
+set(FLOWSQL_FLOW_LABELING "AUTO" CACHE STRING "Build the DPDK flow-labeling plugin: AUTO, ON, or OFF")
+set_property(CACHE FLOWSQL_FLOW_LABELING PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${FLOWSQL_FLOW_LABELING}" FLOWSQL_FLOW_LABELING_MODE)
+if(NOT FLOWSQL_FLOW_LABELING_MODE MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR
+        "FLOWSQL_FLOW_LABELING must be AUTO, ON, or OFF (got '${FLOWSQL_FLOW_LABELING}')")
+endif()
+
+set(FLOWSQL_FLOW_LABELING_AVAILABLE OFF)
+if(FLOWSQL_FLOW_LABELING_MODE STREQUAL "OFF")
+    message(STATUS "Flow Labeling: disabled by FLOWSQL_FLOW_LABELING=OFF")
+else()
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(DPDK QUIET IMPORTED_TARGET libdpdk)
+    endif()
+
+    if(TARGET PkgConfig::DPDK)
+        set(FLOWSQL_FLOW_LABELING_AVAILABLE ON)
+        message(STATUS "Flow Labeling: enabled with system DPDK ${DPDK_VERSION}")
+    elseif(FLOWSQL_FLOW_LABELING_MODE STREQUAL "ON")
+        message(FATAL_ERROR
+            "FLOWSQL_FLOW_LABELING=ON requires PkgConfig and the system libdpdk.pc package")
+    else()
+        message(STATUS
+            "Flow Labeling: system libdpdk.pc not found; AUTO build skips the real plugin")
+        if(CMAKE_DISABLE_FIND_PACKAGE_PkgConfig)
+            # The missing-PkgConfig acceptance path is scoped to Flow Labeling. Existing
+            # FindOpenSSL logic calls pkg_check_modules directly, so restore only the
+            # command definition after the plugin has already been disabled.
+            include(FindPkgConfig)
+        endif()
+    endif()
+endif()
+
 # 添加外部子项目
 add_subdirectory(${CMAKE_SOURCE_DIR}/plugins/npi ${CMAKE_BINARY_DIR}/npi_plugin)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_npi ${CMAKE_BINARY_DIR}/test_npi)
@@ -50,12 +85,18 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/channels ${CMAKE_BINARY_DIR}/channels)
 
 # Stage 1: 框架核心
 add_subdirectory(${CMAKE_SOURCE_DIR}/framework ${CMAKE_BINARY_DIR}/framework)
+if(FLOWSQL_FLOW_LABELING_AVAILABLE)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/plugins/flow_labeling ${CMAKE_BINARY_DIR}/flow_labeling_plugin)
+endif()
 add_subdirectory(${CMAKE_SOURCE_DIR}/operators ${CMAKE_BINARY_DIR}/operators)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_packet_contract ${CMAKE_BINARY_DIR}/test_packet_contract)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_npm_basic ${CMAKE_BINARY_DIR}/test_npm_basic)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_pcapfile_import ${CMAKE_BINARY_DIR}/test_pcapfile_import)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_framework ${CMAKE_BINARY_DIR}/test_framework)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_config_channel ${CMAKE_BINARY_DIR}/test_config_channel)
+if(FLOWSQL_FLOW_LABELING_AVAILABLE)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_flow_labeling ${CMAKE_BINARY_DIR}/test_flow_labeling)
+endif()
 
 # Stage 2: C++ ↔ Python 桥接
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/bridge ${CMAKE_BINARY_DIR}/bridge)

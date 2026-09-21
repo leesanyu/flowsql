@@ -84,8 +84,8 @@ class PendingOutputOwner {
 }  // namespace
 
 NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& results,
-                                          std::shared_ptr<arrow::RecordBatch>* output,
-                                          std::string* error) {
+                                          std::shared_ptr<arrow::RecordBatch>* output, std::string* error,
+                                          bool labeling_enabled) {
     if (output == nullptr) return Fail(NpmBasicEncodeError::kNullOutput, "output is null", error);
 
     try {
@@ -123,6 +123,7 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
         arrow::UInt64Builder packets_ba;
         arrow::UInt64Builder wire_bytes_ab;
         arrow::UInt64Builder wire_bytes_ba;
+        arrow::UInt32Builder primary_label_id;
         arrow::StringBuilder protocol_status;
         arrow::UInt16Builder protocol_id;
         arrow::UInt16Builder protocol_sub_id;
@@ -171,6 +172,9 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
                 !append_optional_string(result.protocol, &protocol, "protocol")) {
                 return NpmBasicEncodeError::kArrowError;
             }
+            if (labeling_enabled && !check(primary_label_id.Append(result.primary_label_id), "primary_label_id")) {
+                return NpmBasicEncodeError::kArrowError;
+            }
             if (result.end_reason.has_value()) {
                 if (!check(end_reason.Append(NpmSessionEndReasonName(*result.end_reason)), "end_reason")) {
                     return NpmBasicEncodeError::kArrowError;
@@ -181,29 +185,33 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
         }
 
         std::vector<std::shared_ptr<arrow::Array>> arrays;
-        arrays.reserve(22);
+        arrays.reserve(labeling_enabled ? 23 : 22);
         auto finish = [&](auto* builder, const char* field) {
             std::shared_ptr<arrow::Array> array;
             if (!check(builder->Finish(&array), field)) return false;
             arrays.push_back(std::move(array));
             return true;
         };
-        if (!finish(&session_id, "session_id") ||
-            !finish(&observation_domain_id, "observation_domain_id") || !finish(&revision, "revision") ||
-            !finish(&observed_at, "observed_at") || !finish(&is_final, "is_final") ||
+        if (!finish(&session_id, "session_id") || !finish(&observation_domain_id, "observation_domain_id") ||
+            !finish(&revision, "revision") || !finish(&observed_at, "observed_at") || !finish(&is_final, "is_final") ||
             !finish(&ip_family, "ip_family") || !finish(&transport_protocol, "transport_protocol") ||
             !finish(&a_ip, "a_ip") || !finish(&b_ip, "b_ip") || !finish(&a_port, "a_port") ||
-            !finish(&b_port, "b_port") || !finish(&first_ns, "first_ns") ||
-            !finish(&last_ns, "last_ns") || !finish(&packets_ab, "packets_ab") ||
-            !finish(&packets_ba, "packets_ba") || !finish(&wire_bytes_ab, "wire_bytes_ab") ||
-            !finish(&wire_bytes_ba, "wire_bytes_ba") || !finish(&protocol_status, "protocol_status") ||
-            !finish(&protocol_id, "protocol_id") || !finish(&protocol_sub_id, "protocol_sub_id") ||
-            !finish(&protocol, "protocol") || !finish(&end_reason, "end_reason")) {
+            !finish(&b_port, "b_port") || !finish(&first_ns, "first_ns") || !finish(&last_ns, "last_ns") ||
+            !finish(&packets_ab, "packets_ab") || !finish(&packets_ba, "packets_ba") ||
+            !finish(&wire_bytes_ab, "wire_bytes_ab") || !finish(&wire_bytes_ba, "wire_bytes_ba")) {
+            return NpmBasicEncodeError::kArrowError;
+        }
+        if (labeling_enabled && !finish(&primary_label_id, "primary_label_id")) {
+            return NpmBasicEncodeError::kArrowError;
+        }
+        if (!finish(&protocol_status, "protocol_status") || !finish(&protocol_id, "protocol_id") ||
+            !finish(&protocol_sub_id, "protocol_sub_id") || !finish(&protocol, "protocol") ||
+            !finish(&end_reason, "end_reason")) {
             return NpmBasicEncodeError::kArrowError;
         }
 
-        auto batch = arrow::RecordBatch::Make(
-            NpmBasicResultSchema(), static_cast<int64_t>(results.size()), std::move(arrays));
+        auto batch = arrow::RecordBatch::Make(NpmBasicResultSchema(labeling_enabled),
+                                              static_cast<int64_t>(results.size()), std::move(arrays));
         const auto validation = batch->ValidateFull();
         if (!validation.ok()) {
             return Fail(NpmBasicEncodeError::kArrowError,
@@ -218,17 +226,16 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
     }
 }
 
-NpmBasicEncodeError EncodeNpmBasicResultsWithBudget(
-    const std::vector<NpmBasicResult>& results,
-    const std::shared_ptr<INpmTaskBudget>& budget,
-    std::shared_ptr<arrow::RecordBatch>* output,
-    std::string* error) {
+NpmBasicEncodeError EncodeNpmBasicResultsWithBudget(const std::vector<NpmBasicResult>& results,
+                                                    const std::shared_ptr<INpmTaskBudget>& budget,
+                                                    std::shared_ptr<arrow::RecordBatch>* output, std::string* error,
+                                                    bool labeling_enabled) {
     if (output == nullptr) return Fail(NpmBasicEncodeError::kNullOutput, "output is null", error);
     if (budget == nullptr) return Fail(NpmBasicEncodeError::kNullBudget, "budget is null", error);
 
     try {
         std::shared_ptr<arrow::RecordBatch> batch;
-        const auto encode_result = EncodeNpmBasicResults(results, &batch, error);
+        const auto encode_result = EncodeNpmBasicResults(results, &batch, error, labeling_enabled);
         if (encode_result != NpmBasicEncodeError::kNone) return encode_result;
 
         const int64_t signed_bytes = arrow::util::TotalBufferSize(*batch);

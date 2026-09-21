@@ -18,9 +18,7 @@
 namespace flowsql::npm {
 namespace {
 
-NpmParameterStatusV1 Fail(NpmParameterErrorV1 error, std::string path = {}) {
-    return {error, std::move(path)};
-}
+NpmParameterStatusV1 Fail(NpmParameterErrorV1 error, std::string path = {}) { return {error, std::move(path)}; }
 
 std::string EscapeJsonPointerToken(std::string_view token) {
     std::string escaped;
@@ -41,17 +39,14 @@ std::string ChildPath(const std::string& path, std::string_view token) {
     return path + "/" + EscapeJsonPointerToken(token);
 }
 
-void KeepLexicographicallyFirst(NpmParameterStatusV1 candidate,
-                                NpmParameterStatusV1* best) {
+void KeepLexicographicallyFirst(NpmParameterStatusV1 candidate, NpmParameterStatusV1* best) {
     if (!best || candidate.error == NpmParameterErrorV1::kNone) return;
     if (best->error == NpmParameterErrorV1::kNone || candidate.path < best->path) {
         *best = std::move(candidate);
     }
 }
 
-void ValidateJsonTree(const rapidjson::Value& value,
-                      const std::string& path,
-                      std::size_t depth,
+void ValidateJsonTree(const rapidjson::Value& value, const std::string& path, std::size_t depth,
                       NpmParameterStatusV1* best) {
     if (depth > kNpmParametersMaxDepthV1) {
         KeepLexicographicallyFirst(Fail(NpmParameterErrorV1::kNestingTooDeep, path), best);
@@ -61,11 +56,8 @@ void ValidateJsonTree(const rapidjson::Value& value,
         for (auto member = value.MemberBegin(); member != value.MemberEnd(); ++member) {
             const std::string_view name(member->name.GetString(), member->name.GetStringLength());
             for (auto previous = value.MemberBegin(); previous != member; ++previous) {
-                if (name == std::string_view(previous->name.GetString(),
-                                             previous->name.GetStringLength())) {
-                    KeepLexicographicallyFirst(
-                        Fail(NpmParameterErrorV1::kDuplicateField, ChildPath(path, name)),
-                        best);
+                if (name == std::string_view(previous->name.GetString(), previous->name.GetStringLength())) {
+                    KeepLexicographicallyFirst(Fail(NpmParameterErrorV1::kDuplicateField, ChildPath(path, name)), best);
                     break;
                 }
             }
@@ -87,23 +79,19 @@ bool IsAllowedField(std::string_view name, const char* const* fields, std::size_
     return false;
 }
 
-NpmParameterStatusV1 RejectUnknownFields(const rapidjson::Value& object,
-                                         const std::string& path,
-                                         const char* const* fields,
-                                         std::size_t field_count) {
+NpmParameterStatusV1 RejectUnknownFields(const rapidjson::Value& object, const std::string& path,
+                                         const char* const* fields, std::size_t field_count) {
     bool has_unknown = false;
     std::string first_unknown;
     for (auto member = object.MemberBegin(); member != object.MemberEnd(); ++member) {
         const std::string_view name(member->name.GetString(), member->name.GetStringLength());
-        if (!IsAllowedField(name, fields, field_count) &&
-            (!has_unknown || name < first_unknown)) {
+        if (!IsAllowedField(name, fields, field_count) && (!has_unknown || name < first_unknown)) {
             has_unknown = true;
             first_unknown.assign(name.data(), name.size());
         }
     }
     if (has_unknown) {
-        return Fail(NpmParameterErrorV1::kUnknownConsumedField,
-                    ChildPath(path, first_unknown));
+        return Fail(NpmParameterErrorV1::kUnknownConsumedField, ChildPath(path, first_unknown));
     }
     return {};
 }
@@ -113,9 +101,7 @@ const rapidjson::Value* Find(const rapidjson::Value& object, const char* name) {
     return member == object.MemberEnd() ? nullptr : &member->value;
 }
 
-NpmParameterStatusV1 ReadString(const rapidjson::Value& object,
-                                const char* name,
-                                const std::string& path,
+NpmParameterStatusV1 ReadString(const rapidjson::Value& object, const char* name, const std::string& path,
                                 const rapidjson::Value** output) {
     const rapidjson::Value* value = Find(object, name);
     if (output) *output = value;
@@ -126,9 +112,7 @@ NpmParameterStatusV1 ReadString(const rapidjson::Value& object,
     return {};
 }
 
-NpmParameterStatusV1 ReadInt64(const rapidjson::Value& object,
-                               const char* name,
-                               const std::string& path,
+NpmParameterStatusV1 ReadInt64(const rapidjson::Value& object, const char* name, const std::string& path,
                                int64_t* output) {
     const rapidjson::Value* value = Find(object, name);
     if (!value) return {};
@@ -139,9 +123,7 @@ NpmParameterStatusV1 ReadInt64(const rapidjson::Value& object,
     return {};
 }
 
-NpmParameterStatusV1 ReadUint64(const rapidjson::Value& object,
-                                const char* name,
-                                const std::string& path,
+NpmParameterStatusV1 ReadUint64(const rapidjson::Value& object, const char* name, const std::string& path,
                                 uint64_t* output) {
     const rapidjson::Value* value = Find(object, name);
     if (!value) return {};
@@ -152,9 +134,7 @@ NpmParameterStatusV1 ReadUint64(const rapidjson::Value& object,
     return {};
 }
 
-NpmParameterStatusV1 ReadUint32(const rapidjson::Value& object,
-                                const char* name,
-                                const std::string& path,
+NpmParameterStatusV1 ReadUint32(const rapidjson::Value& object, const char* name, const std::string& path,
                                 uint32_t* output) {
     const rapidjson::Value* value = Find(object, name);
     if (!value) return {};
@@ -173,8 +153,8 @@ bool IsValidConfigName(std::string_view name) {
         return false;
     }
     for (const char character : name) {
-        if ((character < 'a' || character > 'z') &&
-            (character < '0' || character > '9') && character != '_' && character != '-') {
+        if ((character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' &&
+            character != '-') {
             return false;
         }
     }
@@ -194,12 +174,23 @@ bool IsValidExactConfigReference(std::string_view reference) {
         return false;
     }
     uint64_t revision = 0;
-    const auto parsed = std::from_chars(revision_text.data(),
-                                        revision_text.data() + revision_text.size(),
-                                        revision);
-    return parsed.ec == std::errc{} &&
-           parsed.ptr == revision_text.data() + revision_text.size() &&
+    const auto parsed = std::from_chars(revision_text.data(), revision_text.data() + revision_text.size(), revision);
+    return parsed.ec == std::errc{} && parsed.ptr == revision_text.data() + revision_text.size() &&
            revision <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+}
+
+bool IsValidLabelingMemoryMiB(uint32_t value) {
+    switch (value) {
+        case 8:
+        case 16:
+        case 32:
+        case 64:
+        case 128:
+        case 256:
+            return true;
+        default:
+            return false;
+    }
 }
 
 NpmParameterStatusV1 ValidateAnalysisRange(const NpmAnalysisConfig& config) {
@@ -219,26 +210,27 @@ NpmParameterStatusV1 ValidateAnalysisRange(const NpmAnalysisConfig& config) {
         case NpmAnalysisConfigError::kUdpIdleTimeoutOutOfRange:
             return Fail(NpmParameterErrorV1::kInvalidRange, "/framework/udp_idle_timeout_ns");
         case NpmAnalysisConfigError::kOutOfOrderToleranceOutOfRange:
-            return Fail(NpmParameterErrorV1::kInvalidRange,
-                        "/framework/out_of_order_tolerance_ns");
+            return Fail(NpmParameterErrorV1::kInvalidRange, "/framework/out_of_order_tolerance_ns");
         case NpmAnalysisConfigError::kActiveSessionsOutOfRange:
             return Fail(NpmParameterErrorV1::kInvalidRange, "/framework/max_active_sessions");
         case NpmAnalysisConfigError::kTrackedBytesOutOfRange:
             return Fail(NpmParameterErrorV1::kInvalidRange, "/framework/max_tracked_bytes");
         case NpmAnalysisConfigError::kPendingOutputBytesOutOfRange:
-            return Fail(NpmParameterErrorV1::kInvalidRange,
-                        "/framework/max_pending_output_bytes");
+            return Fail(NpmParameterErrorV1::kInvalidRange, "/framework/max_pending_output_bytes");
         case NpmAnalysisConfigError::kUnsupportedOverloadPolicy:
             return Fail(NpmParameterErrorV1::kInvalidValue, "/framework/overload_policy");
     }
     return Fail(NpmParameterErrorV1::kInvalidValue, "/framework");
 }
 
-NpmParameterStatusV1 ParseFramework(const rapidjson::Value* value,
-                                    const NpmParameterConsumersV1& consumers,
+NpmParameterStatusV1 ParseFramework(const rapidjson::Value* value, const NpmParameterConsumersV1& consumers,
                                     NpmFrameworkParametersV1* output) {
     output->analysis = DefaultNpmAnalysisConfig(NpmRunMode::kOffline);
     output->labeling_reference.reset();
+    output->labeling_memory_mib.reset();
+    if (consumers.labeling_enabled && consumers.labeling_available) {
+        output->labeling_memory_mib = kNpmDefaultLabelingMemoryMiB;
+    }
     if (!value) return {};
     if (!value->IsObject()) {
         return Fail(NpmParameterErrorV1::kInvalidType, "/framework");
@@ -257,6 +249,7 @@ NpmParameterStatusV1 ParseFramework(const rapidjson::Value* value,
         "max_tracked_bytes",
         "max_pending_output_bytes",
         "labeling",
+        "labeling_memory_mib",
     };
     auto status = RejectUnknownFields(*value, "/framework", kFields, std::size(kFields));
     if (status.error != NpmParameterErrorV1::kNone) return status;
@@ -298,29 +291,21 @@ NpmParameterStatusV1 ParseFramework(const rapidjson::Value* value,
         output->analysis.overload_policy = NpmOverloadPolicy::kFail;
     }
 
-    status = ReadInt64(*value, "output_interval_ns", "/framework",
-                       &output->analysis.output_interval_ns);
+    status = ReadInt64(*value, "output_interval_ns", "/framework", &output->analysis.output_interval_ns);
     if (status.error != NpmParameterErrorV1::kNone) return status;
-    status = ReadUint32(*value, "payload_sample_packets", "/framework",
-                        &output->analysis.payload_sample_packets);
+    status = ReadUint32(*value, "payload_sample_packets", "/framework", &output->analysis.payload_sample_packets);
     if (status.error != NpmParameterErrorV1::kNone) return status;
-    status = ReadInt64(*value, "tcp_idle_timeout_ns", "/framework",
-                       &output->analysis.tcp_idle_timeout_ns);
+    status = ReadInt64(*value, "tcp_idle_timeout_ns", "/framework", &output->analysis.tcp_idle_timeout_ns);
     if (status.error != NpmParameterErrorV1::kNone) return status;
-    status = ReadInt64(*value, "udp_idle_timeout_ns", "/framework",
-                       &output->analysis.udp_idle_timeout_ns);
+    status = ReadInt64(*value, "udp_idle_timeout_ns", "/framework", &output->analysis.udp_idle_timeout_ns);
     if (status.error != NpmParameterErrorV1::kNone) return status;
-    status = ReadInt64(*value, "out_of_order_tolerance_ns", "/framework",
-                       &output->analysis.out_of_order_tolerance_ns);
+    status = ReadInt64(*value, "out_of_order_tolerance_ns", "/framework", &output->analysis.out_of_order_tolerance_ns);
     if (status.error != NpmParameterErrorV1::kNone) return status;
-    status = ReadUint64(*value, "max_active_sessions", "/framework",
-                        &output->analysis.max_active_sessions);
+    status = ReadUint64(*value, "max_active_sessions", "/framework", &output->analysis.max_active_sessions);
     if (status.error != NpmParameterErrorV1::kNone) return status;
-    status = ReadUint64(*value, "max_tracked_bytes", "/framework",
-                        &output->analysis.max_tracked_bytes);
+    status = ReadUint64(*value, "max_tracked_bytes", "/framework", &output->analysis.max_tracked_bytes);
     if (status.error != NpmParameterErrorV1::kNone) return status;
-    status = ReadUint64(*value, "max_pending_output_bytes", "/framework",
-                        &output->analysis.max_pending_output_bytes);
+    status = ReadUint64(*value, "max_pending_output_bytes", "/framework", &output->analysis.max_pending_output_bytes);
     if (status.error != NpmParameterErrorV1::kNone) return status;
 
     status = ValidateAnalysisRange(output->analysis);
@@ -332,11 +317,18 @@ NpmParameterStatusV1 ParseFramework(const rapidjson::Value* value,
         if (text) {
             const std::string_view reference(text->GetString(), text->GetStringLength());
             if (!IsValidExactConfigReference(reference)) {
-                return Fail(NpmParameterErrorV1::kInvalidExactReference,
-                            "/framework/labeling");
+                return Fail(NpmParameterErrorV1::kInvalidExactReference, "/framework/labeling");
             }
             output->labeling_reference.emplace(reference);
         }
+        uint32_t labeling_memory_mib = *output->labeling_memory_mib;
+        status = ReadUint32(*value, "labeling_memory_mib", "/framework", &labeling_memory_mib);
+        if (status.error != NpmParameterErrorV1::kNone) return status;
+        if (!IsValidLabelingMemoryMiB(labeling_memory_mib) ||
+            output->analysis.max_tracked_bytes < static_cast<uint64_t>(labeling_memory_mib) * 2 * kNpmMebibyte) {
+            return Fail(NpmParameterErrorV1::kInvalidRange, "/framework/labeling_memory_mib");
+        }
+        output->labeling_memory_mib = labeling_memory_mib;
     }
     return {};
 }
@@ -352,13 +344,10 @@ NpmParameterStatusV1 ValidateModuleNodes(const rapidjson::Value& root) {
             first_invalid.assign(name.data(), name.size());
         }
     }
-    return has_invalid
-               ? Fail(NpmParameterErrorV1::kInvalidType, ChildPath("", first_invalid))
-               : NpmParameterStatusV1{};
+    return has_invalid ? Fail(NpmParameterErrorV1::kInvalidType, ChildPath("", first_invalid)) : NpmParameterStatusV1{};
 }
 
-NpmParameterStatusV1 ParseBasic(const rapidjson::Value* value,
-                                NpmBasicModuleParametersV1* output) {
+NpmParameterStatusV1 ParseBasic(const rapidjson::Value* value, NpmBasicModuleParametersV1* output) {
     if (!value) {
         *output = {};
         return {};
@@ -369,31 +358,25 @@ NpmParameterStatusV1 ParseBasic(const rapidjson::Value* value,
     return {};
 }
 
-NpmParameterStatusV1 ParseSession(const rapidjson::Value* value,
-                                  NpmSessionModuleParametersV1* output) {
+NpmParameterStatusV1 ParseSession(const rapidjson::Value* value, NpmSessionModuleParametersV1* output) {
     *output = {};
     if (!value) return {};
     static constexpr const char* kFields[] = {"max_tcp_ranges_per_direction"};
     auto status = RejectUnknownFields(*value, "/session", kFields, std::size(kFields));
     if (status.error != NpmParameterErrorV1::kNone) return status;
-    status = ReadUint32(*value,
-                        "max_tcp_ranges_per_direction",
-                        "/session",
-                        &output->max_tcp_ranges_per_direction);
+    status = ReadUint32(*value, "max_tcp_ranges_per_direction", "/session", &output->max_tcp_ranges_per_direction);
     if (status.error != NpmParameterErrorV1::kNone) return status;
     if (output->max_tcp_ranges_per_direction < kNpmMinSessionTcpRangesPerDirection ||
         output->max_tcp_ranges_per_direction > kNpmMaxSessionTcpRangesPerDirection) {
-        return Fail(NpmParameterErrorV1::kInvalidRange,
-                    "/session/max_tcp_ranges_per_direction");
+        return Fail(NpmParameterErrorV1::kInvalidRange, "/session/max_tcp_ranges_per_direction");
     }
     return {};
 }
 
 }  // namespace
 
-NpmParameterStatusV1 ParseNpmParametersV1(const char* parameters_json,
-                                         const NpmParameterConsumersV1& consumers,
-                                         NpmTaskParametersV1* output) {
+NpmParameterStatusV1 ParseNpmParametersV1(const char* parameters_json, const NpmParameterConsumersV1& consumers,
+                                          NpmTaskParametersV1* output) {
     if (!parameters_json) return Fail(NpmParameterErrorV1::kNullInput);
     if (parameters_json[0] == '\0') return Fail(NpmParameterErrorV1::kEmptyInput);
     if (!output) return Fail(NpmParameterErrorV1::kNullOutput);
@@ -407,8 +390,7 @@ NpmParameterStatusV1 ParseNpmParametersV1(const char* parameters_json,
 
     try {
         rapidjson::Document document;
-        document.Parse<rapidjson::kParseValidateEncodingFlag | rapidjson::kParseIterativeFlag>(
-            parameters_json);
+        document.Parse<rapidjson::kParseValidateEncodingFlag | rapidjson::kParseIterativeFlag>(parameters_json);
         if (document.HasParseError()) return Fail(NpmParameterErrorV1::kInvalidJson);
         if (!document.IsObject()) return Fail(NpmParameterErrorV1::kInvalidEnvelope);
 

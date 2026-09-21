@@ -1,7 +1,7 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-export const CONFIG_CONTENT_MAX_BYTES = 512 * 1024
+export const CONFIG_CONTENT_MAX_BYTES = 8 * 1024 * 1024
 
 const byteLength = (value) => new TextEncoder().encode(String(value ?? '')).length
 
@@ -59,7 +59,7 @@ export const validateConfigDraft = (draft) => {
   if (byteLength(draft.change_note) > 1024) return '变更说明不能超过 1024 字节'
   if (!draft.content) return '配置内容不能为空'
   if (hasUnpairedSurrogate(draft.content)) return '配置内容必须是有效 UTF-8 文本'
-  if (byteLength(draft.content) > CONFIG_CONTENT_MAX_BYTES) return '配置内容不能超过 512 KiB'
+  if (byteLength(draft.content) > CONFIG_CONTENT_MAX_BYTES) return '配置内容不能超过 8 MiB'
   return ''
 }
 

@@ -109,6 +109,7 @@ NpmBasicProjectionError NpmBasicResultProjector::Project(const NpmSessionView& s
         next.packets_ba = session.packets_ba;
         next.wire_bytes_ab = session.wire_bytes_ab;
         next.wire_bytes_ba = session.wire_bytes_ba;
+        next.primary_label_id = session.primary_label_id;
         next.protocol_status = session.protocol_status;
         if (session.protocol_status == NpmProtocolStatus::kIdentified) {
             const uint16_t protocol_id = *session.protocol_id;

@@ -148,6 +148,7 @@ int NpmSessionAnalysisModule::Emit(const NpmSessionView& session,
         result.first_ns = session.first_ns;
         result.last_ns = session.last_ns;
         result.duration_ns = static_cast<int64_t>(duration);
+        result.primary_label_id = session.primary_label_id;
         result.protocol_status = session.protocol_status;
         if (session.protocol_status == NpmProtocolStatus::kIdentified) {
             const uint16_t protocol_id = *session.protocol_id;

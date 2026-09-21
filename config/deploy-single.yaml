@@ -18,6 +18,7 @@ services:
         option: "db_path=./meta/flowsql_meta.db"
       - name: libflowsql_config_channel.so
         option: "db_path=./meta/flowsql_meta.db"
+      - libflowsql_flow_labeling.so
       - libflowsql_scheduler.so
       - libflowsql_bridge.so
       - libflowsql_builtin.so

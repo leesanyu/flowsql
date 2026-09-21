@@ -7,6 +7,8 @@
 #include "npm_basic_task_runtime.h"
 
 #include <arrow/api.h>
+#include <framework/interfaces/iconfig_channel_registry.h>
+#include <framework/interfaces/iflow_labeling.h>
 #include <plugins/npi/iprotocol.h>
 
 #include <cerrno>
@@ -28,6 +30,15 @@ constexpr const char* kInvalidFlushError = "npm.basic task received an invalid F
 constexpr const char* kFlushStateError = "npm.basic task is not open for Flush";
 constexpr const char* kRuntimeFlushError = "npm.basic task runtime Flush failed";
 constexpr const char* kAllocationError = "npm.basic task allocation failed";
+constexpr const char* kLabelingProviderError = "npm.basic labeling provider is unavailable";
+constexpr const char* kLabelingConfigRegistryError = "npm.basic labeling config registry is unavailable";
+constexpr const char* kLabelingConfigResolveError = "npm.basic labeling config resolve failed";
+constexpr const char* kLabelingConfigMissingError = "npm.basic labeling exact config reference is required";
+constexpr const char* kLabelingBudgetError = "npm.basic labeling matcher budget reservation failed";
+constexpr const char* kLabelingMatcherError = "npm.basic labeling matcher creation failed";
+constexpr uint32_t kLabelingMaxLabels = 10'000;
+constexpr uint32_t kLabelingMaxLogicalRules = 50'000;
+constexpr uint32_t kLabelingMaxCompiledRules = 100'000;
 
 std::string BuildConfigError(const NpmBasicTaskConfigStatus& status) {
     std::string error(kConfigError);
@@ -49,6 +60,32 @@ std::string BuildConfigError(const NpmBasicTaskConfigStatus& status) {
     return error;
 }
 
+std::string BuildLabelingProviderError(const FlowLabelingDiagnosticV1& diagnostic) {
+    std::string error(kLabelingProviderError);
+    if (diagnostic.path != nullptr && diagnostic.path[0] != '\0') {
+        error += " at ";
+        error += diagnostic.path;
+    }
+    if (diagnostic.detail != nullptr && diagnostic.detail[0] != '\0') {
+        error += ": ";
+        error += diagnostic.detail;
+    }
+    return error;
+}
+
+std::string BuildLabelingError(const char* prefix, const char* path, const char* detail) {
+    std::string error(prefix);
+    if (path != nullptr && path[0] != '\0') {
+        error += " at ";
+        error += path;
+    }
+    if (detail != nullptr && detail[0] != '\0') {
+        error += ": ";
+        error += detail;
+    }
+    return error;
+}
+
 bool MaxPacketTimestampNs(const std::shared_ptr<arrow::RecordBatch>& input, int64_t* output) {
     if (!input || input->num_rows() == 0 || input->num_columns() == 0 || output == nullptr) {
         return false;
@@ -66,9 +103,7 @@ bool MaxPacketTimestampNs(const std::shared_ptr<arrow::RecordBatch>& input, int6
 
 }  // namespace
 
-NpmBasicTask::NpmBasicTask(const BlockTransformTaskConfigV1& config,
-                           IQuerier* querier,
-                           const NpmBasicOperator* owner)
+NpmBasicTask::NpmBasicTask(const BlockTransformTaskConfigV1& config, IQuerier* querier, const NpmBasicOperator* owner)
     : task_id_(config.task_id),
       with_params_json_(config.with_params_json),
       pushed_filter_plan_json_(config.pushed_filter_plan_json),
@@ -77,8 +112,7 @@ NpmBasicTask::NpmBasicTask(const BlockTransformTaskConfigV1& config,
 
 NpmBasicTask::~NpmBasicTask() = default;
 
-int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema,
-                       std::shared_ptr<arrow::Schema>* output_schema) {
+int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema>* output_schema) {
     State expected = State::kCreated;
     if (!state_.compare_exchange_strong(expected, State::kOpening, std::memory_order_acq_rel)) {
         if (expected == State::kOpened) {
@@ -94,8 +128,32 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema,
         return expected == State::kCancelled ? ECANCELED : EINVAL;
     }
 
+    const bool labeling_requested = NpmBasicTaskRequestsLabeling(with_params_json_.c_str());
+    IFlowLabelingProviderV1* labeling_provider = nullptr;
+    if (labeling_requested) {
+        labeling_provider = querier_ == nullptr
+                                ? nullptr
+                                : static_cast<IFlowLabelingProviderV1*>(querier_->First(IID_FLOW_LABELING_PROVIDER_V1));
+        FlowLabelingDiagnosticV1 diagnostic;
+        const auto provider_status = labeling_provider == nullptr ? FlowLabelingErrorV1::kUnavailable
+                                                                  : labeling_provider->RuntimeStatus(&diagnostic);
+        if (provider_status != FlowLabelingErrorV1::kNone) {
+            const char* error = kLabelingProviderError;
+            if (labeling_provider != nullptr) {
+                try {
+                    config_error_ = BuildLabelingProviderError(diagnostic);
+                    error = config_error_.c_str();
+                } catch (const std::bad_alloc&) {
+                }
+            }
+            expected = State::kOpening;
+            expected = Fail(expected, error);
+            return expected == State::kCancelled ? ECANCELED : ENODEV;
+        }
+    }
+
     NpmBasicTaskConfig parsed;
-    const auto parse_status = ParseNpmBasicTaskConfig(with_params_json_.c_str(), &parsed);
+    const auto parse_status = ParseNpmBasicTaskConfig(with_params_json_.c_str(), &parsed, labeling_requested);
     if (parse_status.error != NpmBasicTaskConfigError::kNone) {
         const char* error = kConfigError;
         try {
@@ -107,11 +165,78 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema,
         expected = Fail(expected, error);
         return expected == State::kCancelled ? ECANCELED : EINVAL;
     }
-
     std::shared_ptr<arrow::Schema> next_schema;
     std::unique_ptr<NpmBasicTaskRuntime> next_runtime;
-    const auto runtime_status = NpmBasicTaskRuntime::Create(
-        parsed, querier_, input_schema, &next_schema, &next_runtime);
+    std::shared_ptr<NpmTaskBudget> labeling_budget;
+    IFlowLabelMatcherV1* matcher = nullptr;
+    if (parsed.features.labeling_enabled) {
+        const uint64_t labeling_memory_bytes = static_cast<uint64_t>(parsed.labeling_memory_mib) * kNpmMebibyte;
+        if (parsed.labeling_reference.empty()) {
+            expected = State::kOpening;
+            expected = Fail(expected, kLabelingConfigMissingError);
+            return expected == State::kCancelled ? ECANCELED : EINVAL;
+        }
+        auto* registry = querier_ == nullptr
+                             ? nullptr
+                             : static_cast<IConfigChannelRegistryV1*>(querier_->First(IID_CONFIG_CHANNEL_REGISTRY_V1));
+        if (registry == nullptr) {
+            expected = State::kOpening;
+            expected = Fail(expected, kLabelingConfigRegistryError);
+            return expected == State::kCancelled ? ECANCELED : ENODEV;
+        }
+
+        ConfigChannelSnapshot snapshot;
+        std::string resolve_error;
+        const int resolve_status = registry->Resolve(parsed.labeling_reference.c_str(), &snapshot, &resolve_error);
+        if (resolve_status != 0) {
+            const char* error = kLabelingConfigResolveError;
+            try {
+                config_error_ =
+                    BuildLabelingError(kLabelingConfigResolveError, "/framework/labeling", resolve_error.c_str());
+                error = config_error_.c_str();
+            } catch (const std::bad_alloc&) {
+            }
+            expected = State::kOpening;
+            expected = Fail(expected, error);
+            return expected == State::kCancelled ? ECANCELED : EINVAL;
+        }
+
+        try {
+            labeling_budget = std::make_shared<NpmTaskBudget>(parsed.analysis);
+        } catch (const std::bad_alloc&) {
+            expected = State::kOpening;
+            expected = Fail(expected, kAllocationError);
+            return expected == State::kCancelled ? ECANCELED : ENOMEM;
+        }
+        if (labeling_budget->Reserve(NpmBudgetCategory::kModuleState, labeling_memory_bytes) != NpmBudgetError::kNone) {
+            expected = State::kOpening;
+            expected = Fail(expected, kLabelingBudgetError);
+            return expected == State::kCancelled ? ECANCELED : ENOSPC;
+        }
+
+        FlowLabelingCompileRequestV1 request;
+        request.snapshot = &snapshot;
+        request.reserved_module_state_bytes = labeling_memory_bytes;
+        request.max_labels = kLabelingMaxLabels;
+        request.max_logical_rules = kLabelingMaxLogicalRules;
+        request.max_compiled_rules = kLabelingMaxCompiledRules;
+        FlowLabelingDiagnosticV1 diagnostic;
+        const auto matcher_status = labeling_provider->CreateMatcher(request, &matcher, &diagnostic);
+        if (matcher_status != FlowLabelingErrorV1::kNone || matcher == nullptr) {
+            const char* error = kLabelingMatcherError;
+            try {
+                config_error_ = BuildLabelingError(kLabelingMatcherError, diagnostic.path, diagnostic.detail);
+                error = config_error_.c_str();
+            } catch (const std::bad_alloc&) {
+            }
+            expected = State::kOpening;
+            expected = Fail(expected, error);
+            return expected == State::kCancelled ? ECANCELED : EINVAL;
+        }
+    }
+
+    const auto runtime_status = NpmBasicTaskRuntime::Create(parsed, querier_, input_schema, &next_schema, &next_runtime,
+                                                            std::move(labeling_budget), matcher);
     if (runtime_status.error != NpmBasicTaskRuntimeError::kNone) {
         expected = State::kOpening;
         expected = Fail(expected, kRuntimeOpenError);
@@ -135,8 +260,7 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema,
     }
 }
 
-int NpmBasicTask::ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
-                               int64_t ts_ms,
+int NpmBasicTask::ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
                                std::vector<BlockTransformOutputV1>* outputs) {
     State current = state_.load(std::memory_order_acquire);
     if (current != State::kOpened) {
@@ -277,8 +401,7 @@ void NpmBasicTask::Cancel() {
             break;
         }
     }
-    if (current != State::kCancelled &&
-        state_.load(std::memory_order_acquire) != State::kCancelled) {
+    if (current != State::kCancelled && state_.load(std::memory_order_acquire) != State::kCancelled) {
         return;
     }
     const auto runtime = Runtime();
@@ -292,21 +415,13 @@ std::string NpmBasicTask::LastError() const {
     return runtime ? runtime->LastError() : std::string();
 }
 
-const std::string& NpmBasicTask::TaskId() const noexcept {
-    return task_id_;
-}
+const std::string& NpmBasicTask::TaskId() const noexcept { return task_id_; }
 
-const std::string& NpmBasicTask::WithParamsJson() const noexcept {
-    return with_params_json_;
-}
+const std::string& NpmBasicTask::WithParamsJson() const noexcept { return with_params_json_; }
 
-const std::string& NpmBasicTask::PushedFilterPlanJson() const noexcept {
-    return pushed_filter_plan_json_;
-}
+const std::string& NpmBasicTask::PushedFilterPlanJson() const noexcept { return pushed_filter_plan_json_; }
 
-int NpmBasicTask::ErrorCodeForState(State state) noexcept {
-    return state == State::kCancelled ? -ECANCELED : -EPIPE;
-}
+int NpmBasicTask::ErrorCodeForState(State state) noexcept { return state == State::kCancelled ? -ECANCELED : -EPIPE; }
 
 NpmBasicTask::State NpmBasicTask::Fail(State expected, const char* error) noexcept {
     if (!state_.compare_exchange_strong(expected, State::kFailed, std::memory_order_acq_rel)) {
@@ -327,8 +442,7 @@ std::shared_ptr<NpmBasicTaskRuntime> NpmBasicTask::Runtime() const noexcept {
     return std::atomic_load_explicit(&runtime_, std::memory_order_acquire);
 }
 
-NpmBasicOperator::NpmBasicOperator(IQuerier* querier) noexcept
-    : querier_(querier), loaded_(true), started_(true) {}
+NpmBasicOperator::NpmBasicOperator(IQuerier* querier) noexcept : querier_(querier), loaded_(true), started_(true) {}
 
 int NpmBasicOperator::Option(const char* option) {
     if (loaded_ || started_) return EBUSY;
@@ -354,8 +468,7 @@ int NpmBasicOperator::Start() {
     if (!loaded_ || querier_ == nullptr) return EINVAL;
     if (started_) return 0;
 
-    auto* pool = static_cast<IProtocolPipelinePoolV1*>(
-        querier_->First(IID_PROTOCOL_PIPELINE_POOL_V1));
+    auto* pool = static_cast<IProtocolPipelinePoolV1*>(querier_->First(IID_PROTOCOL_PIPELINE_POOL_V1));
     if (pool == nullptr || pool->Capacity() < 1) return ENODEV;
     IProtocol* protocol = pool->Protocol();
     if (protocol == nullptr || protocol->Dictionary() == nullptr) return ENODEV;
@@ -369,25 +482,17 @@ int NpmBasicOperator::Stop() {
     return 0;
 }
 
-std::string NpmBasicOperator::Category() const {
-    return "npm";
-}
+std::string NpmBasicOperator::Category() const { return "npm"; }
 
-std::string NpmBasicOperator::Name() const {
-    return "basic";
-}
+std::string NpmBasicOperator::Name() const { return "basic"; }
 
-std::string NpmBasicOperator::Description() const {
-    return "NPM basic session analysis";
-}
+std::string NpmBasicOperator::Description() const { return "NPM basic session analysis"; }
 
-int NpmBasicOperator::CreateTask(const BlockTransformTaskConfigV1& config,
-                                 IBlockTransformTaskV1** task) {
+int NpmBasicOperator::CreateTask(const BlockTransformTaskConfigV1& config, IBlockTransformTaskV1** task) {
     if (!started_) return EPIPE;
-    if (task == nullptr || config.contract_version != kBlockTransformContractVersionV1 ||
-        config.task_id == nullptr || config.task_id[0] == '\0' || config.with_params_json == nullptr ||
-        config.with_params_json[0] == '\0' || config.pushed_filter_plan_json == nullptr ||
-        config.pushed_filter_plan_json[0] == '\0') {
+    if (task == nullptr || config.contract_version != kBlockTransformContractVersionV1 || config.task_id == nullptr ||
+        config.task_id[0] == '\0' || config.with_params_json == nullptr || config.with_params_json[0] == '\0' ||
+        config.pushed_filter_plan_json == nullptr || config.pushed_filter_plan_json[0] == '\0') {
         return EINVAL;
     }
 

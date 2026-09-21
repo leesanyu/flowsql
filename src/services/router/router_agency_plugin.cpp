@@ -144,8 +144,8 @@ int RouterAgencyPlugin::CollectRoutes(IQuerier* querier) {
 // --- HTTP 服务 ---
 
 void RouterAgencyPlugin::HttpThread() {
-    // 请求体大小限制：1MB
-    server_.set_payload_max_length(1 * 1024 * 1024);
+    // Config Channel carries an 8 MiB source snapshot as Base64 plus bounded JSON metadata.
+    server_.set_payload_max_length(12 * 1024 * 1024);
 
     // catch-all：所有方法统一走 Dispatch
     auto dispatch = [this](const httplib::Request& req, httplib::Response& res) {

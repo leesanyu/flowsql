@@ -6,6 +6,8 @@
 
 #include "npm_analysis_contract.h"
 
+#include <framework/interfaces/iflow_labeling.h>
+
 #include <cstdint>
 
 namespace flowsql::npm {
@@ -33,6 +35,7 @@ struct NpmSessionPacketBinding {
     NpmPacketDirection direction = NpmPacketDirection::kAToB;
     Span<const uint8_t> payload;
     NpmTransportPacketFacts transport;
+    FlowLabelFactsV1 label_facts;
 };
 
 /** Builds one packet-to-session binding. Output remains unchanged on every error. */

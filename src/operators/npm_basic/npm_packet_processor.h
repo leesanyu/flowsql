@@ -39,6 +39,14 @@ NpmPacketProcessStatus ProcessNpmPacket(
     INpmResultWriter& writer,
     std::vector<NpmSessionSnapshot>* ended_sessions);
 
+/** Processes one packet whose normalized binding was already built by the unique decode path. */
+NpmPacketProcessStatus ProcessNpmBoundPacket(const packet::PacketView& packet, const packet::PacketLayerInfo& layer,
+                                             const NpmSessionPacketBinding& binding,
+                                             uint32_t new_session_primary_label_id, NpmSessionTable& sessions,
+                                             packet::IPacketProtocolIdentifier& identifier,
+                                             const std::vector<INpmAnalysisModule*>& modules, INpmResultWriter& writer,
+                                             std::vector<NpmSessionSnapshot>* ended_sessions);
+
 struct NpmSessionEndEvent {
     NpmSessionSnapshot snapshot;
     int64_t observed_at = 0;
@@ -49,6 +57,7 @@ enum class NpmPacketBatchProcessError : uint8_t {
     kNullOutput,
     kNullModule,
     kBatchViewError,
+    kLabelingError,
     kPacketError,
     kProgressDeferred,
     kModuleError,
@@ -60,19 +69,19 @@ struct NpmPacketBatchProcessStatus {
     int64_t row = -1;
     NpmPacketBatchError batch_error = NpmPacketBatchError::kNone;
     NpmPacketProcessStatus packet_status;
+    int labeling_error = 0;
     NpmCaptureProgressDisposition progress_disposition = NpmCaptureProgressDisposition::kUnchanged;
     int module_error = 0;
 };
 
 /** Processes a validated packet batch and advances offline event time after each successful row. */
-NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
-    const NpmObservationDomainMap& domain_map,
-    const NpmPacketBatchView& batch,
-    NpmSessionTable& sessions,
-    packet::IPacketProtocolIdentifier& identifier,
-    const std::vector<INpmAnalysisModule*>& modules,
-    INpmResultWriter& writer,
-    std::vector<NpmSessionEndEvent>* ended_events);
+NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(const NpmObservationDomainMap& domain_map,
+                                                         const NpmPacketBatchView& batch, NpmSessionTable& sessions,
+                                                         packet::IPacketProtocolIdentifier& identifier,
+                                                         const std::vector<INpmAnalysisModule*>& modules,
+                                                         INpmResultWriter& writer,
+                                                         std::vector<NpmSessionEndEvent>* ended_events,
+                                                         const IFlowLabelMatcherV1* matcher = nullptr);
 
 }  // namespace flowsql::npm
 

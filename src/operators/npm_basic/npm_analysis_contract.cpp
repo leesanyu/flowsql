@@ -194,7 +194,7 @@ NpmBasicResultError ValidateNpmBasicResult(const NpmBasicResult& result) {
     return NpmBasicResultError::kNone;
 }
 
-std::shared_ptr<arrow::Schema> NpmBasicResultSchema() {
+std::shared_ptr<arrow::Schema> NpmBasicResultSchema(bool labeling_enabled) {
     static const std::shared_ptr<arrow::Schema> schema = [] {
         auto fields = std::vector<std::shared_ptr<arrow::Field>>{
             arrow::field("session_id", arrow::uint64(), false),
@@ -225,7 +225,14 @@ std::shared_ptr<arrow::Schema> NpmBasicResultSchema() {
             {"npm_basic_result", "1", "ns"});
         return arrow::schema(std::move(fields), std::move(metadata));
     }();
-    return schema;
+    static const std::shared_ptr<arrow::Schema> labeled_schema = [&] {
+        auto fields = schema->fields();
+        fields.insert(fields.begin() + 17, arrow::field("primary_label_id", arrow::uint32(), false));
+        auto metadata = arrow::key_value_metadata(
+            {"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit"}, {"npm_basic_result", "1", "ns"});
+        return arrow::schema(std::move(fields), std::move(metadata));
+    }();
+    return labeling_enabled ? labeled_schema : schema;
 }
 
 const char* NpmRateStatusName(NpmRateStatus status) {
@@ -502,7 +509,7 @@ NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result) {
     return NpmSessionResultError::kNone;
 }
 
-std::shared_ptr<arrow::Schema> NpmSessionResultSchema() {
+std::shared_ptr<arrow::Schema> NpmSessionResultSchema(bool labeling_enabled) {
     static const std::shared_ptr<arrow::Schema> schema = [] {
         auto fields = std::vector<std::shared_ptr<arrow::Field>>{
             arrow::field("session_id", arrow::uint64(), false),
@@ -564,7 +571,16 @@ std::shared_ptr<arrow::Schema> NpmSessionResultSchema() {
             {"npm_session_result", "1", "ns", "cumulative", "single_capture_observed_packets"});
         return arrow::schema(std::move(fields), std::move(metadata));
     }();
-    return schema;
+    static const std::shared_ptr<arrow::Schema> labeled_schema = [&] {
+        auto fields = schema->fields();
+        fields.insert(fields.begin() + 14, arrow::field("primary_label_id", arrow::uint32(), false));
+        auto metadata = arrow::key_value_metadata(
+            {"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit", "flowsql.revision_semantics",
+             "flowsql.measurement_scope"},
+            {"npm_session_result", "1", "ns", "cumulative", "single_capture_observed_packets"});
+        return arrow::schema(std::move(fields), std::move(metadata));
+    }();
+    return labeling_enabled ? labeled_schema : schema;
 }
 
 uint64_t NpmTrackedBudgetBytes(const NpmBudgetUsage& usage) {

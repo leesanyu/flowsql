@@ -145,7 +145,7 @@
             :disabled="submitting || readingFile"
             @change="handleFileSelected"
           />
-          <div class="form-hint">仅接受 JSON、YAML、YML 或 XML，原文最大 512 KiB</div>
+          <div class="form-hint">仅接受 JSON、YAML、YML 或 XML，原文最大 8 MiB</div>
         </el-form-item>
         <el-form-item v-else label="配置内容" required>
           <el-input
@@ -338,7 +338,7 @@ const handleFileSelected = async (event) => {
     return
   }
   if (file.size > CONFIG_CONTENT_MAX_BYTES) {
-    ElMessage.warning('配置内容不能超过 512 KiB')
+    ElMessage.warning('配置内容不能超过 8 MiB')
     event.target.value = ''
     return
   }

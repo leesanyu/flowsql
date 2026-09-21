@@ -150,6 +150,7 @@ struct NpmBasicResult {
     uint64_t packets_ba = 0;
     uint64_t wire_bytes_ab = 0;
     uint64_t wire_bytes_ba = 0;
+    uint32_t primary_label_id = 0;
     NpmProtocolStatus protocol_status = NpmProtocolStatus::kPending;
     std::optional<uint16_t> protocol_id;
     std::optional<uint16_t> protocol_sub_id;
@@ -170,7 +171,7 @@ enum class NpmBasicResultError : uint8_t {
 const char* NpmProtocolStatusName(NpmProtocolStatus status);
 const char* NpmSessionEndReasonName(NpmSessionEndReason reason);
 NpmBasicResultError ValidateNpmBasicResult(const NpmBasicResult& result);
-std::shared_ptr<arrow::Schema> NpmBasicResultSchema();
+std::shared_ptr<arrow::Schema> NpmBasicResultSchema(bool labeling_enabled = false);
 
 enum class NpmRateStatus : uint8_t {
     kValid = 0,
@@ -229,6 +230,7 @@ struct NpmSessionResult {
     int64_t first_ns = 0;
     int64_t last_ns = 0;
     int64_t duration_ns = 0;
+    uint32_t primary_label_id = 0;
     NpmProtocolStatus protocol_status = NpmProtocolStatus::kPending;
     std::optional<uint16_t> protocol_id;
     std::optional<uint16_t> protocol_sub_id;
@@ -298,7 +300,7 @@ const char* NpmTcpRttStatusName(NpmTcpRttStatus status);
 const char* NpmTcpRetransmissionStatusName(NpmTcpRetransmissionStatus status);
 const char* NpmTcpInitiatorName(NpmTcpInitiator initiator);
 NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result);
-std::shared_ptr<arrow::Schema> NpmSessionResultSchema();
+std::shared_ptr<arrow::Schema> NpmSessionResultSchema(bool labeling_enabled = false);
 
 enum class NpmBudgetCategory : uint8_t {
     kSessionState = 0,
@@ -388,6 +390,7 @@ struct NpmSessionView {
     uint64_t packets_ba = 0;
     uint64_t wire_bytes_ab = 0;
     uint64_t wire_bytes_ba = 0;
+    uint32_t primary_label_id = 0;
     NpmProtocolStatus protocol_status = NpmProtocolStatus::kPending;
     std::optional<uint16_t> protocol_id;
     std::optional<uint16_t> protocol_sub_id;

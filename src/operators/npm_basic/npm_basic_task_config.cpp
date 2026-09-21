@@ -71,13 +71,9 @@ constexpr std::array<TaskConfigField, 12> kLegacyTuningFields = {
     TaskConfigField::kSessionMaxTcpRangesPerDirection,
 };
 
-size_t FieldIndex(TaskConfigField field) {
-    return static_cast<size_t>(field);
-}
+size_t FieldIndex(TaskConfigField field) { return static_cast<size_t>(field); }
 
-const char* FieldName(TaskConfigField field) {
-    return kTaskConfigFieldNames[FieldIndex(field)];
-}
+const char* FieldName(TaskConfigField field) { return kTaskConfigFieldNames[FieldIndex(field)]; }
 
 int FindField(std::string_view name) {
     for (size_t index = 0; index < kTaskConfigFieldNames.size(); ++index) {
@@ -108,8 +104,7 @@ bool ParseUnsignedDecimal(std::string_view text, uint64_t* output) {
 
 bool ParseInt64(std::string_view text, int64_t* output) {
     uint64_t value = 0;
-    if (!ParseUnsignedDecimal(text, &value) ||
-        value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    if (!ParseUnsignedDecimal(text, &value) || value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
         return false;
     }
     *output = static_cast<int64_t>(value);
@@ -126,8 +121,8 @@ bool ParseUint32(std::string_view text, uint32_t* output) {
 }
 
 bool IsAsciiWhitespace(char character) {
-    return character == ' ' || character == '\t' || character == '\n' || character == '\r' ||
-           character == '\f' || character == '\v';
+    return character == ' ' || character == '\t' || character == '\n' || character == '\r' || character == '\f' ||
+           character == '\v';
 }
 
 std::string_view TrimAsciiWhitespace(std::string_view text) {
@@ -141,6 +136,7 @@ bool ParseFeatures(std::string_view text, NpmBasicFeatureConfig* config) {
     NpmBasicFeatureConfig next;
     next.basic_enabled = false;
     next.session_enabled = false;
+    next.labeling_enabled = false;
 
     size_t token_begin = 0;
     while (token_begin <= text.size()) {
@@ -154,6 +150,9 @@ bool ParseFeatures(std::string_view text, NpmBasicFeatureConfig* config) {
         } else if (token == "session") {
             if (next.session_enabled) return false;
             next.session_enabled = true;
+        } else if (token == "labeling") {
+            if (next.labeling_enabled) return false;
+            next.labeling_enabled = true;
         } else {
             return false;
         }
@@ -163,6 +162,7 @@ bool ParseFeatures(std::string_view text, NpmBasicFeatureConfig* config) {
 
     config->basic_enabled = next.basic_enabled;
     config->session_enabled = next.session_enabled;
+    config->labeling_enabled = next.labeling_enabled;
     return config->basic_enabled || config->session_enabled;
 }
 
@@ -191,20 +191,16 @@ NpmBasicTaskConfigStatus ParseFeatureConfig(
 
     const rapidjson::Value* observing = values[FieldIndex(TaskConfigField::kObserving)];
     if (observing != nullptr &&
-        !ParseObserving(std::string_view(observing->GetString(), observing->GetStringLength()),
-                        &config->observing)) {
+        !ParseObserving(std::string_view(observing->GetString(), observing->GetStringLength()), &config->observing)) {
         return Fail(NpmBasicTaskConfigError::kInvalidObserving, FieldName(TaskConfigField::kObserving));
     }
-    const bool observing_enabled =
-        (config->observing == NpmResultEntity::kBasic && config->basic_enabled) ||
-        (config->observing == NpmResultEntity::kSession && config->session_enabled);
+    const bool observing_enabled = (config->observing == NpmResultEntity::kBasic && config->basic_enabled) ||
+                                   (config->observing == NpmResultEntity::kSession && config->session_enabled);
     if (!observing_enabled) {
-        return Fail(NpmBasicTaskConfigError::kObservingFeatureDisabled,
-                    FieldName(TaskConfigField::kObserving));
+        return Fail(NpmBasicTaskConfigError::kObservingFeatureDisabled, FieldName(TaskConfigField::kObserving));
     }
 
-    const rapidjson::Value* range_limit =
-        values[FieldIndex(TaskConfigField::kSessionMaxTcpRangesPerDirection)];
+    const rapidjson::Value* range_limit = values[FieldIndex(TaskConfigField::kSessionMaxTcpRangesPerDirection)];
     if (range_limit == nullptr) return {};
     if (!ParseUint32(std::string_view(range_limit->GetString(), range_limit->GetStringLength()),
                      &config->session_max_tcp_ranges_per_direction)) {
@@ -260,8 +256,7 @@ NpmBasicTaskConfigStatus ParseDomainConfig(
     const rapidjson::Value* source_domains = values[FieldIndex(TaskConfigField::kSourceDomains)];
     if (!ParseSourceDomains(std::string_view(source_domains->GetString(), source_domains->GetStringLength()),
                             &domains->bindings)) {
-        return Fail(NpmBasicTaskConfigError::kInvalidSourceDomains,
-                    FieldName(TaskConfigField::kSourceDomains));
+        return Fail(NpmBasicTaskConfigError::kInvalidSourceDomains, FieldName(TaskConfigField::kSourceDomains));
     }
 
     const auto domain_error = ValidateNpmObservationDomainMap(*domains);
@@ -336,8 +331,7 @@ NpmBasicTaskConfigStatus ParseIntegerFields(
         return Fail(NpmBasicTaskConfigError::kInvalidInteger, FieldName(TaskConfigField::kUdpIdleTimeoutNs));
     }
     if (!parse_i64(TaskConfigField::kOutOfOrderToleranceNs, &config->out_of_order_tolerance_ns)) {
-        return Fail(NpmBasicTaskConfigError::kInvalidInteger,
-                    FieldName(TaskConfigField::kOutOfOrderToleranceNs));
+        return Fail(NpmBasicTaskConfigError::kInvalidInteger, FieldName(TaskConfigField::kOutOfOrderToleranceNs));
     }
     if (!parse_u64(TaskConfigField::kMaxActiveSessions, &config->max_active_sessions)) {
         return Fail(NpmBasicTaskConfigError::kInvalidInteger, FieldName(TaskConfigField::kMaxActiveSessions));
@@ -346,15 +340,15 @@ NpmBasicTaskConfigStatus ParseIntegerFields(
         return Fail(NpmBasicTaskConfigError::kInvalidInteger, FieldName(TaskConfigField::kMaxTrackedBytes));
     }
     if (!parse_u64(TaskConfigField::kMaxPendingOutputBytes, &config->max_pending_output_bytes)) {
-        return Fail(NpmBasicTaskConfigError::kInvalidInteger,
-                    FieldName(TaskConfigField::kMaxPendingOutputBytes));
+        return Fail(NpmBasicTaskConfigError::kInvalidInteger, FieldName(TaskConfigField::kMaxPendingOutputBytes));
     }
     return {};
 }
 
 }  // namespace
 
-NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, NpmBasicTaskConfig* output) {
+NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, NpmBasicTaskConfig* output,
+                                                 bool labeling_available) {
     if (with_params_json == nullptr) return Fail(NpmBasicTaskConfigError::kNullInput);
     if (with_params_json[0] == '\0') return Fail(NpmBasicTaskConfigError::kEmptyInput);
     if (output == nullptr) return Fail(NpmBasicTaskConfigError::kNullOutput);
@@ -385,20 +379,17 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
         const auto input_namespace_index = FieldIndex(TaskConfigField::kInputNamespace);
         const auto source_domains_index = FieldIndex(TaskConfigField::kSourceDomains);
         if (values[input_namespace_index] == nullptr) {
-            return Fail(NpmBasicTaskConfigError::kMissingRequiredField,
-                        FieldName(TaskConfigField::kInputNamespace));
+            return Fail(NpmBasicTaskConfigError::kMissingRequiredField, FieldName(TaskConfigField::kInputNamespace));
         }
         if (values[source_domains_index] == nullptr) {
-            return Fail(NpmBasicTaskConfigError::kMissingRequiredField,
-                        FieldName(TaskConfigField::kSourceDomains));
+            return Fail(NpmBasicTaskConfigError::kMissingRequiredField, FieldName(TaskConfigField::kSourceDomains));
         }
 
         const rapidjson::Value* parameters = values[FieldIndex(TaskConfigField::kParameters)];
         if (parameters != nullptr) {
             for (const TaskConfigField legacy_field : kLegacyTuningFields) {
                 if (values[FieldIndex(legacy_field)] == nullptr) continue;
-                auto status = Fail(NpmBasicTaskConfigError::kParameterSourceConflict,
-                                   FieldName(legacy_field));
+                auto status = Fail(NpmBasicTaskConfigError::kParameterSourceConflict, FieldName(legacy_field));
                 status.parameter_status.error = NpmParameterErrorV1::kLegacyConflict;
                 status.parameter_status.path = std::string("/") + FieldName(legacy_field);
                 return status;
@@ -413,25 +404,29 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
             NpmParameterConsumersV1 consumers;
             consumers.basic_enabled = next.features.basic_enabled;
             consumers.session_enabled = next.features.session_enabled;
-            const std::string_view parameters_text(parameters->GetString(),
-                                                   parameters->GetStringLength());
+            consumers.labeling_enabled = next.features.labeling_enabled;
+            consumers.labeling_available = labeling_available;
+            const std::string_view parameters_text(parameters->GetString(), parameters->GetStringLength());
             if (parameters_text.find('\0') != std::string_view::npos) {
-                status = Fail(NpmBasicTaskConfigError::kInvalidParameters,
-                              FieldName(TaskConfigField::kParameters));
+                status = Fail(NpmBasicTaskConfigError::kInvalidParameters, FieldName(TaskConfigField::kParameters));
                 status.parameter_status.error = NpmParameterErrorV1::kInvalidJson;
                 return status;
             }
             NpmTaskParametersV1 parsed_parameters;
-            const auto parameter_status =
-                ParseNpmParametersV1(parameters->GetString(), consumers, &parsed_parameters);
+            const auto parameter_status = ParseNpmParametersV1(parameters->GetString(), consumers, &parsed_parameters);
             if (parameter_status.error != NpmParameterErrorV1::kNone) {
-                status = Fail(NpmBasicTaskConfigError::kInvalidParameters,
-                              FieldName(TaskConfigField::kParameters));
+                status = Fail(NpmBasicTaskConfigError::kInvalidParameters, FieldName(TaskConfigField::kParameters));
                 status.parameter_status = parameter_status;
                 return status;
             }
 
             next.analysis = std::move(parsed_parameters.framework.analysis);
+            if (parsed_parameters.framework.labeling_reference.has_value()) {
+                next.labeling_reference = std::move(*parsed_parameters.framework.labeling_reference);
+            }
+            if (parsed_parameters.framework.labeling_memory_mib.has_value()) {
+                next.labeling_memory_mib = *parsed_parameters.framework.labeling_memory_mib;
+            }
             if (parsed_parameters.session.has_value()) {
                 next.features.session_max_tcp_ranges_per_direction =
                     parsed_parameters.session->max_tcp_ranges_per_direction;
@@ -467,8 +462,7 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
         if (const rapidjson::Value* value = values[FieldIndex(TaskConfigField::kOverloadPolicy)]) {
             const std::string_view text(value->GetString(), value->GetStringLength());
             if (text != "fail") {
-                return Fail(NpmBasicTaskConfigError::kInvalidEnum,
-                            FieldName(TaskConfigField::kOverloadPolicy));
+                return Fail(NpmBasicTaskConfigError::kInvalidEnum, FieldName(TaskConfigField::kOverloadPolicy));
             }
             next.analysis.overload_policy = NpmOverloadPolicy::kFail;
         }
@@ -483,8 +477,7 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
 
         const auto analysis_error = ValidateNpmAnalysisConfig(next.analysis);
         if (analysis_error != NpmAnalysisConfigError::kNone) {
-            status = Fail(NpmBasicTaskConfigError::kAnalysisValidationError,
-                          AnalysisErrorField(analysis_error));
+            status = Fail(NpmBasicTaskConfigError::kAnalysisValidationError, AnalysisErrorField(analysis_error));
             status.analysis_error = analysis_error;
             return status;
         }
@@ -493,6 +486,22 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
         return {};
     } catch (const std::bad_alloc&) {
         return Fail(NpmBasicTaskConfigError::kAllocationFailed);
+    }
+}
+
+bool NpmBasicTaskRequestsLabeling(const char* with_params_json) noexcept {
+    if (with_params_json == nullptr || with_params_json[0] == '\0') return false;
+    try {
+        rapidjson::Document document;
+        document.Parse(with_params_json);
+        if (document.HasParseError() || !document.IsObject()) return false;
+        const auto member = document.FindMember("features");
+        if (member == document.MemberEnd() || !member->value.IsString()) return false;
+        NpmBasicFeatureConfig features;
+        return ParseFeatures(std::string_view(member->value.GetString(), member->value.GetStringLength()), &features) &&
+               features.labeling_enabled;
+    } catch (const std::bad_alloc&) {
+        return false;
     }
 }
 

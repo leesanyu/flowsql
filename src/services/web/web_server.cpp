@@ -31,8 +31,8 @@ namespace web {
 namespace {
 
 constexpr size_t kMaxPcapUploadFieldBytes = 4096;
-constexpr size_t kMaxConfigRequestBytes = 1024 * 1024;
-constexpr size_t kMaxConfigContentBytes = 512 * 1024;
+constexpr size_t kMaxConfigRequestBytes = 12 * 1024 * 1024;
+constexpr size_t kMaxConfigContentBytes = 8 * 1024 * 1024;
 constexpr size_t kMaxConfigBase64Bytes = ((kMaxConfigContentBytes + 2) / 3) * 4;
 
 std::string ConfigError(const char* detail) {
@@ -98,7 +98,7 @@ int32_t CheckConfigPublish(const std::string& request, std::string* response) {
     }
     const std::string encoded(value->GetString(), value->GetStringLength());
     if (encoded.size() > kMaxConfigBase64Bytes) {
-        *response = ConfigError("content exceeds 512 KiB");
+        *response = ConfigError("content exceeds 8 MiB");
         return error::PAYLOAD_TOO_LARGE;
     }
     if (encoded.size() % 4 != 0) {
@@ -125,7 +125,7 @@ int32_t CheckConfigPublish(const std::string& request, std::string* response) {
         if (!pad4) decoded.push_back(static_cast<char>((c << 6) | d));
     }
     if (decoded.size() > kMaxConfigContentBytes) {
-        *response = ConfigError("content exceeds 512 KiB");
+        *response = ConfigError("content exceeds 8 MiB");
         return error::PAYLOAD_TOO_LARGE;
     }
     if (!ConfigUtf8(decoded)) {
@@ -138,7 +138,7 @@ int32_t CheckConfigPublish(const std::string& request, std::string* response) {
 int32_t ProxyConfigPost(const std::string& host, int port, const std::string& path,
                         const std::string& request, std::string* response) {
     if (request.size() > kMaxConfigRequestBytes) {
-        *response = ConfigError("control request exceeds 1 MiB");
+        *response = ConfigError("control request exceeds 12 MiB");
         return error::PAYLOAD_TOO_LARGE;
     }
     if (path == "/channels/config/publish") {
@@ -147,7 +147,8 @@ int32_t ProxyConfigPost(const std::string& host, int port, const std::string& pa
     }
     httplib::Client client(host, port);
     client.set_connection_timeout(5);
-    client.set_read_timeout(10);
+    client.set_read_timeout(30);
+    client.set_write_timeout(30);
     const auto result = client.Post(path.c_str(), request, "application/json");
     if (!result) {
         *response = ConfigError("gateway unreachable");

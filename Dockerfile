@@ -1,10 +1,12 @@
-FROM ubuntu:22.04 AS runtime
+FROM ubuntu:24.04 AS runtime
 
 # 安装运行时依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip \
-    libssl3 \
+    libssl3t64 \
     libmysqlclient21 \
+    librte-acl24 \
+    librte-eal24 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

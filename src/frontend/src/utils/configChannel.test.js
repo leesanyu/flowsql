@@ -46,17 +46,20 @@ test('publish payload keeps system revision read-only and includes optional meta
   })
 })
 
-test('draft validation enforces names, metadata, nonempty UTF-8 bytes, and 512 KiB', () => {
+test('draft validation enforces names, metadata, nonempty UTF-8 bytes, and 8 MiB', () => {
   const valid = { name: 'a', format: 'json', schema_id: 'v1', content: '{}' }
   assert.equal(validateConfigDraft(valid), '')
   assert.equal(validateConfigDraft({ ...valid, name: 'A' }), '通道名称格式无效')
   assert.equal(validateConfigDraft({ ...valid, schema_id: '' }), 'Schema ID 为必填项')
   assert.equal(validateConfigDraft({ ...valid, content: '' }), '配置内容不能为空')
   assert.equal(validateConfigDraft({ ...valid, content: '\ud800' }), '配置内容必须是有效 UTF-8 文本')
+  assert.equal(validateConfigDraft({ ...valid, content: 'x'.repeat(CONFIG_CONTENT_MAX_BYTES) }), '')
   assert.equal(validateConfigDraft({ ...valid, content: 'x'.repeat(CONFIG_CONTENT_MAX_BYTES + 1) }),
-    '配置内容不能超过 512 KiB')
-  assert.equal(validateConfigDraft({ ...valid, content: '中'.repeat(174763) }),
-    '配置内容不能超过 512 KiB')
+    '配置内容不能超过 8 MiB')
+  assert.equal(validateConfigDraft({
+    ...valid,
+    content: '中'.repeat(Math.floor(CONFIG_CONTENT_MAX_BYTES / 3) + 1)
+  }), '配置内容不能超过 8 MiB')
 })
 
 test('file extensions map only to supported formats', () => {

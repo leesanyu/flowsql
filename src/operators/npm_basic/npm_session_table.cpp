@@ -138,6 +138,7 @@ NpmSessionView NpmSessionSnapshot::View() const {
     view.packets_ba = packets_ba;
     view.wire_bytes_ab = wire_bytes_ab;
     view.wire_bytes_ba = wire_bytes_ba;
+    view.primary_label_id = primary_label_id;
     view.protocol_status = protocol_status;
     view.protocol_id = protocol_id;
     view.protocol_sub_id = protocol_sub_id;
@@ -169,6 +170,7 @@ NpmSessionView NpmSessionTable::MakeView(const SessionMap::value_type& entry) {
     view.packets_ba = entry.second.packets_ba;
     view.wire_bytes_ab = entry.second.wire_bytes_ab;
     view.wire_bytes_ba = entry.second.wire_bytes_ba;
+    view.primary_label_id = entry.second.primary_label_id;
     view.protocol_status = entry.second.protocol_status;
     view.protocol_id = entry.second.protocol_id;
     view.protocol_sub_id = entry.second.protocol_sub_id;
@@ -186,6 +188,7 @@ NpmSessionSnapshot NpmSessionTable::MakeSnapshot(const SessionMap::value_type& e
     snapshot.packets_ba = entry.second.packets_ba;
     snapshot.wire_bytes_ab = entry.second.wire_bytes_ab;
     snapshot.wire_bytes_ba = entry.second.wire_bytes_ba;
+    snapshot.primary_label_id = entry.second.primary_label_id;
     snapshot.protocol_status = entry.second.protocol_status;
     if (snapshot.protocol_status == NpmProtocolStatus::kPending) {
         snapshot.protocol_status = NpmProtocolStatus::kUnknown;
@@ -219,9 +222,8 @@ void NpmSessionTable::ReleaseSession(uint64_t bytes) noexcept {
     }
 }
 
-NpmSessionTableError NpmSessionTable::Observe(const NpmSessionPacketBinding& binding,
-                                              const packet::PacketMeta& meta,
-                                              NpmSessionObserveResult* output) {
+NpmSessionTableError NpmSessionTable::Observe(const NpmSessionPacketBinding& binding, const packet::PacketMeta& meta,
+                                              NpmSessionObserveResult* output, uint32_t new_session_primary_label_id) {
     if (!output) return NpmSessionTableError::kNullOutput;
     if (binding.direction != NpmPacketDirection::kAToB && binding.direction != NpmPacketDirection::kBToA) {
         return NpmSessionTableError::kInvalidDirection;
@@ -265,6 +267,7 @@ NpmSessionTableError NpmSessionTable::Observe(const NpmSessionPacketBinding& bin
             state.session_id = next_session_id_;
             state.first_ns = meta.timestamp_ns;
             state.last_ns = meta.timestamp_ns;
+            state.primary_label_id = new_session_primary_label_id;
             state.idle_deadline_ns = SaturatingAdd(meta.timestamp_ns, IdleTimeout(config_, binding.key));
             state.tracked_bytes = charge;
             if (bare_syn) {
@@ -376,6 +379,94 @@ NpmSessionTableError NpmSessionTable::Observe(const NpmSessionPacketBinding& bin
     }
     *output = std::move(result);
     return NpmSessionTableError::kNone;
+}
+
+NpmSessionAdmissionPlanner::NpmSessionAdmissionPlanner(const NpmSessionTable& sessions) noexcept
+    : sessions_(&sessions),
+      watermark_initialized_(sessions.watermark_initialized_),
+      watermark_ns_(sessions.watermark_ns_) {}
+
+NpmSessionTableError NpmSessionAdmissionPlanner::ObserveAndAdvance(const NpmSessionPacketBinding& binding,
+                                                                   const packet::PacketMeta& meta,
+                                                                   bool* requires_admission) {
+    if (requires_admission == nullptr) return NpmSessionTableError::kNullOutput;
+    if (binding.direction != NpmPacketDirection::kAToB && binding.direction != NpmPacketDirection::kBToA) {
+        return NpmSessionTableError::kInvalidDirection;
+    }
+    if (watermark_initialized_ && meta.timestamp_ns < watermark_ns_) {
+        return NpmSessionTableError::kLatePacket;
+    }
+
+    try {
+        auto [iterator, inserted] = states_.try_emplace(binding.key);
+        State& state = iterator->second;
+        if (inserted) {
+            const auto existing = sessions_->sessions_.find(binding.key);
+            if (existing != sessions_->sessions_.end()) {
+                state.active = true;
+                state.last_ns = existing->second.last_ns;
+                state.idle_deadline_ns = existing->second.idle_deadline_ns;
+                state.initial_syn_observed = existing->second.initial_syn_observed;
+                state.initial_syn_direction = existing->second.initial_syn_direction;
+                state.initial_syn_sequence = existing->second.initial_syn_sequence;
+                state.fin_ab = existing->second.fin_ab;
+                state.fin_ba = existing->second.fin_ba;
+            }
+        }
+        if (state.active && watermark_initialized_ && state.idle_deadline_ns <= watermark_ns_) {
+            state = {};
+        }
+
+        const auto& tcp = binding.transport.tcp;
+        const bool is_tcp = binding.key.transport_protocol == ipv4::eNext::TCP && tcp.valid;
+        const bool bare_syn = is_tcp && tcp.syn && !tcp.ack;
+        const bool tuple_reuse = state.active && bare_syn &&
+                                 (!state.initial_syn_observed || state.initial_syn_direction != binding.direction ||
+                                  state.initial_syn_sequence != tcp.sequence);
+        *requires_admission = !state.active || tuple_reuse;
+
+        if (*requires_admission) {
+            state = {};
+            state.active = true;
+            state.last_ns = meta.timestamp_ns;
+            state.idle_deadline_ns = SaturatingAdd(meta.timestamp_ns, IdleTimeout(sessions_->config_, binding.key));
+            if (bare_syn) {
+                state.initial_syn_observed = true;
+                state.initial_syn_direction = binding.direction;
+                state.initial_syn_sequence = tcp.sequence;
+            }
+            if (is_tcp && tcp.fin) {
+                state.fin_ab = binding.direction == NpmPacketDirection::kAToB;
+                state.fin_ba = binding.direction == NpmPacketDirection::kBToA;
+            }
+        } else {
+            if (meta.timestamp_ns > state.last_ns) {
+                state.last_ns = meta.timestamp_ns;
+                state.idle_deadline_ns = SaturatingAdd(state.last_ns, IdleTimeout(sessions_->config_, binding.key));
+            }
+            if (is_tcp && tcp.fin) {
+                if (binding.direction == NpmPacketDirection::kAToB) {
+                    state.fin_ab = true;
+                } else {
+                    state.fin_ba = true;
+                }
+            }
+        }
+
+        if (is_tcp && (tcp.rst || (state.fin_ab && state.fin_ba))) state = {};
+
+        if (sessions_->config_.run_mode == NpmRunMode::kOffline) {
+            const int64_t candidate_watermark =
+                SaturatingSubtract(meta.timestamp_ns, sessions_->config_.out_of_order_tolerance_ns);
+            if (!watermark_initialized_ || candidate_watermark > watermark_ns_) {
+                watermark_initialized_ = true;
+                watermark_ns_ = candidate_watermark;
+            }
+        }
+        return NpmSessionTableError::kNone;
+    } catch (const std::bad_alloc&) {
+        return NpmSessionTableError::kAllocationFailed;
+    }
 }
 
 NpmSessionTableError NpmSessionTable::SampleProtocol(const NpmSessionKey& key,

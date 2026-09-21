@@ -24,6 +24,16 @@ target_compile_options(test_config_channel_e2e PRIVATE -UNDEBUG)
 add_thirddepen(test_config_channel_e2e rapidjson httplib)
 target_link_libraries(test_config_channel_e2e OpenSSL::Crypto ${CMAKE_DL_LIBS})
 add_dependencies(test_config_channel_e2e flowsql_config_channel flowsql_web flowsql_gateway flowsql_router)
+if(TARGET flowsql_flow_labeling)
+    add_thirddepen(test_config_channel_e2e arrow)
+    target_compile_definitions(test_config_channel_e2e PRIVATE
+        FLOWSQL_CONFIG_LABELING_E2E=1
+        FLOWSQL_NPM_BASIC_PLUGIN_PATH="$<TARGET_FILE:flowsql_npm_basic>"
+        FLOWSQL_NPI_PROTOCOLS_PATH="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml"
+    )
+    add_dependencies(test_config_channel_e2e flowsql_common flowsql_npi flowsql_npm_basic flowsql_flow_labeling)
+    target_link_libraries(test_config_channel_e2e flowsql_common)
+endif()
 set_target_properties(test_config_channel_e2e PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_config_channel_e2e COMMAND ${CMAKE_BINARY_DIR}/output/test_config_channel_e2e)
 set_tests_properties(test_config_channel_e2e PROPERTIES TIMEOUT 60)

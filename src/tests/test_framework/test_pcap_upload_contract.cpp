@@ -1340,18 +1340,18 @@ void TestWebConfigControlProxy() {
     const int calls_before_invalid = scheduler_calls;
     const std::string deep_json = std::string(R"({"content_base64":"e30=","nested":)") +
                                   std::string(65, '[') + "0" + std::string(65, ']') + "}";
-    for (const auto& [request, code, status] : {
-             std::tuple<std::string, int32_t, int>{R"({"content_base64":"Zg="})", flowsql::error::BAD_REQUEST, 400},
-             std::tuple<std::string, int32_t, int>{R"({"content_base64":"/w=="})", flowsql::error::BAD_REQUEST, 400},
-             std::tuple<std::string, int32_t, int>{std::string(R"({"content_base64":")") +
-                                                     std::string(699052, 'A') + R"("})",
-                                                 flowsql::error::PAYLOAD_TOO_LARGE, 413},
-             std::tuple<std::string, int32_t, int>{std::string(R"({"content_base64":")") +
-                                                     std::string(699056, 'Y') + R"("})",
-                                                 flowsql::error::PAYLOAD_TOO_LARGE, 413},
-             std::tuple<std::string, int32_t, int>{std::string(1024 * 1024 + 1, ' '),
-                                                 flowsql::error::PAYLOAD_TOO_LARGE, 413},
-             std::tuple<std::string, int32_t, int>{deep_json, flowsql::error::BAD_REQUEST, 400}}) {
+    for (const auto& [request, code, status] :
+         {std::tuple<std::string, int32_t, int>{R"({"content_base64":"Zg="})", flowsql::error::BAD_REQUEST, 400},
+          std::tuple<std::string, int32_t, int>{R"({"content_base64":"/w=="})", flowsql::error::BAD_REQUEST, 400},
+          std::tuple<std::string, int32_t, int>{
+              std::string(R"({"content_base64":")") + std::string(11184812, 'A') + R"("})",
+              flowsql::error::PAYLOAD_TOO_LARGE, 413},
+          std::tuple<std::string, int32_t, int>{
+              std::string(R"({"content_base64":")") + std::string(11184816, 'Y') + R"("})",
+              flowsql::error::PAYLOAD_TOO_LARGE, 413},
+          std::tuple<std::string, int32_t, int>{std::string(12 * 1024 * 1024 + 1, ' '),
+                                                flowsql::error::PAYLOAD_TOO_LARGE, 413},
+          std::tuple<std::string, int32_t, int>{deep_json, flowsql::error::BAD_REQUEST, 400}}) {
         const auto http = client.Post("/api/channels/config/publish", request, "application/json");
         assert(http && http->status == status && http->body.find("error") != std::string::npos);
         std::string response;

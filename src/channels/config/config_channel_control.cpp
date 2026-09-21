@@ -21,9 +21,9 @@
 namespace flowsql::channels::config {
 namespace {
 
-constexpr size_t kMaxContentBytes = 512 * 1024;
+constexpr size_t kMaxContentBytes = 8 * 1024 * 1024;
 constexpr size_t kMaxEncodedContentBytes = ((kMaxContentBytes + 2) / 3) * 4;
-constexpr size_t kMaxControlRequestBytes = 1024 * 1024;
+constexpr size_t kMaxControlRequestBytes = 12 * 1024 * 1024;
 constexpr size_t kMaxJsonDepth = 64;
 
 std::string ErrorJson(const std::string& message) {
@@ -50,7 +50,7 @@ bool ParseObject(const std::string& request, const std::unordered_set<std::strin
                  rapidjson::Document* document, std::string* detail) {
     if (!document || !detail) return false;
     if (request.size() > kMaxControlRequestBytes) {
-        *detail = "control request exceeds 1 MiB";
+        *detail = "control request exceeds 12 MiB";
         return false;
     }
     if (!JsonNestingWithin(request, kMaxJsonDepth)) {
@@ -121,7 +121,7 @@ int Base64Value(char ch) {
 int DecodeBase64(const std::string& encoded, std::string* decoded, std::string* detail) {
     decoded->clear();
     if (encoded.size() > kMaxEncodedContentBytes) {
-        *detail = "Base64 content exceeds 512 KiB decoded limit";
+        *detail = "Base64 content exceeds 8 MiB decoded limit";
         return EFBIG;
     }
     if (encoded.size() % 4 != 0) {
@@ -151,7 +151,7 @@ int DecodeBase64(const std::string& encoded, std::string* decoded, std::string* 
     }
     if (decoded->size() > kMaxContentBytes) {
         decoded->clear();
-        *detail = "decoded content exceeds 512 KiB";
+        *detail = "decoded content exceeds 8 MiB";
         return EFBIG;
     }
     return 0;

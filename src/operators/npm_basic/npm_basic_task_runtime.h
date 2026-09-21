@@ -12,6 +12,8 @@
 #include "npm_session_table.h"
 #include "npm_task_budget.h"
 
+#include <framework/interfaces/iflow_labeling.h>
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +37,7 @@ enum class NpmBasicTaskRuntimeError : uint8_t {
     kSchemaMismatch,
     kTimeCapabilityError,
     kProtocolContextError,
+    kLabelingMatcherMissing,
     kAllocationFailed,
 };
 
@@ -108,19 +111,19 @@ struct NpmBasicRealtimeMaintenanceStatus {
 /** Fully initialized task-private state published atomically by Create(). */
 class NpmBasicTaskRuntime final {
  public:
-    static NpmBasicTaskRuntimeStatus Create(
-        const NpmBasicTaskConfig& config,
-        IQuerier* querier,
-        const std::shared_ptr<arrow::Schema>& input_schema,
-        std::shared_ptr<arrow::Schema>* output_schema,
-        std::unique_ptr<NpmBasicTaskRuntime>* output);
-    static NpmBasicTaskRuntimeStatus CreateWithTimeCapabilities(
-        const NpmBasicTaskConfig& config,
-        IQuerier* querier,
-        const std::shared_ptr<arrow::Schema>& input_schema,
-        const NpmTimeCapabilities& time_capabilities,
-        std::shared_ptr<arrow::Schema>* output_schema,
-        std::unique_ptr<NpmBasicTaskRuntime>* output);
+    static NpmBasicTaskRuntimeStatus Create(const NpmBasicTaskConfig& config, IQuerier* querier,
+                                            const std::shared_ptr<arrow::Schema>& input_schema,
+                                            std::shared_ptr<arrow::Schema>* output_schema,
+                                            std::unique_ptr<NpmBasicTaskRuntime>* output,
+                                            std::shared_ptr<NpmTaskBudget> budget = {},
+                                            IFlowLabelMatcherV1* matcher = nullptr);
+    static NpmBasicTaskRuntimeStatus CreateWithTimeCapabilities(const NpmBasicTaskConfig& config, IQuerier* querier,
+                                                                const std::shared_ptr<arrow::Schema>& input_schema,
+                                                                const NpmTimeCapabilities& time_capabilities,
+                                                                std::shared_ptr<arrow::Schema>* output_schema,
+                                                                std::unique_ptr<NpmBasicTaskRuntime>* output,
+                                                                std::shared_ptr<NpmTaskBudget> budget = {},
+                                                                IFlowLabelMatcherV1* matcher = nullptr);
 
     ~NpmBasicTaskRuntime() = default;
     NpmBasicTaskRuntime(const NpmBasicTaskRuntime&) = delete;
@@ -151,15 +154,22 @@ class NpmBasicTaskRuntime final {
     const std::vector<INpmAnalysisModule*>& Modules() const noexcept;
 
  private:
-    NpmBasicTaskRuntime(NpmBasicTaskConfig config,
-                        std::unique_ptr<NpmProtocolContext> protocol_context,
-                        std::shared_ptr<NpmTaskBudget> budget);
+    struct MatcherReleaser {
+        void operator()(IFlowLabelMatcherV1* matcher) const noexcept {
+            if (matcher != nullptr) matcher->Release();
+        }
+    };
+    using MatcherLease = std::unique_ptr<IFlowLabelMatcherV1, MatcherReleaser>;
+
+    NpmBasicTaskRuntime(NpmBasicTaskConfig config, std::unique_ptr<NpmProtocolContext> protocol_context,
+                        std::shared_ptr<NpmTaskBudget> budget, MatcherLease matcher);
     void SetLastErrorOnce(const char* error) noexcept;
     void ReleaseResources() noexcept;
 
     NpmBasicTaskConfig config_;
     std::unique_ptr<NpmProtocolContext> protocol_context_;
     std::shared_ptr<NpmTaskBudget> budget_;
+    MatcherLease matcher_;
     std::unique_ptr<NpmSessionTable> sessions_;
     std::unique_ptr<NpmBasicResultCollector> collector_;
     std::unique_ptr<NpmBasicResultProjector> projector_;

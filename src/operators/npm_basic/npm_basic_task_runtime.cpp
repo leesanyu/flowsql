@@ -82,22 +82,21 @@ class InputBatchLease final {
 
 }  // namespace
 
-NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::Create(
-    const NpmBasicTaskConfig& config,
-    IQuerier* querier,
-    const std::shared_ptr<arrow::Schema>& input_schema,
-    std::shared_ptr<arrow::Schema>* output_schema,
-    std::unique_ptr<NpmBasicTaskRuntime>* output) {
-    return CreateWithTimeCapabilities(config, querier, input_schema, {}, output_schema, output);
+NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::Create(const NpmBasicTaskConfig& config, IQuerier* querier,
+                                                      const std::shared_ptr<arrow::Schema>& input_schema,
+                                                      std::shared_ptr<arrow::Schema>* output_schema,
+                                                      std::unique_ptr<NpmBasicTaskRuntime>* output,
+                                                      std::shared_ptr<NpmTaskBudget> budget,
+                                                      IFlowLabelMatcherV1* matcher) {
+    return CreateWithTimeCapabilities(config, querier, input_schema, {}, output_schema, output, std::move(budget),
+                                      matcher);
 }
 
 NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
-    const NpmBasicTaskConfig& config,
-    IQuerier* querier,
-    const std::shared_ptr<arrow::Schema>& input_schema,
-    const NpmTimeCapabilities& time_capabilities,
-    std::shared_ptr<arrow::Schema>* output_schema,
-    std::unique_ptr<NpmBasicTaskRuntime>* output) {
+    const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
+    const NpmTimeCapabilities& time_capabilities, std::shared_ptr<arrow::Schema>* output_schema,
+    std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcherV1* matcher) {
+    MatcherLease matcher_lease(matcher);
     NpmBasicTaskRuntimeStatus status;
     if (!input_schema) {
         status.error = NpmBasicTaskRuntimeError::kNullInputSchema;
@@ -109,6 +108,10 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
     }
     if (!output) {
         status.error = NpmBasicTaskRuntimeError::kNullRuntimeOutput;
+        return status;
+    }
+    if (config.features.labeling_enabled != (matcher_lease != nullptr)) {
+        status.error = NpmBasicTaskRuntimeError::kLabelingMatcherMissing;
         return status;
     }
     const auto packet_schema = packet::PacketSchema();
@@ -131,12 +134,12 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
     }
 
     try {
-        auto budget = std::make_shared<NpmTaskBudget>(config.analysis);
+        if (!budget) budget = std::make_shared<NpmTaskBudget>(config.analysis);
         std::unique_ptr<NpmBasicTaskRuntime> runtime(
-            new NpmBasicTaskRuntime(config, std::move(protocol_context), std::move(budget)));
+            new NpmBasicTaskRuntime(config, std::move(protocol_context), std::move(budget), std::move(matcher_lease)));
         auto result_schema = config.features.observing == NpmResultEntity::kSession
-                                 ? NpmSessionResultSchema()
-                                 : NpmBasicResultSchema();
+                                 ? NpmSessionResultSchema(config.features.labeling_enabled)
+                                 : NpmBasicResultSchema(config.features.labeling_enabled);
         *output_schema = std::move(result_schema);
         *output = std::move(runtime);
         return status;
@@ -148,10 +151,11 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
 
 NpmBasicTaskRuntime::NpmBasicTaskRuntime(NpmBasicTaskConfig config,
                                          std::unique_ptr<NpmProtocolContext> protocol_context,
-                                         std::shared_ptr<NpmTaskBudget> budget)
+                                         std::shared_ptr<NpmTaskBudget> budget, MatcherLease matcher)
     : config_(std::move(config)),
       protocol_context_(std::move(protocol_context)),
       budget_(std::move(budget)),
+      matcher_(std::move(matcher)),
       sessions_(std::make_unique<NpmSessionTable>(config_.analysis, budget_)),
       collector_(std::make_unique<NpmBasicResultCollector>(config_.features)),
       projector_(std::make_unique<NpmBasicResultProjector>(*protocol_context_)) {
@@ -240,13 +244,9 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(
         if (state_.load(std::memory_order_acquire) == NpmEofFlushState::kCancelled) return cancel();
 
         std::vector<NpmSessionEndEvent> ended_events;
-        status.process_status = ProcessNpmOfflinePacketBatch(config_.domains,
-                                                             *batch,
-                                                             *sessions_,
-                                                             *protocol_context_->Identifier(),
-                                                             modules_,
-                                                             *collector_,
-                                                             &ended_events);
+        status.process_status =
+            ProcessNpmOfflinePacketBatch(config_.domains, *batch, *sessions_, *protocol_context_->Identifier(),
+                                         modules_, *collector_, &ended_events, matcher_.get());
         if (status.process_status.error != NpmPacketBatchProcessError::kNone) {
             return fail(NpmBasicOfflineBatchError::kBatchProcessError,
                         "npm.basic offline batch processing failed");
@@ -514,6 +514,7 @@ void NpmBasicTaskRuntime::ReleaseResources() noexcept {
     collector_.reset();
     projector_.reset();
     protocol_context_.reset();
+    matcher_.reset();
 }
 
 NpmProtocolContext& NpmBasicTaskRuntime::ProtocolContext() noexcept {

@@ -17,32 +17,33 @@
 #include <unistd.h>
 #endif
 
+#include <framework/builtin/dataframe/passthrough_operator.h>
 #include <framework/core/channel_adapter.h>
 #include <framework/core/dataframe.h>
 #include <framework/core/dataframe_channel.h>
 #include <framework/core/error_contract.h>
 #include <framework/core/filter_binding.h>
-#include <framework/core/filter_expression.h>
 #include <framework/core/filter_executor.h>
+#include <framework/core/filter_expression.h>
 #include <framework/core/filter_planner.h>
 #include <framework/core/json_error_builder.h>
 #include <framework/core/memory_channel.h>
 #include <framework/core/packet_codec.h>
 #include <framework/core/packet_filter_plan.h>
-#include <framework/builtin/dataframe/passthrough_operator.h>
 #include <framework/core/pipeline.h>
 #include <framework/core/sql_parser.h>
 #include <framework/core/sql_text_splitter.h>
-#include <framework/interfaces/ichannel.h>
-#include <framework/interfaces/ichannel_registry.h>
-#include <framework/interfaces/iconfig_channel_registry.h>
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_operator.h>
 #include <framework/interfaces/iblock_stream_reader.h>
 #include <framework/interfaces/iblock_transform_operator.h>
+#include <framework/interfaces/ichannel.h>
+#include <framework/interfaces/ichannel_registry.h>
+#include <framework/interfaces/iconfig_channel_registry.h>
 #include <framework/interfaces/idataframe_channel.h>
-#include <framework/interfaces/ifilter_pushdown.h>
 #include <framework/interfaces/ifilter_domain_resolver.h>
+#include <framework/interfaces/ifilter_pushdown.h>
+#include <framework/interfaces/iflow_labeling.h>
 #include <framework/interfaces/ioperator.h>
 #include <rapidjson/document.h>
 
@@ -70,6 +71,7 @@ void test_filter_pushdown_negotiation();
 void test_statement_stage_filters();
 void test_offline_filter_public_contracts();
 void test_config_channel_public_contract();
+void test_flow_labeling_public_contract();
 void test_offline_filter_reader_factory_contracts();
 void test_stage_filter_interfaces();
 void test_filter_task_session_isolation();
@@ -4395,6 +4397,215 @@ void test_config_channel_public_contract() {
 }
 
 // ============================================================
+// Flow-labeling public ABI and mock lifecycle contract
+// ============================================================
+class MockFlowLabelMatcher final : public IFlowLabelMatcherV1 {
+ public:
+    explicit MockFlowLabelMatcher(bool* released) : released_(released) {}
+
+    int ClassifyBatch(const FlowLabelFactsV1* facts, uint32_t count, uint32_t* primary_label_ids) const override {
+        if (facts == nullptr || count == 0 || primary_label_ids == nullptr) return EINVAL;
+        ++classify_calls;
+        for (uint32_t index = 0; index < count; ++index) {
+            const auto& current = facts[index];
+            if (current.struct_size != kFlowLabelFactsV1Size) return EINVAL;
+            const bool https = (current.source.port_valid != 0 && current.source.port == 443) ||
+                               (current.destination.port_valid != 0 && current.destination.port == 443);
+            primary_label_ids[index] = https ? 1001 : 0;
+        }
+        return 0;
+    }
+
+    bool FindLabel(uint32_t label_id, FlowPrimaryLabelViewV1* output) const override {
+        if (label_id != 1001 || output == nullptr) return false;
+        output->label_id = 1001;
+        output->priority = 3000;
+        output->name = name_.c_str();
+        output->display_name = display_name_.c_str();
+        output->description = description_.c_str();
+        return true;
+    }
+
+    void Release() noexcept override {
+        *released_ = true;
+        delete this;
+    }
+
+    mutable uint32_t classify_calls = 0;
+
+ private:
+    bool* released_;
+    const std::string name_ = "corp-web";
+    const std::string display_name_ = "Corporate Web";
+    const std::string description_ = "Corporate HTTPS traffic.";
+};
+
+class MockFlowLabelingProvider final : public IFlowLabelingProviderV1 {
+ public:
+    FlowLabelingErrorV1 RuntimeStatus(FlowLabelingDiagnosticV1* diagnostic) const override {
+        if (ready) {
+            if (diagnostic != nullptr) *diagnostic = {};
+            return FlowLabelingErrorV1::kNone;
+        }
+        SetDiagnostic(FlowLabelingErrorV1::kUnavailable, "/runtime", "mock runtime unavailable", diagnostic);
+        return FlowLabelingErrorV1::kUnavailable;
+    }
+
+    FlowLabelingErrorV1 CreateMatcher(const FlowLabelingCompileRequestV1& request, IFlowLabelMatcherV1** output,
+                                      FlowLabelingDiagnosticV1* diagnostic) override {
+        if (!ready) {
+            SetDiagnostic(FlowLabelingErrorV1::kUnavailable, "/runtime", "mock runtime unavailable", diagnostic);
+            return FlowLabelingErrorV1::kUnavailable;
+        }
+        if (request.struct_size != kFlowLabelingCompileRequestV1Size || request.snapshot == nullptr ||
+            request.snapshot->content == nullptr) {
+            SetDiagnostic(FlowLabelingErrorV1::kInvalidSnapshot, "/snapshot", "mock snapshot invalid", diagnostic);
+            return FlowLabelingErrorV1::kInvalidSnapshot;
+        }
+        if (output == nullptr) {
+            SetDiagnostic(FlowLabelingErrorV1::kInvalidConfig, "/output", "mock output missing", diagnostic);
+            return FlowLabelingErrorV1::kInvalidConfig;
+        }
+
+        captured_revision = request.snapshot->revision;
+        captured_content = *request.snapshot->content;
+        captured_reserved_bytes = request.reserved_module_state_bytes;
+        captured_max_labels = request.max_labels;
+        captured_max_logical_rules = request.max_logical_rules;
+        captured_max_compiled_rules = request.max_compiled_rules;
+        *output = new MockFlowLabelMatcher(&matcher_released);
+        if (diagnostic != nullptr) *diagnostic = {};
+        return FlowLabelingErrorV1::kNone;
+    }
+
+    bool ready = true;
+    bool matcher_released = false;
+    uint64_t captured_revision = 0;
+    std::string captured_content;
+    uint64_t captured_reserved_bytes = 0;
+    uint32_t captured_max_labels = 0;
+    uint32_t captured_max_logical_rules = 0;
+    uint32_t captured_max_compiled_rules = 0;
+
+ private:
+    static void SetDiagnostic(FlowLabelingErrorV1 error, const char* path, const char* detail,
+                              FlowLabelingDiagnosticV1* diagnostic) {
+        if (diagnostic == nullptr) return;
+        diagnostic->error = error;
+        diagnostic->path = path;
+        diagnostic->detail = detail;
+    }
+};
+
+void test_flow_labeling_public_contract() {
+    printf("[TEST] flow-labeling public ABI and mock lifecycle contract...\n");
+
+    using RuntimeStatusMethod = FlowLabelingErrorV1 (IFlowLabelingProviderV1::*)(FlowLabelingDiagnosticV1*) const;
+    using CreateMatcherMethod = FlowLabelingErrorV1 (IFlowLabelingProviderV1::*)(
+        const FlowLabelingCompileRequestV1&, IFlowLabelMatcherV1**, FlowLabelingDiagnosticV1*);
+    using ClassifyBatchMethod = int (IFlowLabelMatcherV1::*)(const FlowLabelFactsV1*, uint32_t, uint32_t*) const;
+    using FindLabelMethod = bool (IFlowLabelMatcherV1::*)(uint32_t, FlowPrimaryLabelViewV1*) const;
+    using ReleaseMethod = void (IFlowLabelMatcherV1::*)() noexcept;
+    static_assert(std::is_same_v<decltype(&IFlowLabelingProviderV1::RuntimeStatus), RuntimeStatusMethod>);
+    static_assert(std::is_same_v<decltype(&IFlowLabelingProviderV1::CreateMatcher), CreateMatcherMethod>);
+    static_assert(std::is_same_v<decltype(&IFlowLabelMatcherV1::ClassifyBatch), ClassifyBatchMethod>);
+    static_assert(std::is_same_v<decltype(&IFlowLabelMatcherV1::FindLabel), FindLabelMethod>);
+    static_assert(std::is_same_v<decltype(&IFlowLabelMatcherV1::Release), ReleaseMethod>);
+    static_assert(std::is_same_v<std::underlying_type_t<FlowLabelingErrorV1>, uint8_t>);
+    static_assert(std::is_standard_layout_v<FlowLabelEndpointFactsV1>);
+    static_assert(std::is_standard_layout_v<FlowLabelVlanFactsV1>);
+    static_assert(std::is_standard_layout_v<FlowLabelFactsV1>);
+    static_assert(std::is_standard_layout_v<FlowLabelingCompileRequestV1>);
+    static_assert(std::is_standard_layout_v<FlowPrimaryLabelViewV1>);
+    static_assert(std::is_standard_layout_v<FlowLabelingDiagnosticV1>);
+    static_assert(std::is_abstract_v<IFlowLabelMatcherV1>);
+    static_assert(std::is_abstract_v<IFlowLabelingProviderV1>);
+
+    assert(IID_FLOW_LABELING_PROVIDER_V1.d1_ == 0xe2451331);
+    assert(IID_FLOW_LABELING_PROVIDER_V1.d2_ == 0xa639);
+    assert(IID_FLOW_LABELING_PROVIDER_V1.d3_ == 0x4c4b);
+    assert(memcmp(&IID_FLOW_LABELING_PROVIDER_V1, &IID_CONFIG_CHANNEL_REGISTRY_V1, sizeof(Guid)) != 0);
+
+    FlowLabelFactsV1 defaults;
+    assert(defaults.struct_size == kFlowLabelFactsV1Size);
+    assert(defaults.observation_domain_id == 0 && defaults.ip_family == 0);
+    assert(defaults.transport_protocol == 0 && defaults.transport_valid == 0);
+    assert(defaults.source.mac_valid == 0 && defaults.source.ip_valid == 0 && defaults.source.port_valid == 0);
+    assert(defaults.destination.mac_valid == 0 && defaults.destination.ip_valid == 0 &&
+           defaults.destination.port_valid == 0);
+    assert(defaults.vlan[0].valid == 0 && defaults.vlan[1].valid == 0);
+
+    MockFlowLabelingProvider provider;
+    FlowLabelingDiagnosticV1 diagnostic;
+    assert(provider.RuntimeStatus(&diagnostic) == FlowLabelingErrorV1::kNone);
+    assert(diagnostic.error == FlowLabelingErrorV1::kNone && diagnostic.path == nullptr &&
+           diagnostic.detail == nullptr);
+
+    ConfigChannelSnapshot snapshot;
+    snapshot.channel_name = "corp-labels";
+    snapshot.revision = 7;
+    snapshot.format = "yaml";
+    snapshot.schema_id = "flowsql.io/flow-labeling/v1alpha1";
+    snapshot.content = std::make_shared<const std::string>("labels: []");
+    snapshot.content_bytes = snapshot.content->size();
+
+    FlowLabelingCompileRequestV1 request;
+    assert(request.struct_size == kFlowLabelingCompileRequestV1Size);
+    request.snapshot = &snapshot;
+    request.reserved_module_state_bytes = 64 * 1024;
+    request.max_labels = 10'000;
+    request.max_logical_rules = 50'000;
+    request.max_compiled_rules = 100'000;
+
+    bool sentinel_released = false;
+    MockFlowLabelMatcher sentinel(&sentinel_released);
+    IFlowLabelMatcherV1* matcher = &sentinel;
+    provider.ready = false;
+    assert(provider.CreateMatcher(request, &matcher, &diagnostic) == FlowLabelingErrorV1::kUnavailable);
+    assert(matcher == &sentinel);
+    assert(!sentinel_released);
+    assert(diagnostic.error == FlowLabelingErrorV1::kUnavailable);
+    assert(std::string(diagnostic.path) == "/runtime");
+    assert(std::string(diagnostic.detail) == "mock runtime unavailable");
+
+    provider.ready = true;
+    matcher = nullptr;
+    assert(provider.CreateMatcher(request, &matcher, &diagnostic) == FlowLabelingErrorV1::kNone);
+    assert(matcher != nullptr);
+    assert(provider.captured_revision == 7 && provider.captured_content == "labels: []");
+    assert(provider.captured_reserved_bytes == 64 * 1024);
+    assert(provider.captured_max_labels == 10'000);
+    assert(provider.captured_max_logical_rules == 50'000);
+    assert(provider.captured_max_compiled_rules == 100'000);
+
+    FlowLabelFactsV1 batch[2];
+    batch[0].observation_domain_id = 23;
+    batch[0].ip_family = 4;
+    batch[0].transport_protocol = 6;
+    batch[0].transport_valid = 1;
+    batch[0].destination.port = 443;
+    batch[0].destination.port_valid = 1;
+    batch[1].observation_domain_id = 23;
+    batch[1].ip_family = 6;
+    uint32_t labels[2] = {9999, 9999};
+    assert(matcher->ClassifyBatch(batch, 2, labels) == 0);
+    assert(labels[0] == 1001 && labels[1] == 0);
+
+    FlowPrimaryLabelViewV1 view;
+    assert(matcher->FindLabel(1001, &view));
+    assert(view.label_id == 1001 && view.priority == 3000);
+    assert(std::string(view.name) == "corp-web");
+    assert(std::string(view.display_name) == "Corporate Web");
+    assert(std::string(view.description) == "Corporate HTTPS traffic.");
+    assert(!provider.matcher_released);
+    matcher->Release();
+    matcher = nullptr;
+    assert(provider.matcher_released);
+
+    printf("[PASS] flow-labeling public ABI and mock lifecycle contract\n");
+}
+
+// ============================================================
 // main
 // ============================================================
 int main(int argc, char* argv[]) {
@@ -4421,6 +4632,7 @@ int main(int argc, char* argv[]) {
     test_statement_stage_filters();
     test_offline_filter_public_contracts();
     test_config_channel_public_contract();
+    test_flow_labeling_public_contract();
     test_offline_filter_reader_factory_contracts();
     test_stage_filter_interfaces();
     test_filter_task_session_isolation();

@@ -20,7 +20,7 @@
 namespace flowsql::channels::config {
 namespace {
 
-constexpr size_t kMaxContentBytes = 512 * 1024;
+constexpr size_t kMaxContentBytes = 8 * 1024 * 1024;
 using Statement = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
 
 int Fail(std::string* error, int code, const std::string& message) {
@@ -73,7 +73,7 @@ int Validate(const ConfigPublishRequest& request, std::string* error) {
         !ValidUtf8(request.change_note) || request.content.empty() || !ValidUtf8(request.content)) {
         return Fail(error, EINVAL, "invalid configuration metadata or UTF-8 content");
     }
-    if (request.content.size() > kMaxContentBytes) return Fail(error, EFBIG, "configuration content exceeds 512 KiB");
+    if (request.content.size() > kMaxContentBytes) return Fail(error, EFBIG, "configuration content exceeds 8 MiB");
     if (request.expected_current_revision > INT64_MAX || request.base_revision > INT64_MAX) {
         return Fail(error, EINVAL, "revision exceeds SQLite integer range");
     }

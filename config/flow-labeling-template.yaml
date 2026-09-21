@@ -1,15 +1,17 @@
-# Flow-labeling design template.
+# Flow Labeling V1 strict configuration example.
 #
-# The flow-labeling runtime does not consume this schema yet. A Config Channel owns
-# each immutable revision; npm.basic is the first consumer and binds it as config.<name>@<revision>.
-# One bidirectional session receives zero or one primary label. npm.basic first
-# looks up the base session key; only unique new-session admission candidates enter
-# a bounded ACL batch. Existing sessions reuse their stored label, including 0.
-# DPDK ACL category 0 returns the highest-priority matching rule; userdata is label_id.
+# Publish this UTF-8 YAML through Config Channel, then bind the immutable
+# config.<name>@<revision> reference from npm.basic. Unknown fields, duplicate
+# mapping keys, aliases, custom tags, and duplicate label ids/names/priorities
+# are rejected before a matcher is published.
+#
+# Rules are always bidirectional. Each logical rule is expanded into forward
+# and endpoint-swapped physical rules, then identical physical rules are
+# deduplicated. The single DPDK ACL category returns the matching label with
+# the highest priority; label id 0 is reserved for no match.
 
 api_version: flowsql.io/flow-labeling/v1alpha1
 kind: FlowLabelingSet
-status: design-template
 
 metadata:
   name: corp-primary-labels
@@ -17,163 +19,19 @@ metadata:
   description: Replace all example values before publishing.
 
 spec:
-  entity:
-    kind: session
-    label_cardinality: zero_or_one
-    rule_direction: bidirectional
-    no_match_label_id: 0
-    decision_time: on_session_admission
-    classification_scope: unique_new_session_candidate
-    classification_batch: admission_window
-    session_partition_key_includes_primary_label: false
-    primary_label_is_immutable_for_session: true
-    existing_session_reuses_primary_label: true
-    tuple_reuse_reclassifies: true
-    admission_window:
-      max_candidates: 256
-      max_wait_ns: 1000000
-
   engine:
     type: dpdk-acl
-    categories: 1                       # Fixed by the product; category_mask is always 1.
-    algorithm: default                  # default, scalar, sse, avx2, neon, altivec,
-                                        # avx512x16, avx512x32, or rvv.
+    categories: 1
+    algorithm: default                 # default, scalar, sse, avx2, neon,
+                                       # altivec, avx512x16, or avx512x32.
     numa_socket_id: any
-    max_runtime_bytes: 67108864         # Maps to rte_acl_config.max_size; also task-budget bounded.
+    max_runtime_bytes: 33554432        # DPDK rte_acl_config.max_size.
     limits:
       max_labels: 10000
       max_logical_rules: 50000
       max_compiled_rules: 100000
-      max_expanded_fields: 64           # RTE_ACL_MAX_FIELDS.
+      max_expanded_fields: 64
       reject_duplicate_label_priorities: true
-
-  # Labeling V1 consumes only typed L2-L4 facts and does not invoke NPI. The
-  # existing npm.basic NPI sampler runs after session admission. Protocol is an
-  # objective standard dimension from NPI; label is a network-defined dimension
-  # from this rule set. Both coexist in the session as separate fields with
-  # independent ownership and lifecycle semantics.
-
-  configuration_identity:
-    revision_owner: config-channel
-    expected_reference: config.corp-primary-labels@7
-    content_digest_algorithm: sha256
-    max_snapshot_bytes: 8388608          # Planned T1.1 contract; current channel limit is 512 KiB.
-
-  # Fields select typed facts, never raw packet or C++ memory offsets. The compiler
-  # generates field_index, input_index, offsets, four-byte grouping, padding, and
-  # hidden presence fields. acl_parts contain only DPDK-supported widths: 1/2/4/8.
-  # Reusing one source with different IDs/types exposes all native ACL operations.
-  tuple:
-    schema_id: flow-labeling-l2-l4-v1
-    byte_order: network
-    dpdk_field_contract:
-      types: [mask, range, bitmask]
-      sizes_bytes_by_type:
-        mask: [1, 2, 4, 8]
-        range: [1, 2, 4, 8]
-        bitmask: [1, 2, 4, 8]
-    field_definitions:
-      - id: observation_domain
-        source: observation.domain_id
-        type: range
-        logical_width_bytes: 8
-        acl_parts: [8]
-
-      - id: ip_family
-        source: network.ip_family
-        type: bitmask
-        logical_width_bytes: 1
-        acl_parts: [1]
-
-      - id: source_mac_prefix
-        source: link.source_mac
-        type: mask
-        logical_width_bytes: 6
-        acl_parts: [2, 4]
-
-      - id: destination_mac_prefix
-        source: link.destination_mac
-        type: mask
-        logical_width_bytes: 6
-        acl_parts: [2, 4]
-
-      - id: outer_vlan_tpid
-        source: link.vlan[0].tpid
-        type: bitmask
-        logical_width_bytes: 2
-        acl_parts: [2]
-
-      - id: outer_vlan_vid
-        source: link.vlan[0].vid
-        type: range
-        logical_width_bytes: 2
-        acl_parts: [2]
-
-      - id: inner_vlan_tpid
-        source: link.vlan[1].tpid
-        type: bitmask
-        logical_width_bytes: 2
-        acl_parts: [2]
-
-      - id: inner_vlan_vid
-        source: link.vlan[1].vid
-        type: range
-        logical_width_bytes: 2
-        acl_parts: [2]
-
-      - id: source_ipv4_prefix
-        source: network.source_ipv4
-        type: mask
-        logical_width_bytes: 4
-        acl_parts: [4]
-
-      - id: destination_ipv4_prefix
-        source: network.destination_ipv4
-        type: mask
-        logical_width_bytes: 4
-        acl_parts: [4]
-
-      - id: source_ipv4_range
-        source: network.source_ipv4
-        type: range
-        logical_width_bytes: 4
-        acl_parts: [4]
-
-      - id: destination_ipv4_range
-        source: network.destination_ipv4
-        type: range
-        logical_width_bytes: 4
-        acl_parts: [4]
-
-      - id: source_ipv6_prefix
-        source: network.source_ipv6
-        type: mask
-        logical_width_bytes: 16
-        acl_parts: [4, 4, 4, 4]
-
-      - id: destination_ipv6_prefix
-        source: network.destination_ipv6
-        type: mask
-        logical_width_bytes: 16
-        acl_parts: [4, 4, 4, 4]
-
-      - id: transport_protocol
-        source: transport.protocol
-        type: bitmask
-        logical_width_bytes: 1
-        acl_parts: [1]
-
-      - id: source_port
-        source: transport.source_port
-        type: range
-        logical_width_bytes: 2
-        acl_parts: [2]
-
-      - id: destination_port
-        source: transport.destination_port
-        type: range
-        logical_width_bytes: 2
-        acl_parts: [2]
 
   labels:
     - id: 1001
@@ -194,16 +52,32 @@ spec:
       display_name: Gateway Management
       description: Management traffic involving the gateway MAC.
 
-  # A logical rule's matches are AND. An omitted field is a wildcard. Express OR
-  # with additional logical rules, which may point to the same label. The compiler
-  # emits forward and endpoint-swapped physical rules with the same priority and
-  # userdata, then removes identical duplicates. All rules inherit their label's
-  # priority and use label_id as userdata. Priorities are unique between labels;
-  # larger values win. Empty matches require explicit match_all: true.
+  # Match fields are AND. Use additional logical rules for OR. Every fact with
+  # explicit validity (MAC, IP, VLAN, protocol, or port) automatically receives
+  # a hidden presence constraint, so an absent fact cannot match a zero value.
   #
-  # mask:    value + prefix_bits (0..logical width in bits)
-  # range:   inclusive min/max
-  # bitmask: value + mask; arbitrary masked bits are supported
+  # Native DPDK operations and safe predefined fields:
+  #
+  # RANGE:
+  #   observation_domain                      8 bytes
+  #   source_ipv4_range/destination_ipv4_range 4 bytes
+  #   outer_vlan_vid/inner_vlan_vid           2 bytes
+  #   source_port/destination_port             2 bytes
+  #   transport_protocol_range                 1 byte
+  #
+  # MASK (value + prefix_bits):
+  #   observation_domain_prefix                8 bytes
+  #   source/destination_ipv4_prefix            4 bytes
+  #   source/destination_ipv6_prefix            four 4-byte ACL parts
+  #   source/destination_mac_prefix             2-byte + 4-byte ACL parts
+  #   outer/inner_vlan_tpid_prefix              2 bytes
+  #   transport_protocol_prefix                 1 byte
+  #
+  # BITMASK (value + mask):
+  #   observation_domain_bitmask                8 bytes
+  #   source/destination_ipv4_bitmask            4 bytes; value/mask use IPv4 text
+  #   outer/inner_vlan_tpid                      2 bytes
+  #   ip_family/transport_protocol               1 byte
   rules:
     - id: corp-web-client-to-server
       label_id: 1001
@@ -219,7 +93,7 @@ spec:
           value: "10.30.0.0"
           prefix_bits: 16
         - field: transport_protocol
-          value: 6                         # TCP
+          value: 6                       # TCP
           mask: 255
         - field: destination_port
           min: 443
@@ -233,7 +107,7 @@ spec:
           min: "10.40.0.10"
           max: "10.40.0.99"
         - field: transport_protocol
-          value: 17                        # UDP
+          value: 17                      # UDP
           mask: 255
         - field: destination_port
           min: 53
@@ -247,28 +121,23 @@ spec:
           value: "00:11:22:33:44:55"
           prefix_bits: 48
 
-    - id: ipv6-service-example
-      label_id: 1001
+    - id: ipv6-inner-vlan-example
+      label_id: 1002
       direction: bidirectional
       matches:
+        - field: inner_vlan_tpid
+          value: 34984                   # 0x88a8
+          mask: 65535
+        - field: inner_vlan_vid
+          min: 100
+          max: 100
         - field: destination_ipv6_prefix
-          value: "2001:db8:30::"
+          value: "2001:db8:1::"
           prefix_bits: 48
-        - field: transport_protocol
-          value: 6
-          mask: 255
-        - field: destination_port
-          min: 8443
-          max: 8443
 
-  validation:
-    reject_unknown_fields: true
-    reject_duplicate_label_rule_and_field_ids: true
-    reject_label_id_zero: true
-    reject_unknown_label_references: true
-    reject_duplicate_label_priorities: true
-    reject_invalid_field_types_sizes_masks_and_ranges: true
-    reject_missing_optional_fact_matches: true
-    reject_empty_rule_without_explicit_match_all: true
-    reject_multi_category_configuration: true
-    reject_expansion_over_engine_limits: true
+    # An intentionally global rule must say match_all explicitly. Its forward
+    # and reverse forms are identical and compile to one physical rule.
+    # - id: explicit-catch-all
+    #   label_id: 1003
+    #   direction: bidirectional
+    #   match_all: true
