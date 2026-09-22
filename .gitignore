@@ -1,6 +1,8 @@
 # Build directories
 build/
 output/
+!src/operators/npm_basic/output/
+!src/operators/npm_basic/output/**
 
 # Third-party dependency cache (outside build dir)
 .thirdparts_installed

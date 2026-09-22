@@ -350,7 +350,7 @@ void RunPublishedLabelingTask(Runtime* runtime, const char* reference, uint32_t 
     const std::string task_id = std::string("config-labeling-") + reference;
     const std::string with_json =
         std::string(R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"basic,labeling",)") +
-        R"("parameters":"{\"schema_version\":1,\"framework\":{\"labeling\":\")" + reference + R"(\"}}"})";
+        R"("parameters":"{\"schema_version\":1,\"core\":{\"labeling\":\")" + reference + R"(\"}}"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
     flowsql::BlockTransformTaskConfigV1 config;
     config.task_id = task_id.c_str();

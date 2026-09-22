@@ -3,22 +3,22 @@ project(flowsql_npm_basic)
 add_library(${PROJECT_NAME} SHARED
     npm_analysis_contract.cpp
     npm_basic_operator.cpp
-    npm_basic_result_collector.cpp
-    npm_basic_result_encoder.cpp
-    npm_basic_result_projector.cpp
-    npm_basic_task_config.cpp
-    npm_basic_task_runtime.cpp
-    npm_eof_flusher.cpp
-    npm_packet_batch_view.cpp
-    npm_packet_processor.cpp
-    npm_parameters.cpp
-    npm_protocol_context.cpp
-    npm_session_key.cpp
-    npm_session_analysis_module.cpp
-    npm_session_result_encoder.cpp
-    npm_session_table.cpp
-    npm_task_budget.cpp
-    npm_tcp_performance_tracker.cpp
+    config/npm_basic_task_config.cpp
+    config/npm_parameters.cpp
+    core/npm_basic_task_runtime.cpp
+    core/npm_eof_flusher.cpp
+    core/npm_packet_batch_view.cpp
+    core/npm_packet_processor.cpp
+    core/npm_protocol_context.cpp
+    core/npm_session_key.cpp
+    core/npm_session_table.cpp
+    core/npm_task_budget.cpp
+    modules/basic/npm_basic_result_projector.cpp
+    modules/session/npm_session_analysis_module.cpp
+    modules/session/npm_tcp_performance_tracker.cpp
+    output/npm_basic_result_collector.cpp
+    output/npm_basic_result_encoder.cpp
+    output/npm_session_result_encoder.cpp
     npm_basic_plugin_exports.cpp
     ${CMAKE_SOURCE_DIR}/plugins/npi/packet_decoder.cpp
 )

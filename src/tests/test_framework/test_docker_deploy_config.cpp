@@ -18,11 +18,11 @@ constexpr const char* kFlowsqlConfigMount = "./config/flowsql.yml:/opt/flowsql/c
 constexpr const char* kGatewayPlugin = "libflowsql_gateway.so";
 constexpr const char* kWebPlugin = "libflowsql_web.so";
 constexpr const char* kRouterPlugin = "libflowsql_router.so";
-constexpr const char* kNpiPlugin =
-    "libflowsql_npi.so:{\"ldfile\":\"/opt/flowsql/config/protocols.yml\"}";
+constexpr const char* kNpiPlugin = "libflowsql_npi.so:{\"ldfile\":\"/opt/flowsql/config/protocols.yml\"}";
 constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
 constexpr const char* kConfigChannelPlugin = "libflowsql_config_channel.so";
 constexpr const char* kFlowLabelingPlugin = "libflowsql_flow_labeling.so";
+constexpr const char* kFlowLabelingOption = "eal_memory_mib=512";
 constexpr const char* kNpmBasicPlugin = "libflowsql_npm_basic.so";
 constexpr const char* kSchedulerPlugin = "libflowsql_scheduler.so";
 constexpr const char* kBuiltinPlugin = "libflowsql_builtin.so";
@@ -178,6 +178,7 @@ bool TestCompose() {
     const std::string web_option = PluginOption(web_plugins, kWebPlugin);
     const std::string router_option = PluginOption(web_plugins, kRouterPlugin);
     const std::string scheduler_plugins = CommandArgument(scheduler_command, "--plugins");
+    const std::string flow_labeling_option = PluginOption(scheduler_plugins, kFlowLabelingPlugin);
     const std::string pcapfile_option = PluginOption(scheduler_plugins, kPcapFilePlugin);
     const std::string config_channel_option = PluginOption(scheduler_plugins, kConfigChannelPlugin);
     const std::string catalog_option = PluginOption(scheduler_plugins, kCatalogPlugin);
@@ -187,8 +188,7 @@ bool TestCompose() {
     ok = Expect(PluginSpec(web_plugins, kFlowLabelingPlugin).empty(), "Web must not load Flow Labeling") && ok;
 
     ok = Expect(gateway_command.IsSequence(), "Gateway command must use an argv sequence") && ok;
-    ok = Expect(gateway_plugins == kGatewayPlugin, "Gateway plugin must not receive a config path as its option") &&
-         ok;
+    ok = Expect(gateway_plugins == kGatewayPlugin, "Gateway plugin must not receive a config path as its option") && ok;
     ok = Expect(CommandArgument(gateway_command, "--port") == "18800", "Gateway must listen on port 18800") && ok;
     ok = Contains(gateway_option, "host=0.0.0.0", "Gateway must be reachable from the Compose network") && ok;
     ok = Contains(gateway_option, "heartbeat_interval_s=10", "Gateway must preserve its heartbeat interval") && ok;
@@ -201,8 +201,7 @@ bool TestCompose() {
     ok = Contains(web_option, "host=0.0.0.0", "Web must listen on the container network") && ok;
     ok = Contains(web_option, "port=8081", "Web must listen on its external port") && ok;
     ok = Contains(web_option, "gateway=gateway:18800", "Web control requests must use Gateway") && ok;
-    ok = Contains(web_option, "upload_dir=/opt/flowsql/uploads", "Web must use the shared absolute upload path") &&
-         ok;
+    ok = Contains(web_option, "upload_dir=/opt/flowsql/uploads", "Web must use the shared absolute upload path") && ok;
     ok = Contains(router_option, "host=0.0.0.0", "Web Router must listen on the container network") && ok;
     ok = Contains(router_option, "port=18802", "Web Router must listen on its internal port") && ok;
     ok = Contains(router_option, "gateway=gateway:18800", "Web Router must register with Gateway") && ok;
@@ -216,18 +215,19 @@ bool TestCompose() {
 
     ok = Expect(scheduler_command.IsSequence(), "Scheduler command must preserve JSON with an argv sequence") && ok;
     ok = Expect(HasVolume(web, kCaptureMount), "Web must mount pcap-uploads at the shared absolute path") && ok;
-    ok = Expect(HasVolume(scheduler, kCaptureMount),
-                "Scheduler must mount pcap-uploads at the shared absolute path") &&
+    ok = Expect(HasVolume(scheduler, kCaptureMount), "Scheduler must mount pcap-uploads at the shared absolute path") &&
          ok;
     ok = Contains(scheduler_plugins, kNpiPlugin, "Scheduler must load NPI with the absolute protocol path") && ok;
-    ok = Expect(!PluginSpec(scheduler_plugins, kPcapFilePlugin).empty(),
-                "Scheduler must load the pcapfile provider") &&
+    ok = Expect(!PluginSpec(scheduler_plugins, kPcapFilePlugin).empty(), "Scheduler must load the pcapfile provider") &&
          ok;
     ok = Expect(!PluginSpec(scheduler_plugins, kConfigChannelPlugin).empty(),
                 "Scheduler must load the Config Channel provider") &&
          ok;
     ok = Expect(!PluginSpec(scheduler_plugins, kFlowLabelingPlugin).empty(),
                 "Scheduler must load the Flow Labeling provider") &&
+         ok;
+    ok = Expect(flow_labeling_option == kFlowLabelingOption,
+                "Scheduler Flow Labeling must set the process EAL default explicitly") &&
          ok;
     ok = Expect(PluginSpec(scheduler_plugins, kNpmBasicPlugin).empty(),
                 "Scheduler must not statically load the npm.basic operator plugin") &&

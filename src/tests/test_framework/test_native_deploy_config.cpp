@@ -17,6 +17,7 @@ constexpr const char* kNpiPlugin = "libflowsql_npi.so";
 constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
 constexpr const char* kConfigChannelPlugin = "libflowsql_config_channel.so";
 constexpr const char* kFlowLabelingPlugin = "libflowsql_flow_labeling.so";
+constexpr const char* kFlowLabelingOption = "eal_memory_mib=512";
 constexpr const char* kNpmBasicPlugin = "libflowsql_npm_basic.so";
 constexpr const char* kSchedulerPlugin = "libflowsql_scheduler.so";
 constexpr const char* kCatalogPlugin = "libflowsql_catalog.so";
@@ -34,10 +35,9 @@ bool Expect(bool condition, const std::string& message) {
 }
 
 const flowsql::gateway::ServiceConfig* FindService(const flowsql::gateway::GatewayConfig& config,
-                                                    const std::string& name) {
-    const auto it = std::find_if(config.services.begin(), config.services.end(), [&](const auto& service) {
-        return service.name == name;
-    });
+                                                   const std::string& name) {
+    const auto it = std::find_if(config.services.begin(), config.services.end(),
+                                 [&](const auto& service) { return service.name == name; });
     return it == config.services.end() ? nullptr : &*it;
 }
 
@@ -58,21 +58,17 @@ bool ExpectSchedulerRuntime(const flowsql::gateway::ServiceConfig& service, cons
     const std::string* npi = FindPlugin(service, kNpiPlugin);
     ok = Expect(npi != nullptr, deployment + " Scheduler process must load NPI") && ok;
     if (npi) {
-        ok = Expect(PluginOption(*npi) == kNpiOption, deployment + " must preserve the complete NPI JSON option") &&
-             ok;
+        ok = Expect(PluginOption(*npi) == kNpiOption, deployment + " must preserve the complete NPI JSON option") && ok;
     }
     const std::string* pcapfile = FindPlugin(service, kPcapFilePlugin);
-    ok = Expect(pcapfile != nullptr,
-                deployment + " Scheduler process must load the pcapfile provider") &&
-         ok;
+    ok = Expect(pcapfile != nullptr, deployment + " Scheduler process must load the pcapfile provider") && ok;
     if (pcapfile) {
         ok = Expect(PluginOption(*pcapfile) == kPcapFileOption,
                     deployment + " pcapfile must persist in the runtime meta database") &&
              ok;
     }
     const std::string* config_channel = FindPlugin(service, kConfigChannelPlugin);
-    ok = Expect(config_channel != nullptr,
-                deployment + " Scheduler process must load the Config Channel provider") &&
+    ok = Expect(config_channel != nullptr, deployment + " Scheduler process must load the Config Channel provider") &&
          ok;
     if (config_channel) {
         ok = Expect(PluginOption(*config_channel) == kConfigChannelOption,
@@ -83,6 +79,11 @@ bool ExpectSchedulerRuntime(const flowsql::gateway::ServiceConfig& service, cons
     ok = Expect(npm_basic == nullptr, deployment + " must not statically load the npm.basic operator plugin") && ok;
     const std::string* flow_labeling = FindPlugin(service, kFlowLabelingPlugin);
     ok = Expect(flow_labeling != nullptr, deployment + " Scheduler process must load Flow Labeling") && ok;
+    if (flow_labeling) {
+        ok = Expect(PluginOption(*flow_labeling) == kFlowLabelingOption,
+                    deployment + " Flow Labeling must set the process EAL default explicitly") &&
+             ok;
+    }
     const std::string* catalog = FindPlugin(service, kCatalogPlugin);
     ok = Expect(catalog != nullptr, deployment + " Scheduler process must load Catalog") && ok;
     if (catalog) {
@@ -98,11 +99,11 @@ bool ExpectSchedulerRuntime(const flowsql::gateway::ServiceConfig& service, cons
              ok;
     }
     const auto plugin_index = [&](const char* library) {
-        return static_cast<size_t>(std::distance(
-            service.plugins.begin(),
-            std::find_if(service.plugins.begin(), service.plugins.end(), [&](const auto& plugin) {
-                return plugin == library || plugin.rfind(std::string(library) + ":", 0) == 0;
-            })));
+        return static_cast<size_t>(
+            std::distance(service.plugins.begin(),
+                          std::find_if(service.plugins.begin(), service.plugins.end(), [&](const auto& plugin) {
+                              return plugin == library || plugin.rfind(std::string(library) + ":", 0) == 0;
+                          })));
     };
     const size_t npi_index = plugin_index(kNpiPlugin);
     const size_t pcapfile_index = plugin_index(kPcapFilePlugin);
@@ -173,8 +174,7 @@ bool TestGuardianConfig() {
     return web_ok && providers_ok && ok;
 }
 
-bool ExpectMatchingAsset(const std::filesystem::path& source,
-                         const std::filesystem::path& output,
+bool ExpectMatchingAsset(const std::filesystem::path& source, const std::filesystem::path& output,
                          const std::string& name) {
     bool ok = Expect(std::filesystem::is_regular_file(source), "source " + name + " must exist");
     ok = Expect(std::filesystem::is_regular_file(output), "flowsql build must stage output/config/" + name) && ok;
@@ -183,8 +183,7 @@ bool ExpectMatchingAsset(const std::filesystem::path& source,
 }
 
 bool TestRuntimeAssets() {
-    bool ok = ExpectMatchingAsset(FLOWSQL_DEPLOY_SINGLE_PATH, FLOWSQL_DEPLOY_SINGLE_OUTPUT_PATH,
-                                  "deploy-single.yaml");
+    bool ok = ExpectMatchingAsset(FLOWSQL_DEPLOY_SINGLE_PATH, FLOWSQL_DEPLOY_SINGLE_OUTPUT_PATH, "deploy-single.yaml");
     ok = ExpectMatchingAsset(FLOWSQL_DEPLOY_MULTI_PATH, FLOWSQL_DEPLOY_MULTI_OUTPUT_PATH, "deploy-multi.yaml") && ok;
     ok = ExpectMatchingAsset(FLOWSQL_NPI_PROTOCOLS_SOURCE_PATH, FLOWSQL_NPI_PROTOCOLS_OUTPUT_PATH, "protocols.yml") &&
          ok;
@@ -270,8 +269,8 @@ bool TestPcapFilePersistenceDocumentation() {
         std::filesystem::path(FLOWSQL_DEPLOY_SINGLE_PATH).parent_path().parent_path();
     const std::string readme = ReadFile(repository_root / "README.md");
 
-    bool ok = Expect(readme.find("PCAP 文件通道持久化") != std::string::npos,
-                     "README must document pcapfile persistence");
+    bool ok =
+        Expect(readme.find("PCAP 文件通道持久化") != std::string::npos, "README must document pcapfile persistence");
     ok = Expect(readme.find(kPcapFileOption) != std::string::npos,
                 "README must document the native pcapfile database path") &&
          ok;
@@ -287,9 +286,9 @@ bool TestPcapFilePersistenceDocumentation() {
     ok = Expect(readme.find("SQL 任务执行完成") != std::string::npos,
                 "README must explain that completed SQL does not remove the base channel") &&
          ok;
-    ok = Expect(readme.find("显式删除通道") != std::string::npos,
-                "README must distinguish explicit channel deletion") &&
-         ok;
+    ok =
+        Expect(readme.find("显式删除通道") != std::string::npos, "README must distinguish explicit channel deletion") &&
+        ok;
     ok = Expect(readme.find("pcap-uploads") != std::string::npos,
                 "README must identify the Docker persistence volume") &&
          ok;

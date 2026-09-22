@@ -20,7 +20,7 @@
 组合 `npm.basic` 共享核心、Basic/Session 结果及后续协议模块的用户，不应为每个能力继续增加
 `session_xxx`、`http_xxx` 等顶层 `WITH` 键，也不应面对同一配置由多个模块重复声明或按隐式优先级覆盖。
 
-本 Feature 交付单一 `parameters` JSON 字符串入口：`framework` 承载任务共享运行配置，其余一级字段以
+本 Feature 交付单一 `parameters` JSON 字符串入口：`core` 承载任务共享运行配置，其余一级字段以
 `features` 的精确模块 ID 承载模块私有配置。任务打开时一次性完成严格校验并冻结为拥有型结构；包、会话和时间
 通知路径只读取类型化配置，不再解析 JSON。旧 SQL 保持兼容；信封、共享字段和已启用模块严格校验，其他模块配置
 可随信封携带但不进入当前任务运行时。
@@ -58,7 +58,7 @@ INTO dataframe.session_metrics
 ```json
 {
   "schema_version": 1,
-  "framework": {
+  "core": {
     "max_tracked_bytes": 268435456
   },
   "basic": {},
@@ -69,26 +69,26 @@ INTO dataframe.session_metrics
 ```
 
 - `schema_version` 在使用 `parameters` 时必填，V1 只接受整数 `1`；缺失或未知版本明确失败。
-- `framework` 可省略，表示全部使用共享默认值；若存在必须是 object。它只表示当前 `npm.basic` 任务的共享框架，
+- `core` 可省略，表示全部使用共享默认值；若存在必须是 object。它只表示当前 `npm.basic` 任务的基础流程配置，
   不是 FlowSQL 全局配置。
-- 除 `schema_version`、`framework` 外，一级键是模块参数命名空间且必须是 object。`features` 已启用且当前可用的
+- 除 `schema_version`、`core` 外，一级键是模块参数命名空间且必须是 object。`features` 已启用且当前可用的
   模块严格校验其节点；节点缺失表示使用默认值，空 object 表示显式使用默认值。
 - 未启用、未加载或未知模块节点自动忽略，不校验其内部业务字段，也不写入拥有型配置或因后续加载而热生效；
   `features` 显式请求不存在或未加载模块仍失败。规划中的 HTTP/1 使用 `http1`，不使用含混的 `http`。
-- 所有 JSON object 拒绝重复键；信封、`framework` 和被消费模块拒绝未知字段、错误类型与 `null`。未消费模块仅要求
+- 所有 JSON object 拒绝重复键；信封、`core` 和被消费模块拒绝未知字段、错误类型与 `null`。未消费模块仅要求
   节点为 object，并受合法 JSON、重复键、大小和深度约束；错误携带稳定错误类别及 JSON Pointer 风格字段路径。
 - SQL 字面量解码后的 `parameters` JSON 文本最多 64 KiB，嵌套深度最多 64；各 SQL 入口现有的语句长度限制
   保持独立，不假定均为 64 KiB。解析、分配或校验失败时原输出配置不变。
 
 ### 共享与模块参数
 
-V1 把现有共享参数按原名放入 `framework`：
+V1 把现有共享参数按原名放入 `core`：
 
 | 所有者 | 字段 |
 | --- | --- |
-| `framework` | `run_mode`、`result_mode`、`overload_policy`、`output_interval_ns`、`payload_sample_packets` |
-| `framework` | `tcp_idle_timeout_ns`、`udp_idle_timeout_ns`、`out_of_order_tolerance_ns` |
-| `framework` | `max_active_sessions`、`max_tracked_bytes`、`max_pending_output_bytes` |
+| `core` | `run_mode`、`result_mode`、`overload_policy`、`output_interval_ns`、`payload_sample_packets` |
+| `core` | `tcp_idle_timeout_ns`、`udp_idle_timeout_ns`、`out_of_order_tolerance_ns` |
+| `core` | `max_active_sessions`、`max_tracked_bytes`、`max_pending_output_bytes` |
 | `basic` | V1 暂无私有字段；启用时只接受 `{}`，未启用时整个节点忽略 |
 | `session` | 启用时接受 `max_tcp_ranges_per_direction`，整数范围 8～65536，默认 1024；未启用时整个节点忽略 |
 
@@ -102,7 +102,7 @@ V1 把现有共享参数按原名放入 `framework`：
 重叠规则必须以显式优先级确定唯一结果，未命中表示无标签。它不是模块启用开关，也不执行 HTTP、DNS、TLS
 等可变长解析结果的属性匹配；只有该早期主标签可供后续处理准入使用。
 
-流量标签化已启用且可用时，`framework.labeling` 是单个精确不可变引用字符串 `config.<name>@<revision>`；空字符串、
+流量标签化已启用且可用时，`core.labeling` 是单个精确不可变引用字符串 `config.<name>@<revision>`；空字符串、
 裸名称、`@latest`、revision 0 和非 Config 引用无效。省略表示未配置，是否必填由 `flow-labeling` 契约决定。
 
 后续能力交付后的扩展位置固定为：
@@ -110,7 +110,7 @@ V1 把现有共享参数按原名放入 `framework`：
 ```json
 {
   "schema_version": 1,
-  "framework": {
+  "core": {
     "labeling": "config.corp-labels@7"
   },
   "http1": {}
@@ -131,7 +131,7 @@ enum class NpmParameterSourceV1 : uint8_t {
     kParametersV1,
 };
 
-struct NpmFrameworkParametersV1 {
+struct NpmCoreParametersV1 {
     NpmAnalysisConfig analysis;
     std::optional<std::string> labeling_reference;
 };
@@ -154,7 +154,7 @@ struct NpmParameterConsumersV1 {
 struct NpmTaskParametersV1 {
     uint32_t schema_version = 1;
     NpmParameterSourceV1 source = NpmParameterSourceV1::kLegacyWith;
-    NpmFrameworkParametersV1 framework;
+    NpmCoreParametersV1 core;
     std::optional<NpmBasicModuleParametersV1> basic;
     std::optional<NpmSessionModuleParametersV1> session;
 };
@@ -192,7 +192,7 @@ invalid type/range、legacy conflict、invalid exact reference 和 allocation fa
 ## 主链路
 
 1. **V1 参数打开任务**：SQL Parser 严格读取单个 `parameters` 字符串并拒绝重复键 → Scheduler 安全包装外层
-   `WITH` JSON → `npm.basic` 校验信封和 framework、只校验 `features` 已启用且可用的模块并丢弃其余模块节点 →
+   `WITH` JSON → `npm.basic` 校验信封和 core、只校验 `features` 已启用且可用的模块并丢弃其余模块节点 →
    原子冻结拥有型配置 → probe、Process、time notification 和 Flush 只读同一类型化快照。
 2. **Legacy 兼容打开任务**：未提供 `parameters` → 按现有顶层字符串参数和默认值解析 → 归一到同一拥有型任务
    配置 → 运行时行为与改造前一致；一旦出现新旧调优字段混用，在创建任何 task/runtime 前明确失败。
@@ -206,7 +206,7 @@ invalid type/range、legacy conflict、invalid exact reference 和 allocation fa
     `parameters` 等于 SQL 字面量解码后的值，且不改变旧算子配置。
 - `[x]` T1：交付单一 `parameters` 传输与严格解析，使共享配置、Basic 和 Session 私有配置在任务打开时形成一个
   拥有型快照，并让包/会话热路径不接触 JSON。
-  - `[x]` T1.1：完成 `framework` 共享字段及活动 `basic/session` 节点的类型、默认、范围校验，并丢弃非活动模块节点。
+  - `[x]` T1.1：完成 `core` 共享字段及活动 `basic/session` 节点的类型、默认、范围校验，并丢弃非活动模块节点。
   - `[x]` T1.2：把 V1 与 legacy 归一到同一 `NpmBasicTaskConfig`，拒绝任意新旧调优字段混用。
 - `[x]` T2：把参数快照接入 probe、离线和模拟实时 runtime，使相同逻辑配置在 V1 与 legacy 下得到相同 Schema、
   生命周期、预算和 Basic/Session 输出。
@@ -218,9 +218,9 @@ invalid type/range、legacy conflict、invalid exact reference 和 allocation fa
 | 验收面 | 必测断言 |
 | --- | --- |
 | 信封 | 缺失/未知 `schema_version`、根或模块节点非 object、过深及任意 object 重复键失败；字段顺序不影响结果 |
-| 原生类型 | `framework` 与活动模块中的数字只接受 JSON integer；字符串数字、负数、溢出、错误枚举及类型错均失败 |
+| 原生类型 | `core` 与活动模块中的数字只接受 JSON integer；字符串数字、负数、溢出、错误枚举及类型错均失败 |
 | 模块消费 | enabled+available 节点缺失使用默认、`{}` 合法且错误字段失败；未启用/未加载/未知模块 object 被忽略且不进入运行时；`features` 显式请求不可用模块失败 |
-| 流量标签化 | 未启用或不可用时忽略 `framework.labeling` 且不校验/Resolve；启用后严格校验精确引用并只 Resolve 一次 |
+| 流量标签化 | 未启用或不可用时忽略 `core.labeling` 且不校验/Resolve；启用后严格校验精确引用并只 Resolve 一次 |
 | 单一来源 | `parameters` 与任一 legacy 调优键混用失败；输入绑定、features、observing 可正常共存 |
 | SQL 词法 | 单/双引号成对转义、引号内分号/逗号/关键字、未闭合引号及同 stage 重复键；跨 stage 同名键合法；普通算子回归 |
 | SQL 传输 | 直接单 SQL 与 `sql_text` 切分入口一致；Scheduler 包装后算子收到字面量解码值，不要求外层 JSON 字节或字段顺序一致；无效输入不创建算子任务 |
@@ -241,7 +241,7 @@ git diff --check
 
 ## 完成出口
 
-1. V1 `parameters` 信封、`framework` 和扁平模块命名空间具有按需、原子、拥有型解析结果。
+1. V1 `parameters` 信封、`core` 和扁平模块命名空间具有按需、原子、拥有型解析结果。
 2. `features`、`observing`、输入绑定和参数配置职责保持正交；参数节点不能启用模块，未消费节点被确定性丢弃。
 3. 旧 SQL 行为不变，新旧调优字段不能混用；等价 legacy/V1 配置生成相同任务配置和可观察结果。
 4. SQL 引号、重复 `WITH`、JSON 重复键、已消费字段的未知/类型/范围及流量标签化预留边界均有确定性测试。
@@ -250,7 +250,7 @@ git diff --check
 ## 完成证据
 
 - T0.1：新增 `NpmTaskParametersV1`、消费者可用性快照、稳定错误枚举与 `ParseNpmParametersV1` 独立契约；迭代式
-  JSON 解析限制 64 KiB/深度 64，任意 object 重复键和 JSON Pointer 路径确定，活动 Basic/Session 与 framework
+  JSON 解析限制 64 KiB/深度 64，任意 object 重复键和 JSON Pointer 路径确定，活动 Basic/Session 与当时的 framework
   严格校验，非活动/未知模块 object 丢弃；字段顺序、输入所有权及失败不改输出均有断言。T0 阶段该入口尚未接入
   `NpmBasicTaskConfig`、operator 或 runtime；任务配置接入已在下述 T1 证据中完成。
 - T0.2：通用 SQL Parser 已锚定单/双引号成对转义、引号内逗号/分号/关键字、未闭合引号、同 stage 重复键拒绝
@@ -259,7 +259,7 @@ git diff --check
 - `test_framework`、`test_npm_basic`、`test_scheduler_e2e` 构建通过；定向 CTest 3/3 通过（37.96 秒）。
 - `git diff --check`、新增文件空白检查和新增 C++ 120 列检查通过；环境无 `clang-format` 可执行文件，也无仓库
   format/lint target，已按 `src/.clang-format` 人工审查本轮 Diff。
-- T1.1：任务打开配置先按顶层 `features`/`observing` 冻结消费者集合，再一次性解析 `parameters`；V1 framework
+- T1.1：任务打开配置先按顶层 `features`/`observing` 冻结消费者集合，再一次性解析 `parameters`；当时的 V1 framework
   分析配置和活动 Session 范围归一进现有拥有型 `NpmBasicTaskConfig`，未活动 Basic/Session 与未知模块不进入结果，
   原始 JSON 不保存到任务配置或热路径。外层 JSON string 的内嵌 NUL 也被明确拒绝，避免 C 字符串截断绕过严格解析。
 - T1.2：V1 与 legacy 等价配置逐字段一致；12 个 legacy 调优键与 `parameters` 任意混用均返回
@@ -273,16 +273,20 @@ git diff --check
   runtime/operator 生产代码或增加第二套参数通道。
 - `cmake --build build --target test_npm_basic -j$(nproc)` 通过；`test_npm_basic` 定向 CTest 1/1 通过（0.40 秒）。
   T3 已在下述真实 SQL/E2E 与完整回归中完成。
-- T3：复用动态加载的真实 `libflowsql_npm_basic.so`、真实 PCAP Source、Scheduler 和 DataFrame Sink，证明既有
+- T3：复用动态加载的真实 `libflowsql_npm_basic.so`、真实 PCAP Source、Scheduler 和 DataFrame Sink，证明当时既有
   legacy Basic/Session SQL 无修改运行，等价 V1 SQL 的 Schema 与完整 Arrow RecordBatch 分别逐值相同；Basic-only
   V1 同时携带无效 Session 内部值、未启用 labeling 的非精确引用及未知 `http1` 节点仍成功，Session V1 携带未知
   future protocol 节点仍成功，锚定参数节点不隐式启用模块且未消费 object 被确定性忽略。
 - 活动 V1 framework 类型错误、活动 Session 范围错误及 legacy/V1 来源冲突均在真实 Scheduler Schema probe 阶段
   失败，未注册目标 DataFrame、未进入 NPI 包处理；返回诊断分别包含稳定的 `invalid parameters` 或
-  `configuration source conflict` 类别，以及 `/framework/max_active_sessions`、
+  `configuration source conflict` 类别，以及当时的 `/framework/max_active_sessions`、
   `/session/max_tcp_ranges_per_direction` 或 `/run_mode` JSON Pointer。算子只在 `Open()` 配置失败时构造一次任务私有
   诊断字符串，继续通过既有原子首错槽发布稳定指针，不改变 Cancel/runtime 并发路径。
 - Feature 完成验收：`cmake -B build src` 通过；三个目标定向构建通过，定向 CTest 3/3 通过（38.97 秒）；完整
   `cmake --build build -j$(nproc)` 通过，完整 CTest 15/15 通过（52.99 秒）。`git diff --check`、未跟踪新增文件
   空白检查和新增/修改 C++ 120 列检查通过；环境无 `clang-format` 可执行文件，也无仓库 format/lint target，已按
   `src/.clang-format` 人工审查 T3 Diff。Feature 已完成并归档，未开始后续 Feature。
+- 2026-09-22 契约修正将唯一共享配置命名空间从 `parameters.framework` 改为 `parameters.core`，同步拥有型类型
+  `NpmCoreParametersV1`、成员名和全部共享字段诊断路径；旧 `framework` 不按未知未来模块静默忽略，而是返回
+  `kUnknownConsumedField` 与 `/framework`。字段、默认值、范围、条件消费和 legacy `WITH` 语义不变；本次验证
+  见即时工作台。

@@ -3,8 +3,8 @@
 
 #include "npm_basic_operator.h"
 
-#include "npm_basic_task_config.h"
-#include "npm_basic_task_runtime.h"
+#include <operators/npm_basic/config/npm_basic_task_config.h>
+#include <operators/npm_basic/core/npm_basic_task_runtime.h>
 
 #include <arrow/api.h>
 #include <framework/interfaces/iconfig_channel_registry.h>
@@ -192,7 +192,7 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
             const char* error = kLabelingConfigResolveError;
             try {
                 config_error_ =
-                    BuildLabelingError(kLabelingConfigResolveError, "/framework/labeling", resolve_error.c_str());
+                    BuildLabelingError(kLabelingConfigResolveError, "/core/labeling", resolve_error.c_str());
                 error = config_error_.c_str();
             } catch (const std::bad_alloc&) {
             }

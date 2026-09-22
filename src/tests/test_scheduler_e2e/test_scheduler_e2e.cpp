@@ -1989,7 +1989,7 @@ int main() {
         const std::string parameters_basic_dataframe_name =
             "scheduler_npm_basic_parameters";
         const std::string parameters_basic =
-            R"({"schema_version":1,"framework":{"labeling":"@latest"},)"
+            R"({"schema_version":1,"core":{"labeling":"@latest"},)"
             R"("session":{"max_tcp_ranges_per_direction":"ignored"},"http1":{"future":null}})";
         pcap_protocol.Reset();
         ASSERT_EQ(exec("/scheduler/batch/execute",
@@ -2107,14 +2107,14 @@ int main() {
             ASSERT_TRUE(registry->Get(destination.c_str()) == nullptr);
             ASSERT_EQ(pcap_protocol.layer_calls, 0);
         };
-        const std::string invalid_framework_destination =
-            "scheduler_npm_invalid_framework";
+        const std::string invalid_core_destination =
+            "scheduler_npm_invalid_core";
         assert_npm_config_failure(
-            invalid_framework_destination,
+            invalid_core_destination,
             make_npm_parameters_sql(
-                invalid_framework_destination,
-                R"({"schema_version":1,"framework":{"max_active_sessions":"1"}})"),
-            {"invalid parameters", "/framework/max_active_sessions"});
+                invalid_core_destination,
+                R"({"schema_version":1,"core":{"max_active_sessions":"1"}})"),
+            {"invalid parameters", "/core/max_active_sessions"});
         const std::string invalid_session_destination =
             "scheduler_npm_invalid_session";
         assert_npm_config_failure(

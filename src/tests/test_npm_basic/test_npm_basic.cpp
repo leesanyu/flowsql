@@ -6,24 +6,24 @@
 #include <framework/core/packet_codec.h>
 #include <framework/interfaces/cpp_operator_plugin_abi.h>
 #include <framework/interfaces/iflow_labeling.h>
+#include <operators/npm_basic/config/npm_basic_task_config.h>
+#include <operators/npm_basic/config/npm_parameters.h>
+#include <operators/npm_basic/core/npm_basic_task_runtime.h>
+#include <operators/npm_basic/core/npm_eof_flusher.h>
+#include <operators/npm_basic/core/npm_packet_batch_view.h>
+#include <operators/npm_basic/core/npm_packet_processor.h>
+#include <operators/npm_basic/core/npm_protocol_context.h>
+#include <operators/npm_basic/core/npm_session_key.h>
+#include <operators/npm_basic/core/npm_session_table.h>
+#include <operators/npm_basic/core/npm_task_budget.h>
+#include <operators/npm_basic/modules/basic/npm_basic_result_projector.h>
+#include <operators/npm_basic/modules/session/npm_session_analysis_module.h>
+#include <operators/npm_basic/modules/session/npm_tcp_performance_tracker.h>
 #include <operators/npm_basic/npm_analysis_contract.h>
 #include <operators/npm_basic/npm_basic_operator.h>
-#include <operators/npm_basic/npm_basic_result_collector.h>
-#include <operators/npm_basic/npm_basic_result_encoder.h>
-#include <operators/npm_basic/npm_basic_result_projector.h>
-#include <operators/npm_basic/npm_basic_task_config.h>
-#include <operators/npm_basic/npm_basic_task_runtime.h>
-#include <operators/npm_basic/npm_eof_flusher.h>
-#include <operators/npm_basic/npm_packet_batch_view.h>
-#include <operators/npm_basic/npm_packet_processor.h>
-#include <operators/npm_basic/npm_parameters.h>
-#include <operators/npm_basic/npm_protocol_context.h>
-#include <operators/npm_basic/npm_session_analysis_module.h>
-#include <operators/npm_basic/npm_session_key.h>
-#include <operators/npm_basic/npm_session_result_encoder.h>
-#include <operators/npm_basic/npm_session_table.h>
-#include <operators/npm_basic/npm_task_budget.h>
-#include <operators/npm_basic/npm_tcp_performance_tracker.h>
+#include <operators/npm_basic/output/npm_basic_result_collector.h>
+#include <operators/npm_basic/output/npm_basic_result_encoder.h>
+#include <operators/npm_basic/output/npm_session_result_encoder.h>
 #include <plugins/npi/iprotocol.h>
 #include <common/loader.hpp>
 
@@ -6361,6 +6361,9 @@ void TestNpmBasicTaskConfigFeatureSelection() {
     static_assert(npm::kNpmMinSessionTcpRangesPerDirection == 8);
     static_assert(npm::kNpmDefaultSessionTcpRangesPerDirection == 1024);
     static_assert(npm::kNpmMaxSessionTcpRangesPerDirection == 65536);
+    static_assert(npm::kNpmMinLabelingMemoryMiB == 8);
+    static_assert(npm::kNpmDefaultLabelingMemoryMiB == 64);
+    static_assert(npm::kNpmMaxLabelingMemoryMiB == 256);
 
     npm::NpmBasicTaskConfig output;
     auto status =
@@ -6391,7 +6394,7 @@ void TestNpmBasicTaskConfigFeatureSelection() {
     assert(output.features.session_max_tcp_ranges_per_direction == npm::kNpmDefaultSessionTcpRangesPerDirection);
 
     const char* labeling_json = R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,labeling",)JSON"
-                                R"JSON("parameters":"{\"schema_version\":1,\"framework\":{)JSON"
+                                R"JSON("parameters":"{\"schema_version\":1,\"core\":{)JSON"
                                 R"JSON(\"labeling\":\"config.corp-labels@7\"}}"})JSON";
     status = npm::ParseNpmBasicTaskConfig(labeling_json, &output, true);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
@@ -6401,12 +6404,17 @@ void TestNpmBasicTaskConfigFeatureSelection() {
 
     const char* sized_labeling_json =
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,labeling",)JSON"
-        R"JSON("parameters":"{\"schema_version\":1,\"framework\":{)JSON"
-        R"JSON(\"labeling\":\"config.corp-labels@7\",\"labeling_memory_mib\":128}}"})JSON";
+        R"JSON("parameters":"{\"schema_version\":1,\"core\":{)JSON"
+        R"JSON(\"labeling\":\"config.corp-labels@7\",\"labeling_memory_mib\":96}}"})JSON";
     status = npm::ParseNpmBasicTaskConfig(sized_labeling_json, &output, true);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.labeling_reference == "config.corp-labels@7");
-    assert(output.labeling_memory_mib == 128);
+    assert(output.labeling_memory_mib == 96);
+
+    status = npm::ParseNpmBasicTaskConfig(labeling_json, &output, true);
+    assert(status.error == npm::NpmBasicTaskConfigError::kNone);
+    assert(output.labeling_reference == "config.corp-labels@7");
+    assert(output.labeling_memory_mib == npm::kNpmDefaultLabelingMemoryMiB);
 
     status = npm::ParseNpmBasicTaskConfig(labeling_json, &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kInvalidParameters);
@@ -6510,15 +6518,15 @@ EquivalentRuntimeTaskConfigs MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode ru
                                          R"JSON("max_active_sessions":"32",)JSON"
                                          R"JSON("max_tracked_bytes":"1048576",)JSON"
                                          R"JSON("max_pending_output_bytes":"1048576")JSON";
-    const char* parameters_framework =
+    const char* parameters_core =
         run_mode == npm::NpmRunMode::kRealtime
-            ? R"JSON(,"parameters":"{\"schema_version\":1,\"framework\":{)JSON"
+            ? R"JSON(,"parameters":"{\"schema_version\":1,\"core\":{)JSON"
               R"JSON(\"run_mode\":\"realtime\",\"result_mode\":\"periodic_snapshot\",)JSON"
               R"JSON(\"output_interval_ns\":10000000,\"payload_sample_packets\":4,)JSON"
               R"JSON(\"tcp_idle_timeout_ns\":1000000000,\"udp_idle_timeout_ns\":1000000000,)JSON"
               R"JSON(\"out_of_order_tolerance_ns\":0,\"max_active_sessions\":32,)JSON"
               R"JSON(\"max_tracked_bytes\":1048576,\"max_pending_output_bytes\":1048576})JSON"
-            : R"JSON(,"parameters":"{\"schema_version\":1,\"framework\":{)JSON"
+            : R"JSON(,"parameters":"{\"schema_version\":1,\"core\":{)JSON"
               R"JSON(\"run_mode\":\"offline\",\"result_mode\":\"final\",)JSON"
               R"JSON(\"output_interval_ns\":10000000,\"payload_sample_packets\":4,)JSON"
               R"JSON(\"tcp_idle_timeout_ns\":1000000000,\"udp_idle_timeout_ns\":1000000000,)JSON"
@@ -6530,7 +6538,7 @@ EquivalentRuntimeTaskConfigs MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode ru
                           feature_fields + legacy_framework;
     configs.parameters_v1_json =
         std::string(R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77")JSON") + feature_fields +
-        parameters_framework;
+        parameters_core;
     if (observing_session) {
         configs.legacy_json += R"JSON(,"session_max_tcp_ranges_per_direction":"8")JSON";
         configs.parameters_v1_json += R"JSON(,\"session\":{\"max_tcp_ranges_per_direction\":8})JSON";
@@ -6555,7 +6563,7 @@ void TestNpmBasicTaskConfigNormalizesParametersV1() {
         "source_domains":"0:7;1:8",
         "features":"basic,session",
         "observing":"session",
-        "parameters":"{\"schema_version\":1,\"framework\":{\"run_mode\":\"realtime\",)JSON"
+        "parameters":"{\"schema_version\":1,\"core\":{\"run_mode\":\"realtime\",)JSON"
                           R"JSON(\"result_mode\":\"final\",\"overload_policy\":\"fail\",)JSON"
                           R"JSON(\"output_interval_ns\":10000000,\"payload_sample_packets\":64,)JSON"
                           R"JSON(\"tcp_idle_timeout_ns\":1000000000,)JSON"
@@ -6674,10 +6682,10 @@ void TestNpmBasicTaskConfigPreservesParameterFailuresAtomically() {
                            npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
                            npm::NpmParameterErrorV1::kEmptyInput);
     ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
-                           R"JSON("parameters":"{\"schema_version\":1,\"framework\":{)JSON"
+                           R"JSON("parameters":"{\"schema_version\":1,\"core\":{)JSON"
                            R"JSON(\"max_active_sessions\":\"1\"}}"})JSON",
                            npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
-                           npm::NpmParameterErrorV1::kInvalidType, "/framework/max_active_sessions");
+                           npm::NpmParameterErrorV1::kInvalidType, "/core/max_active_sessions");
     ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
                            R"JSON("observing":"session",)JSON"
                            R"JSON("parameters":"{\"schema_version\":1,\"session\":{)JSON"
@@ -6704,10 +6712,10 @@ npm::NpmParameterStatusV1 ParseParametersFailure(const char* json, const npm::Np
     npm::NpmTaskParametersV1 output;
     output.schema_version = 99;
     output.source = npm::NpmParameterSourceV1::kLegacyWith;
-    output.framework.analysis = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kRealtime);
-    output.framework.analysis.max_active_sessions = 123;
-    output.framework.labeling_reference = "sentinel";
-    output.framework.labeling_memory_mib = 8;
+    output.core.analysis = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kRealtime);
+    output.core.analysis.max_active_sessions = 123;
+    output.core.labeling_reference = "sentinel";
+    output.core.labeling_memory_mib = 8;
     output.basic.reset();
     output.session = npm::NpmSessionModuleParametersV1{321};
 
@@ -6716,10 +6724,10 @@ npm::NpmParameterStatusV1 ParseParametersFailure(const char* json, const npm::Np
     assert(status.path == expected_path);
     assert(output.schema_version == 99);
     assert(output.source == npm::NpmParameterSourceV1::kLegacyWith);
-    assert(output.framework.analysis.run_mode == npm::NpmRunMode::kRealtime);
-    assert(output.framework.analysis.max_active_sessions == 123);
-    assert(output.framework.labeling_reference == "sentinel");
-    assert(output.framework.labeling_memory_mib == 8);
+    assert(output.core.analysis.run_mode == npm::NpmRunMode::kRealtime);
+    assert(output.core.analysis.max_active_sessions == 123);
+    assert(output.core.labeling_reference == "sentinel");
+    assert(output.core.labeling_memory_mib == 8);
     assert(!output.basic.has_value());
     assert(output.session.has_value());
     assert(output.session->max_tcp_ranges_per_direction == 321);
@@ -6729,19 +6737,19 @@ npm::NpmParameterStatusV1 ParseParametersFailure(const char* json, const npm::Np
 void AssertEquivalentParameters(const npm::NpmTaskParametersV1& left, const npm::NpmTaskParametersV1& right) {
     assert(left.schema_version == right.schema_version);
     assert(left.source == right.source);
-    assert(left.framework.analysis.run_mode == right.framework.analysis.run_mode);
-    assert(left.framework.analysis.result_mode == right.framework.analysis.result_mode);
-    assert(left.framework.analysis.output_interval_ns == right.framework.analysis.output_interval_ns);
-    assert(left.framework.analysis.payload_sample_packets == right.framework.analysis.payload_sample_packets);
-    assert(left.framework.analysis.tcp_idle_timeout_ns == right.framework.analysis.tcp_idle_timeout_ns);
-    assert(left.framework.analysis.udp_idle_timeout_ns == right.framework.analysis.udp_idle_timeout_ns);
-    assert(left.framework.analysis.out_of_order_tolerance_ns == right.framework.analysis.out_of_order_tolerance_ns);
-    assert(left.framework.analysis.max_active_sessions == right.framework.analysis.max_active_sessions);
-    assert(left.framework.analysis.max_tracked_bytes == right.framework.analysis.max_tracked_bytes);
-    assert(left.framework.analysis.max_pending_output_bytes == right.framework.analysis.max_pending_output_bytes);
-    assert(left.framework.analysis.overload_policy == right.framework.analysis.overload_policy);
-    assert(left.framework.labeling_reference == right.framework.labeling_reference);
-    assert(left.framework.labeling_memory_mib == right.framework.labeling_memory_mib);
+    assert(left.core.analysis.run_mode == right.core.analysis.run_mode);
+    assert(left.core.analysis.result_mode == right.core.analysis.result_mode);
+    assert(left.core.analysis.output_interval_ns == right.core.analysis.output_interval_ns);
+    assert(left.core.analysis.payload_sample_packets == right.core.analysis.payload_sample_packets);
+    assert(left.core.analysis.tcp_idle_timeout_ns == right.core.analysis.tcp_idle_timeout_ns);
+    assert(left.core.analysis.udp_idle_timeout_ns == right.core.analysis.udp_idle_timeout_ns);
+    assert(left.core.analysis.out_of_order_tolerance_ns == right.core.analysis.out_of_order_tolerance_ns);
+    assert(left.core.analysis.max_active_sessions == right.core.analysis.max_active_sessions);
+    assert(left.core.analysis.max_tracked_bytes == right.core.analysis.max_tracked_bytes);
+    assert(left.core.analysis.max_pending_output_bytes == right.core.analysis.max_pending_output_bytes);
+    assert(left.core.analysis.overload_policy == right.core.analysis.overload_policy);
+    assert(left.core.labeling_reference == right.core.labeling_reference);
+    assert(left.core.labeling_memory_mib == right.core.labeling_memory_mib);
     assert(left.basic.has_value() == right.basic.has_value());
     assert(left.session.has_value() == right.session.has_value());
     if (left.session) {
@@ -6760,10 +6768,10 @@ void TestNpmParametersV1OwnsCanonicalConfig() {
     assert(status.error == npm::NpmParameterErrorV1::kNone && status.path.empty());
     assert(minimal.schema_version == 1);
     assert(minimal.source == npm::NpmParameterSourceV1::kParametersV1);
-    assert(minimal.framework.analysis.run_mode == npm::NpmRunMode::kOffline);
-    assert(minimal.framework.analysis.result_mode == npm::NpmResultMode::kFinal);
-    assert(!minimal.framework.labeling_reference.has_value());
-    assert(!minimal.framework.labeling_memory_mib.has_value());
+    assert(minimal.core.analysis.run_mode == npm::NpmRunMode::kOffline);
+    assert(minimal.core.analysis.result_mode == npm::NpmResultMode::kFinal);
+    assert(!minimal.core.labeling_reference.has_value());
+    assert(!minimal.core.labeling_memory_mib.has_value());
     assert(minimal.basic.has_value() && !minimal.session.has_value());
 
     npm::NpmParameterConsumersV1 consumers;
@@ -6772,7 +6780,7 @@ void TestNpmParametersV1OwnsCanonicalConfig() {
         "future":{"opaque":null,"array":[1,{"nested":true}]},
         "session":{"max_tcp_ranges_per_direction":65536},
         "basic":{},
-        "framework":{
+        "core":{
             "max_pending_output_bytes":1099511627776,
             "max_tracked_bytes":1099511627776,
             "max_active_sessions":10000000,
@@ -6791,24 +6799,24 @@ void TestNpmParametersV1OwnsCanonicalConfig() {
     npm::NpmTaskParametersV1 first;
     status = npm::ParseNpmParametersV1(json.c_str(), consumers, &first);
     assert(status.error == npm::NpmParameterErrorV1::kNone);
-    assert(first.framework.analysis.run_mode == npm::NpmRunMode::kRealtime);
-    assert(first.framework.analysis.result_mode == npm::NpmResultMode::kFinal);
-    assert(first.framework.analysis.output_interval_ns == npm::kNpmMinOutputIntervalNs);
-    assert(first.framework.analysis.payload_sample_packets == npm::kNpmMaxPayloadSamplePackets);
-    assert(first.framework.analysis.tcp_idle_timeout_ns == npm::kNpmMinIdleTimeoutNs);
-    assert(first.framework.analysis.udp_idle_timeout_ns == npm::kNpmMaxIdleTimeoutNs);
-    assert(first.framework.analysis.out_of_order_tolerance_ns == npm::kNpmMaxOutOfOrderToleranceNs);
-    assert(first.framework.analysis.max_active_sessions == npm::kNpmMaxActiveSessions);
-    assert(first.framework.analysis.max_tracked_bytes == npm::kNpmMaxTrackedBytes);
-    assert(first.framework.analysis.max_pending_output_bytes == npm::kNpmMaxPendingOutputBytes);
-    assert(!first.framework.labeling_reference.has_value());
-    assert(!first.framework.labeling_memory_mib.has_value());
+    assert(first.core.analysis.run_mode == npm::NpmRunMode::kRealtime);
+    assert(first.core.analysis.result_mode == npm::NpmResultMode::kFinal);
+    assert(first.core.analysis.output_interval_ns == npm::kNpmMinOutputIntervalNs);
+    assert(first.core.analysis.payload_sample_packets == npm::kNpmMaxPayloadSamplePackets);
+    assert(first.core.analysis.tcp_idle_timeout_ns == npm::kNpmMinIdleTimeoutNs);
+    assert(first.core.analysis.udp_idle_timeout_ns == npm::kNpmMaxIdleTimeoutNs);
+    assert(first.core.analysis.out_of_order_tolerance_ns == npm::kNpmMaxOutOfOrderToleranceNs);
+    assert(first.core.analysis.max_active_sessions == npm::kNpmMaxActiveSessions);
+    assert(first.core.analysis.max_tracked_bytes == npm::kNpmMaxTrackedBytes);
+    assert(first.core.analysis.max_pending_output_bytes == npm::kNpmMaxPendingOutputBytes);
+    assert(!first.core.labeling_reference.has_value());
+    assert(!first.core.labeling_memory_mib.has_value());
     assert(first.basic.has_value() && first.session.has_value());
     assert(first.session->max_tcp_ranges_per_direction == npm::kNpmMaxSessionTcpRangesPerDirection);
 
     const char* reordered = R"JSON({
         "schema_version":1,
-        "framework":{"labeling":"ignored","run_mode":"realtime","result_mode":"final",
+        "core":{"labeling":"ignored","run_mode":"realtime","result_mode":"final",
             "overload_policy":"fail","output_interval_ns":10000000,"payload_sample_packets":64,
             "tcp_idle_timeout_ns":1000000000,"udp_idle_timeout_ns":86400000000000,
             "out_of_order_tolerance_ns":60000000000,"max_active_sessions":10000000,
@@ -6840,8 +6848,8 @@ void TestNpmParametersV1RejectsEnvelopeAndDuplicatesAtomically() {
                            "/schema_version");
     ParseParametersFailure(R"JSON({"schema_version":1,"schema_version":1})JSON", consumers,
                            npm::NpmParameterErrorV1::kDuplicateField, "/schema_version");
-    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"run_mode":"offline","run_mode":"realtime"}})JSON",
-                           consumers, npm::NpmParameterErrorV1::kDuplicateField, "/framework/run_mode");
+    ParseParametersFailure(R"JSON({"schema_version":1,"core":{"run_mode":"offline","run_mode":"realtime"}})JSON",
+                           consumers, npm::NpmParameterErrorV1::kDuplicateField, "/core/run_mode");
     ParseParametersFailure(R"JSON({"schema_version":1,"future":{"nested":{"value":1,"value":2}}})JSON", consumers,
                            npm::NpmParameterErrorV1::kDuplicateField, "/future/nested/value");
     ParseParametersFailure(R"JSON({"schema_version":1,"":7})JSON", consumers, npm::NpmParameterErrorV1::kInvalidType,
@@ -6929,76 +6937,92 @@ void TestNpmParametersV1ConsumesOnlyEnabledAvailableModules() {
     assert(status.error == npm::NpmParameterErrorV1::kNone && !output.session.has_value());
 }
 
-void TestNpmParametersV1ValidatesFrameworkAndConditionalLabeling() {
+void TestNpmParametersV1UsesCoreNamespaceExclusively() {
+    const npm::NpmParameterConsumersV1 consumers;
+    npm::NpmTaskParametersV1 output;
+    auto status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1,"core":{"max_active_sessions":123}})JSON",
+                                            consumers, &output);
+    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    assert(output.core.analysis.max_active_sessions == 123);
+
+    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/framework");
+    ParseParametersFailure(R"JSON({"schema_version":1,"core":{},"framework":{"max_active_sessions":123}})JSON",
+                           consumers, npm::NpmParameterErrorV1::kUnknownConsumedField, "/framework");
+}
+
+void TestNpmParametersV1ValidatesCoreAndConditionalLabeling() {
     npm::NpmParameterConsumersV1 consumers;
-    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"unknown":1}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/framework/unknown");
-    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"":1}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/framework/");
-    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"run_mode":null}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kInvalidType, "/framework/run_mode");
-    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"run_mode":"batch"}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kInvalidValue, "/framework/run_mode");
-    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"max_active_sessions":"1"}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kInvalidType, "/framework/max_active_sessions");
-    ParseParametersFailure(R"JSON({"schema_version":1,"framework":{"max_active_sessions":0}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kInvalidRange, "/framework/max_active_sessions");
-    ParseParametersFailure(R"JSON({"schema_version":1,"framework":null})JSON", consumers,
-                           npm::NpmParameterErrorV1::kInvalidType, "/framework");
+    ParseParametersFailure(R"JSON({"schema_version":1,"core":{"unknown":1}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/core/unknown");
+    ParseParametersFailure(R"JSON({"schema_version":1,"core":{"":1}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/core/");
+    ParseParametersFailure(R"JSON({"schema_version":1,"core":{"run_mode":null}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kInvalidType, "/core/run_mode");
+    ParseParametersFailure(R"JSON({"schema_version":1,"core":{"run_mode":"batch"}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kInvalidValue, "/core/run_mode");
+    ParseParametersFailure(R"JSON({"schema_version":1,"core":{"max_active_sessions":"1"}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kInvalidType, "/core/max_active_sessions");
+    ParseParametersFailure(R"JSON({"schema_version":1,"core":{"max_active_sessions":0}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kInvalidRange, "/core/max_active_sessions");
+    ParseParametersFailure(R"JSON({"schema_version":1,"core":null})JSON", consumers,
+                           npm::NpmParameterErrorV1::kInvalidType, "/core");
 
     npm::NpmTaskParametersV1 output;
     auto status = npm::ParseNpmParametersV1(
-        R"JSON({"schema_version":1,"framework":{"labeling":null,"labeling_memory_mib":"ignored"}})JSON", consumers,
-        &output);
+        R"JSON({"schema_version":1,"core":{"labeling":null,"labeling_memory_mib":"ignored"}})JSON", consumers, &output);
     assert(status.error == npm::NpmParameterErrorV1::kNone);
-    assert(!output.framework.labeling_reference.has_value());
-    assert(!output.framework.labeling_memory_mib.has_value());
+    assert(!output.core.labeling_reference.has_value());
+    assert(!output.core.labeling_memory_mib.has_value());
 
     consumers.labeling_enabled = true;
     consumers.labeling_available = true;
     for (const char* reference : {"", "rules@1", "config.rules", "config.rules@latest", "config.rules@0",
                                   "config.Rules@1", "config.rules@01"}) {
         const std::string json =
-            std::string(R"JSON({"schema_version":1,"framework":{"labeling":")JSON") + reference + R"JSON("}})JSON";
+            std::string(R"JSON({"schema_version":1,"core":{"labeling":")JSON") + reference + R"JSON("}})JSON";
         ParseParametersFailure(json.c_str(), consumers, npm::NpmParameterErrorV1::kInvalidExactReference,
-                               "/framework/labeling");
+                               "/core/labeling");
     }
-    status = npm::ParseNpmParametersV1(
-        R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7"}})JSON", consumers, &output);
+    status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7"}})JSON",
+                                       consumers, &output);
     assert(status.error == npm::NpmParameterErrorV1::kNone);
-    assert(output.framework.labeling_reference == "config.corp-labels@7");
-    assert(output.framework.labeling_memory_mib == npm::kNpmDefaultLabelingMemoryMiB);
+    assert(output.core.labeling_reference == "config.corp-labels@7");
+    assert(output.core.labeling_memory_mib == npm::kNpmDefaultLabelingMemoryMiB);
 
-    for (uint32_t memory_mib : {8U, 16U, 32U, 64U, 128U}) {
+    for (uint32_t memory_mib : {8U, 12U, 16U, 24U, 32U, 64U, 96U, 127U, 128U}) {
         const std::string json =
-            R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7","labeling_memory_mib":)JSON" +
+            R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7","labeling_memory_mib":)JSON" +
             std::to_string(memory_mib) + "}}";
         status = npm::ParseNpmParametersV1(json.c_str(), consumers, &output);
         assert(status.error == npm::NpmParameterErrorV1::kNone);
-        assert(output.framework.labeling_memory_mib == memory_mib);
+        assert(output.core.labeling_memory_mib == memory_mib);
     }
     status = npm::ParseNpmParametersV1(
-        R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7","max_tracked_bytes":536870912,"labeling_memory_mib":256}})JSON",
+        R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7","max_tracked_bytes":536870912,"labeling_memory_mib":256}})JSON",
         consumers, &output);
     assert(status.error == npm::NpmParameterErrorV1::kNone);
-    assert(output.framework.labeling_memory_mib == 256);
+    assert(output.core.labeling_memory_mib == 256);
 
-    for (const char* invalid : {"null", "\"64\"", "0", "7", "24", "512"}) {
+    for (const char* invalid : {"null", "\"64\"", "0", "7", "512"}) {
         const std::string json =
             std::string(
-                R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7","labeling_memory_mib":)JSON") +
+                R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7","labeling_memory_mib":)JSON") +
             invalid + "}}";
         ParseParametersFailure(json.c_str(), consumers,
                                invalid[0] == '"' || invalid[0] == 'n' ? npm::NpmParameterErrorV1::kInvalidType
                                                                       : npm::NpmParameterErrorV1::kInvalidRange,
-                               "/framework/labeling_memory_mib");
+                               "/core/labeling_memory_mib");
     }
     ParseParametersFailure(
-        R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7","labeling_memory_mib":256}})JSON",
-        consumers, npm::NpmParameterErrorV1::kInvalidRange, "/framework/labeling_memory_mib");
+        R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7","max_tracked_bytes":538968064,"labeling_memory_mib":257}})JSON",
+        consumers, npm::NpmParameterErrorV1::kInvalidRange, "/core/labeling_memory_mib");
     ParseParametersFailure(
-        R"JSON({"schema_version":1,"framework":{"labeling":"config.corp-labels@7","max_tracked_bytes":268435455,"labeling_memory_mib":128}})JSON",
-        consumers, npm::NpmParameterErrorV1::kInvalidRange, "/framework/labeling_memory_mib");
+        R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7","labeling_memory_mib":256}})JSON",
+        consumers, npm::NpmParameterErrorV1::kInvalidRange, "/core/labeling_memory_mib");
+    ParseParametersFailure(
+        R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7","max_tracked_bytes":268435455,"labeling_memory_mib":128}})JSON",
+        consumers, npm::NpmParameterErrorV1::kInvalidRange, "/core/labeling_memory_mib");
 
     consumers.labeling_available = false;
     ParseParametersFailure(R"JSON({"schema_version":1})JSON", consumers, npm::NpmParameterErrorV1::kUnavailableFeature,
@@ -10733,10 +10757,10 @@ void TestNpmBasicTaskReportsConfigurationFailurePaths() {
         provider.ReleaseTask(task);
     };
 
-    assert_failure("task-invalid-framework-parameter",
+    assert_failure("task-invalid-core-parameter",
                    R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
-                   R"JSON("parameters":"{\"schema_version\":1,\"framework\":{\"max_active_sessions\":\"1\"}}"})JSON",
-                   {"invalid parameters", "/framework/max_active_sessions"});
+                   R"JSON("parameters":"{\"schema_version\":1,\"core\":{\"max_active_sessions\":\"1\"}}"})JSON",
+                   {"invalid parameters", "/core/max_active_sessions"});
     assert_failure("task-invalid-session-parameter",
                    R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
                    R"JSON("features":"basic,session","observing":"session",)JSON"
@@ -10782,9 +10806,8 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     assert(labeling_provider.runtime_status_calls == 0 && labeling_provider.create_matcher_calls == 0);
     provider.ReleaseTask(task);
 
-    const std::string ignored_labeling_json =
-        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
-        R"("parameters":"{\"schema_version\":1,\"framework\":{\"labeling\":null}}"})";
+    const std::string ignored_labeling_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
+                                              R"("parameters":"{\"schema_version\":1,\"core\":{\"labeling\":null}}"})";
     querier.labeling_provider = nullptr;
     const std::string ignored_task_id = "ordinary-ignores-labeling-field";
     config = MakeOperatorTaskConfig(ignored_task_id, ignored_labeling_json, filter_plan);
@@ -10797,9 +10820,9 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
 
     const std::string labeling_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
                                       R"("features":"basic,labeling",)"
-                                      R"("parameters":"{\"schema_version\":1,\"framework\":{)"
+                                      R"("parameters":"{\"schema_version\":1,\"core\":{)"
                                       R"(\"labeling\":\"config.corp-labels@7\",)"
-                                      R"(\"labeling_memory_mib\":128}}"})";
+                                      R"(\"labeling_memory_mib\":127}}"})";
 
     querier.labeling_provider = nullptr;
     const std::string missing_task_id = "missing-labeling-provider";
@@ -10857,7 +10880,7 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     assert(config_registry.resolve_calls == 1 && config_registry.last_reference == "config.corp-labels@7");
     assert(labeling_provider.runtime_status_calls == 3 && labeling_provider.create_matcher_calls == 1);
     assert(labeling_provider.captured_reference == "corp-labels@7");
-    assert(labeling_provider.captured_reserved_bytes == 128ULL * 1024ULL * 1024ULL);
+    assert(labeling_provider.captured_reserved_bytes == 127ULL * 1024ULL * 1024ULL);
     assert(labeling_provider.captured_max_labels == 10'000);
     assert(labeling_provider.captured_max_logical_rules == 50'000);
     assert(labeling_provider.captured_max_compiled_rules == 100'000);
@@ -10886,7 +10909,7 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
 
     const std::string session_labeling_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
                                               R"("features":"basic,session,labeling","observing":"session",)"
-                                              R"("parameters":"{\"schema_version\":1,\"framework\":{)"
+                                              R"("parameters":"{\"schema_version\":1,\"core\":{)"
                                               R"(\"labeling\":\"config.corp-labels@7\"}}"})";
     const std::string session_task_id = "connected-labeling-session-result";
     config = MakeOperatorTaskConfig(session_task_id, session_labeling_json, filter_plan);
@@ -10916,7 +10939,7 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     const std::string invalid_labeling_json =
         R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
         R"("features":"basic,labeling",)"
-        R"("parameters":"{\"schema_version\":1,\"framework\":{\"labeling\":\"@latest\"}}"})";
+        R"("parameters":"{\"schema_version\":1,\"core\":{\"labeling\":\"@latest\"}}"})";
     const std::string invalid_task_id = "invalid-labeling-reference";
     config = MakeOperatorTaskConfig(invalid_task_id, invalid_labeling_json, filter_plan);
     task = nullptr;
@@ -10924,7 +10947,7 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     output_schema = sentinel_schema;
     assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == EINVAL);
     assert(output_schema == sentinel_schema);
-    assert(task->LastError().find("/framework/labeling") != std::string::npos);
+    assert(task->LastError().find("/core/labeling") != std::string::npos);
     assert(querier.labeling_queries == 6);
     assert(labeling_provider.runtime_status_calls == 5 && labeling_provider.create_matcher_calls == 2);
     provider.ReleaseTask(task);
@@ -10959,7 +10982,7 @@ void TestRealFlowLabelingMatcherWithNpmBasicTask() {
          MakeBatchPacketRecord(reverse_first, 0, 300, 3), MakeBatchPacketRecord(unmatched, 0, 400, 4)});
     const std::string filter_plan = R"({"version":1,"root":null})";
     const std::string params =
-        R"("parameters":"{\"schema_version\":1,\"framework\":{\"labeling\":\"config.corp-labels@7\"}}")";
+        R"("parameters":"{\"schema_version\":1,\"core\":{\"labeling\":\"config.corp-labels@7\"}}")";
 
     for (bool session_result : {false, true}) {
         const std::string task_id = session_result ? "real-labeling-session" : "real-labeling-basic";
@@ -11324,7 +11347,8 @@ int main() {
     TestNpmParametersV1OwnsCanonicalConfig();
     TestNpmParametersV1RejectsEnvelopeAndDuplicatesAtomically();
     TestNpmParametersV1ConsumesOnlyEnabledAvailableModules();
-    TestNpmParametersV1ValidatesFrameworkAndConditionalLabeling();
+    TestNpmParametersV1UsesCoreNamespaceExclusively();
+    TestNpmParametersV1ValidatesCoreAndConditionalLabeling();
     TestNpmTaskBudgetLimitsAtomicityAndIsolation();
     TestNpmTaskBudgetConcurrentAccountingAndSharedLifetime();
     TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Offline();

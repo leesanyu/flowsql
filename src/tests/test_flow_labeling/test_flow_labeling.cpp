@@ -2,9 +2,13 @@
 // Licensed under the MIT License.
 
 #include <framework/interfaces/iflow_labeling.h>
+#include <plugins/flow_labeling/flow_labeling_plugin.h>
 #include <common/loader.hpp>
 
 #include <arpa/inet.h>
+#include <sched.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -53,6 +57,161 @@ flowsql::FlowLabelingCompileRequestV1 MakeRequest(const flowsql::ConfigChannelSn
     request.max_logical_rules = 50000;
     request.max_compiled_rules = 100000;
     return request;
+}
+
+uint32_t FirstAvailableCpu() {
+    cpu_set_t affinity;
+    CPU_ZERO(&affinity);
+    assert(sched_getaffinity(0, sizeof(affinity), &affinity) == 0);
+    for (uint32_t cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (CPU_ISSET(cpu, &affinity)) return cpu;
+    }
+    assert(false && "the process affinity set must contain at least one CPU");
+    return 0;
+}
+
+uint32_t FirstUnavailableCpu() {
+    cpu_set_t affinity;
+    CPU_ZERO(&affinity);
+    assert(sched_getaffinity(0, sizeof(affinity), &affinity) == 0);
+    for (uint32_t cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(cpu, &affinity)) return cpu;
+    }
+    return CPU_SETSIZE;
+}
+
+void TestStartupOptions() {
+    const uint32_t available_cpu = FirstAvailableCpu();
+    flowsql::FlowLabelingStartupOptions options;
+    options.eal_memory_mib = 2048;
+    options.eal_lcore_cpu = available_cpu;
+
+    assert(flowsql::ParseFlowLabelingStartupOptions(nullptr, &options) == 0);
+    assert(options.eal_memory_mib == 512 && !options.eal_lcore_cpu.has_value());
+    options.eal_memory_mib = 2048;
+    options.eal_lcore_cpu = available_cpu;
+    assert(flowsql::ParseFlowLabelingStartupOptions("", &options) == 0);
+    assert(options.eal_memory_mib == 512 && !options.eal_lcore_cpu.has_value());
+
+    assert(flowsql::ParseFlowLabelingStartupOptions("eal_memory_mib=4096", &options) == 0);
+    assert(options.eal_memory_mib == 4096 && !options.eal_lcore_cpu.has_value());
+    const std::string cpu_only = "eal_lcore_cpu=" + std::to_string(available_cpu);
+    assert(flowsql::ParseFlowLabelingStartupOptions(cpu_only.c_str(), &options) == 0);
+    assert(options.eal_memory_mib == 512 && options.eal_lcore_cpu == available_cpu);
+    const std::string both = "eal_lcore_cpu=" + std::to_string(available_cpu) + ";eal_memory_mib=512";
+    assert(flowsql::ParseFlowLabelingStartupOptions(both.c_str(), &options) == 0);
+    assert(options.eal_memory_mib == 512 && options.eal_lcore_cpu == available_cpu);
+
+    const flowsql::FlowLabelingStartupOptions previous = options;
+    const std::vector<std::string> invalid = {
+        ";",
+        "eal_memory_mib=512;",
+        ";eal_memory_mib=512",
+        "eal_memory_mib=512;;eal_lcore_cpu=" + std::to_string(available_cpu),
+        "eal_memory_mib",
+        "eal_memory_mib=",
+        "=512",
+        "eal_memory_mib=512=0",
+        "unknown=512",
+        "eal_memory_mib=512;eal_memory_mib=1024",
+        "eal_lcore_cpu=" + std::to_string(available_cpu) + ";eal_lcore_cpu=" + std::to_string(available_cpu),
+        "eal_memory_mib=511",
+        "eal_memory_mib=4097",
+        "eal_memory_mib=+512",
+        "eal_memory_mib=-512",
+        "eal_memory_mib=512x",
+        "eal_memory_mib=4294967296",
+        "eal_lcore_cpu=+" + std::to_string(available_cpu),
+        "eal_lcore_cpu=-1",
+        "eal_lcore_cpu=1x",
+        "eal_lcore_cpu=4294967296",
+        "eal_lcore_cpu=" + std::to_string(FirstUnavailableCpu()),
+    };
+    for (const auto& option : invalid) {
+        assert(flowsql::ParseFlowLabelingStartupOptions(option.c_str(), &options) != 0);
+        assert(options.eal_memory_mib == previous.eal_memory_mib);
+        assert(options.eal_lcore_cpu == previous.eal_lcore_cpu);
+    }
+    assert(flowsql::ParseFlowLabelingStartupOptions(nullptr, nullptr) != 0);
+}
+
+void TestEalArguments() {
+    const uint32_t available_cpu = FirstAvailableCpu();
+    flowsql::FlowLabelingStartupOptions options;
+    const std::vector<std::string> expected_default = {"flowsql-flow-labeling",
+                                                       "--lcores=0@" + std::to_string(available_cpu),
+                                                       "--main-lcore=0",
+                                                       "-m",
+                                                       "512",
+                                                       "--no-huge",
+                                                       "--no-pci",
+                                                       "--no-telemetry",
+                                                       "--no-shconf"};
+    assert(flowsql::BuildFlowLabelingEalArguments(options, available_cpu) == expected_default);
+
+    options.eal_memory_mib = 768;
+    options.eal_lcore_cpu = available_cpu;
+    auto expected_override = expected_default;
+    expected_override[4] = "768";
+    assert(flowsql::BuildFlowLabelingEalArguments(options, available_cpu + 1) == expected_override);
+}
+
+void TestIsolatedEalStartup(const char* library) {
+    // DPDK EAL is process-global; separate children prove the default and an override can each start cleanly.
+    const std::vector<std::string> startup_options = {
+        "", "eal_memory_mib=768;eal_lcore_cpu=" + std::to_string(FirstAvailableCpu())};
+    for (const auto& option : startup_options) {
+        const pid_t child = fork();
+        assert(child >= 0);
+        if (child == 0) {
+            auto* loader = flowsql::PluginLoader::Single();
+            const char* plugins[] = {library};
+            const char* options[] = {option.empty() ? nullptr : option.c_str()};
+            if (loader->Load(flowsql::get_absolute_process_path(), plugins, options, 1) != 0) _exit(1);
+            auto* provider =
+                static_cast<flowsql::IFlowLabelingProviderV1*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER_V1));
+            if (provider == nullptr || loader->StartAll() != 0) _exit(2);
+            flowsql::FlowLabelingDiagnosticV1 diagnostic;
+            if (provider->RuntimeStatus(&diagnostic) != flowsql::FlowLabelingErrorV1::kNone) _exit(3);
+            loader->StopAll();
+            if (loader->Unload() != 0) _exit(4);
+            _exit(0);
+        }
+        int status = 0;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+
+    // Two independent plugin instances share one process EAL. The second initialization must fail and roll back both.
+    const pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        const std::filesystem::path copy = std::string(library) + ".second." + std::to_string(getpid()) + ".so";
+        std::error_code error;
+        if (!std::filesystem::copy_file(library, copy, std::filesystem::copy_options::overwrite_existing, error)) {
+            _exit(5);
+        }
+        auto* loader = flowsql::PluginLoader::Single();
+        const std::string copy_path = copy.string();
+        const char* plugins[] = {library, copy_path.c_str()};
+        const char* options[] = {"eal_memory_mib=512", "eal_memory_mib=512"};
+        if (loader->Load(flowsql::get_absolute_process_path(), plugins, options, 2) != 0) _exit(6);
+        if (loader->StartAll() == 0) _exit(7);
+        auto* provider =
+            static_cast<flowsql::IFlowLabelingProviderV1*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER_V1));
+        flowsql::FlowLabelingDiagnosticV1 diagnostic;
+        if (provider == nullptr || provider->RuntimeStatus(&diagnostic) != flowsql::FlowLabelingErrorV1::kUnavailable) {
+            _exit(8);
+        }
+        loader->StopAll();
+        if (loader->Unload() != 0) _exit(9);
+        std::filesystem::remove(copy, error);
+        if (error) _exit(10);
+        _exit(0);
+    }
+    int status = 0;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
 std::string EmptyConfig(const std::string& algorithm = "scalar", uint64_t runtime_bytes = 4 * 1024 * 1024) {
@@ -766,14 +925,29 @@ void TestClassification(flowsql::IFlowLabelMatcherV1* matcher) {
 
 int main(int argc, char** argv) {
     assert(argc == 2);
+    TestStartupOptions();
+    TestEalArguments();
+    TestIsolatedEalStartup(argv[1]);
     flowsql::PluginLoader* loader = flowsql::PluginLoader::Single();
     const char* plugins[] = {argv[1]};
-    assert(loader->Load(plugins, 1) == 0);
+    const std::string missing = std::string(argv[1]) + ".not-installed";
+    const char* missing_plugins[] = {missing.c_str()};
+    assert(loader->Load(missing_plugins, 1) != 0);
+    assert(loader->First(flowsql::IID_PLUGIN) == nullptr);
+    const char* invalid_options[] = {"eal_memory_mib=511"};
+    assert(loader->Load(flowsql::get_absolute_process_path(), plugins, invalid_options, 1) != 0);
+    assert(loader->First(flowsql::IID_PLUGIN) == nullptr);
+    assert(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER_V1) == nullptr);
+
+    const std::string option = "eal_memory_mib=512;eal_lcore_cpu=" + std::to_string(FirstAvailableCpu());
+    const char* options[] = {option.c_str()};
+    assert(loader->Load(flowsql::get_absolute_process_path(), plugins, options, 1) == 0);
 
     auto* plugin = static_cast<flowsql::IPlugin*>(loader->First(flowsql::IID_PLUGIN));
     auto* provider =
         static_cast<flowsql::IFlowLabelingProviderV1*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER_V1));
     assert(plugin != nullptr && provider != nullptr);
+    assert(plugin->Option(nullptr) != 0);
 
     flowsql::FlowLabelingDiagnosticV1 diagnostic;
     assert(provider->RuntimeStatus(&diagnostic) == flowsql::FlowLabelingErrorV1::kUnavailable);

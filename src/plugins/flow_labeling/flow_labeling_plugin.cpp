@@ -1155,11 +1155,8 @@ int CurrentCpu() {
     return cpu < 0 ? 0 : cpu;
 }
 
-int InitializeEal() {
-    const std::string lcores = "--lcores=0@" + std::to_string(CurrentCpu());
-    std::vector<std::string> arguments = {
-        "flowsql-flow-labeling", lcores,       "--main-lcore=0", "-m", "512", "--no-huge", "--no-pci",
-        "--no-telemetry",        "--no-shconf"};
+int InitializeEal(const FlowLabelingStartupOptions& options) {
+    std::vector<std::string> arguments = BuildFlowLabelingEalArguments(options, CurrentCpu());
     std::vector<char*> argv;
     argv.reserve(arguments.size());
     for (std::string& argument : arguments) argv.push_back(argument.data());
@@ -1232,7 +1229,15 @@ class FlowLabelingPlugin::Matcher final : public IFlowLabelMatcherV1 {
     std::vector<LabelRecord> labels_;
 };
 
-int FlowLabelingPlugin::Option(const char* arg) { return arg == nullptr || arg[0] == '\0' ? 0 : -1; }
+int FlowLabelingPlugin::Option(const char* arg) {
+    FlowLabelingStartupOptions parsed;
+    if (ParseFlowLabelingStartupOptions(arg, &parsed) != 0) return -1;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (loaded_ || ready_ || eal_initialized_) return -1;
+    startup_options_ = std::move(parsed);
+    return 0;
+}
 
 int FlowLabelingPlugin::Load(IQuerier*) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1253,7 +1258,7 @@ int FlowLabelingPlugin::Start() {
     if (!loaded_) return -1;
     if (ready_) return 0;
     if (eal_initialized_) return -1;
-    if (InitializeEal() < 0) return -1;
+    if (InitializeEal(startup_options_) < 0) return -1;
     eal_initialized_ = true;
     ready_ = true;
     return 0;

@@ -393,6 +393,10 @@ tcpdump 语法，也不代表 TCP stream、重组、会话或客户端/服务端
 采样识别，输出会话结果，不保留 `raw_data`；它不提供 RTT/重传算法、TCP 重组或应用交易解析。不能区分隧道
 上下文的封装流量会明确报错，不按内层五元组合并。
 
+需要按 observation domain、MAC、VLAN、IP/CIDR、传输协议和端口为双向会话绑定唯一主标签时，参见
+[Flow Labeling 构建、部署、规则配置与容量指引](docs/flow-labeling.md)。该文档说明 DPDK 依赖、CMake 三态、
+Scheduler EAL option、Config Channel 精确快照、`labeling_memory_mib` 连续任务预算及可复核 benchmark。
+
 部署前必须在 Scheduler **同一进程**加载 `libflowsql_npi.so`、`libflowsql_pcapfile.so` 和
 `libflowsql_npm_basic.so`。NPI 的 JSON option 必须包含指向可读协议词典的 `ldfile`，例如原生运行目录中的
 `{"ldfile":"./config/protocols.yml"}`，Docker 中为 `/opt/flowsql/config/protocols.yml`。
