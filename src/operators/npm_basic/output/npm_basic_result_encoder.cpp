@@ -84,9 +84,10 @@ class PendingOutputOwner {
 
 NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& results,
                                           std::shared_ptr<arrow::RecordBatch>* output, std::string* error,
-                                          bool labeling_enabled) {
+                                          bool labeling_enabled, arrow::MemoryPool* pool) {
     if (output == nullptr) return Fail(NpmBasicEncodeError::kNullOutput, "output is null", error);
 
+    if (!pool) pool = arrow::default_memory_pool();
     try {
         for (size_t index = 0; index < results.size(); ++index) {
             const auto validation = ValidateNpmBasicResult(results[index]);
@@ -104,29 +105,29 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
             }
         }
 
-        arrow::UInt64Builder session_id;
-        arrow::UInt64Builder observation_domain_id;
-        arrow::UInt64Builder revision;
-        arrow::Int64Builder observed_at;
-        arrow::BooleanBuilder is_final;
-        arrow::UInt8Builder ip_family;
-        arrow::UInt8Builder transport_protocol;
-        arrow::StringBuilder a_ip;
-        arrow::StringBuilder b_ip;
-        arrow::UInt16Builder a_port;
-        arrow::UInt16Builder b_port;
-        arrow::Int64Builder first_ns;
-        arrow::Int64Builder last_ns;
-        arrow::UInt64Builder packets_ab;
-        arrow::UInt64Builder packets_ba;
-        arrow::UInt64Builder wire_bytes_ab;
-        arrow::UInt64Builder wire_bytes_ba;
-        arrow::UInt32Builder primary_label_id;
-        arrow::StringBuilder protocol_status;
-        arrow::UInt16Builder protocol_id;
-        arrow::UInt16Builder protocol_sub_id;
-        arrow::StringBuilder protocol;
-        arrow::StringBuilder end_reason;
+        arrow::UInt64Builder session_id(pool);
+        arrow::UInt64Builder observation_domain_id(pool);
+        arrow::UInt64Builder revision(pool);
+        arrow::Int64Builder observed_at(pool);
+        arrow::BooleanBuilder is_final(pool);
+        arrow::UInt8Builder ip_family(pool);
+        arrow::UInt8Builder transport_protocol(pool);
+        arrow::StringBuilder a_ip(pool);
+        arrow::StringBuilder b_ip(pool);
+        arrow::UInt16Builder a_port(pool);
+        arrow::UInt16Builder b_port(pool);
+        arrow::Int64Builder first_ns(pool);
+        arrow::Int64Builder last_ns(pool);
+        arrow::UInt64Builder packets_ab(pool);
+        arrow::UInt64Builder packets_ba(pool);
+        arrow::UInt64Builder wire_bytes_ab(pool);
+        arrow::UInt64Builder wire_bytes_ba(pool);
+        arrow::UInt32Builder primary_label_id(pool);
+        arrow::StringBuilder protocol_status(pool);
+        arrow::UInt16Builder protocol_id(pool);
+        arrow::UInt16Builder protocol_sub_id(pool);
+        arrow::StringBuilder protocol(pool);
+        arrow::StringBuilder end_reason(pool);
 
         auto check = [&](const arrow::Status& status, const char* field) {
             if (status.ok()) return true;

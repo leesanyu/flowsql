@@ -18,6 +18,7 @@ add_library(${PROJECT_NAME} SHARED
     modules/basic/npm_basic_result_projector.cpp
     modules/session/npm_session_analysis_module.cpp
     modules/session/npm_tcp_performance_tracker.cpp
+    output/npm_result_router.cpp
     output/npm_basic_result_collector.cpp
     output/npm_basic_result_encoder.cpp
     output/npm_session_result_encoder.cpp

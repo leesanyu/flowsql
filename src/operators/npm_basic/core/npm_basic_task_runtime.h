@@ -15,6 +15,7 @@
 #include <operators/npm_basic/output/npm_basic_result_collector.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -114,20 +115,21 @@ struct NpmBasicRealtimeMaintenanceStatus {
 /** Fully initialized task-private state published atomically by Create(). */
 class NpmBasicTaskRuntime final {
  public:
-    static NpmBasicTaskRuntimeStatus Create(const NpmBasicTaskConfig& config, IQuerier* querier,
-                                            const std::shared_ptr<arrow::Schema>& input_schema,
-                                            std::shared_ptr<arrow::Schema>* output_schema,
-                                            std::unique_ptr<NpmBasicTaskRuntime>* output,
-                                            std::shared_ptr<NpmTaskBudget> budget = {},
-                                            IFlowLabelMatcherV1* matcher = nullptr,
-                                            const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1());
+    static NpmBasicTaskRuntimeStatus Create(
+        const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
+        std::shared_ptr<arrow::Schema>* output_schema, std::unique_ptr<NpmBasicTaskRuntime>* output,
+        std::shared_ptr<NpmTaskBudget> budget = {}, IFlowLabelMatcherV1* matcher = nullptr,
+        const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1(),
+        std::unique_ptr<INpmResultConsumerV1> consumer = {}, std::string task_id = {});
     static NpmBasicTaskRuntimeStatus CreateWithTimeCapabilities(
         const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
         const NpmTimeCapabilities& time_capabilities, std::shared_ptr<arrow::Schema>* output_schema,
         std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget = {},
-        IFlowLabelMatcherV1* matcher = nullptr, const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1());
+        IFlowLabelMatcherV1* matcher = nullptr, const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1(),
+        std::unique_ptr<INpmResultConsumerV1> consumer = {}, std::string task_id = {});
 
-    ~NpmBasicTaskRuntime() = default;
+    ~NpmBasicTaskRuntime();
+    const NpmResultContextV1& ResultContext() const { return router_->Context(); }
     NpmBasicTaskRuntime(const NpmBasicTaskRuntime&) = delete;
     NpmBasicTaskRuntime& operator=(const NpmBasicTaskRuntime&) = delete;
     NpmBasicTaskRuntime(NpmBasicTaskRuntime&&) = delete;
@@ -166,6 +168,7 @@ class NpmBasicTaskRuntime final {
     void SetLastErrorOnce(const char* error) noexcept;
     void ReleaseResources() noexcept;
 
+    std::shared_ptr<NpmResultRouter> router_;
     NpmBasicTaskConfig config_;
     std::unique_ptr<NpmProtocolContext> protocol_context_;
     std::shared_ptr<NpmTaskBudget> budget_;
@@ -182,6 +185,7 @@ class NpmBasicTaskRuntime final {
     int64_t last_realtime_drive_ns_ = 0;
     int64_t last_realtime_snapshot_ns_ = 0;
     mutable std::mutex operation_mutex_;
+    std::condition_variable operation_done_;
     std::atomic<bool> cancellation_requested_{false};
     std::atomic<bool> operation_active_{false};
     std::atomic<NpmEofFlushState> state_{NpmEofFlushState::kOpen};

@@ -235,8 +235,9 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
         }
     }
 
-    const auto runtime_status = NpmBasicTaskRuntime::Create(parsed, querier_, input_schema, &next_schema, &next_runtime,
-                                                            std::move(labeling_budget), matcher);
+    const auto runtime_status =
+        NpmBasicTaskRuntime::Create(parsed, querier_, input_schema, &next_schema, &next_runtime,
+                                    std::move(labeling_budget), matcher, ProductionNpmModuleCatalogV1(), {}, task_id_);
     if (runtime_status.error != NpmBasicTaskRuntimeError::kNone) {
         expected = State::kOpening;
         expected = Fail(expected, kRuntimeOpenError);

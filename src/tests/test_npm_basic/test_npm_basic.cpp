@@ -503,8 +503,10 @@ PacketFixture MakeIpv4TcpPacket(const char* src, uint16_t src_port, const char* 
     tcp->offset = 5;
     tcp->flags.flags_byte = flags;
     tcp->window = htons(window);
-    std::memcpy(fixture.bytes.data() + sizeof(flowsql::Ipv4Header) + sizeof(flowsql::TcpHeader), payload.data(),
-                payload.size());
+    if (!payload.empty()) {
+        std::memcpy(fixture.bytes.data() + sizeof(flowsql::Ipv4Header) + sizeof(flowsql::TcpHeader), payload.data(),
+                    payload.size());
+    }
 
     fixture.layer.status = flowsql::packet::LayerStatus::kDecoded;
     fixture.layer.layer_count = 2;
@@ -547,7 +549,9 @@ PacketFixture MakeIpv6UdpPacket(const char* src, uint16_t src_port, const char* 
     udp->src_port = htons(src_port);
     udp->dst_port = htons(dst_port);
     udp->length = htons(static_cast<uint16_t>(sizeof(flowsql::UdpHeader) + payload.size()));
-    std::memcpy(fixture.bytes.data() + udp_offset + sizeof(flowsql::UdpHeader), payload.data(), payload.size());
+    if (!payload.empty()) {
+        std::memcpy(fixture.bytes.data() + udp_offset + sizeof(flowsql::UdpHeader), payload.data(), payload.size());
+    }
 
     fixture.layer.status = flowsql::packet::LayerStatus::kDecoded;
     fixture.layer.layer_count = fragmented ? 3 : 2;
@@ -2591,6 +2595,14 @@ void TestSessionTableIsolationCapacityAndErrors() {
 }
 
 npm::NpmCaptureProgressUpdate OfflineProgress(int64_t capture_time_ns);
+uint64_t ResultBufferCapacity(const std::shared_ptr<arrow::RecordBatch>& batch) {
+    uint64_t bytes = 0;
+    for (const auto& column : batch->columns())
+        for (const auto& buffer : column->data()->buffers)
+            if (buffer) bytes += buffer->capacity();
+    return bytes;
+}
+
 void AssertTaskBudgetUsage(const npm::NpmBudgetUsage& usage, uint64_t session, uint64_t module, uint64_t input,
                            uint64_t output);
 
@@ -7756,11 +7768,11 @@ void TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions() {
     assert(status.snapshot_due && status.emitted);
     assert(status.active_sessions == 2 && status.ended_sessions == 0);
     assert(output != nullptr && output != original_output && output->num_rows() == 2);
-    const auto first_ids = BasicResultColumn<arrow::UInt64Array>(output, 0);
-    const auto first_revisions = BasicResultColumn<arrow::UInt64Array>(output, 2);
-    const auto first_observed = BasicResultColumn<arrow::Int64Array>(output, 3);
-    const auto first_final = BasicResultColumn<arrow::BooleanArray>(output, 4);
-    const auto first_reasons = BasicResultColumn<arrow::StringArray>(output, 21);
+    const auto* first_ids = BasicResultColumn<arrow::UInt64Array>(output, 0).get();
+    const auto* first_revisions = BasicResultColumn<arrow::UInt64Array>(output, 2).get();
+    const auto* first_observed = BasicResultColumn<arrow::Int64Array>(output, 3).get();
+    const auto* first_final = BasicResultColumn<arrow::BooleanArray>(output, 4).get();
+    const auto* first_reasons = BasicResultColumn<arrow::StringArray>(output, 21).get();
     assert(first_ids->Value(0) == 1 && first_ids->Value(1) == 2);
     assert(first_revisions->Value(0) == 1 && first_revisions->Value(1) == 1);
     assert(first_observed->Value(0) == 1'700'000'000'020'000'000LL);
@@ -7787,10 +7799,10 @@ void TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions() {
                                                &output);
     assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
     assert(status.snapshot_due && status.emitted && output->num_rows() == 2);
-    const auto second_ids = BasicResultColumn<arrow::UInt64Array>(output, 0);
-    const auto second_revisions = BasicResultColumn<arrow::UInt64Array>(output, 2);
-    const auto second_packets_ab = BasicResultColumn<arrow::UInt64Array>(output, 13);
-    const auto second_packets_ba = BasicResultColumn<arrow::UInt64Array>(output, 14);
+    const auto* second_ids = BasicResultColumn<arrow::UInt64Array>(output, 0).get();
+    const auto* second_revisions = BasicResultColumn<arrow::UInt64Array>(output, 2).get();
+    const auto* second_packets_ab = BasicResultColumn<arrow::UInt64Array>(output, 13).get();
+    const auto* second_packets_ba = BasicResultColumn<arrow::UInt64Array>(output, 14).get();
     assert(second_ids->Value(0) == 1 && second_ids->Value(1) == 2);
     assert(second_revisions->Value(0) == 2 && second_revisions->Value(1) == 2);
     assert(second_packets_ab->Value(0) + second_packets_ba->Value(0) == 2);
@@ -7805,11 +7817,11 @@ void TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions() {
     assert(!status.snapshot_due && status.emitted);
     assert(status.active_sessions == 0 && status.ended_sessions == 2);
     assert(output != nullptr && output->num_rows() == 2);
-    const auto final_revisions = BasicResultColumn<arrow::UInt64Array>(output, 2);
-    const auto final_observed = BasicResultColumn<arrow::Int64Array>(output, 3);
-    const auto final_flags = BasicResultColumn<arrow::BooleanArray>(output, 4);
-    const auto final_protocol = BasicResultColumn<arrow::StringArray>(output, 17);
-    const auto final_reasons = BasicResultColumn<arrow::StringArray>(output, 21);
+    const auto* final_revisions = BasicResultColumn<arrow::UInt64Array>(output, 2).get();
+    const auto* final_observed = BasicResultColumn<arrow::Int64Array>(output, 3).get();
+    const auto* final_flags = BasicResultColumn<arrow::BooleanArray>(output, 4).get();
+    const auto* final_protocol = BasicResultColumn<arrow::StringArray>(output, 17).get();
+    const auto* final_reasons = BasicResultColumn<arrow::StringArray>(output, 21).get();
     for (int64_t row = 0; row < output->num_rows(); ++row) {
         assert(final_revisions->Value(row) == 3);
         assert(final_observed->Value(row) == 1'700'000'002'000'000'000LL);
@@ -8190,9 +8202,9 @@ void TestNpmBasicTaskRuntimeClosesRealtimeSessionsAfterPeriodicSnapshots() {
                 assert(session_module->tracked_sessions() == 0 && session_module->tracked_bytes() == 0);
             }
 
-            const uint64_t first_output_bytes = BasicResultBufferBytes(first_snapshot_output);
-            const uint64_t second_output_bytes = BasicResultBufferBytes(second_snapshot_output);
-            const uint64_t final_output_bytes = BasicResultBufferBytes(output);
+            const uint64_t first_output_bytes = ResultBufferCapacity(first_snapshot_output);
+            const uint64_t second_output_bytes = ResultBufferCapacity(second_snapshot_output);
+            const uint64_t final_output_bytes = ResultBufferCapacity(output);
             AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0,
                                   first_output_bytes + second_output_bytes + final_output_bytes);
             first_snapshot_output.reset();
@@ -8292,7 +8304,7 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
                 assert(SessionResultColumn<arrow::UInt16Array>(batch, 15)->Value(0) == 7);
                 assert(SessionResultColumn<arrow::UInt16Array>(batch, 16)->Value(0) == 8);
                 assert(SessionResultColumn<arrow::StringArray>(batch, 17)->GetString(0) == "SUB");
-                const auto reasons = SessionResultColumn<arrow::StringArray>(batch, 18);
+                const auto* reasons = SessionResultColumn<arrow::StringArray>(batch, 18).get();
                 if (end_reason == nullptr) {
                     assert(reasons->IsNull(0));
                 } else {
@@ -8325,7 +8337,7 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
             assert(BasicResultColumn<arrow::UInt16Array>(batch, 18)->Value(0) == 7);
             assert(BasicResultColumn<arrow::UInt16Array>(batch, 19)->Value(0) == 8);
             assert(BasicResultColumn<arrow::StringArray>(batch, 20)->GetString(0) == "SUB");
-            const auto reasons = BasicResultColumn<arrow::StringArray>(batch, 21);
+            const auto* reasons = BasicResultColumn<arrow::StringArray>(batch, 21).get();
             if (end_reason == nullptr) {
                 assert(reasons->IsNull(0));
             } else {
@@ -8445,9 +8457,9 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
         if (session_module != nullptr) {
             assert(session_module->tracked_sessions() == 1 && session_module->tracked_bytes() > 0);
         }
-        const uint64_t first_snapshot_bytes = BasicResultBufferBytes(first_snapshot_output);
-        const uint64_t second_snapshot_bytes = BasicResultBufferBytes(second_snapshot_output);
-        const uint64_t reuse_output_bytes = BasicResultBufferBytes(reuse_output);
+        const uint64_t first_snapshot_bytes = ResultBufferCapacity(first_snapshot_output);
+        const uint64_t second_snapshot_bytes = ResultBufferCapacity(second_snapshot_output);
+        const uint64_t reuse_output_bytes = ResultBufferCapacity(reuse_output);
         AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(),
                               session_module == nullptr ? 0 : session_module->tracked_bytes(), 0,
                               first_snapshot_bytes + second_snapshot_bytes + reuse_output_bytes);
@@ -8523,8 +8535,8 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
             assert(session_module->tracked_sessions() == 0 && session_module->tracked_bytes() == 0);
         }
 
-        const uint64_t replacement_snapshot_bytes = BasicResultBufferBytes(replacement_snapshot_output);
-        const uint64_t closed_output_bytes = BasicResultBufferBytes(output);
+        const uint64_t replacement_snapshot_bytes = ResultBufferCapacity(replacement_snapshot_output);
+        const uint64_t closed_output_bytes = ResultBufferCapacity(output);
         uint64_t retained_output_bytes = first_snapshot_bytes + second_snapshot_bytes + reuse_output_bytes +
                                          replacement_snapshot_bytes + closed_output_bytes;
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, retained_output_bytes);
@@ -8650,27 +8662,27 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
             if (observing_session) {
                 assert(batch->schema().get() == npm::NpmSessionResultSchema().get());
                 assert(batch->num_columns() == 49);
-                const auto session_ids = SessionResultColumn<arrow::UInt64Array>(batch, 0);
-                const auto revisions = SessionResultColumn<arrow::UInt64Array>(batch, 2);
-                const auto observed_at = SessionResultColumn<arrow::Int64Array>(batch, 3);
-                const auto final_flags = SessionResultColumn<arrow::BooleanArray>(batch, 4);
-                const auto transports = SessionResultColumn<arrow::UInt8Array>(batch, 6);
-                const auto first_ns = SessionResultColumn<arrow::Int64Array>(batch, 11);
-                const auto last_ns = SessionResultColumn<arrow::Int64Array>(batch, 12);
-                const auto durations = SessionResultColumn<arrow::Int64Array>(batch, 13);
-                const auto protocol_status = SessionResultColumn<arrow::StringArray>(batch, 14);
-                const auto protocol_ids = SessionResultColumn<arrow::UInt16Array>(batch, 15);
-                const auto protocol_sub_ids = SessionResultColumn<arrow::UInt16Array>(batch, 16);
-                const auto protocol_names = SessionResultColumn<arrow::StringArray>(batch, 17);
-                const auto end_reasons = SessionResultColumn<arrow::StringArray>(batch, 18);
-                const auto packets_ab = SessionResultColumn<arrow::UInt64Array>(batch, 19);
-                const auto packets_ba = SessionResultColumn<arrow::UInt64Array>(batch, 20);
-                const auto wire_bytes_ab = SessionResultColumn<arrow::UInt64Array>(batch, 21);
-                const auto wire_bytes_ba = SessionResultColumn<arrow::UInt64Array>(batch, 22);
-                const auto payload_bytes_ab = SessionResultColumn<arrow::UInt64Array>(batch, 23);
-                const auto payload_bytes_ba = SessionResultColumn<arrow::UInt64Array>(batch, 24);
-                const auto unique_payload_bytes_ab = SessionResultColumn<arrow::UInt64Array>(batch, 30);
-                const auto unique_payload_bytes_ba = SessionResultColumn<arrow::UInt64Array>(batch, 31);
+                const auto* session_ids = SessionResultColumn<arrow::UInt64Array>(batch, 0).get();
+                const auto* revisions = SessionResultColumn<arrow::UInt64Array>(batch, 2).get();
+                const auto* observed_at = SessionResultColumn<arrow::Int64Array>(batch, 3).get();
+                const auto* final_flags = SessionResultColumn<arrow::BooleanArray>(batch, 4).get();
+                const auto* transports = SessionResultColumn<arrow::UInt8Array>(batch, 6).get();
+                const auto* first_ns = SessionResultColumn<arrow::Int64Array>(batch, 11).get();
+                const auto* last_ns = SessionResultColumn<arrow::Int64Array>(batch, 12).get();
+                const auto* durations = SessionResultColumn<arrow::Int64Array>(batch, 13).get();
+                const auto* protocol_status = SessionResultColumn<arrow::StringArray>(batch, 14).get();
+                const auto* protocol_ids = SessionResultColumn<arrow::UInt16Array>(batch, 15).get();
+                const auto* protocol_sub_ids = SessionResultColumn<arrow::UInt16Array>(batch, 16).get();
+                const auto* protocol_names = SessionResultColumn<arrow::StringArray>(batch, 17).get();
+                const auto* end_reasons = SessionResultColumn<arrow::StringArray>(batch, 18).get();
+                const auto* packets_ab = SessionResultColumn<arrow::UInt64Array>(batch, 19).get();
+                const auto* packets_ba = SessionResultColumn<arrow::UInt64Array>(batch, 20).get();
+                const auto* wire_bytes_ab = SessionResultColumn<arrow::UInt64Array>(batch, 21).get();
+                const auto* wire_bytes_ba = SessionResultColumn<arrow::UInt64Array>(batch, 22).get();
+                const auto* payload_bytes_ab = SessionResultColumn<arrow::UInt64Array>(batch, 23).get();
+                const auto* payload_bytes_ba = SessionResultColumn<arrow::UInt64Array>(batch, 24).get();
+                const auto* unique_payload_bytes_ab = SessionResultColumn<arrow::UInt64Array>(batch, 30).get();
+                const auto* unique_payload_bytes_ba = SessionResultColumn<arrow::UInt64Array>(batch, 31).get();
 
                 assert(session_ids->Value(0) == 1 && session_ids->Value(1) == 2);
                 assert(revisions->Value(0) == revision && revisions->Value(1) == revision);
@@ -8711,22 +8723,22 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
 
             assert(batch->schema().get() == npm::NpmBasicResultSchema().get());
             assert(batch->num_columns() == 22);
-            const auto session_ids = BasicResultColumn<arrow::UInt64Array>(batch, 0);
-            const auto revisions = BasicResultColumn<arrow::UInt64Array>(batch, 2);
-            const auto observed_at = BasicResultColumn<arrow::Int64Array>(batch, 3);
-            const auto final_flags = BasicResultColumn<arrow::BooleanArray>(batch, 4);
-            const auto transports = BasicResultColumn<arrow::UInt8Array>(batch, 6);
-            const auto first_ns = BasicResultColumn<arrow::Int64Array>(batch, 11);
-            const auto last_ns = BasicResultColumn<arrow::Int64Array>(batch, 12);
-            const auto packets_ab = BasicResultColumn<arrow::UInt64Array>(batch, 13);
-            const auto packets_ba = BasicResultColumn<arrow::UInt64Array>(batch, 14);
-            const auto wire_bytes_ab = BasicResultColumn<arrow::UInt64Array>(batch, 15);
-            const auto wire_bytes_ba = BasicResultColumn<arrow::UInt64Array>(batch, 16);
-            const auto protocol_status = BasicResultColumn<arrow::StringArray>(batch, 17);
-            const auto protocol_ids = BasicResultColumn<arrow::UInt16Array>(batch, 18);
-            const auto protocol_sub_ids = BasicResultColumn<arrow::UInt16Array>(batch, 19);
-            const auto protocol_names = BasicResultColumn<arrow::StringArray>(batch, 20);
-            const auto end_reasons = BasicResultColumn<arrow::StringArray>(batch, 21);
+            const auto* session_ids = BasicResultColumn<arrow::UInt64Array>(batch, 0).get();
+            const auto* revisions = BasicResultColumn<arrow::UInt64Array>(batch, 2).get();
+            const auto* observed_at = BasicResultColumn<arrow::Int64Array>(batch, 3).get();
+            const auto* final_flags = BasicResultColumn<arrow::BooleanArray>(batch, 4).get();
+            const auto* transports = BasicResultColumn<arrow::UInt8Array>(batch, 6).get();
+            const auto* first_ns = BasicResultColumn<arrow::Int64Array>(batch, 11).get();
+            const auto* last_ns = BasicResultColumn<arrow::Int64Array>(batch, 12).get();
+            const auto* packets_ab = BasicResultColumn<arrow::UInt64Array>(batch, 13).get();
+            const auto* packets_ba = BasicResultColumn<arrow::UInt64Array>(batch, 14).get();
+            const auto* wire_bytes_ab = BasicResultColumn<arrow::UInt64Array>(batch, 15).get();
+            const auto* wire_bytes_ba = BasicResultColumn<arrow::UInt64Array>(batch, 16).get();
+            const auto* protocol_status = BasicResultColumn<arrow::StringArray>(batch, 17).get();
+            const auto* protocol_ids = BasicResultColumn<arrow::UInt16Array>(batch, 18).get();
+            const auto* protocol_sub_ids = BasicResultColumn<arrow::UInt16Array>(batch, 19).get();
+            const auto* protocol_names = BasicResultColumn<arrow::StringArray>(batch, 20).get();
+            const auto* end_reasons = BasicResultColumn<arrow::StringArray>(batch, 21).get();
 
             assert(session_ids->Value(0) == 1 && session_ids->Value(1) == 2);
             assert(revisions->Value(0) == revision && revisions->Value(1) == revision);
@@ -8790,8 +8802,8 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
             assert(session_module->tracked_sessions() == 2 && session_module->tracked_bytes() > 0);
         }
 
-        const uint64_t first_snapshot_bytes = BasicResultBufferBytes(first_snapshot_output);
-        const uint64_t second_snapshot_bytes = BasicResultBufferBytes(second_snapshot_output);
+        const uint64_t first_snapshot_bytes = ResultBufferCapacity(first_snapshot_output);
+        const uint64_t second_snapshot_bytes = ResultBufferCapacity(second_snapshot_output);
         AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(),
                               session_module == nullptr ? 0 : session_module->tracked_bytes(), 0,
                               first_snapshot_bytes + second_snapshot_bytes);
@@ -8805,7 +8817,7 @@ void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots()
         assert(protocol.identify_pipelines.size() == 2);
         assert_output(output, 3, eof_observed_at_ns, true, true);
 
-        const uint64_t eof_output_bytes = BasicResultBufferBytes(output);
+        const uint64_t eof_output_bytes = ResultBufferCapacity(output);
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0,
                               first_snapshot_bytes + second_snapshot_bytes + eof_output_bytes);
         const auto* eof_output_pointer = output.get();
@@ -8953,17 +8965,14 @@ void TestNpmBasicTaskRuntimeCleansRealtimeBackpressureFailures() {
             RealtimeMaintenanceInput(monotonic_start_ns + interval_ns, observed_start_ns + interval_ns,
                                      packet_view.meta.timestamp_ns, false, false, true, true),
             &output);
-        assert(maintenance_status.error == npm::NpmBasicRealtimeMaintenanceError::kDrainError);
+        assert(maintenance_status.error == (config.features.basic_enabled
+                                                ? npm::NpmBasicRealtimeMaintenanceError::kWriterError
+                                                : npm::NpmBasicRealtimeMaintenanceError::kModuleError));
         assert(maintenance_status.runtime_state == npm::NpmEofFlushState::kFailed);
         assert(maintenance_status.snapshot_due && !maintenance_status.emitted);
-        assert(maintenance_status.drain_status.error == npm::NpmBasicDrainError::kEncodeError);
-        if (observing_session) {
-            assert(maintenance_status.drain_status.encode_error == npm::NpmBasicEncodeError::kNone);
-            assert(maintenance_status.drain_status.session_encode_error == npm::NpmSessionEncodeError::kBudgetError);
-        } else {
-            assert(maintenance_status.drain_status.encode_error == npm::NpmBasicEncodeError::kBudgetError);
-            assert(maintenance_status.drain_status.session_encode_error == npm::NpmSessionEncodeError::kNone);
-        }
+        assert((config.features.basic_enabled ? maintenance_status.writer_error : maintenance_status.module_error) ==
+               ENOMEM);
+        assert(runtime->LastError().find("budget exceeded") != std::string::npos);
         assert(output == original_output && runtime->State() == npm::NpmEofFlushState::kFailed);
         const auto first_error = runtime->LastError();
         assert(!first_error.empty() && pool.acquire_calls == 1 && pool.release_calls == 1);
@@ -9065,7 +9074,7 @@ void TestNpmBasicTaskRuntimeCancelsSessionStateWithoutTerminalResults() {
         };
         assert_periodic_output();
         auto budget = runtime->Budget();
-        const uint64_t output_bytes = BasicResultBufferBytes(output);
+        const uint64_t output_bytes = ResultBufferCapacity(output);
         const auto* output_pointer = output.get();
         assert(output_bytes > 0);
 
@@ -9227,7 +9236,7 @@ void TestNpmBasicTaskRuntimeRetiresRealtimeIdleSessionsOnce() {
         if (session_module != nullptr) {
             assert(session_module->tracked_sessions() == 0 && session_module->tracked_bytes() == 0);
         }
-        AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, BasicResultBufferBytes(output));
+        AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, ResultBufferCapacity(output));
 
         output.reset();
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
@@ -9324,8 +9333,8 @@ void TestNpmBasicRealtimeTaskIsolationAndSlowSinkBudget() {
     assert(!BasicResultColumn<arrow::BooleanArray>(slow_output_a, 4)->Value(0));
     assert(!BasicResultColumn<arrow::BooleanArray>(slow_output_b, 4)->Value(0));
 
-    const uint64_t output_bytes_a = BasicResultBufferBytes(slow_output_a);
-    const uint64_t output_bytes_b = BasicResultBufferBytes(slow_output_b);
+    const uint64_t output_bytes_a = ResultBufferCapacity(slow_output_a);
+    const uint64_t output_bytes_b = ResultBufferCapacity(slow_output_b);
     assert(output_bytes_a > 0 && output_bytes_a < config_a.analysis.max_pending_output_bytes);
     assert(output_bytes_b > 0 && output_bytes_b < config_b.analysis.max_pending_output_bytes);
     AssertTaskBudgetUsage(budget_a->Usage(), session_bytes_a, 0, 0, output_bytes_a);
@@ -9343,10 +9352,10 @@ void TestNpmBasicRealtimeTaskIsolationAndSlowSinkBudget() {
         RealtimeMaintenanceInput(first_due_ns + interval_ns, observed_start_ns + 2 * interval_ns, 100, false, false,
                                  true, true),
         &blocked_output);
-    assert(status_a.error == npm::NpmBasicRealtimeMaintenanceError::kDrainError);
+    assert(status_a.error == npm::NpmBasicRealtimeMaintenanceError::kWriterError);
     assert(status_a.runtime_state == npm::NpmEofFlushState::kFailed);
-    assert(status_a.drain_status.error == npm::NpmBasicDrainError::kEncodeError);
-    assert(status_a.drain_status.encode_error == npm::NpmBasicEncodeError::kBudgetError);
+    assert(status_a.writer_error == ENOMEM);
+    assert(runtime_a->LastError().find("budget exceeded") != std::string::npos);
     assert(blocked_output == original_blocked_output);
     assert(runtime_a->State() == npm::NpmEofFlushState::kFailed);
     assert(!runtime_a->LastError().empty() && pool.release_calls == 1);
@@ -9364,7 +9373,7 @@ void TestNpmBasicRealtimeTaskIsolationAndSlowSinkBudget() {
     assert(BasicResultColumn<arrow::UInt64Array>(second_output_b, 1)->Value(0) == 702);
     assert(BasicResultColumn<arrow::UInt64Array>(second_output_b, 2)->Value(0) == 2);
     assert(pool.release_calls == 1);
-    const uint64_t second_output_bytes_b = BasicResultBufferBytes(second_output_b);
+    const uint64_t second_output_bytes_b = ResultBufferCapacity(second_output_b);
     AssertTaskBudgetUsage(budget_b->Usage(), session_bytes_b, 0, 0, output_bytes_b + second_output_bytes_b);
 
     assert(budget_a->Release(npm::NpmBudgetCategory::kPendingOutput, backlog_bytes) == npm::NpmBudgetError::kNone);
@@ -9414,7 +9423,7 @@ void TestNpmBasicTaskRuntimeProcessesAndDrainsOfflineBatch() {
     assert(runtime->Sessions().size() == 0 && runtime->Collector().pending_results() == 0);
     assert(runtime->Projector().tracked_sessions() == 0);
 
-    const uint64_t output_bytes = BasicResultBufferBytes(output);
+    const uint64_t output_bytes = ResultBufferCapacity(output);
     AssertTaskBudgetUsage(runtime->Budget()->Usage(), 0, 0, 0, output_bytes);
     input.reset();
     assert(input_owner.expired());
@@ -9473,7 +9482,7 @@ void TestNpmBasicTaskRuntimeProcessesImmediateClosedSession() {
     auto* session_module = dynamic_cast<npm::NpmSessionAnalysisModule*>(runtime->Modules()[0]);
     assert(session_module != nullptr && session_module->tracked_sessions() == 0);
     auto budget = runtime->Budget();
-    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, BasicResultBufferBytes(output));
+    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, ResultBufferCapacity(output));
 
     output.reset();
     AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
@@ -9549,7 +9558,7 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
             assert(session_module->tracked_sessions() == 1 && module_bytes > 0);
         }
         auto budget = runtime->Budget();
-        AssertTaskBudgetUsage(budget->Usage(), session_bytes, module_bytes, 0, BasicResultBufferBytes(output));
+        AssertTaskBudgetUsage(budget->Usage(), session_bytes, module_bytes, 0, ResultBufferCapacity(output));
         active_input.reset();
         assert(active_input_owner.expired());
         output.reset();
@@ -9600,7 +9609,7 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
         if (session_module != nullptr) {
             assert(session_module->tracked_sessions() == 0 && session_module->tracked_bytes() == 0);
         }
-        AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, BasicResultBufferBytes(output));
+        AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, ResultBufferCapacity(output));
         closed_input.reset();
         assert(closed_input_owner.expired());
         output.reset();
@@ -9619,7 +9628,7 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
         if (session_module != nullptr) {
             assert(session_module->tracked_sessions() == 0 && session_module->tracked_bytes() == 0);
         }
-        AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, BasicResultBufferBytes(output));
+        AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, ResultBufferCapacity(output));
         empty_input.reset();
         output.reset();
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
@@ -9698,7 +9707,7 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
         auto budget = runtime->Budget();
         AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(),
                               session_module == nullptr ? 0 : session_module->tracked_bytes(), 0,
-                              BasicResultBufferBytes(output));
+                              ResultBufferCapacity(output));
         old_input.reset();
         assert(old_input_owner.expired());
         output.reset();
@@ -9771,7 +9780,7 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
         if (session_module != nullptr) {
             assert(session_module->tracked_sessions() == 1 && session_module->tracked_bytes() > 0);
         }
-        const uint64_t old_output_bytes = BasicResultBufferBytes(output);
+        const uint64_t old_output_bytes = ResultBufferCapacity(output);
         AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(),
                               session_module == nullptr ? 0 : session_module->tracked_bytes(), 0, old_output_bytes);
         auto old_output = output;
@@ -9833,7 +9842,7 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
         if (session_module != nullptr) {
             assert(session_module->tracked_sessions() == 0 && session_module->tracked_bytes() == 0);
         }
-        const uint64_t new_output_bytes = BasicResultBufferBytes(output);
+        const uint64_t new_output_bytes = ResultBufferCapacity(output);
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, old_output_bytes + new_output_bytes);
         output.reset();
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, old_output_bytes);
@@ -9928,7 +9937,7 @@ void TestNpmBasicTaskRuntimeClosesTupleReuseReplacementImmediately() {
         auto budget = runtime->Budget();
         AssertTaskBudgetUsage(budget->Usage(), runtime->Sessions().tracked_bytes(),
                               session_module == nullptr ? 0 : session_module->tracked_bytes(), 0,
-                              BasicResultBufferBytes(output));
+                              ResultBufferCapacity(output));
         old_input.reset();
         assert(old_input_owner.expired());
         output.reset();
@@ -9951,23 +9960,23 @@ void TestNpmBasicTaskRuntimeClosesTupleReuseReplacementImmediately() {
         assert(protocol.identify_pipelines.size() == 2 * index + 2);
 
         if (observing_session) {
-            const auto session_ids = SessionResultColumn<arrow::UInt64Array>(output, 0);
-            const auto revisions = SessionResultColumn<arrow::UInt64Array>(output, 2);
-            const auto observed_at = SessionResultColumn<arrow::Int64Array>(output, 3);
-            const auto final_flags = SessionResultColumn<arrow::BooleanArray>(output, 4);
-            const auto first_ns = SessionResultColumn<arrow::Int64Array>(output, 11);
-            const auto last_ns = SessionResultColumn<arrow::Int64Array>(output, 12);
-            const auto protocol_status = SessionResultColumn<arrow::StringArray>(output, 14);
-            const auto protocol_ids = SessionResultColumn<arrow::UInt16Array>(output, 15);
-            const auto protocol_sub_ids = SessionResultColumn<arrow::UInt16Array>(output, 16);
-            const auto protocol_names = SessionResultColumn<arrow::StringArray>(output, 17);
-            const auto reasons = SessionResultColumn<arrow::StringArray>(output, 18);
-            const auto packets_ab = SessionResultColumn<arrow::UInt64Array>(output, 19);
-            const auto packets_ba = SessionResultColumn<arrow::UInt64Array>(output, 20);
-            const auto wire_bytes_ab = SessionResultColumn<arrow::UInt64Array>(output, 21);
-            const auto wire_bytes_ba = SessionResultColumn<arrow::UInt64Array>(output, 22);
-            const auto payload_bytes_ab = SessionResultColumn<arrow::UInt64Array>(output, 23);
-            const auto payload_bytes_ba = SessionResultColumn<arrow::UInt64Array>(output, 24);
+            const auto* session_ids = SessionResultColumn<arrow::UInt64Array>(output, 0).get();
+            const auto* revisions = SessionResultColumn<arrow::UInt64Array>(output, 2).get();
+            const auto* observed_at = SessionResultColumn<arrow::Int64Array>(output, 3).get();
+            const auto* final_flags = SessionResultColumn<arrow::BooleanArray>(output, 4).get();
+            const auto* first_ns = SessionResultColumn<arrow::Int64Array>(output, 11).get();
+            const auto* last_ns = SessionResultColumn<arrow::Int64Array>(output, 12).get();
+            const auto* protocol_status = SessionResultColumn<arrow::StringArray>(output, 14).get();
+            const auto* protocol_ids = SessionResultColumn<arrow::UInt16Array>(output, 15).get();
+            const auto* protocol_sub_ids = SessionResultColumn<arrow::UInt16Array>(output, 16).get();
+            const auto* protocol_names = SessionResultColumn<arrow::StringArray>(output, 17).get();
+            const auto* reasons = SessionResultColumn<arrow::StringArray>(output, 18).get();
+            const auto* packets_ab = SessionResultColumn<arrow::UInt64Array>(output, 19).get();
+            const auto* packets_ba = SessionResultColumn<arrow::UInt64Array>(output, 20).get();
+            const auto* wire_bytes_ab = SessionResultColumn<arrow::UInt64Array>(output, 21).get();
+            const auto* wire_bytes_ba = SessionResultColumn<arrow::UInt64Array>(output, 22).get();
+            const auto* payload_bytes_ab = SessionResultColumn<arrow::UInt64Array>(output, 23).get();
+            const auto* payload_bytes_ba = SessionResultColumn<arrow::UInt64Array>(output, 24).get();
 
             assert(session_ids->Value(0) == 1 && session_ids->Value(1) == 2);
             assert(revisions->Value(0) == 1 && revisions->Value(1) == 1);
@@ -9993,21 +10002,21 @@ void TestNpmBasicTaskRuntimeClosesTupleReuseReplacementImmediately() {
             assert(payload_bytes_ab->Value(1) == replacement_payload.size());
             assert(payload_bytes_ba->Value(0) == 0 && payload_bytes_ba->Value(1) == 0);
         } else {
-            const auto session_ids = BasicResultColumn<arrow::UInt64Array>(output, 0);
-            const auto revisions = BasicResultColumn<arrow::UInt64Array>(output, 2);
-            const auto observed_at = BasicResultColumn<arrow::Int64Array>(output, 3);
-            const auto final_flags = BasicResultColumn<arrow::BooleanArray>(output, 4);
-            const auto first_ns = BasicResultColumn<arrow::Int64Array>(output, 11);
-            const auto last_ns = BasicResultColumn<arrow::Int64Array>(output, 12);
-            const auto packets_ab = BasicResultColumn<arrow::UInt64Array>(output, 13);
-            const auto packets_ba = BasicResultColumn<arrow::UInt64Array>(output, 14);
-            const auto wire_bytes_ab = BasicResultColumn<arrow::UInt64Array>(output, 15);
-            const auto wire_bytes_ba = BasicResultColumn<arrow::UInt64Array>(output, 16);
-            const auto protocol_status = BasicResultColumn<arrow::StringArray>(output, 17);
-            const auto protocol_ids = BasicResultColumn<arrow::UInt16Array>(output, 18);
-            const auto protocol_sub_ids = BasicResultColumn<arrow::UInt16Array>(output, 19);
-            const auto protocol_names = BasicResultColumn<arrow::StringArray>(output, 20);
-            const auto reasons = BasicResultColumn<arrow::StringArray>(output, 21);
+            const auto* session_ids = BasicResultColumn<arrow::UInt64Array>(output, 0).get();
+            const auto* revisions = BasicResultColumn<arrow::UInt64Array>(output, 2).get();
+            const auto* observed_at = BasicResultColumn<arrow::Int64Array>(output, 3).get();
+            const auto* final_flags = BasicResultColumn<arrow::BooleanArray>(output, 4).get();
+            const auto* first_ns = BasicResultColumn<arrow::Int64Array>(output, 11).get();
+            const auto* last_ns = BasicResultColumn<arrow::Int64Array>(output, 12).get();
+            const auto* packets_ab = BasicResultColumn<arrow::UInt64Array>(output, 13).get();
+            const auto* packets_ba = BasicResultColumn<arrow::UInt64Array>(output, 14).get();
+            const auto* wire_bytes_ab = BasicResultColumn<arrow::UInt64Array>(output, 15).get();
+            const auto* wire_bytes_ba = BasicResultColumn<arrow::UInt64Array>(output, 16).get();
+            const auto* protocol_status = BasicResultColumn<arrow::StringArray>(output, 17).get();
+            const auto* protocol_ids = BasicResultColumn<arrow::UInt16Array>(output, 18).get();
+            const auto* protocol_sub_ids = BasicResultColumn<arrow::UInt16Array>(output, 19).get();
+            const auto* protocol_names = BasicResultColumn<arrow::StringArray>(output, 20).get();
+            const auto* reasons = BasicResultColumn<arrow::StringArray>(output, 21).get();
 
             assert(session_ids->Value(0) == 1 && session_ids->Value(1) == 2);
             assert(revisions->Value(0) == 1 && revisions->Value(1) == 1);
@@ -10038,7 +10047,7 @@ void TestNpmBasicTaskRuntimeClosesTupleReuseReplacementImmediately() {
         if (session_module != nullptr) {
             assert(session_module->tracked_sessions() == 0 && session_module->tracked_bytes() == 0);
         }
-        AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, BasicResultBufferBytes(output));
+        AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, ResultBufferCapacity(output));
         output.reset();
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
 
@@ -10140,7 +10149,7 @@ void TestNpmBasicTaskRuntimeRoutesObservedEntity() {
             assert(BasicResultColumn<arrow::StringArray>(output, 21)->GetString(0) == "eof");
         }
 
-        AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, BasicResultBufferBytes(output));
+        AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, ResultBufferCapacity(output));
         output.reset();
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
         runtime.reset();
@@ -10264,8 +10273,8 @@ void TestNpmBasicTaskRuntimeRejectsOfflineBatchFailuresAtomically() {
     status = runtime->ProcessOfflineBatch(drain_failure_input, &output);
     assert(status.error == npm::NpmBasicOfflineBatchError::kDrainError);
     assert(status.runtime_state == npm::NpmEofFlushState::kFailed);
-    assert(status.drain_status.error == npm::NpmBasicDrainError::kEncodeError);
-    assert(status.drain_status.encode_error == npm::NpmBasicEncodeError::kBudgetError);
+    assert(status.drain_status.error == npm::NpmBasicDrainError::kRouterError);
+    assert(status.drain_status.router_error == ENOMEM);
     assert(output == original_output);
     AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, output_limit);
     assert(budget->Release(npm::NpmBudgetCategory::kPendingOutput, output_limit) == npm::NpmBudgetError::kNone);
@@ -10290,7 +10299,7 @@ void TestNpmBasicTaskRuntimeFlushesOfflineExactlyOnce() {
     assert(output != nullptr && output->num_rows() == 0 && runtime->Sessions().size() == 1);
     const uint64_t session_bytes = runtime->Sessions().tracked_bytes();
     assert(session_bytes > 0);
-    AssertTaskBudgetUsage(budget->Usage(), session_bytes, 0, 0, BasicResultBufferBytes(output));
+    AssertTaskBudgetUsage(budget->Usage(), session_bytes, 0, 0, ResultBufferCapacity(output));
     output.reset();
     AssertTaskBudgetUsage(budget->Usage(), session_bytes, 0, 0, 0);
 
@@ -10303,7 +10312,7 @@ void TestNpmBasicTaskRuntimeFlushesOfflineExactlyOnce() {
     assert(BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0) == 500);
     assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
     assert(BasicResultColumn<arrow::StringArray>(output, 21)->GetString(0) == "eof");
-    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, BasicResultBufferBytes(output));
+    AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, ResultBufferCapacity(output));
 
     auto original_output = output;
     flush_status = runtime->FlushOffline(600, &output);
@@ -10354,8 +10363,8 @@ void TestNpmBasicTaskRuntimeEofFailureIsTerminal() {
     const auto original_output = output;
     auto flush_status = runtime->FlushOffline(500, &output);
     assert(flush_status.error == npm::NpmEofFlushError::kDrainError);
-    assert(flush_status.drain_status.error == npm::NpmBasicDrainError::kEncodeError);
-    assert(flush_status.drain_status.encode_error == npm::NpmBasicEncodeError::kBudgetError);
+    assert(flush_status.drain_status.error == npm::NpmBasicDrainError::kRouterError);
+    assert(flush_status.drain_status.router_error == ENOMEM);
     assert(runtime->State() == npm::NpmEofFlushState::kFailed);
     const auto first_error = runtime->LastError();
     assert(!first_error.empty() && output == original_output);
@@ -10435,7 +10444,7 @@ void TestNpmBasicTaskRuntimeCancelKeepsDeliveredOutputAlive() {
     std::shared_ptr<arrow::RecordBatch> output;
     const auto status = runtime->ProcessOfflineBatch(input, &output);
     assert(status.error == npm::NpmBasicOfflineBatchError::kNone && output != nullptr);
-    const uint64_t output_bytes = BasicResultBufferBytes(output);
+    const uint64_t output_bytes = ResultBufferCapacity(output);
     AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, output_bytes);
 
     runtime->Cancel();
@@ -11939,9 +11948,490 @@ void TestProtocolLabelIsolationAndAtomicFactoryFailure() {
     assert(pool.acquire_calls == pool.release_calls);
 }
 
+struct ResultConsumerTrace {
+    std::vector<std::string> entities;
+    std::vector<npm::NpmResultContextV1> contexts;
+    std::vector<uint64_t> revisions;
+    std::vector<bool> finals;
+    int attempts = 0;
+    int fail_at = 0;
+    int finishes = 0;
+    int finish_error = 0;
+    std::atomic<int> cancels{0};
+    std::function<void()> on_consume;
+    std::function<void()> on_finish;
+    std::function<void()> on_cancel;
+};
+class RecordingResultConsumer final : public npm::INpmResultConsumerV1 {
+ public:
+    explicit RecordingResultConsumer(ResultConsumerTrace* trace) : trace_(trace) {}
+    int Consume(const npm::NpmResultContextV1& context, const npm::NpmEntityDescriptorV1& entity,
+                const arrow::RecordBatch& rows) override {
+        ++trace_->attempts;
+        if (trace_->on_consume) trace_->on_consume();
+        if (trace_->attempts == trace_->fail_at) return EIO;
+        // Copy only the values needed by this bounded test consumer, never retain borrowed Arrow owners.
+        for (int64_t i = 0; i < rows.num_rows(); ++i) {
+            trace_->entities.push_back(entity.entity_id);
+            trace_->contexts.push_back(context);
+            trace_->revisions.push_back(
+                std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName(entity.revision_column))->Value(i));
+            trace_->finals.push_back(
+                std::static_pointer_cast<arrow::BooleanArray>(rows.GetColumnByName(entity.is_final_column))->Value(i));
+        }
+        return 0;
+    }
+    int Finish() override {
+        ++trace_->finishes;
+        if (trace_->on_finish) trace_->on_finish();
+        return trace_->finish_error;
+    }
+    void Cancel() noexcept override {
+        ++trace_->cancels;
+        if (trace_->on_cancel) trace_->on_cancel();
+    }
+
+ private:
+    ResultConsumerTrace* trace_;
+};
+
+class EmittingProtocolModule final : public npm::INpmProtocolModuleV1 {
+ public:
+    explicit EmittingProtocolModule(ProtocolInputTrace* trace) : trace_(trace) {}
+    int OnInput(const npm::NpmInputEventV1&, npm::INpmResultEmitterV1& emitter) override {
+        auto result = MakeBasicEncodingResult(++next_id_);
+        result.protocol_status = npm::NpmProtocolStatus::kUnknown;
+        result.revision = 1;
+        result.is_final = true;
+        result.end_reason = npm::NpmSessionEndReason::kClosed;
+        std::shared_ptr<arrow::RecordBatch> batch;
+        assert(npm::EncodeNpmBasicResults({result}, &batch) == npm::NpmBasicEncodeError::kNone);
+        const int error = emitter.Emit("emitting_event", *batch);
+        // Borrowed storage can be immediately overwritten; foreground must already own a copy.
+        auto values = batch->column(0)->data()->buffers[1];
+        std::memset(values->mutable_data(), 0, values->size());
+        return error;
+    }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
+                     npm::INpmResultEmitterV1&) override {
+        return 0;
+    }
+    std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
+    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+        trace_->order.push_back("finish");
+        return 0;
+    }
+    void Abort() noexcept override { ++trace_->aborted; }
+
+ private:
+    ProtocolInputTrace* trace_;
+    uint64_t next_id_ = 0;
+};
+npm::NpmModuleCatalogV1 EmittingCatalog(ProtocolInputTrace* trace) {
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    auto entry = CountingRegistration("emitting", npm::kNpmInputMaskV1, trace);
+    auto prepare = entry.prepare;
+    entry.prepare = [prepare, trace](const npm::NpmBasicTaskConfig& config, std::string_view json,
+                                     npm::NpmPreparedModuleV1* out) {
+        const auto status = prepare(config, json, out);
+        out->plan.entities[0].revision_semantics = npm::NpmRevisionSemanticsV1::kEvent;
+        out->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
+            npm::NpmModuleInstanceV1 instance;
+            instance.protocol = std::make_unique<EmittingProtocolModule>(trace);
+            return instance;
+        };
+        return status;
+    };
+    catalog.push_back(entry);
+    return catalog;
+}
+std::unique_ptr<npm::NpmBasicTaskRuntime> CreateConsumingRuntime(
+    npm::NpmBasicTaskConfig config, SinglePoolQuerier* querier, ResultConsumerTrace* trace,
+    const npm::NpmModuleCatalogV1& catalog = npm::ProductionNpmModuleCatalogV1()) {
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    std::shared_ptr<arrow::Schema> schema;
+    auto consumer = trace ? std::make_unique<RecordingResultConsumer>(trace) : nullptr;
+    const auto status = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
+        config, querier, flowsql::packet::PacketSchema(), AllRealtimeTimeCapabilities(), &schema, &runtime, {}, nullptr,
+        catalog, std::move(consumer), "repeatable-task");
+    assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
+    assert(runtime->ResultContext().task_id == "repeatable-task" && !runtime->ResultContext().run_id.empty());
+    return runtime;
+}
+void TestUnifiedConsumerBasicSessionSnapshotsFinalsAndRunIdentity() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    std::string previous_run;
+    for (bool session : {false, true}) {
+        ResultConsumerTrace trace;
+        auto config = MakeRuntimeTaskConfig(npm::NpmRunMode::kRealtime);
+        config.features.session_enabled = true;
+        config.features.observing = session ? npm::NpmResultEntity::kSession : npm::NpmResultEntity::kBasic;
+        config.analysis.output_interval_ns = 100;
+        auto runtime = CreateConsumingRuntime(config, &querier, &trace);
+        assert(previous_run != runtime->ResultContext().run_id);
+        previous_run = runtime->ResultContext().run_id;
+        // These calls acquire the lifecycle mutex, proving consumer callbacks execute outside that lock.
+        trace.on_consume = [&] { runtime->MaintenancePlan(); };
+        trace.on_finish = [&] { runtime->MaintenancePlan(); };
+        const auto packet = MakeIpv6UdpPacket("2001:db8::1", 4000, "2001:db8::2", 53, {1});
+        auto packet_view = packet.View(0);
+        packet_view.meta.timestamp_ns = 20;
+        std::vector<npm::NpmSessionSnapshot> ended;
+        assert(npm::ProcessNpmPacket(config.domains, packet_view, packet.layer, runtime->Sessions(),
+                                     *runtime->ProtocolContext().Identifier(), runtime->Modules(), runtime->Collector(),
+                                     &ended)
+                   .error == npm::NpmPacketProcessError::kNone);
+        std::shared_ptr<arrow::RecordBatch> output;
+        auto drive = RealtimeMaintenanceInput(100, 1000, 20, true, false, true, false);
+        assert(runtime->DriveRealtimeMaintenance(drive, &output).error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+        drive.monotonic_now_ns = 200;
+        drive.observed_at_ns = 1100;
+        assert(runtime->DriveRealtimeMaintenance(drive, &output).error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+        assert(output->num_rows() == 1);
+        assert(
+            output->schema()->Equals(*(session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema()), true));
+        assert((trace.entities == std::vector<std::string>{"basic", "session"}));
+        assert((trace.revisions == std::vector<uint64_t>{1, 1}));
+        assert(!trace.finals[0] && !trace.finals[1]);
+        output.reset();
+        assert(runtime->FlushOffline(1200, &output).error == npm::NpmEofFlushError::kNone);
+        assert((trace.entities == std::vector<std::string>{"basic", "session", "session", "basic"}));
+        assert((trace.revisions == std::vector<uint64_t>{1, 1, 2, 2}));
+        assert(trace.finals[2] && trace.finals[3]);
+        assert(trace.finishes == 1 && trace.cancels == 0);
+        assert(runtime->FlushOffline(1300, &output).error == npm::NpmEofFlushError::kAlreadyFlushed);
+        runtime->Cancel();
+        runtime.reset();
+        assert(trace.finishes == 1 && trace.cancels == 0);
+    }
+}
+void TestUnifiedConsumerProtocolCopyFailurePrefixAndOwnerBudget() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    for (int fail_at : {0, 1, 2}) {
+        ProtocolInputTrace module;
+        ResultConsumerTrace trace;
+        trace.fail_at = fail_at;
+        auto config = MakeRuntimeTaskConfig();
+        config.features.basic_enabled = false;
+        config.features.module_ids = {"emitting"};
+        config.features.observing = npm::NpmResultEntity::kProtocol;
+        config.features.observing_entity = "emitting_event";
+        auto runtime = CreateConsumingRuntime(config, &querier, &trace, EmittingCatalog(&module));
+        auto budget = runtime->Budget();
+        auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(MakeControlPacket(), 0, 100, 1),
+                                             MakeBatchPacketRecord(MakeControlPacket(true), 0, 101, 2)});
+        std::weak_ptr<arrow::RecordBatch> input_owner = input;
+        std::shared_ptr<arrow::RecordBatch> output;
+        const auto status = runtime->ProcessOfflineBatch(input, &output);
+        if (fail_at) {
+            assert(status.error == npm::NpmBasicOfflineBatchError::kBatchProcessError);
+            assert(!output && trace.attempts == fail_at);
+            assert(trace.entities.size() == static_cast<size_t>(fail_at - 1));
+            assert(trace.finishes == 0 && trace.cancels == 1 && module.aborted == 1);
+            assert(runtime->LastError().find("emitting_event: consumer Consume failed: 5") != std::string::npos);
+            assert(runtime->ProcessOfflineBatch(input, &output).error ==
+                   npm::NpmBasicOfflineBatchError::kTerminalState);
+            assert(runtime->FlushOffline(200, &output).error == npm::NpmEofFlushError::kFailedState);
+            assert(trace.attempts == fail_at && npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+        } else {
+            assert(status.error == npm::NpmBasicOfflineBatchError::kNone && output->num_rows() == 2);
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 0)->Value(0) == 1);
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 0)->Value(1) == 2);
+            input.reset();
+            assert(input_owner.expired());
+            auto retained = output->column(0)->Slice(1, 1);
+            output.reset();
+            assert(budget->Usage().pending_output_bytes > 0);
+            runtime.reset();
+            assert(budget->Usage().pending_output_bytes > 0);
+            assert(std::static_pointer_cast<arrow::UInt64Array>(retained)->Value(0) == 2);
+            retained.reset();
+            assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+        }
+    }
+}
+void TestUnifiedConsumerFinishFailureAndCancellation() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    for (bool during_finish : {false, true}) {
+        ResultConsumerTrace trace;
+        auto config = MakeRuntimeTaskConfig();
+        auto runtime = CreateConsumingRuntime(config, &querier, &trace);
+        auto budget = runtime->Budget();
+        auto packet = MakeIpv4TcpPacket("192.0.2.1", 4000, "192.0.2.2", 443, {1});
+        auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 1)});
+        std::shared_ptr<arrow::RecordBatch> output;
+        assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+        output.reset();
+        std::mutex gate;
+        std::condition_variable changed;
+        bool entered = false;
+        auto block = [&] {
+            std::unique_lock<std::mutex> lock(gate);
+            entered = true;
+            changed.notify_all();
+            changed.wait(lock, [&] { return trace.cancels.load() != 0; });
+        };
+        if (during_finish)
+            trace.on_finish = block;
+        else
+            trace.on_consume = block;
+        trace.on_cancel = [&] {
+            std::lock_guard<std::mutex> lock(gate);
+            changed.notify_all();
+        };
+        npm::NpmEofFlushStatus status;
+        std::thread worker([&] { status = runtime->FlushOffline(200, &output); });
+        {
+            std::unique_lock<std::mutex> lock(gate);
+            assert(changed.wait_for(lock, std::chrono::seconds(5), [&] { return entered; }));
+        }
+        runtime->Cancel();
+        worker.join();
+        assert(status.error == npm::NpmEofFlushError::kCancelled && !output);
+        assert(trace.cancels == 1 && trace.finishes == (during_finish ? 1 : 0));
+        runtime->Cancel();
+        runtime.reset();
+        assert(trace.cancels == 1 && npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+    }
+    ResultConsumerTrace trace;
+    trace.finish_error = EBUSY;
+    auto runtime = CreateConsumingRuntime(MakeRuntimeTaskConfig(), &querier, &trace);
+    auto packet = MakeIpv6UdpPacket("2001:db8::1", 4000, "2001:db8::2", 53, {1});
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 1)});
+    std::shared_ptr<arrow::RecordBatch> output;
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    output.reset();
+    assert(runtime->FlushOffline(200, &output).error == npm::NpmEofFlushError::kDrainError);
+    assert(!output && trace.entities.size() == 1 && trace.finishes == 1 && trace.cancels == 1);
+    assert(runtime->LastError().find("consumer Finish failed") != std::string::npos);
+    assert(runtime->FlushOffline(200, &output).error == npm::NpmEofFlushError::kFailedState);
+    assert(trace.finishes == 1 && npm::NpmTrackedBudgetBytes(runtime->Budget()->Usage()) == 0);
+}
+void TestResultRouterValidationBudgetAndUnobservedRelease() {
+    auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
+    auto budget = std::make_shared<npm::NpmTaskBudget>(config);
+    auto invoke = [](const std::function<int()>& fn) { return fn(); };
+    auto basic = npm::NpmBasicEntityDescriptorV1();
+    auto another = basic;
+    another.entity_id = "other";
+    another.module_id = "other";
+    std::shared_ptr<arrow::RecordBatch> rows;
+    assert(npm::EncodeNpmBasicResults({MakeBasicEncodingResult(1)}, &rows) == npm::NpmBasicEncodeError::kNone);
+    {
+        npm::NpmResultRouter router({basic, another}, "basic", npm::MakeNpmResultContext("task"), budget, {}, invoke);
+        for (int i = 0; i < 1000; ++i) assert(router.Emit("other", "other", *rows) == 0);
+        assert(router.pending_results() == 0 && npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+        assert(router.Emit("other", "basic", *rows) == EINVAL);
+        assert(router.LastError().find("module_id") != std::string::npos);
+    }
+    for (int invalid : {0, 1, 2}) {
+        ResultConsumerTrace trace;
+        npm::NpmResultRouter router({basic}, "basic", npm::MakeNpmResultContext("task"), budget,
+                                    std::make_unique<RecordingResultConsumer>(&trace), invoke);
+        if (invalid == 0) assert(router.Emit("basic", "undeclared", *rows) == EINVAL);
+        if (invalid == 1) assert(router.Emit("basic", "basic", *MakeNpmPacketViewBatch()) == EINVAL);
+        if (invalid == 2) {
+            auto invalid_rows = rows->ReplaceSchemaMetadata(arrow::key_value_metadata({"bad"}, {"metadata"}));
+            assert(router.Emit("basic", "basic", *invalid_rows) == EINVAL);
+        }
+        assert(trace.attempts == 0 && npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+    }
+    config.max_pending_output_bytes = 1;
+    budget = std::make_shared<npm::NpmTaskBudget>(config);
+    ResultConsumerTrace trace;
+    npm::NpmResultRouter router({basic}, "basic", npm::MakeNpmResultContext("task"), budget,
+                                std::make_unique<RecordingResultConsumer>(&trace), invoke);
+    assert(router.Emit("basic", "basic", *rows) == ENOMEM);
+    assert(trace.attempts == 0 && npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+}
+
+struct DualEntityProtocolTrace {
+    std::atomic<int> inputs{0};
+    std::atomic<int> finishes{0};
+    std::atomic<int> aborts{0};
+};
+
+class DualEntityProtocolModule final : public npm::INpmProtocolModuleV1 {
+ public:
+    DualEntityProtocolModule(DualEntityProtocolTrace* trace, uint64_t first_id) : trace_(trace), next_id_(first_id) {}
+
+    int OnInput(const npm::NpmInputEventV1& input, npm::INpmResultEmitterV1& emitter) override {
+        assert(input.kind == npm::NpmInputKindV1::kControlPacket);
+        assert(input.transport == nullptr && input.session == nullptr);
+        ++trace_->inputs;
+        const int left_error = EmitEvent("dual_left", emitter);
+        return left_error == 0 ? EmitEvent("dual_right", emitter) : left_error;
+    }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override {
+        assert(false);
+        return EINVAL;
+    }
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
+                     npm::INpmResultEmitterV1&) override {
+        assert(false);
+        return EINVAL;
+    }
+    std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
+    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+        ++trace_->finishes;
+        return 0;
+    }
+    void Abort() noexcept override { ++trace_->aborts; }
+
+ private:
+    int EmitEvent(std::string_view entity, npm::INpmResultEmitterV1& emitter) {
+        auto result = MakeBasicEncodingResult(next_id_++);
+        result.protocol_status = npm::NpmProtocolStatus::kUnknown;
+        result.revision = 1;
+        result.is_final = true;
+        result.end_reason = npm::NpmSessionEndReason::kClosed;
+        std::shared_ptr<arrow::RecordBatch> rows;
+        if (npm::EncodeNpmBasicResults({result}, &rows) != npm::NpmBasicEncodeError::kNone) return ENOMEM;
+        return emitter.Emit(entity, *rows);
+    }
+
+    DualEntityProtocolTrace* trace_ = nullptr;
+    uint64_t next_id_ = 0;
+};
+
+npm::NpmModuleCatalogV1 DualEntityCatalog(DualEntityProtocolTrace* trace, uint64_t first_id) {
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    npm::NpmModuleRegistrationV1 registration;
+    registration.module_id = "dual";
+    registration.entity_ids = {"dual_left", "dual_right"};
+    registration.prepare = [trace, first_id](const npm::NpmBasicTaskConfig&, std::string_view,
+                                             npm::NpmPreparedModuleV1* out) {
+        out->plan.module_id = "dual";
+        out->plan.input_mask = static_cast<uint8_t>(npm::NpmInputKindV1::kControlPacket);
+        for (const char* entity_id : {"dual_left", "dual_right"}) {
+            auto entity = npm::NpmBasicEntityDescriptorV1();
+            entity.entity_id = entity_id;
+            entity.module_id = "dual";
+            entity.revision_semantics = npm::NpmRevisionSemanticsV1::kEvent;
+            out->plan.entities.push_back(std::move(entity));
+        }
+        out->create = [trace, first_id](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
+            npm::NpmModuleInstanceV1 result;
+            result.protocol = std::make_unique<DualEntityProtocolModule>(trace, first_id);
+            return result;
+        };
+        return npm::NpmProtocolContractStatusV1{};
+    };
+    catalog.push_back(std::move(registration));
+    return catalog;
+}
+
+void TestProtocolProductionCatalogAndConcurrentDualEntityControlRuntime() {
+    const auto& production = npm::ProductionNpmModuleCatalogV1();
+    assert(production.size() == 2);
+    assert(production[0].module_id == "basic" && production[0].entity_ids == std::vector<std::string>{"basic"});
+    assert(production[1].module_id == "session" && production[1].entity_ids == std::vector<std::string>{"session"});
+
+    ContextDictionary first_dictionary, second_dictionary;
+    ContextProtocol first_protocol(&first_dictionary), second_protocol(&second_dictionary);
+    ContextPool first_pool(&first_protocol), second_pool(&second_protocol);
+    SinglePoolQuerier first_querier(&first_pool), second_querier(&second_pool);
+
+    for (const char* unavailable : {"dns", "http1", "tls", "icmp"}) {
+        auto config = MakeRuntimeTaskConfig();
+        config.features.module_ids = {unavailable};
+        config.features.basic_enabled = false;
+        config.features.observing = npm::NpmResultEntity::kProtocol;
+        config.features.observing_entity = std::string(unavailable) + "_event";
+        std::shared_ptr<arrow::Schema> schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+        const auto status = npm::NpmBasicTaskRuntime::Create(config, &first_querier, flowsql::packet::PacketSchema(),
+                                                             &schema, &runtime);
+        assert(status.error == npm::NpmBasicTaskRuntimeError::kModulePlanError);
+        assert(status.module_status.field == unavailable && !runtime && !schema);
+    }
+
+    auto config = MakeRuntimeTaskConfig();
+    config.features.module_ids = {"dual"};
+    config.features.basic_enabled = false;
+    config.features.observing = npm::NpmResultEntity::kProtocol;
+    config.features.observing_entity = "dual_left";
+    DualEntityProtocolTrace first_module, second_module;
+    ResultConsumerTrace first_consumer, second_consumer;
+    auto first_runtime =
+        CreateConsumingRuntime(config, &first_querier, &first_consumer, DualEntityCatalog(&first_module, 100));
+    auto second_runtime =
+        CreateConsumingRuntime(config, &second_querier, &second_consumer, DualEntityCatalog(&second_module, 1000));
+    assert(first_runtime->ResultContext().run_id != second_runtime->ResultContext().run_id);
+    auto first_budget = first_runtime->Budget();
+    auto second_budget = second_runtime->Budget();
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(MakeControlPacket(), 0, 100, 1),
+                                         MakeBatchPacketRecord(MakeControlPacket(true), 0, 101, 2)});
+    std::shared_ptr<arrow::RecordBatch> first_output, second_output;
+    npm::NpmBasicOfflineBatchStatus first_status, second_status;
+    std::thread first_worker([&] { first_status = first_runtime->ProcessOfflineBatch(input, &first_output); });
+    std::thread second_worker([&] { second_status = second_runtime->ProcessOfflineBatch(input, &second_output); });
+    first_worker.join();
+    second_worker.join();
+
+    assert(first_status.error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(second_status.error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(first_module.inputs == 2 && second_module.inputs == 2);
+    assert(first_output->num_rows() == 2 && second_output->num_rows() == 2);
+    assert(BasicResultColumn<arrow::UInt64Array>(first_output, 0)->Value(0) == 100);
+    assert(BasicResultColumn<arrow::UInt64Array>(first_output, 0)->Value(1) == 102);
+    assert(BasicResultColumn<arrow::UInt64Array>(second_output, 0)->Value(0) == 1000);
+    assert(BasicResultColumn<arrow::UInt64Array>(second_output, 0)->Value(1) == 1002);
+    const std::vector<std::string> expected_entities{"dual_left", "dual_right", "dual_left", "dual_right"};
+    assert(first_consumer.entities == expected_entities && second_consumer.entities == expected_entities);
+    for (const auto& context : first_consumer.contexts) assert(context.run_id == first_runtime->ResultContext().run_id);
+    for (const auto& context : second_consumer.contexts)
+        assert(context.run_id == second_runtime->ResultContext().run_id);
+
+    npm::NpmEofFlushStatus first_flush, second_flush;
+    std::shared_ptr<arrow::RecordBatch> first_eof, second_eof;
+    std::thread first_finish([&] { first_flush = first_runtime->FlushOffline(200, &first_eof); });
+    std::thread second_finish([&] { second_flush = second_runtime->FlushOffline(200, &second_eof); });
+    first_finish.join();
+    second_finish.join();
+    assert(first_flush.error == npm::NpmEofFlushError::kNone);
+    assert(second_flush.error == npm::NpmEofFlushError::kNone);
+    assert(first_module.finishes == 1 && first_module.aborts == 0);
+    assert(second_module.finishes == 1 && second_module.aborts == 0);
+    assert(first_consumer.finishes == 1 && first_consumer.cancels == 0);
+    assert(second_consumer.finishes == 1 && second_consumer.cancels == 0);
+    assert(first_eof->num_rows() == 0 && second_eof->num_rows() == 0);
+
+    auto retained = first_output->column(0)->Slice(1, 1);
+    first_output.reset();
+    first_eof.reset();
+    first_runtime.reset();
+    assert(first_budget->Usage().pending_output_bytes > 0);
+    assert(std::static_pointer_cast<arrow::UInt64Array>(retained)->Value(0) == 102);
+    assert(second_runtime->State() == npm::NpmEofFlushState::kFlushed);
+    second_output.reset();
+    second_eof.reset();
+    second_runtime.reset();
+    assert(npm::NpmTrackedBudgetBytes(second_budget->Usage()) == 0);
+    retained.reset();
+    assert(npm::NpmTrackedBudgetBytes(first_budget->Usage()) == 0);
+}
+
 }  // namespace
 
 int main() {
+    TestProtocolProductionCatalogAndConcurrentDualEntityControlRuntime();
+    TestResultRouterValidationBudgetAndUnobservedRelease();
+    TestUnifiedConsumerBasicSessionSnapshotsFinalsAndRunIdentity();
+    TestUnifiedConsumerProtocolCopyFailurePrefixAndOwnerBudget();
+    TestUnifiedConsumerFinishFailureAndCancellation();
     TestProtocolLifecycleRealtimeDeferralAndCallbackCancel();
     TestProtocolLifecycleFinishFailureAbortsAndDoesNotReplay();
     TestProtocolLifecycleTupleReuseAndBudgetFailureCleanup();

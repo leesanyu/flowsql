@@ -13,6 +13,7 @@ namespace flowsql::npm {
 
 struct NpmBasicTaskConfig;
 class NpmProtocolContext;
+class NpmResultRouter;
 
 struct NpmModuleInstanceV1 {
     std::unique_ptr<INpmAnalysisModule> analysis;
@@ -43,7 +44,7 @@ NpmProtocolContractStatusV1 PrepareNpmModulesV1(const NpmBasicTaskConfig& config
 class NpmProtocolModuleAdapter final : public INpmAnalysisModule, private INpmResultEmitterV1 {
  public:
     NpmProtocolModuleAdapter(NpmModulePlanV1 plan, std::unique_ptr<INpmProtocolModuleV1> module,
-                             const std::atomic<bool>* cancellation_requested);
+                             const std::atomic<bool>* cancellation_requested, NpmResultRouter* router);
     ~NpmProtocolModuleAdapter() override;
     bool AcceptsControl() const;
     int OnControl(const NpmInputEventV1& event);
@@ -58,6 +59,7 @@ class NpmProtocolModuleAdapter final : public INpmAnalysisModule, private INpmRe
  private:
     bool AcceptsSession(const NpmSessionView&) const;
     int Emit(std::string_view entity_id, const arrow::RecordBatch& rows) override;
+    NpmResultRouter* router_;
     NpmModulePlanV1 plan_;
     std::unique_ptr<INpmProtocolModuleV1> module_;
     const std::atomic<bool>* cancellation_requested_ = nullptr;

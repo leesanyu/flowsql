@@ -1,61 +1,82 @@
 # 即时工作台
 
-事项：实施 `npm-protocol-analysis` T2 独立实体时间与终结管理
-关联 Feature Task：`tasks/specs/feat-npm-protocol-analysis.md` T2。
-当前 Atomic Slice：把模块事件 deadline、单调 watermark 通知、EOF Finish 和失败/取消 Abort 接入 T1 runtime。
-状态：已完成
+事项：实施 `npm-protocol-analysis` T4 兼容回归与组合验收
+关联 Feature Task：`tasks/archive/feat-npm-protocol-analysis.md` T4。
+当前 Atomic Slice：补齐生产 runtime 组合/隔离锚点，执行 Sanitizer、全量构建、完整 CTest 与 Feature 归档。
+状态：已完成；WIP=1，停止于 T4 边界。
 
 ## 业务意图
 
-- 使协议模块维护的事务能在端口会话仍存活或根本没有端口会话时按采集事件时间到期。
-- 让正常 EOF、tuple reuse、处理失败和取消具有互斥且可验证的终结语义，不泄漏模块状态或重放终态。
-- 用户本轮明确授权 T2 直至完成；本工作台只承载 T2，不进入 T3～T4。
+- 证明 T0～T3 交付的协议运行时可以供后续协议 Feature 直接复用，且不会破坏既有 Basic/Session SQL、
+  生命周期、预算、标签和插件装载行为。
+- 证明多个测试实体、control 输入、并发任务和任务销毁后的 Arrow owner 都遵守已冻结契约。
+- 用户明确授权 T4 直至完成；T4 验收通过后完成并归档整个 `npm-protocol-analysis` Feature。
 
 ## Non-Goals
 
-- 不实现 T3 的统一 emitter/router、附加 consumer、run_id、Arrow owner 或前台/存储结果交付。
-- 不实现具体协议解析、TCP 重组、持久化或生产实时采集适配器，不修改模块配置与输入订阅语义。
-- 不把模块实体状态提升为 runtime 通用容器；entity ID、revision、finality 和对应预算仍由所属模块维护。
-- 不修改 T0 契约或已交付的 Basic/Session Schema；不运行全量 CTest，不 commit/push。
+- 不实现 DNS、HTTP/1、TLS、ICMP 等具体协议解析，不实现 TCP 重组、结果数据库或生产实时采集接线。
+- 不新增生产模块目录项、公共测试 SQL 开关、框架 ABI 或新 Feature Task，不修改后续 Feature 规格。
+- 不以机器相关的吞吐/RSS 数值作为通过阈值，不 commit/push。
+- 非当前 Feature 的非阻塞失败只记录复现证据；仅处理由本 Feature Diff 引入的 P0/P1 回归。
 
 ## 冻结接口与测试契约
 
-- `NpmProtocolModuleAdapter` 串行转发 `OnTime`、`Finish`、幂等 `Abort`，正常 Finish 后析构不再 Abort；
-  callback 内取消在当前回调返回后终止处理，不再分发后续输入或启动正常 Finish。
-- packet/control 成功分发并推进唯一 capture progress 后，只有单调 watermark 实际前进才通知所有协议模块；
-  realtime backlog 未知/存在、idle 未确认及 watermark 不变/回退均不触发事务时间。
-- EOF 顺序固定为剩余 session end → 每个协议模块一次 Finish → 前台 drain；任一步失败只进入失败清理，
-  未 Finish 的模块 Abort。重复 Flush/Cancel 不重放模块回调。
-- runtime 提供任务内 `NpmMaintenancePlanV1` 快照：聚合 session 与模块最早事件 deadline；周期输出仅使用
-  初始化后的 monotonic snapshot deadline，不把事件 epoch 时间映射为单调时钟。
-- 测试模块生成同 session 多实体及 control 无 session 实体，自己维护 deadline、revision/final 状态并计入
-  `kModuleState`；测试只观察生命周期轨迹，不调用 T3 尚未交付的 Emit。
+- 生产目录仍只登记 `basic`、`session`；测试/未交付协议实体只能通过测试目录注入。
+- 两种测试实体与 control 输入通过生产 `NpmBasicTaskRuntime` 的 Open、分发、统一 router、EOF 主链组合验收；
+  前台只输出 observing，附加 consumer 收到全部 enabled 实体。
+- 并发任务拥有不同 run_id、模块状态、consumer、预算和输出；取消/失败/销毁不跨任务传播。
+- runtime 销毁后已交付的 RecordBatch、提取 Array 或切片继续有效，最后 owner 释放后预算归零。
+- 既有 SQL/E2E 和完整 CTest 必须通过；定向 AddressSanitizer/UndefinedBehaviorSanitizer 覆盖协议 runtime 测试。
+- 完成时检查生产目录、动态依赖、格式、Diff 范围及未交付协议不可用证据；无条件扩大到后续 Feature。
 
 ## 允许修改文件
 
 - `tasks/active_task.md`
+- `tasks/product_backlog.md`
 - `tasks/specs/feat-npm-protocol-analysis.md`
-- `src/operators/npm_basic/core/npm_module_catalog.h`
-- `src/operators/npm_basic/core/npm_module_catalog.cpp`
+- `tasks/archive/feat-npm-protocol-analysis.md`
+- `src/operators/npm_basic/CMakeLists.txt`
+- `src/operators/npm_basic/npm_basic_operator.cpp`
 - `src/operators/npm_basic/core/npm_basic_task_runtime.h`
 - `src/operators/npm_basic/core/npm_basic_task_runtime.cpp`
-- `src/operators/npm_basic/core/npm_eof_flusher.h`
 - `src/operators/npm_basic/core/npm_eof_flusher.cpp`
-- `src/operators/npm_basic/core/npm_packet_processor.h`
-- `src/operators/npm_basic/core/npm_packet_processor.cpp`
-- `src/operators/npm_basic/core/npm_session_table.h`
+- `src/operators/npm_basic/core/npm_module_catalog.h`
+- `src/operators/npm_basic/core/npm_module_catalog.cpp`
+- `src/operators/npm_basic/output/npm_result_router.h`
+- `src/operators/npm_basic/output/npm_result_router.cpp`
+- `src/operators/npm_basic/output/npm_basic_result_collector.h`
+- `src/operators/npm_basic/output/npm_basic_result_collector.cpp`
+- `src/operators/npm_basic/output/npm_basic_result_encoder.h`
+- `src/operators/npm_basic/output/npm_basic_result_encoder.cpp`
+- `src/operators/npm_basic/output/npm_session_result_encoder.h`
+- `src/operators/npm_basic/output/npm_session_result_encoder.cpp`
+- `src/tests/test_npm_basic/CMakeLists.txt`
 - `src/tests/test_npm_basic/test_npm_basic.cpp`
+- `src/tests/test_npm_basic/test_npm_protocol_contract.cpp`
 
-本轮修改跨越既有唯一输入链与终结器，是 T2 生命周期保证的必要接线；不新增生产源文件或 CMake 接线。
-工作区已有 T0/T1 和 Backlog 未提交差异均保留；每次 patch 后以 `git diff --name-only` 检查不得越界。
+现有 T0～T3 未提交差异均属于本 Feature，T4 完成时统一审查；新增实现优先限制在测试文件。
+每次 patch 后检查 `git diff --name-only` 与未跟踪文件，所有差异必须在本清单内。
 
 ## 验收命令
 
 ```bash
-cmake -B build src
-cmake --build build --target test_npm_basic test_npm_protocol_contract -j8
-ctest --test-dir build -R '^(test_npm_basic|test_npm_protocol_contract)$' --output-on-failure
-# 对本轮 C++ 文件运行 clang-format-18 --dry-run --Werror；既有大测试文件只检查新增区域。
+cmake -B build src -DFLOWSQL_FLOW_LABELING=ON
+cmake --build build -j8
+ctest --test-dir build --output-on-failure
+
+# 在独立 build 目录定向启用 ASan/UBSan；只构建并运行协议 runtime 两个测试 target。
+cmake -B build-npm-protocol-sanitizer src -DFLOWSQL_FLOW_LABELING=ON \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
+  -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined' \
+  -DCMAKE_SHARED_LINKER_FLAGS='-fsanitize=address,undefined'
+cmake --build build-npm-protocol-sanitizer --target test_npm_basic test_npm_protocol_contract -j8
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build-npm-protocol-sanitizer \
+  -R '^(test_npm_basic|test_npm_protocol_contract)$' --output-on-failure
+
+# 本 Feature 修改的 C++ 文件执行 clang-format-18 --dry-run --Werror；既有大文件检查修改区域。
+readelf -d build/output/libflowsql_npm_basic.so
 git diff --check
 git diff --name-only
 git status --short --untracked-files=all
@@ -63,24 +84,20 @@ git status --short --untracked-files=all
 
 ## 时间盒与停止条件
 
-- 时间盒：30 分钟；开始于 2026-09-23 14:08（Asia/Shanghai）。
-- T2 全部锚点通过构建、测试、格式与 Diff 审查后，记录证据并勾选 T2，立即停止，不进入 T3。
-- 到期仍保留 T2 编号，只报告可验证检查点或明确错误，不增加规格层级或扩大范围。
+- 第一时间盒：30 分钟；开始于 2026-09-23 20:05（Asia/Shanghai）。
+- T4 全部锚点、定向 Sanitizer、全量构建、完整 CTest、格式与 Diff 审查通过后，勾选 T4，归档规格，
+  Backlog 标记完成并停止；不开始后续 Feature。
+- 到期未完成时沿用 T4，记录“进行中且检查点通过”或明确错误；不增加任务层级或扩大允许文件。
 
 ## 完成证据
 
-- T2 于 2026-09-23 15:14（Asia/Shanghai）完成；实际执行约 66 分钟，超过冻结的 30 分钟时间盒。期间未扩大
-  到 T3、未新增生产文件或规格层级；偏差来自生命周期/取消/失败路径测试及最终 Diff 收敛，按实际证据记录。
-- 已在协议 adapter 接入事件 deadline、单调 watermark `OnTime`、正常 EOF 单次 `Finish` 与幂等 `Abort`；
-  callback 内取消由原子信号在当前回调返回后终止处理，重复取消或终态入口不重放回调。
-- 离线 packet/control 仅在 capture watermark 实际前进时通知模块；实时 backlog 未知/存在、idle 未确认以及
-  水位不变/回退不触发事务时间。`MaintenancePlan()` 分别聚合事件时间和单调 snapshot deadline，不跨时钟换算。
-- 新增生命周期测试模块自行维护并计费同 session 多实体和 control 无 session 实体；覆盖 deadline 等号边界、
-  活动会话内事务到期、终结 packet 顺序、tuple reuse、observing 独立、正常 EOF、Finish 失败、重复取消、
-  回调内取消和预算部分预留失败后的完整归还，最终 module state 预算均归零。
-- `cmake -B build src` 通过，`FLOWSQL_FLOW_LABELING=ON`；生产库、`test_npm_basic` 和
-  `test_npm_protocol_contract` 构建通过，无编译 Error。
-- 最终定向 CTest 2/2、0 失败（0.80 秒）；本轮生产 C++ 文件及既有测试文件新增区域通过
-  `clang-format-18 --dry-run --Werror`，`git diff --check` 通过。
-- 已审查 T2 Diff 并检查允许文件；T0/T1 与 Backlog 既有未提交差异保留。T3 统一结果路由尚未实施，
-  协议 Emit 继续返回 ENOTSUP；未运行全量 CTest、未 commit/push。本 Atomic Slice 完成后停止。
+- 生产目录仅登记 `basic`、`session`；`dns`、`http1`、`tls`、`icmp` 在 Open 阶段拒绝且不发布半成品。
+- 双实体 control 组合测试通过生产 runtime 验证前台 observing、全实体 consumer、并发 `run_id`/状态/预算隔离、
+  EOF 恰好一次，以及 runtime 销毁后的 Arrow owner 与 `kPendingOutput` 租约生命周期。
+- 独立 ASan/UBSan 定向 CTest 2/2 通过；期间修复 IPv4 TCP、IPv6 UDP 测试构造器对空 payload 执行
+  `memcpy` 的未定义行为。
+- `FLOWSQL_FLOW_LABELING=ON` 配置和全量构建成功；允许 loopback socket 的最终完整 CTest 同一轮 17/17 通过
+  （65.16 秒）。
+- 15 个变更 C++ 文件通过 `clang-format-18 --dry-run --Werror`；`readelf` 确认 NPM Basic 没有 DPDK
+  NEEDED 项；`git diff --check` 与允许文件范围检查通过，额外构建元数据已清理。
+- T4 和整个 Feature 已完成，规格归档、Backlog 标记完成；未启动后续 Feature，未 commit/push。

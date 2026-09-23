@@ -5,6 +5,7 @@
 #define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_BASIC_RESULT_COLLECTOR_H_
 
 #include "npm_basic_result_encoder.h"
+#include "npm_result_router.h"
 #include "npm_session_result_encoder.h"
 
 #include <operators/npm_basic/config/npm_basic_task_config.h>
@@ -24,11 +25,13 @@ enum class NpmBasicDrainError : uint8_t {
     kProjectionError,
     kEncodeError,
     kAllocationFailed,
+    kRouterError,
 };
 
 struct NpmBasicDrainStatus {
     NpmBasicDrainError error = NpmBasicDrainError::kNone;
     int64_t event_index = -1;
+    int router_error = 0;
     NpmBasicProjectionError projection_error = NpmBasicProjectionError::kNone;
     NpmBasicEncodeError encode_error = NpmBasicEncodeError::kNone;
     NpmSessionEncodeError session_encode_error = NpmSessionEncodeError::kNone;
@@ -44,6 +47,10 @@ class NpmBasicResultCollector final : public INpmResultWriter {
     NpmBasicResultCollector(NpmBasicResultCollector&&) = delete;
     NpmBasicResultCollector& operator=(NpmBasicResultCollector&&) = delete;
 
+    void BindRouter(std::shared_ptr<NpmResultRouter> router) { router_ = std::move(router); }
+    NpmBasicDrainStatus RouteEnds(const std::vector<NpmSessionEndEvent>& events, NpmBasicResultProjector& projector);
+    int Finish() { return router_ ? router_->Finish() : 0; }
+    bool has_router() const { return router_ != nullptr; }
     int WriteBasic(const NpmBasicResult& result) override;
     int WriteSession(const NpmSessionResult& result) override;
 
@@ -56,6 +63,7 @@ class NpmBasicResultCollector final : public INpmResultWriter {
 
  private:
     NpmBasicFeatureConfig features_;
+    std::shared_ptr<NpmResultRouter> router_;
     std::vector<NpmBasicResult> pending_basic_;
     std::vector<NpmSessionResult> pending_session_;
 };

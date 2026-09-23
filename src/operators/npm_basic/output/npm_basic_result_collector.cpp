@@ -17,6 +17,14 @@ NpmBasicResultCollector::NpmBasicResultCollector(NpmBasicFeatureConfig features)
 int NpmBasicResultCollector::WriteBasic(const NpmBasicResult& result) {
     if (!features_.basic_enabled) return ENOTSUP;
     if (ValidateNpmBasicResult(result) != NpmBasicResultError::kNone) return EINVAL;
+    if (router_) {
+        std::shared_ptr<arrow::RecordBatch> rows;
+        std::string error;
+        if (EncodeNpmBasicResults({result}, &rows, &error, features_.labeling_enabled, router_->pool()) !=
+            NpmBasicEncodeError::kNone)
+            return router_->Reject(ENOMEM, "basic: " + error);
+        return router_->Emit("basic", "basic", *rows);
+    }
     if (features_.observing != NpmResultEntity::kBasic) return 0;
     try {
         pending_basic_.push_back(result);
@@ -29,6 +37,14 @@ int NpmBasicResultCollector::WriteBasic(const NpmBasicResult& result) {
 int NpmBasicResultCollector::WriteSession(const NpmSessionResult& result) {
     if (!features_.session_enabled) return ENOTSUP;
     if (ValidateNpmSessionResult(result) != NpmSessionResultError::kNone) return EINVAL;
+    if (router_) {
+        std::shared_ptr<arrow::RecordBatch> rows;
+        std::string error;
+        if (EncodeNpmSessionResults({result}, &rows, &error, features_.labeling_enabled, router_->pool()) !=
+            NpmSessionEncodeError::kNone)
+            return router_->Reject(ENOMEM, "session: " + error);
+        return router_->Emit("session", "session", *rows);
+    }
     if (features_.observing != NpmResultEntity::kSession) return 0;
     try {
         pending_session_.push_back(result);
@@ -52,6 +68,13 @@ NpmBasicDrainStatus NpmBasicResultCollector::Drain(const std::vector<NpmSessionE
         return status;
     }
 
+    if (router_) {
+        status = RouteEnds(events, projector);
+        if (status.error != NpmBasicDrainError::kNone) return status;
+        status.router_error = router_->Drain(output);
+        if (status.router_error) status.error = NpmBasicDrainError::kRouterError;
+        return status;
+    }
     try {
         const bool observing_basic = features_.observing == NpmResultEntity::kBasic;
         std::vector<NpmBasicResult> basic_results;
@@ -109,7 +132,31 @@ NpmBasicDrainStatus NpmBasicResultCollector::Drain(const std::vector<NpmSessionE
     }
 }
 
+NpmBasicDrainStatus NpmBasicResultCollector::RouteEnds(const std::vector<NpmSessionEndEvent>& events,
+                                                       NpmBasicResultProjector& projector) {
+    NpmBasicDrainStatus status;
+    if (!features_.basic_enabled) return status;
+    for (size_t index = 0; index < events.size(); ++index) {
+        const auto& event = events[index];
+        NpmBasicResult result;
+        status.projection_error =
+            projector.ProjectFinal(event.snapshot.View(), event.snapshot.end_reason, event.observed_at, &result);
+        if (status.projection_error != NpmBasicProjectionError::kNone) {
+            status.error = NpmBasicDrainError::kProjectionError;
+        } else {
+            status.router_error = WriteBasic(result);
+            if (status.router_error) status.error = NpmBasicDrainError::kRouterError;
+        }
+        if (status.error != NpmBasicDrainError::kNone) {
+            status.event_index = index;
+            return status;
+        }
+    }
+    return status;
+}
+
 size_t NpmBasicResultCollector::pending_results() const noexcept {
+    if (router_) return router_->pending_results();
     return features_.observing == NpmResultEntity::kBasic ? pending_basic_.size() : pending_session_.size();
 }
 

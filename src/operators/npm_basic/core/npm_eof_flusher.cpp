@@ -78,6 +78,15 @@ NpmEofFlushStatus NpmEofFlusher::Flush(int64_t observed_at, NpmSessionTable& ses
         for (auto& snapshot : snapshots) {
             events.push_back(NpmSessionEndEvent{std::move(snapshot), observed_at});
         }
+        if (collector.has_router()) {
+            status.drain_status = collector.RouteEnds(events, projector);
+            if (status.drain_status.error != NpmBasicDrainError::kNone) {
+                status.error = NpmEofFlushError::kDrainError;
+                state_ = NpmEofFlushState::kFailed;
+                return status;
+            }
+            events.clear();
+        }
         for (auto* module : protocol_modules) {
             status.module_error = module->Finish(observed_at);
             if (status.module_error != 0) {
@@ -94,6 +103,14 @@ NpmEofFlushStatus NpmEofFlusher::Flush(int64_t observed_at, NpmSessionTable& ses
             return status;
         }
 
+        status.drain_status.router_error = collector.Finish();
+        if (status.drain_status.router_error) {
+            status.drain_status.error = NpmBasicDrainError::kRouterError;
+            status.error = NpmEofFlushError::kDrainError;
+            state_ = NpmEofFlushState::kFailed;
+            output->reset();
+            return status;
+        }
         state_ = NpmEofFlushState::kFlushed;
         return status;
     } catch (const std::bad_alloc&) {

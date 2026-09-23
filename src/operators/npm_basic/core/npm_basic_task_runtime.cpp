@@ -83,21 +83,26 @@ class InputBatchLease final {
 
 }  // namespace
 
-NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::Create(const NpmBasicTaskConfig& config, IQuerier* querier,
-                                                      const std::shared_ptr<arrow::Schema>& input_schema,
-                                                      std::shared_ptr<arrow::Schema>* output_schema,
-                                                      std::unique_ptr<NpmBasicTaskRuntime>* output,
-                                                      std::shared_ptr<NpmTaskBudget> budget,
-                                                      IFlowLabelMatcherV1* matcher, const NpmModuleCatalogV1& catalog) {
+NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::Create(
+    const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
+    std::shared_ptr<arrow::Schema>* output_schema, std::unique_ptr<NpmBasicTaskRuntime>* output,
+    std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcherV1* matcher, const NpmModuleCatalogV1& catalog,
+    std::unique_ptr<INpmResultConsumerV1> consumer, std::string task_id) {
     return CreateWithTimeCapabilities(config, querier, input_schema, {}, output_schema, output, std::move(budget),
-                                      matcher, catalog);
+                                      matcher, catalog, std::move(consumer), std::move(task_id));
 }
 
 NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
     const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
     const NpmTimeCapabilities& time_capabilities, std::shared_ptr<arrow::Schema>* output_schema,
     std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcherV1* matcher,
-    const NpmModuleCatalogV1& catalog) {
+    const NpmModuleCatalogV1& catalog, std::unique_ptr<INpmResultConsumerV1> consumer, std::string task_id) {
+    struct ConsumerGuard {
+        std::unique_ptr<INpmResultConsumerV1>& consumer;
+        ~ConsumerGuard() {
+            if (consumer) consumer->Cancel();
+        }
+    } consumer_guard{consumer};
     MatcherLease matcher_lease(matcher);
     NpmBasicTaskRuntimeStatus status;
     if (!input_schema) {
@@ -177,12 +182,31 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         if (!budget) budget = std::make_shared<NpmTaskBudget>(config.analysis);
         std::unique_ptr<NpmBasicTaskRuntime> runtime(new NpmBasicTaskRuntime(
             std::move(frozen), std::move(protocol_context), std::move(budget), std::move(matcher_lease)));
+        std::vector<NpmEntityDescriptorV1> entities;
+        for (const auto& entry : prepared)
+            entities.insert(entities.end(), entry.plan.entities.begin(), entry.plan.entities.end());
+        runtime->router_ = std::make_shared<NpmResultRouter>(
+            std::move(entities), observing, MakeNpmResultContext(std::move(task_id)), runtime->budget_,
+            std::move(consumer), [self = runtime.get()](const std::function<int()>& callback) {
+                // The active-operation gate serializes entry while external code runs without the lifecycle lock.
+                self->operation_mutex_.unlock();
+                try {
+                    const int error = callback();
+                    self->operation_mutex_.lock();
+                    return error;
+                } catch (...) {
+                    self->operation_mutex_.lock();
+                    throw;
+                }
+            });
+        runtime->collector_->BindRouter(runtime->router_);
         runtime->prepared_modules_ = std::move(prepared);
         for (const auto& entry : runtime->prepared_modules_) {
             auto instance = entry.create(*runtime->protocol_context_, runtime->budget_);
             if (instance.protocol && !instance.analysis) {
                 auto adapter = std::make_unique<NpmProtocolModuleAdapter>(entry.plan, std::move(instance.protocol),
-                                                                          &runtime->cancellation_requested_);
+                                                                          &runtime->cancellation_requested_,
+                                                                          runtime->router_.get());
                 runtime->protocol_modules_.push_back(adapter.get());
                 instance.analysis = std::move(adapter);
             } else if (instance.protocol || (!instance.analysis && entry.plan.module_id != "basic")) {
@@ -215,12 +239,20 @@ NpmBasicTaskRuntime::NpmBasicTaskRuntime(NpmBasicTaskConfig config,
       collector_(std::make_unique<NpmBasicResultCollector>(config_.features)),
       projector_(std::make_unique<NpmBasicResultProjector>(*protocol_context_)) {}
 
+NpmBasicTaskRuntime::~NpmBasicTaskRuntime() {
+    Cancel();
+    std::unique_lock<std::mutex> lock(operation_mutex_);
+    operation_done_.wait(lock, [this] { return !operation_active_.load(); });
+    ReleaseResources();
+}
+
 const NpmBasicTaskConfig& NpmBasicTaskRuntime::Config() const noexcept { return config_; }
 
 NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::shared_ptr<arrow::RecordBatch>& input,
                                                                     std::shared_ptr<arrow::RecordBatch>* output) {
     NpmBasicOfflineBatchStatus status;
     std::unique_lock<std::mutex> lock(operation_mutex_);
+    operation_done_.wait(lock, [this] { return !operation_active_.load(); });
     status.runtime_state = state_.load(std::memory_order_acquire);
     if (status.runtime_state != NpmEofFlushState::kOpen) {
         status.error = NpmBasicOfflineBatchError::kTerminalState;
@@ -229,8 +261,9 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::s
     operation_active_.store(true, std::memory_order_release);
 
     const auto finish = [this, &lock]() {
-        lock.unlock();
         operation_active_.store(false, std::memory_order_release);
+        operation_done_.notify_all();
+        lock.unlock();
     };
     const auto cancel = [this, &status, &finish]() {
         status.error = NpmBasicOfflineBatchError::kCancelled;
@@ -297,16 +330,10 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::s
         if (status.drain_status.error != NpmBasicDrainError::kNone) {
             return fail(NpmBasicOfflineBatchError::kDrainError, "npm.basic offline batch result drain failed");
         }
-        finish();
         status.runtime_state = state_.load(std::memory_order_acquire);
-        if (status.runtime_state == NpmEofFlushState::kCancelled) {
-            std::lock_guard<std::mutex> cleanup_lock(operation_mutex_);
-            eof_flusher_.Cancel();
-            ReleaseResources();
-            status.error = NpmBasicOfflineBatchError::kCancelled;
-            return status;
-        }
+        if (status.runtime_state == NpmEofFlushState::kCancelled) return cancel();
         *output = std::move(next_output);
+        finish();
         return status;
     } catch (const std::bad_alloc&) {
         return fail(NpmBasicOfflineBatchError::kAllocationFailed, "npm.basic offline batch allocation failed");
@@ -317,6 +344,7 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
     const NpmBasicRealtimeMaintenanceInput& input, std::shared_ptr<arrow::RecordBatch>* output) {
     NpmBasicRealtimeMaintenanceStatus status;
     std::unique_lock<std::mutex> lock(operation_mutex_);
+    operation_done_.wait(lock, [this] { return !operation_active_.load(); });
     status.runtime_state = state_.load(std::memory_order_acquire);
     if (status.runtime_state != NpmEofFlushState::kOpen) {
         status.error = NpmBasicRealtimeMaintenanceError::kTerminalState;
@@ -325,8 +353,9 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
     operation_active_.store(true, std::memory_order_release);
 
     const auto finish = [this, &lock]() {
-        lock.unlock();
         operation_active_.store(false, std::memory_order_release);
+        operation_done_.notify_all();
+        lock.unlock();
     };
     const auto cancel = [this, &status, &finish]() {
         status.error = NpmBasicRealtimeMaintenanceError::kCancelled;
@@ -350,14 +379,15 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
         return status;
     };
     const auto finish_success = [this, &status, &finish]() {
-        finish();
         status.runtime_state = state_.load(std::memory_order_acquire);
-        if (status.runtime_state != NpmEofFlushState::kCancelled) return false;
-        std::lock_guard<std::mutex> cleanup_lock(operation_mutex_);
-        eof_flusher_.Cancel();
-        ReleaseResources();
-        status.error = NpmBasicRealtimeMaintenanceError::kCancelled;
-        return true;
+        const bool cancelled = status.runtime_state == NpmEofFlushState::kCancelled;
+        if (cancelled) {
+            eof_flusher_.Cancel();
+            ReleaseResources();
+            status.error = NpmBasicRealtimeMaintenanceError::kCancelled;
+        }
+        finish();
+        return cancelled;
     };
 
     if (state_.load(std::memory_order_acquire) == NpmEofFlushState::kCancelled) return cancel();
@@ -433,8 +463,7 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
             }
         }
 
-        const bool should_emit =
-            !progress.ended_sessions.empty() || (status.snapshot_due && collector_->pending_results() != 0);
+        const bool should_emit = !progress.ended_sessions.empty() || collector_->pending_results() != 0;
         if (!should_emit) {
             finish_success();
             return status;
@@ -465,14 +494,16 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
 
 NpmEofFlushStatus NpmBasicTaskRuntime::FlushOffline(int64_t observed_at, std::shared_ptr<arrow::RecordBatch>* output) {
     std::unique_lock<std::mutex> lock(operation_mutex_);
+    operation_done_.wait(lock, [this] { return !operation_active_.load(); });
     NpmEofFlushState current = state_.load(std::memory_order_acquire);
     if (current != NpmEofFlushState::kOpen) return TerminalFlushStatus(current);
     operation_active_.store(true, std::memory_order_release);
     if (state_.load(std::memory_order_acquire) == NpmEofFlushState::kCancelled) {
         eof_flusher_.Cancel();
         ReleaseResources();
-        lock.unlock();
         operation_active_.store(false, std::memory_order_release);
+        operation_done_.notify_all();
+        lock.unlock();
         return TerminalFlushStatus(NpmEofFlushState::kCancelled);
     }
 
@@ -489,11 +520,12 @@ NpmEofFlushStatus NpmBasicTaskRuntime::FlushOffline(int64_t observed_at, std::sh
         SetLastErrorOnce(EofErrorMessage(status.error));
     }
     ReleaseResources();
-    lock.unlock();
-    operation_active_.store(false, std::memory_order_release);
     if (output != nullptr && state_.load(std::memory_order_acquire) == NpmEofFlushState::kFlushed) {
         *output = std::move(next_output);
     }
+    operation_active_.store(false, std::memory_order_release);
+    operation_done_.notify_all();
+    lock.unlock();
     return status;
 }
 
@@ -503,6 +535,7 @@ void NpmBasicTaskRuntime::Cancel() noexcept {
         return;
     }
     cancellation_requested_.store(true, std::memory_order_release);
+    if (router_) router_->Cancel();
     SetLastErrorOnce(kCancelledError);
     if (operation_active_.load(std::memory_order_acquire)) return;
     if (!operation_mutex_.try_lock()) return;
@@ -544,10 +577,20 @@ NpmEofFlushState NpmBasicTaskRuntime::State() const noexcept { return state_.loa
 
 void NpmBasicTaskRuntime::SetLastErrorOnce(const char* error) noexcept {
     const char* expected = nullptr;
-    last_error_.compare_exchange_strong(expected, error, std::memory_order_acq_rel);
+    if (error != kCancelledError && router_ && !router_->LastError().empty()) {
+        last_error_.compare_exchange_strong(expected, router_->LastError().c_str(), std::memory_order_acq_rel);
+    } else {
+        last_error_.compare_exchange_strong(expected, error, std::memory_order_acq_rel);
+    }
 }
 
 void NpmBasicTaskRuntime::ReleaseResources() noexcept {
+    if (router_) {
+        operation_mutex_.unlock();
+        router_->Cancel();
+        operation_mutex_.lock();
+        router_->Discard();
+    }
     modules_.clear();
     protocol_modules_.clear();
     owned_modules_.clear();

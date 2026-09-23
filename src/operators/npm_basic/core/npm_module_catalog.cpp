@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "npm_module_catalog.h"
+#include <operators/npm_basic/output/npm_result_router.h>
 
 #include <operators/npm_basic/config/npm_basic_task_config.h>
 #include <operators/npm_basic/modules/session/npm_session_analysis_module.h>
@@ -115,8 +116,12 @@ NpmProtocolContractStatusV1 PrepareNpmModulesV1(const NpmBasicTaskConfig& config
 }
 
 NpmProtocolModuleAdapter::NpmProtocolModuleAdapter(NpmModulePlanV1 plan, std::unique_ptr<INpmProtocolModuleV1> module,
-                                                   const std::atomic<bool>* cancellation_requested)
-    : plan_(std::move(plan)), module_(std::move(module)), cancellation_requested_(cancellation_requested) {}
+                                                   const std::atomic<bool>* cancellation_requested,
+                                                   NpmResultRouter* router)
+    : router_(router),
+      plan_(std::move(plan)),
+      module_(std::move(module)),
+      cancellation_requested_(cancellation_requested) {}
 NpmProtocolModuleAdapter::~NpmProtocolModuleAdapter() { Abort(); }
 bool NpmProtocolModuleAdapter::AcceptsControl() const { return (plan_.input_mask & 4) != 0; }
 int NpmProtocolModuleAdapter::OnControl(const NpmInputEventV1& event) {
@@ -182,8 +187,7 @@ int NpmProtocolModuleAdapter::OnSessionEnd(const NpmSessionView& session, NpmSes
     const int error = module_->OnSessionEnd(session, reason, time, *this);
     return error == 0 && cancellation_requested_->load(std::memory_order_acquire) ? ECANCELED : error;
 }
-int NpmProtocolModuleAdapter::Emit(std::string_view, const arrow::RecordBatch&) {
-    // Result routing is introduced by T3; do not acknowledge undelivered protocol results.
-    return ENOTSUP;
+int NpmProtocolModuleAdapter::Emit(std::string_view entity, const arrow::RecordBatch& rows) {
+    return router_->Emit(plan_.module_id, entity, rows);
 }
 }  // namespace flowsql::npm

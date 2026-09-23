@@ -82,11 +82,12 @@ class PendingOutputOwner {
 
 NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult>& results,
                                               std::shared_ptr<arrow::RecordBatch>* output, std::string* error,
-                                              bool labeling_enabled) {
+                                              bool labeling_enabled, arrow::MemoryPool* pool) {
     if (output == nullptr) {
         return Fail(NpmSessionEncodeError::kNullOutput, "output is null", error);
     }
 
+    if (!pool) pool = arrow::default_memory_pool();
     try {
         for (size_t index = 0; index < results.size(); ++index) {
             const auto validation = ValidateNpmSessionResult(results[index]);
@@ -104,56 +105,56 @@ NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult
             }
         }
 
-        arrow::UInt64Builder session_id;
-        arrow::UInt64Builder observation_domain_id;
-        arrow::UInt64Builder revision;
-        arrow::Int64Builder observed_at;
-        arrow::BooleanBuilder is_final;
-        arrow::UInt8Builder ip_family;
-        arrow::UInt8Builder transport_protocol;
-        arrow::StringBuilder a_ip;
-        arrow::StringBuilder b_ip;
-        arrow::UInt16Builder a_port;
-        arrow::UInt16Builder b_port;
-        arrow::Int64Builder first_ns;
-        arrow::Int64Builder last_ns;
-        arrow::Int64Builder duration_ns;
-        arrow::UInt32Builder primary_label_id;
-        arrow::StringBuilder protocol_status;
-        arrow::UInt16Builder protocol_id;
-        arrow::UInt16Builder protocol_sub_id;
-        arrow::StringBuilder protocol;
-        arrow::StringBuilder end_reason;
-        arrow::UInt64Builder packets_ab;
-        arrow::UInt64Builder packets_ba;
-        arrow::UInt64Builder wire_bytes_ab;
-        arrow::UInt64Builder wire_bytes_ba;
-        arrow::UInt64Builder payload_bytes_ab;
-        arrow::UInt64Builder payload_bytes_ba;
-        arrow::StringBuilder rate_status;
-        arrow::DoubleBuilder wire_bps_ab;
-        arrow::DoubleBuilder wire_bps_ba;
-        arrow::DoubleBuilder payload_bps_ab;
-        arrow::DoubleBuilder payload_bps_ba;
-        arrow::UInt64Builder tcp_unique_payload_bytes_ab;
-        arrow::UInt64Builder tcp_unique_payload_bytes_ba;
-        arrow::DoubleBuilder tcp_unique_payload_bps_ab;
-        arrow::DoubleBuilder tcp_unique_payload_bps_ba;
-        arrow::StringBuilder tcp_handshake_status;
-        arrow::StringBuilder tcp_initiator;
-        arrow::Int64Builder tcp_handshake_duration_ns;
-        arrow::Int64Builder tcp_synack_rtt_ns;
-        arrow::StringBuilder tcp_rtt_status;
-        arrow::UInt64Builder tcp_rtt_samples;
-        arrow::Int64Builder tcp_rtt_min_ns;
-        arrow::Int64Builder tcp_rtt_mean_ns;
-        arrow::Int64Builder tcp_rtt_max_ns;
-        arrow::StringBuilder tcp_retransmission_status;
-        arrow::UInt64Builder tcp_retrans_packets_ab;
-        arrow::UInt64Builder tcp_retrans_packets_ba;
-        arrow::UInt64Builder tcp_retrans_payload_bytes_ab;
-        arrow::UInt64Builder tcp_retrans_payload_bytes_ba;
-        arrow::UInt32Builder measurement_flags;
+        arrow::UInt64Builder session_id(pool);
+        arrow::UInt64Builder observation_domain_id(pool);
+        arrow::UInt64Builder revision(pool);
+        arrow::Int64Builder observed_at(pool);
+        arrow::BooleanBuilder is_final(pool);
+        arrow::UInt8Builder ip_family(pool);
+        arrow::UInt8Builder transport_protocol(pool);
+        arrow::StringBuilder a_ip(pool);
+        arrow::StringBuilder b_ip(pool);
+        arrow::UInt16Builder a_port(pool);
+        arrow::UInt16Builder b_port(pool);
+        arrow::Int64Builder first_ns(pool);
+        arrow::Int64Builder last_ns(pool);
+        arrow::Int64Builder duration_ns(pool);
+        arrow::UInt32Builder primary_label_id(pool);
+        arrow::StringBuilder protocol_status(pool);
+        arrow::UInt16Builder protocol_id(pool);
+        arrow::UInt16Builder protocol_sub_id(pool);
+        arrow::StringBuilder protocol(pool);
+        arrow::StringBuilder end_reason(pool);
+        arrow::UInt64Builder packets_ab(pool);
+        arrow::UInt64Builder packets_ba(pool);
+        arrow::UInt64Builder wire_bytes_ab(pool);
+        arrow::UInt64Builder wire_bytes_ba(pool);
+        arrow::UInt64Builder payload_bytes_ab(pool);
+        arrow::UInt64Builder payload_bytes_ba(pool);
+        arrow::StringBuilder rate_status(pool);
+        arrow::DoubleBuilder wire_bps_ab(pool);
+        arrow::DoubleBuilder wire_bps_ba(pool);
+        arrow::DoubleBuilder payload_bps_ab(pool);
+        arrow::DoubleBuilder payload_bps_ba(pool);
+        arrow::UInt64Builder tcp_unique_payload_bytes_ab(pool);
+        arrow::UInt64Builder tcp_unique_payload_bytes_ba(pool);
+        arrow::DoubleBuilder tcp_unique_payload_bps_ab(pool);
+        arrow::DoubleBuilder tcp_unique_payload_bps_ba(pool);
+        arrow::StringBuilder tcp_handshake_status(pool);
+        arrow::StringBuilder tcp_initiator(pool);
+        arrow::Int64Builder tcp_handshake_duration_ns(pool);
+        arrow::Int64Builder tcp_synack_rtt_ns(pool);
+        arrow::StringBuilder tcp_rtt_status(pool);
+        arrow::UInt64Builder tcp_rtt_samples(pool);
+        arrow::Int64Builder tcp_rtt_min_ns(pool);
+        arrow::Int64Builder tcp_rtt_mean_ns(pool);
+        arrow::Int64Builder tcp_rtt_max_ns(pool);
+        arrow::StringBuilder tcp_retransmission_status(pool);
+        arrow::UInt64Builder tcp_retrans_packets_ab(pool);
+        arrow::UInt64Builder tcp_retrans_packets_ba(pool);
+        arrow::UInt64Builder tcp_retrans_payload_bytes_ab(pool);
+        arrow::UInt64Builder tcp_retrans_payload_bytes_ba(pool);
+        arrow::UInt32Builder measurement_flags(pool);
 
         const auto check = [&](const arrow::Status& status, const char* field) {
             if (status.ok()) return true;

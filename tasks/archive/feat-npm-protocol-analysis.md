@@ -1,6 +1,6 @@
 # Feature: NPM 协议模块运行时基础
 
-状态：`[-]` 进行中（T0～T2 已完成，T3～T4 未实施）
+状态：`[x]` 已完成（T0～T4 均已验收）
 优先级：P1
 前置：`npm-basic-analysis`、`npm-session-analysis`、`npm-basic-parameters`、`stream-time-drive`（均已交付）。
 条件依赖：显式启用标签化或模块声明标签准入时要求 `flow-labeling`。
@@ -168,10 +168,10 @@ Abort 幂等且无结果输出，仅在在途模块回调结束后执行；consu
 - `[x]` T2：交付独立实体时间与终结管理，使事务在会话存活时可到期，EOF/取消/复用不会泄漏或重放。
   锚点：同 session 多实体、无 session 实体、deadline 边界、无包/积压/水位回退、切换 observing 不改变轨迹；
   终结包先处理、tuple reuse 隔离、EOF 恰好一次、重复取消、回调中取消、预算失败后资源归还。
-- `[ ]` T3：交付统一结果消费与前台路由，使全部 enabled 实体可接入存储且消费失败保持明确的终止语义。
+- `[x]` T3：交付统一结果消费与前台路由，使全部 enabled 实体可接入存储且消费失败保持明确的终止语义。
   锚点：Basic/Session 快照与终态均送达附加 consumer；仅 observing 进入前台；同任务再次 Open 的 run_id 不同；
   consumer 首批/中途/Finish 失败无重试、前缀不回滚、借用复制与 Arrow owner 预算、非观察结果无无限积压。
-- `[ ]` T4：交付兼容回归与组合验收证据，使运行时可供后续 Feature 使用且未交付模块不会被误报为可用。
+- `[x]` T4：交付兼容回归与组合验收证据，使运行时可供后续 Feature 使用且未交付模块不会被误报为可用。
   锚点：现有 SQL/E2E 通过；两种测试实体与控制输入走生产 runtime 组合验证；生产目录无测试/未交付协议项；
   并发任务隔离、销毁后结果 owner 有效、定向 Sanitizer、格式检查及完整 CTest 通过。
 
@@ -219,3 +219,38 @@ Abort 幂等且无结果输出，仅在在途模块回调结束后执行；consu
   最终生产库和两个定向 target 构建通过，CTest 2/2、0 失败（0.80 秒），本轮 C++ 格式与 Diff 检查通过。
 - T2 边界：实体身份/revision/finality/预算仍由模块拥有，runtime 不引入通用实体容器；协议 Emit 仍明确返回
   ENOTSUP，统一结果路由留给 T3。T3～T4 未勾选，未运行全量 CTest，未 commit/push。
+
+- T3（2026-09-23）：新增任务私有 `NpmResultRouter`，协议 emitter 绑定模块归属；Basic/Session typed writer、
+  周期快照及 Basic 直接投影终态统一进入路由。Open 可注入一个拥有型附加 consumer，接收所有 enabled 实体，
+  前台只保留 observing；无消费者的非观察实体校验后释放，1000 次连续输出无 pending 积压。
+- Open 生成新的 run_id，生产任务传入原 task_id；旧 Basic/Session Schema、列映射及 labeling metadata 保持。
+  每批验证实体归属、Schema 与行值，前台缓冲在 Consume 前复制并预留预算；消费者错误保留实体/操作与 errno，
+  任务失败且不重试，已消费前缀不回滚，当前调用不发布前台结果。EOF 全部模块 Finish 后单次 consumer Finish。
+- 结果使用预留后分配的 Arrow memory pool，按实际对齐分配容量计入 `kPendingOutput`；预算租约绑定到缓冲，
+  单独保留 Array、切片或 Buffer 时也持续有效和计费，最后持有者释放后归还。输入 packet/batch owner 不被保留。
+  既有预算测试同步改为核对容量；仅检查值的旧列引用不再意外延长持有期，独立测试验证真实 owner 生命周期。
+- consumer Consume/Finish 不持生命周期互斥锁；串行 operation gate 防止重入处理。并发 Cancel 发出非阻塞信号，
+  在途回调返回后终止并清理，销毁等待在途操作结束；错误和未正常结束只 Cancel，成功 Finish 不再 Cancel。
+- T3 新增四组测试覆盖 Basic/Session 两种 observing 下的快照和终态、重复 task_id 的不同 run_id、协议借用覆写
+  后前台数据仍有效、首批/中途/Finish 失败前缀与无重试、Consume/Finish 中阻塞后并发取消、提取列在 runtime
+  销毁后有效且计费、非法实体/Schema/模块归属拒绝、消费前预算失败及资源归还。既有定向回归一起通过。
+- 最终 `cmake -B build src` 配置成功，`FLOWSQL_FLOW_LABELING=ON`；生产库、`test_npm_basic` 和
+  `test_npm_protocol_contract` 构建通过；定向 CTest 2/2、0 失败（0.85 秒）。本轮 15 个 C++ 文件格式检查通过
+  （既有大测试/算子文件只检查修改区域），`git diff --check` 通过，所有差异在工作台允许文件内。
+- T3 完成后停止；T4、全量 CTest、Sanitizer、结果存储与具体协议解析仍未实施；未 commit/push。
+
+- T4（2026-09-23）：新增生产 runtime 组合锚点，确认生产目录严格只有 `basic`、`session`，`dns`、`http1`、
+  `tls`、`icmp` 均在 Open 阶段以模块计划错误拒绝且不发布 runtime/schema。测试目录注入 `dual_left`、
+  `dual_right` 两个实体，两个 control packet 经生产 Open、分发、统一 router 和 EOF 主链；前台只交付 observing
+  实体，附加 consumer 按输入顺序收到两个实体的全部结果。
+- 两个 runtime 并发处理及 EOF 时具有不同 `run_id`、独立模块状态、consumer、预算和输出；模块及 consumer
+  Finish 各执行一次且不触发 Abort/Cancel。runtime 销毁后保留的 Arrow Array slice 仍可读取且继续持有
+  `kPendingOutput` 预算，第二个任务先独立归零，最后 owner 释放后第一个任务预算归零。
+- 独立 Debug ASan/UBSan 构建在首次运行中定位到两个测试报文构造器对空 payload 调用 `memcpy` 的未定义行为；
+  增加非空保护后，`test_npm_basic`、`test_npm_protocol_contract` 定向 CTest 2/2 通过（1.70 秒），无 Sanitizer
+  runtime error。主构建以 `FLOWSQL_FLOW_LABELING=ON` 配置并全量编译成功，完整 CTest 同一轮 17/17 通过
+  （65.16 秒）。
+- 15 个变更 C++ 文件通过 `clang-format-18 --dry-run --Werror`，`git diff --check` 通过；`readelf -d`
+  确认 `libflowsql_npm_basic.so` 的 NEEDED 项仅含 Arrow、FlowSQL common 和标准运行库，没有 DPDK 依赖。
+  所有源码、测试和任务文档差异均在 T4 工作台允许范围内，Sanitizer 构建生成的未跟踪元数据已清理；未实现
+  具体协议、TCP 重组、结果存储或后续 Feature，未 commit/push。

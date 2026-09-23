@@ -13,7 +13,8 @@
 
 namespace arrow {
 class RecordBatch;
-}
+class MemoryPool;
+}  // namespace arrow
 
 namespace flowsql::npm {
 
@@ -31,7 +32,7 @@ enum class NpmBasicEncodeError : uint8_t {
 /** Encodes valid active/final results into the fixed NpmBasicResultSchema. Output is unchanged on error. */
 NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& results,
                                           std::shared_ptr<arrow::RecordBatch>* output, std::string* error = nullptr,
-                                          bool labeling_enabled = false);
+                                          bool labeling_enabled = false, arrow::MemoryPool* pool = nullptr);
 
 /** Encodes, reserves exact Arrow buffer bytes, and releases the reservation with the last output owner. */
 NpmBasicEncodeError EncodeNpmBasicResultsWithBudget(const std::vector<NpmBasicResult>& results,
