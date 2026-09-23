@@ -11265,9 +11265,691 @@ void TestNpmBasicV2PluginExports() {
     assert(dlclose(handle) == 0);
 }
 
+struct ProtocolInputTrace {
+    int created = 0;
+    int aborted = 0;
+    int prepared = 0;
+    int snapshots = 0;
+    std::vector<npm::NpmInputKindV1> kinds;
+    std::vector<size_t> sizes;
+    std::vector<bool> complete;
+    std::vector<uint64_t> sessions;
+    std::vector<std::string> order;
+    std::string json;
+};
+
+class CountingProtocolModule final : public npm::INpmProtocolModuleV1 {
+ public:
+    explicit CountingProtocolModule(ProtocolInputTrace* trace) : trace_(trace) { ++trace_->created; }
+    int OnInput(const npm::NpmInputEventV1& event, npm::INpmResultEmitterV1&) override {
+        assert(npm::ValidateNpmInputEventV1(event).error == npm::NpmProtocolContractErrorV1::kNone);
+        trace_->kinds.push_back(event.kind);
+        trace_->sizes.push_back(event.body.size);
+        trace_->complete.push_back(event.body_complete);
+        trace_->sessions.push_back(event.session ? event.session->session_id : 0);
+        trace_->order.push_back("packet");
+        return 0;
+    }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override {
+        ++trace_->snapshots;
+        return 0;
+    }
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
+                     npm::INpmResultEmitterV1&) override {
+        trace_->order.push_back("end");
+        return 0;
+    }
+    std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
+    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    void Abort() noexcept override { ++trace_->aborted; }
+
+ private:
+    ProtocolInputTrace* trace_;
+};
+
+npm::NpmModuleRegistrationV1 CountingRegistration(std::string id, uint8_t mask, ProtocolInputTrace* trace,
+                                                  bool stream = false,
+                                                  std::optional<std::vector<uint32_t>> labels = {}) {
+    npm::NpmModuleRegistrationV1 entry;
+    entry.module_id = id;
+    entry.entity_ids = {id + "_event"};
+    entry.prepare = [id, mask, trace, stream, labels](const npm::NpmBasicTaskConfig&, std::string_view json,
+                                                      npm::NpmPreparedModuleV1* output) {
+        ++trace->prepared;
+        trace->json = json;
+        output->plan.module_id = id;
+        output->plan.input_mask = mask;
+        output->plan.requires_tcp_stream = stream;
+        output->plan.requires_labeling = labels.has_value();
+        output->plan.primary_label_ids = labels;
+        auto entity = npm::NpmBasicEntityDescriptorV1();
+        entity.entity_id = id + "_event";
+        entity.module_id = id;
+        output->plan.entities = {entity};
+        output->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
+            npm::NpmModuleInstanceV1 instance;
+            instance.protocol = std::make_unique<CountingProtocolModule>(trace);
+            return instance;
+        };
+        return npm::NpmProtocolContractStatusV1{};
+    };
+    return entry;
+}
+
+PacketFixture MakeControlPacket(bool ipv6 = false) {
+    auto fixture = ipv6 ? MakeIpv6UdpPacket("2001:db8::1", 1, "2001:db8::2", 2, {9, 8, 7, 6})
+                        : MakeIpv4TcpPacket("192.0.2.1", 1, "192.0.2.2", 2, {});
+    const size_t header = ipv6 ? sizeof(flowsql::Ipv6Header) : sizeof(flowsql::Ipv4Header);
+    fixture.bytes.resize(header + 12);
+    if (ipv6) {
+        auto* ip = reinterpret_cast<flowsql::Ipv6Header*>(fixture.bytes.data());
+        ip->protocol = 58;
+        ip->payload = htons(12);
+    } else {
+        auto* ip = reinterpret_cast<flowsql::Ipv4Header*>(fixture.bytes.data());
+        ip->protocol = 1;
+        ip->total_length = htons(header + 12);
+    }
+    fixture.layer.transport_protocol = ipv6 ? 58 : 1;
+    fixture.layer.transport_layer_index = flowsql::packet::kNoLayerIndex;
+    fixture.layer.layer_count = 1;
+    fixture.layer.ports_valid = false;
+    fixture.layer.src_port = fixture.layer.dst_port = 0;
+    fixture.layer.payload_offset = header;
+    return fixture;
+}
+
+void TestProtocolCatalogOpenAndDispatch() {
+    ProtocolInputTrace first, second, control;
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    assert(catalog.size() == 2);
+    catalog.push_back(CountingRegistration("probe", 3, &first));
+    catalog.push_back(CountingRegistration("mirror", 3, &second));
+    catalog.push_back(CountingRegistration("control", 4, &control));
+    npm::NpmBasicTaskConfig config;
+    const char* json =
+        R"({"input_namespace":"capture","source_domains":"1:77","features":"control,mirror,session,probe,basic","parameters":"{\"schema_version\":1,\"probe\":{\"marker\":7},\"disabled\":{\"bad\":true}}"})";
+    assert(npm::ParseNpmBasicTaskConfig(json, &config, false, catalog).error == npm::NpmBasicTaskConfigError::kNone);
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    std::shared_ptr<arrow::Schema> schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
+                                            nullptr, catalog)
+               .error == npm::NpmBasicTaskRuntimeError::kNone);
+    assert(schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(first.json == R"({"marker":7})");
+    assert(first.created == 1 && second.created == 1 && control.created == 1);
+    // The task owns its plans and factories, independent of the injected directory and configuration lifetimes.
+    catalog.clear();
+    config.parameters_json.clear();
+    auto tcp = MakeIpv4TcpPacket("192.0.2.1", 123, "192.0.2.2", 443, {1, 2});
+    auto udp = MakeIpv6UdpPacket("2001:db8::1", 123, "2001:db8::2", 53, {3, 4, 5, 6});
+    auto truncated = udp;
+    truncated.bytes.resize(truncated.bytes.size() - 2);
+    truncated.layer.status = flowsql::packet::LayerStatus::kTruncated;
+    auto short_record = MakeBatchPacketRecord(truncated, 1, 40, 4);
+    short_record.meta.wire_len = udp.bytes.size();
+    auto input = MakeEncodedPacketBatch(
+        {MakeBatchPacketRecord(tcp, 1, 10, 1), MakeBatchPacketRecord(MakeControlPacket(), 1, 20, 2),
+         MakeBatchPacketRecord(udp, 1, 30, 3), short_record, MakeBatchPacketRecord(MakeControlPacket(true), 1, 50, 5)});
+    std::shared_ptr<arrow::RecordBatch> output;
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(first.kinds.size() == 3 && first.kinds == second.kinds);
+    assert(first.sizes == std::vector<size_t>({2, 4, 2}));
+    assert(first.complete == std::vector<bool>({true, true, false}));
+    assert(first.sessions == second.sessions && first.sessions[1] == first.sessions[2]);
+    assert(control.kinds.size() == 2 && control.sessions == std::vector<uint64_t>({0, 0}));
+    assert(control.sizes == std::vector<size_t>({12, 12}));
+    assert(runtime->Sessions().size() == 2 && protocol.identify_pipelines.size() == 2);
+    std::vector<npm::NpmSessionView> active;
+    assert(runtime->Sessions().SnapshotActive(&active) == npm::NpmSessionTableError::kNone);
+    assert(active[0].packets_ab + active[0].packets_ba == 1);
+    assert(active[1].packets_ab + active[1].packets_ba == 2);
+    assert(runtime->FlushOffline(60, &output).error == npm::NpmEofFlushError::kNone);
+    assert(output->num_rows() == 2);
+    assert(control.order == std::vector<std::string>({"packet", "packet"}));
+    assert(first.order == std::vector<std::string>({"packet", "packet", "packet", "end", "end"}));
+    assert(pool.release_calls == 1);
+}
+
+void TestProtocolOpenRejectionsAndControlCompatibility() {
+    ProtocolInputTrace trace;
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    catalog.push_back(CountingRegistration("probe", 3, &trace, true, std::vector<uint32_t>{1001}));
+    npm::NpmBasicTaskConfig config;
+    assert(npm::ParseNpmBasicTaskConfig(
+               R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,probe"})", &config, false,
+               catalog)
+               .error == npm::NpmBasicTaskConfigError::kNone);
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    auto schema = arrow::schema({});
+    const auto original_schema = schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    auto status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                                   {}, nullptr, catalog);
+    assert(status.error == npm::NpmBasicTaskRuntimeError::kModulePlanError);
+    assert(!runtime && schema == original_schema && trace.created == 0);
+    assert(status.module_status.field.find("probe") != std::string::npos);
+    assert(pool.acquire_calls == 0);
+    for (const char* features : {"basic,dns", "basic,basic", "basic,", "labeling", "basic,probe,probe"}) {
+        const std::string text =
+            std::string(R"({"input_namespace":"capture","source_domains":"1:77","features":")") + features + "\"}";
+        assert(npm::ParseNpmBasicTaskConfig(text.c_str(), &config, false, catalog).error !=
+               npm::NpmBasicTaskConfigError::kNone);
+    }
+    catalog.back().available = false;
+    assert(npm::ParseNpmBasicTaskConfig(
+               R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,probe"})", &config, false,
+               catalog)
+               .error != npm::NpmBasicTaskConfigError::kNone);
+    assert(
+        npm::ParseNpmBasicTaskConfig(
+            R"({"input_namespace":"capture","source_domains":"1:77","parameters":"{\"schema_version\":1,\"probe\":{\"bad\":true}}"})",
+            &config, false, catalog)
+            .error == npm::NpmBasicTaskConfigError::kNone);
+    const int prepared_before = trace.prepared;
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
+                                            nullptr, catalog)
+               .error == npm::NpmBasicTaskRuntimeError::kNone);
+    assert(trace.prepared == prepared_before);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(MakeControlPacket(), 1, 10, 1)});
+    std::shared_ptr<arrow::RecordBatch> output;
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kBatchProcessError);
+    assert(protocol.identify_pipelines.empty());
+    runtime.reset();
+    catalog.back() = CountingRegistration("probe", 4, &trace);
+    assert(npm::ParseNpmBasicTaskConfig(
+               R"({"input_namespace":"capture","source_domains":"1:77","features":"probe","observing":"probe_event"})",
+               &config, false, catalog)
+               .error == npm::NpmBasicTaskConfigError::kNone);
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
+                                            nullptr, catalog)
+               .error == npm::NpmBasicTaskRuntimeError::kNone);
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(output->num_rows() == 0 && output->schema()->Equals(*schema, true));
+    assert(runtime->Sessions().size() == 0 && protocol.identify_pipelines.empty());
+    auto extended = MakeControlPacket(true);
+    extended.bytes.insert(extended.bytes.begin() + sizeof(flowsql::Ipv6Header), 8, 0);
+    auto* ip6 = reinterpret_cast<flowsql::Ipv6Header*>(extended.bytes.data());
+    ip6->protocol = 44;
+    ip6->payload = htons(20);
+    extended.bytes[sizeof(flowsql::Ipv6Header)] = 58;
+    extended.layer.transport_protocol = 44;
+    extended.layer.layer_count = 2;
+    extended.layer.layers[1] = {static_cast<uint16_t>(flowsql::eLayer::IPv6_EXT_FRAGMENT), sizeof(flowsql::Ipv6Header)};
+    input = MakeEncodedPacketBatch({MakeBatchPacketRecord(extended, 1, 20, 2)});
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(trace.sizes.back() == 12);
+    extended.bytes.resize(extended.bytes.size() - 3);
+    extended.layer.status = flowsql::packet::LayerStatus::kTruncated;
+    auto record = MakeBatchPacketRecord(extended, 1, 30, 3);
+    record.meta.wire_len += 3;
+    input = MakeEncodedPacketBatch({record});
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(trace.sizes.back() == 9 && !trace.complete.back());
+    npm::NpmInputEventV1 event;
+    const npm::NpmObservationDomainMap domains{"capture", {{1, 77}}};
+    auto malformed = MakeControlPacket();
+    malformed.layer.layers[0].offset = 999;
+    assert(npm::BuildNpmControlInput(domains, malformed.View(1), malformed.layer, &event) !=
+           npm::NpmSessionPacketError::kNone);
+    malformed = MakeControlPacket();
+    reinterpret_cast<flowsql::Ipv4Header*>(malformed.bytes.data())->fragment_offset = htons(1);
+    assert(npm::BuildNpmControlInput(domains, malformed.View(1), malformed.layer, &event) ==
+           npm::NpmSessionPacketError::kNonInitialFragment);
+}
+
+class ProtocolLabelMatcher final : public flowsql::IFlowLabelMatcherV1 {
+ public:
+    explicit ProtocolLabelMatcher(LabelingMatcherStats* stats) : stats_(stats) {}
+    int ClassifyBatch(const flowsql::FlowLabelFactsV1* facts, uint32_t count, uint32_t* labels) const override {
+        ++stats_->classify_calls;
+        for (uint32_t i = 0; i < count; ++i) {
+            stats_->facts.push_back(facts[i]);
+            labels[i] = facts[i].destination.port == 443 ? 1001 : 0;
+        }
+        return 0;
+    }
+    bool FindLabel(uint32_t id, flowsql::FlowPrimaryLabelViewV1*) const override { return id == 1001; }
+    void Release() noexcept override {
+        ++stats_->release_calls;
+        delete this;
+    }
+
+ private:
+    LabelingMatcherStats* stats_;
+};
+
+struct ProtocolLifecycleTrace {
+    int created = 0;
+    int finish_calls = 0;
+    int abort_calls = 0;
+    int finish_error = 0;
+    size_t control_entity_count = 1;
+    uint64_t entity_bytes = 32;
+    uint64_t second_entity_bytes = 32;
+    uint64_t next_entity_id = 1;
+    size_t live_entities = 0;
+    size_t peak_entities = 0;
+    std::vector<int64_t> watermarks;
+    std::vector<uint64_t> expired_entities;
+    std::vector<std::string> order;
+    std::function<void()> on_time;
+};
+
+class LifecycleProtocolModule final : public npm::INpmProtocolModuleV1 {
+ public:
+    LifecycleProtocolModule(ProtocolLifecycleTrace* trace, std::shared_ptr<npm::INpmTaskBudget> budget)
+        : trace_(trace), budget_(std::move(budget)) {
+        ++trace_->created;
+    }
+
+    int OnInput(const npm::NpmInputEventV1& event, npm::INpmResultEmitterV1&) override {
+        const uint64_t session_id = event.session == nullptr ? 0 : event.session->session_id;
+        trace_->order.push_back("input:" + std::to_string(session_id));
+        const size_t count = session_id == 0 ? trace_->control_entity_count : 2;
+        std::vector<Entity> added;
+        for (size_t index = 0; index < count; ++index) {
+            const uint64_t bytes = index == 0 ? trace_->entity_bytes : trace_->second_entity_bytes;
+            if (budget_->Reserve(npm::NpmBudgetCategory::kModuleState, bytes) != npm::NpmBudgetError::kNone) {
+                for (const auto& entity : added) budget_->Release(npm::NpmBudgetCategory::kModuleState, entity.bytes);
+                return ENOSPC;
+            }
+            added.push_back({trace_->next_entity_id++, session_id, event.packet.meta.timestamp_ns + 10, bytes});
+        }
+        entities_.insert(entities_.end(), added.begin(), added.end());
+        trace_->live_entities = entities_.size();
+        trace_->peak_entities = std::max(trace_->peak_entities, trace_->live_entities);
+        return 0;
+    }
+
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+
+    int OnSessionEnd(const npm::NpmSessionView& session, npm::NpmSessionEndReason, int64_t,
+                     npm::INpmResultEmitterV1&) override {
+        trace_->order.push_back("end:" + std::to_string(session.session_id));
+        ReleaseIf([&](const Entity& entity) { return entity.session_id == session.session_id; });
+        return 0;
+    }
+
+    std::optional<int64_t> NextEventDeadlineNs() const override {
+        std::optional<int64_t> result;
+        for (const auto& entity : entities_) {
+            if (!result || entity.deadline_ns < *result) result = entity.deadline_ns;
+        }
+        return result;
+    }
+
+    int OnTime(const npm::NpmModuleTimeV1& time, npm::INpmResultEmitterV1&) override {
+        assert(time.watermark_ns.has_value());
+        trace_->watermarks.push_back(*time.watermark_ns);
+        trace_->order.push_back("time:" + std::to_string(*time.watermark_ns));
+        ReleaseIf([&](const Entity& entity) {
+            if (entity.deadline_ns > *time.watermark_ns) return false;
+            trace_->expired_entities.push_back(entity.id);
+            return true;
+        });
+        if (trace_->on_time) trace_->on_time();
+        return 0;
+    }
+
+    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+        ++trace_->finish_calls;
+        trace_->order.push_back("finish");
+        if (trace_->finish_error != 0) return trace_->finish_error;
+        ReleaseIf([](const Entity&) { return true; });
+        return 0;
+    }
+
+    void Abort() noexcept override {
+        ++trace_->abort_calls;
+        trace_->order.push_back("abort");
+        ReleaseIf([](const Entity&) { return true; });
+    }
+
+ private:
+    struct Entity {
+        uint64_t id = 0;
+        uint64_t session_id = 0;
+        int64_t deadline_ns = 0;
+        uint64_t bytes = 0;
+    };
+
+    template <typename Predicate>
+    void ReleaseIf(Predicate predicate) noexcept {
+        auto entity = entities_.begin();
+        while (entity != entities_.end()) {
+            if (!predicate(*entity)) {
+                ++entity;
+                continue;
+            }
+            budget_->Release(npm::NpmBudgetCategory::kModuleState, entity->bytes);
+            entity = entities_.erase(entity);
+        }
+        trace_->live_entities = entities_.size();
+    }
+
+    ProtocolLifecycleTrace* trace_;
+    std::shared_ptr<npm::INpmTaskBudget> budget_;
+    std::vector<Entity> entities_;
+};
+
+npm::NpmModuleRegistrationV1 LifecycleRegistration(ProtocolLifecycleTrace* trace) {
+    npm::NpmModuleRegistrationV1 entry;
+    entry.module_id = "lifecycle";
+    entry.entity_ids = {"lifecycle_event"};
+    entry.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view, npm::NpmPreparedModuleV1* output) {
+        output->plan.module_id = "lifecycle";
+        output->plan.input_mask = npm::kNpmInputMaskV1;
+        auto entity = npm::NpmBasicEntityDescriptorV1();
+        entity.module_id = "lifecycle";
+        entity.entity_id = "lifecycle_event";
+        output->plan.entities = {std::move(entity)};
+        output->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget> budget) {
+            npm::NpmModuleInstanceV1 result;
+            result.protocol = std::make_unique<LifecycleProtocolModule>(trace, std::move(budget));
+            return result;
+        };
+        return npm::NpmProtocolContractStatusV1{};
+    };
+    return entry;
+}
+
+std::unique_ptr<npm::NpmBasicTaskRuntime> CreateLifecycleRuntime(ProtocolLifecycleTrace* trace,
+                                                                 SinglePoolQuerier* querier,
+                                                                 npm::NpmBasicTaskConfig config,
+                                                                 std::shared_ptr<npm::NpmTaskBudget> budget = {}) {
+    config.features.module_ids = {"basic", "lifecycle"};
+    config.features.basic_enabled = true;
+    config.features.observing = npm::NpmResultEntity::kBasic;
+    config.features.observing_entity = "basic";
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    catalog.push_back(LifecycleRegistration(trace));
+    std::shared_ptr<arrow::Schema> schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    const auto status = npm::NpmBasicTaskRuntime::Create(config, querier, flowsql::packet::PacketSchema(), &schema,
+                                                         &runtime, std::move(budget), nullptr, catalog);
+    assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
+    return runtime;
+}
+
+void TestProtocolLifecycleDeadlinesSessionsAndEof() {
+    ProtocolLifecycleTrace trace;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    auto config = MakeRuntimeTaskConfig();
+    config.analysis.out_of_order_tolerance_ns = 0;
+    auto runtime = CreateLifecycleRuntime(&trace, &querier, config);
+    const auto tcp = MakeIpv4TcpPacket("192.0.2.1", 123, "192.0.2.2", 443, {1});
+    auto input = MakeEncodedPacketBatch(
+        {MakeBatchPacketRecord(tcp, 0, 100, 1), MakeBatchPacketRecord(MakeControlPacket(), 0, 105, 2)});
+    std::shared_ptr<arrow::RecordBatch> output;
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(trace.peak_entities == 3 && trace.live_entities == 3);
+    assert(runtime->Budget()->Usage().module_state_bytes == 96);
+    const auto plan = runtime->MaintenancePlan();
+    assert(plan.event_deadline_ns == 110 && !plan.snapshot_deadline_monotonic_ns);
+    assert(trace.watermarks == std::vector<int64_t>({100, 105}));
+
+    input = MakeEncodedPacketBatch({MakeBatchPacketRecord(MakeControlPacket(), 0, 110, 3)});
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(trace.expired_entities == std::vector<uint64_t>({1, 2}));
+    assert(trace.live_entities == 2 && runtime->Sessions().size() == 1);
+    assert(runtime->Budget()->Usage().module_state_bytes == 64);
+    assert(runtime->MaintenancePlan().event_deadline_ns == 115);
+
+    const auto rst = MakeIpv4TcpPacket("192.0.2.1", 123, "192.0.2.2", 443, {2}, kTcpRst);
+    input = MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 112, 4)});
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(trace.live_entities == 2 && runtime->Sessions().size() == 0);
+    const auto terminal_input = std::find(trace.order.begin(), trace.order.end(), "input:1");
+    const auto terminal_end = std::find(trace.order.begin(), trace.order.end(), "end:1");
+    assert(terminal_input != trace.order.end() && terminal_end != trace.order.end() && terminal_input < terminal_end);
+    const auto flush = runtime->FlushOffline(120, &output);
+    assert(flush.error == npm::NpmEofFlushError::kNone);
+    assert(trace.finish_calls == 1 && trace.abort_calls == 0 && trace.live_entities == 0);
+    assert(runtime->Budget()->Usage().module_state_bytes == 0);
+    assert(runtime->FlushOffline(121, &output).error == npm::NpmEofFlushError::kAlreadyFlushed);
+    runtime->Cancel();
+    assert(trace.finish_calls == 1 && trace.abort_calls == 0);
+}
+
+void TestProtocolLifecycleEofOrderAndObservingIndependence() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    std::vector<std::vector<int64_t>> trajectories;
+    for (const bool observe_lifecycle : {false, true}) {
+        ProtocolLifecycleTrace trace;
+        auto config = MakeRuntimeTaskConfig();
+        config.analysis.out_of_order_tolerance_ns = 0;
+        config.features.module_ids = {"basic", "lifecycle"};
+        if (observe_lifecycle) {
+            config.features.observing = npm::NpmResultEntity::kProtocol;
+            config.features.observing_entity = "lifecycle_event";
+        }
+        auto catalog = npm::ProductionNpmModuleCatalogV1();
+        catalog.push_back(LifecycleRegistration(&trace));
+        std::shared_ptr<arrow::Schema> schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+        assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                                {}, nullptr, catalog)
+                   .error == npm::NpmBasicTaskRuntimeError::kNone);
+        const auto tcp = MakeIpv4TcpPacket("192.0.2.1", 123, "192.0.2.2", 443, {1});
+        auto input = MakeEncodedPacketBatch(
+            {MakeBatchPacketRecord(tcp, 0, 100, 1), MakeBatchPacketRecord(MakeControlPacket(), 0, 105, 2)});
+        std::shared_ptr<arrow::RecordBatch> output;
+        assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(runtime->FlushOffline(106, &output).error == npm::NpmEofFlushError::kNone);
+        const auto session_end = std::find(trace.order.begin(), trace.order.end(), "end:1");
+        const auto finish = std::find(trace.order.begin(), trace.order.end(), "finish");
+        assert(session_end != trace.order.end() && finish != trace.order.end() && session_end < finish);
+        assert(trace.finish_calls == 1 && trace.abort_calls == 0 && trace.live_entities == 0);
+        trajectories.push_back(trace.watermarks);
+    }
+    assert(trajectories[0] == trajectories[1]);
+    assert(trajectories[0] == std::vector<int64_t>({100, 105}));
+}
+
+void TestProtocolLifecycleTupleReuseAndBudgetFailureCleanup() {
+    ProtocolLifecycleTrace trace;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    auto config = MakeRuntimeTaskConfig();
+    config.analysis.out_of_order_tolerance_ns = 0;
+    auto runtime = CreateLifecycleRuntime(&trace, &querier, config);
+    const auto first = MakeIpv4TcpPacket("192.0.2.1", 123, "192.0.2.2", 443, {1}, kTcpSyn, 1);
+    const auto reuse = MakeIpv4TcpPacket("192.0.2.1", 123, "192.0.2.2", 443, {2}, kTcpSyn, 2);
+    auto input =
+        MakeEncodedPacketBatch({MakeBatchPacketRecord(first, 0, 100, 1), MakeBatchPacketRecord(reuse, 0, 101, 2)});
+    std::shared_ptr<arrow::RecordBatch> output;
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(trace.peak_entities == 2 && trace.live_entities == 2);
+    assert(trace.order[0] == "input:1" && trace.order[2] == "end:1" && trace.order[3] == "input:2");
+    runtime->Cancel();
+    runtime->Cancel();
+    assert(trace.finish_calls == 0 && trace.abort_calls == 1 && trace.live_entities == 0);
+    assert(runtime->Budget()->Usage().module_state_bytes == 0);
+
+    ProtocolLifecycleTrace constrained;
+    constrained.control_entity_count = 2;
+    constrained.entity_bytes = 32;
+    constrained.second_entity_bytes = npm::kNpmMinTrackedBytes;
+    auto tight_config = config;
+    tight_config.analysis.max_tracked_bytes = npm::kNpmMinTrackedBytes;
+    auto budget = std::make_shared<npm::NpmTaskBudget>(tight_config.analysis);
+    auto failed = CreateLifecycleRuntime(&constrained, &querier, tight_config, budget);
+    input = MakeEncodedPacketBatch({MakeBatchPacketRecord(MakeControlPacket(), 0, 200, 3)});
+    assert(failed->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kBatchProcessError);
+    assert(failed->State() == npm::NpmEofFlushState::kFailed);
+    assert(constrained.finish_calls == 0 && constrained.abort_calls == 1 && constrained.live_entities == 0);
+    assert(budget->Usage().module_state_bytes == 0);
+}
+
+void TestProtocolLifecycleFinishFailureAbortsAndDoesNotReplay() {
+    ProtocolLifecycleTrace trace;
+    trace.finish_error = EIO;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    auto config = MakeRuntimeTaskConfig();
+    config.analysis.out_of_order_tolerance_ns = 0;
+    auto runtime = CreateLifecycleRuntime(&trace, &querier, config);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(MakeControlPacket(), 0, 100, 1)});
+    std::shared_ptr<arrow::RecordBatch> output;
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(trace.live_entities == 1 && runtime->Budget()->Usage().module_state_bytes == 32);
+    assert(runtime->FlushOffline(101, &output).error == npm::NpmEofFlushError::kModuleError);
+    assert(runtime->State() == npm::NpmEofFlushState::kFailed);
+    assert(trace.finish_calls == 1 && trace.abort_calls == 1 && trace.live_entities == 0);
+    assert(runtime->Budget()->Usage().module_state_bytes == 0);
+    assert(runtime->FlushOffline(102, &output).error == npm::NpmEofFlushError::kFailedState);
+    runtime->Cancel();
+    assert(trace.finish_calls == 1 && trace.abort_calls == 1);
+}
+
+void TestProtocolLifecycleRealtimeDeferralAndCallbackCancel() {
+    ProtocolLifecycleTrace trace;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    auto config = MakeRuntimeTaskConfig(npm::NpmRunMode::kRealtime);
+    config.analysis.out_of_order_tolerance_ns = 0;
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    catalog.push_back(LifecycleRegistration(&trace));
+    config.features.module_ids = {"basic", "lifecycle"};
+    std::shared_ptr<arrow::Schema> schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    npm::NpmTimeCapabilities capabilities{true, true, true, true};
+    assert(npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(config, &querier, flowsql::packet::PacketSchema(),
+                                                                capabilities, &schema, &runtime, {}, nullptr, catalog)
+               .error == npm::NpmBasicTaskRuntimeError::kNone);
+    std::shared_ptr<arrow::RecordBatch> output;
+    auto maintenance = RealtimeMaintenanceInput(10, 1000, 100, false, false, false, false);
+    assert(runtime->DriveRealtimeMaintenance(maintenance, &output).error ==
+           npm::NpmBasicRealtimeMaintenanceError::kNone);
+    assert(trace.watermarks.empty());
+    maintenance = RealtimeMaintenanceInput(20, 1001, 200, false, false, true, true);
+    assert(runtime->DriveRealtimeMaintenance(maintenance, &output).error ==
+           npm::NpmBasicRealtimeMaintenanceError::kNone);
+    assert(trace.watermarks.empty());
+    maintenance = RealtimeMaintenanceInput(30, 1002, 300, false, true, true, false);
+    assert(runtime->DriveRealtimeMaintenance(maintenance, &output).error ==
+           npm::NpmBasicRealtimeMaintenanceError::kNone);
+    assert(trace.watermarks == std::vector<int64_t>({300}));
+    maintenance = RealtimeMaintenanceInput(40, 1003, 250, false, true, true, false);
+    assert(runtime->DriveRealtimeMaintenance(maintenance, &output).error ==
+           npm::NpmBasicRealtimeMaintenanceError::kNone);
+    assert(trace.watermarks == std::vector<int64_t>({300}));
+    const auto plan = runtime->MaintenancePlan();
+    assert(!plan.event_deadline_ns && plan.snapshot_deadline_monotonic_ns.has_value());
+
+    trace.on_time = [&]() { runtime->Cancel(); };
+    maintenance = RealtimeMaintenanceInput(50, 1004, 400, false, true, true, false);
+    const auto cancelled = runtime->DriveRealtimeMaintenance(maintenance, &output);
+    assert(cancelled.error == npm::NpmBasicRealtimeMaintenanceError::kCancelled);
+    assert(runtime->State() == npm::NpmEofFlushState::kCancelled);
+    assert(trace.finish_calls == 0 && trace.abort_calls == 1);
+    runtime->Cancel();
+    assert(trace.abort_calls == 1);
+}
+
+void TestProtocolLabelIsolationAndAtomicFactoryFailure() {
+    ProtocolInputTrace selected, all, control;
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    catalog.push_back(CountingRegistration("selected", 1, &selected, false, std::vector<uint32_t>{1001}));
+    catalog.push_back(CountingRegistration("all", 3, &all));
+    catalog.push_back(CountingRegistration("control", 4, &control));
+    npm::NpmBasicTaskConfig config;
+    assert(
+        npm::ParseNpmBasicTaskConfig(
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,selected,all,control","out_of_order_tolerance_ns":"0","tcp_idle_timeout_ns":"1000000000"})",
+            &config, true, catalog)
+            .error == npm::NpmBasicTaskConfigError::kNone);
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    LabelingMatcherStats labels;
+    std::shared_ptr<arrow::Schema> schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
+                                            new ProtocolLabelMatcher(&labels), catalog)
+               .error == npm::NpmBasicTaskRuntimeError::kNone);
+    const auto tcp = MakeIpv4TcpPacket("192.0.2.1", 123, "192.0.2.2", 443, {1});
+    const auto other = MakeIpv4TcpPacket("192.0.2.1", 456, "192.0.2.2", 80, {2});
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(tcp, 1, 1, 1), MakeBatchPacketRecord(other, 1, 2, 2),
+                                         MakeBatchPacketRecord(MakeControlPacket(), 1, 2000000000, 3),
+                                         MakeBatchPacketRecord(tcp, 1, 2000000001, 4)});
+    std::shared_ptr<arrow::RecordBatch> output;
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(selected.kinds.size() == 2 && all.kinds.size() == 3 && control.kinds.size() == 1);
+    assert(selected.sessions[0] != selected.sessions[1]);
+    assert(labels.facts.size() == 3 && labels.classify_calls == 1);
+    assert(protocol.identify_pipelines.size() == 3 && output->num_rows() == 2);
+    assert(selected.order == std::vector<std::string>({"packet", "end", "packet"}));
+    // Control input must observe the same late-packet rule without creating or labeling a session.
+    input = MakeEncodedPacketBatch({MakeBatchPacketRecord(MakeControlPacket(), 1, 0, 5)});
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kBatchProcessError);
+    assert(control.kinds.size() == 1 && labels.release_calls == 1);
+    runtime.reset();
+
+    auto bad_catalog = catalog;
+    bad_catalog[2] = CountingRegistration("selected", 1, &selected, false, std::vector<uint32_t>{999});
+    const auto previous_schema = schema;
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
+                                            new ProtocolLabelMatcher(&labels), bad_catalog)
+               .error == npm::NpmBasicTaskRuntimeError::kModulePlanError);
+    assert(!runtime && schema == previous_schema);
+    bad_catalog[2] = CountingRegistration("selected", 1, &selected, true, std::vector<uint32_t>{1001});
+    const auto stream_error =
+        npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
+                                         new ProtocolLabelMatcher(&labels), bad_catalog);
+    assert(stream_error.error == npm::NpmBasicTaskRuntimeError::kModulePlanError);
+    assert(stream_error.module_status.field == "selected/tcp_stream");
+    // Fail after an earlier module was instantiated; neither runtime nor schema is published.
+    auto prepare = catalog.back().prepare;
+    catalog.back().prepare = [prepare](const npm::NpmBasicTaskConfig& cfg, std::string_view json,
+                                       npm::NpmPreparedModuleV1* out) {
+        auto status = prepare(cfg, json, out);
+        out->create = [](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
+            return npm::NpmModuleInstanceV1{};
+        };
+        return status;
+    };
+    const int aborted = selected.aborted;
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
+                                            new ProtocolLabelMatcher(&labels), catalog)
+               .error == npm::NpmBasicTaskRuntimeError::kModuleCreateError);
+    assert(!runtime && schema == previous_schema && selected.aborted == aborted + 1);
+    assert(pool.acquire_calls == pool.release_calls);
+}
+
 }  // namespace
 
 int main() {
+    TestProtocolLifecycleRealtimeDeferralAndCallbackCancel();
+    TestProtocolLifecycleFinishFailureAbortsAndDoesNotReplay();
+    TestProtocolLifecycleTupleReuseAndBudgetFailureCleanup();
+    TestProtocolLifecycleEofOrderAndObservingIndependence();
+    TestProtocolLifecycleDeadlinesSessionsAndEof();
+    TestProtocolLabelIsolationAndAtomicFactoryFailure();
+    TestProtocolCatalogOpenAndDispatch();
+    TestProtocolOpenRejectionsAndControlCompatibility();
     TestConfigDefaultsAndEnumContract();
     TestConfigRangesAndUnsupportedValues();
     TestObservationDomainMapping();

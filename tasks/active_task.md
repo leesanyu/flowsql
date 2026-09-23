@@ -1,67 +1,61 @@
 # 即时工作台
 
-事项：`npm.basic` 参数共享配置命名空间从 `parameters.framework` 改为 `parameters.core`
-关联 Feature：已完成的 `npm-basic-parameters` 与 `npm-flow-labeling-refinement` 的用户请求契约修正；不新增 Feature Task。
-当前 Atomic Slice：先以单元/E2E 断言冻结 `core` 唯一命名与旧 `framework` 明确失败语义，再同步解析器、内部拥有型
-类型、任务接线、错误路径及现行文档，完成定向和全量回归后停止。
+事项：实施 `npm-protocol-analysis` T2 独立实体时间与终结管理
+关联 Feature Task：`tasks/specs/feat-npm-protocol-analysis.md` T2。
+当前 Atomic Slice：把模块事件 deadline、单调 watermark 通知、EOF Finish 和失败/取消 Abort 接入 T1 runtime。
 状态：已完成
 
 ## 业务意图
 
-- 让 `npm.basic` 的参数命名与源码职责一致：基础流程位于 `core/`，对应任务共享配置统一写在
-  `parameters.core`，避免 `framework` 被误解为 FlowSQL 全局框架配置。
-- 让旧拼写产生明确、可诊断的配置错误，避免被前向兼容的未知模块规则静默忽略并退回默认配置。
+- 使协议模块维护的事务能在端口会话仍存活或根本没有端口会话时按采集事件时间到期。
+- 让正常 EOF、tuple reuse、处理失败和取消具有互斥且可验证的终结语义，不泄漏模块状态或重放终态。
+- 用户本轮明确授权 T2 直至完成；本工作台只承载 T2，不进入 T3～T4。
 
 ## Non-Goals
 
-- 不改变 `core` 内字段名、默认值、范围、legacy `WITH` 参数、模块参数、条件消费、Config Channel Resolve、
-  matcher、会话或结果语义。
-- 不保留 `framework` 兼容别名，不自动迁移运行中的外部任务，不提升 `schema_version`。
-- 不改 `src/framework/`、`framework.*` C++ 框架 include、插件 ABI、目录布局或历史 sprint 文档。
-- 不修改无关既有差异，不 push；用户已在验收阶段明确要求提交当前已完成改动。
+- 不实现 T3 的统一 emitter/router、附加 consumer、run_id、Arrow owner 或前台/存储结果交付。
+- 不实现具体协议解析、TCP 重组、持久化或生产实时采集适配器，不修改模块配置与输入订阅语义。
+- 不把模块实体状态提升为 runtime 通用容器；entity ID、revision、finality 和对应预算仍由所属模块维护。
+- 不修改 T0 契约或已交付的 Basic/Session Schema；不运行全量 CTest，不 commit/push。
 
 ## 冻结接口与测试契约
 
-- V1 JSON 信封的唯一共享配置键是可省略 object `core`；内部拥有型类型同步为 `NpmCoreParametersV1`，成员名为
-  `core`，避免配置名与实现名再次分叉。
-- `core` 继续严格校验共享字段；labeling 未启用/不可用时仍忽略其 `labeling` 与
-  `labeling_memory_mib` 业务值，启用且可用时严格校验并只 Resolve 一次。
-- 根级 `framework` 不作为未知未来模块接受，统一返回 `kUnknownConsumedField`，路径 `/framework`；同时出现
-  `core` 与 `framework` 也按 `/framework` 失败。所有共享字段诊断路径改为 `/core/...`。
-- 测试先锚定：`core` 正常解析和任务/E2E 传递、旧 `framework` 明确拒绝、重复/类型/范围/labeling 错误路径
-  均使用 `/core`，失败仍保持输出原子性。
+- `NpmProtocolModuleAdapter` 串行转发 `OnTime`、`Finish`、幂等 `Abort`，正常 Finish 后析构不再 Abort；
+  callback 内取消在当前回调返回后终止处理，不再分发后续输入或启动正常 Finish。
+- packet/control 成功分发并推进唯一 capture progress 后，只有单调 watermark 实际前进才通知所有协议模块；
+  realtime backlog 未知/存在、idle 未确认及 watermark 不变/回退均不触发事务时间。
+- EOF 顺序固定为剩余 session end → 每个协议模块一次 Finish → 前台 drain；任一步失败只进入失败清理，
+  未 Finish 的模块 Abort。重复 Flush/Cancel 不重放模块回调。
+- runtime 提供任务内 `NpmMaintenancePlanV1` 快照：聚合 session 与模块最早事件 deadline；周期输出仅使用
+  初始化后的 monotonic snapshot deadline，不把事件 epoch 时间映射为单调时钟。
+- 测试模块生成同 session 多实体及 control 无 session 实体，自己维护 deadline、revision/final 状态并计入
+  `kModuleState`；测试只观察生命周期轨迹，不调用 T3 尚未交付的 Emit。
 
 ## 允许修改文件
 
 - `tasks/active_task.md`
-- `src/operators/npm_basic/config/npm_parameters.h`
-- `src/operators/npm_basic/config/npm_parameters.cpp`
-- `src/operators/npm_basic/config/npm_basic_task_config.cpp`
-- `src/operators/npm_basic/npm_basic_operator.cpp`
+- `tasks/specs/feat-npm-protocol-analysis.md`
+- `src/operators/npm_basic/core/npm_module_catalog.h`
+- `src/operators/npm_basic/core/npm_module_catalog.cpp`
+- `src/operators/npm_basic/core/npm_basic_task_runtime.h`
+- `src/operators/npm_basic/core/npm_basic_task_runtime.cpp`
+- `src/operators/npm_basic/core/npm_eof_flusher.h`
+- `src/operators/npm_basic/core/npm_eof_flusher.cpp`
+- `src/operators/npm_basic/core/npm_packet_processor.h`
+- `src/operators/npm_basic/core/npm_packet_processor.cpp`
+- `src/operators/npm_basic/core/npm_session_table.h`
 - `src/tests/test_npm_basic/test_npm_basic.cpp`
-- `src/tests/test_scheduler_e2e/test_scheduler_e2e.cpp`
-- `src/tests/test_config_channel/test_config_channel_e2e.cpp`
-- `docs/flow-labeling.md`
-- `tasks/archive/feat-npm-basic-parameters.md`
-- `tasks/archive/feat-npm-flow-labeling-refinement.md`
-- `tasks/product_backlog.md`
+
+本轮修改跨越既有唯一输入链与终结器，是 T2 生命周期保证的必要接线；不新增生产源文件或 CMake 接线。
+工作区已有 T0/T1 和 Backlog 未提交差异均保留；每次 patch 后以 `git diff --name-only` 检查不得越界。
 
 ## 验收命令
 
 ```bash
-cmake --build build --target test_npm_basic test_scheduler_e2e test_config_channel_e2e -j$(nproc)
-ctest --test-dir build -R '^(test_npm_basic|test_scheduler_e2e|test_config_channel_e2e)$' --output-on-failure
-cmake --build build -j$(nproc)
-ctest --test-dir build --output-on-failure
-rg -n 'parameters\.framework|framework\.labeling|NpmFrameworkParametersV1|parsed_parameters\.framework|/framework' \
-  src/operators/npm_basic src/tests/test_npm_basic src/tests/test_scheduler_e2e docs/flow-labeling.md \
-  tasks/archive/feat-npm-basic-parameters.md tasks/archive/feat-npm-flow-labeling-refinement.md tasks/product_backlog.md
-clang-format-18 --dry-run --Werror \
-  src/operators/npm_basic/config/npm_parameters.h src/operators/npm_basic/config/npm_parameters.cpp \
-  src/operators/npm_basic/config/npm_basic_task_config.cpp src/operators/npm_basic/npm_basic_operator.cpp \
-  src/tests/test_npm_basic/test_npm_basic.cpp
-git diff --check -- src/tests/test_scheduler_e2e/test_scheduler_e2e.cpp \
-  src/tests/test_config_channel/test_config_channel_e2e.cpp
+cmake -B build src
+cmake --build build --target test_npm_basic test_npm_protocol_contract -j8
+ctest --test-dir build -R '^(test_npm_basic|test_npm_protocol_contract)$' --output-on-failure
+# 对本轮 C++ 文件运行 clang-format-18 --dry-run --Werror；既有大测试文件只检查新增区域。
 git diff --check
 git diff --name-only
 git status --short --untracked-files=all
@@ -69,22 +63,24 @@ git status --short --untracked-files=all
 
 ## 时间盒与停止条件
 
-- 时间盒：30 分钟；未完成则沿用本切片到可验证或有明确错误证据的检查点，不创建第三层任务。
-- 停止条件：`core` 成为唯一共享配置命名空间，旧 `framework` 明确失败，现行文档与诊断路径一致，定向及完整
-  回归通过，完成证据写入工作台后立即停止。
-- 两个既有 E2E 源文件已有大量与本切片无关的全文件 clang-format 差异；本轮仅替换配置键、局部变量名与诊断
-  文本，保持原有局部排版并检查 Diff/空白，不对整文件做无关机械改写。
+- 时间盒：30 分钟；开始于 2026-09-23 14:08（Asia/Shanghai）。
+- T2 全部锚点通过构建、测试、格式与 Diff 审查后，记录证据并勾选 T2，立即停止，不进入 T3。
+- 到期仍保留 T2 编号，只报告可验证检查点或明确错误，不增加规格层级或扩大范围。
 
 ## 完成证据
 
-- `core` 已成为 V1 参数信封的唯一共享配置入口；拥有型类型、任务接线与共享字段诊断均同步为 `core`。
-  旧 `framework` 输入由生产解析器明确返回 `kUnknownConsumedField` 与 `/framework`，对应单元测试覆盖单独出现及
-  与 `core` 同时出现两种情况。搜索结果中的其余旧命名仅位于拒绝断言和归档历史证据，不构成有效配置入口。
-- `cmake --build build --target test_npm_basic test_scheduler_e2e test_config_channel_e2e -j8` 通过；定向 CTest
-  3/3 通过（25.77 秒）。
-- `cmake --build build -j8` 通过；完整 CTest 16/16、0 失败（64.27 秒）。
-- 当前切片及 Feature 改动 C++ 均通过 `clang-format-18 --dry-run --Werror`；按冻结边界不对两个已有大量全文件
-  格式差异的 E2E 源文件做无关机械重排，其本轮局部改动已通过 Diff/空白检查。所有新增或修改 C++ 文件版权头
-  符合约定，`git diff --check` 通过。
-- 两个已完成 Feature 的归档证据、Backlog 完成状态和现行 `docs/flow-labeling.md` 已同步为 `parameters.core`；
-  本次未改变字段、默认值、范围、条件消费、matcher、会话、结果或 legacy `WITH` 语义，未 push。
+- T2 于 2026-09-23 15:14（Asia/Shanghai）完成；实际执行约 66 分钟，超过冻结的 30 分钟时间盒。期间未扩大
+  到 T3、未新增生产文件或规格层级；偏差来自生命周期/取消/失败路径测试及最终 Diff 收敛，按实际证据记录。
+- 已在协议 adapter 接入事件 deadline、单调 watermark `OnTime`、正常 EOF 单次 `Finish` 与幂等 `Abort`；
+  callback 内取消由原子信号在当前回调返回后终止处理，重复取消或终态入口不重放回调。
+- 离线 packet/control 仅在 capture watermark 实际前进时通知模块；实时 backlog 未知/存在、idle 未确认以及
+  水位不变/回退不触发事务时间。`MaintenancePlan()` 分别聚合事件时间和单调 snapshot deadline，不跨时钟换算。
+- 新增生命周期测试模块自行维护并计费同 session 多实体和 control 无 session 实体；覆盖 deadline 等号边界、
+  活动会话内事务到期、终结 packet 顺序、tuple reuse、observing 独立、正常 EOF、Finish 失败、重复取消、
+  回调内取消和预算部分预留失败后的完整归还，最终 module state 预算均归零。
+- `cmake -B build src` 通过，`FLOWSQL_FLOW_LABELING=ON`；生产库、`test_npm_basic` 和
+  `test_npm_protocol_contract` 构建通过，无编译 Error。
+- 最终定向 CTest 2/2、0 失败（0.80 秒）；本轮生产 C++ 文件及既有测试文件新增区域通过
+  `clang-format-18 --dry-run --Werror`，`git diff --check` 通过。
+- 已审查 T2 Diff 并检查允许文件；T0/T1 与 Backlog 既有未提交差异保留。T3 统一结果路由尚未实施，
+  协议 Emit 继续返回 ENOTSUP；未运行全量 CTest、未 commit/push。本 Atomic Slice 完成后停止。

@@ -54,9 +54,16 @@ class NpmEofFlusher final {
     NpmEofFlushState state() const noexcept { return state_; }
 
     NpmEofFlushStatus Flush(int64_t observed_at, NpmSessionTable& sessions,
+                            const std::vector<INpmAnalysisModule*>& modules,
+                            const std::vector<NpmProtocolModuleAdapter*>& protocol_modules,
+                            NpmBasicResultCollector& collector, NpmBasicResultProjector& projector,
+                            const std::shared_ptr<INpmTaskBudget>& budget, std::shared_ptr<arrow::RecordBatch>* output);
+    NpmEofFlushStatus Flush(int64_t observed_at, NpmSessionTable& sessions,
                             const std::vector<INpmAnalysisModule*>& modules, NpmBasicResultCollector& collector,
                             NpmBasicResultProjector& projector, const std::shared_ptr<INpmTaskBudget>& budget,
-                            std::shared_ptr<arrow::RecordBatch>* output);
+                            std::shared_ptr<arrow::RecordBatch>* output) {
+        return Flush(observed_at, sessions, modules, {}, collector, projector, budget, output);
+    }
 
  private:
     NpmEofFlushState state_ = NpmEofFlushState::kOpen;

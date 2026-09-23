@@ -7,6 +7,8 @@ add_executable(${PROJECT_NAME} test_npm_basic.cpp)
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR})
 target_compile_options(${PROJECT_NAME} PRIVATE -UNDEBUG)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_module_catalog.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_basic_operator.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/config/npm_basic_task_config.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/config/npm_parameters.cpp)
@@ -48,6 +50,21 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 )
 
 add_test(NAME test_npm_basic COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_basic)
+
+add_executable(test_npm_protocol_contract
+    test_npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+)
+target_include_directories(test_npm_protocol_contract PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_protocol_contract PRIVATE -UNDEBUG)
+add_thirddepen(test_npm_protocol_contract arrow)
+add_dependencies(test_npm_protocol_contract flowsql_npm_basic)
+target_link_libraries(test_npm_protocol_contract flowsql_common)
+set_target_properties(test_npm_protocol_contract PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
+)
+add_test(NAME test_npm_protocol_contract COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_protocol_contract)
 
 # Machine-dependent throughput is an observation, not a CTest pass/fail threshold.
 add_executable(benchmark_npm_basic

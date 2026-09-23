@@ -5,7 +5,7 @@
 #define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_SESSION_KEY_H_
 
 #include <framework/interfaces/iflow_labeling.h>
-#include <operators/npm_basic/npm_analysis_contract.h>
+#include <operators/npm_basic/npm_protocol_contract.h>
 
 #include <cstdint>
 
@@ -36,6 +36,10 @@ struct NpmSessionPacketBinding {
     NpmTransportPacketFacts transport;
     FlowLabelFactsV1 label_facts;
 };
+
+/** Validates network bounds and normalizes control protocol metadata and exposes a body without a port session. */
+NpmSessionPacketError BuildNpmControlInput(const NpmObservationDomainMap&, const packet::PacketView&,
+                                           packet::PacketLayerInfo&, NpmInputEventV1*);
 
 /** Builds one packet-to-session binding. Output remains unchanged on every error. */
 NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap& domain_map,

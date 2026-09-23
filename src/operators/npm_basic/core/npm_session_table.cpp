@@ -438,18 +438,22 @@ NpmSessionTableError NpmSessionAdmissionPlanner::ObserveAndAdvance(const NpmSess
 
         if (is_tcp && (tcp.rst || (state.fin_ab && state.fin_ba))) state = {};
 
-        if (sessions_->config_.run_mode == NpmRunMode::kOffline) {
-            const int64_t candidate_watermark =
-                SaturatingSubtract(meta.timestamp_ns, sessions_->config_.out_of_order_tolerance_ns);
-            if (!watermark_initialized_ || candidate_watermark > watermark_ns_) {
-                watermark_initialized_ = true;
-                watermark_ns_ = candidate_watermark;
-            }
-        }
-        return NpmSessionTableError::kNone;
+        return AdvanceControl(meta.timestamp_ns);
     } catch (const std::bad_alloc&) {
         return NpmSessionTableError::kAllocationFailed;
     }
+}
+
+NpmSessionTableError NpmSessionAdmissionPlanner::AdvanceControl(int64_t timestamp_ns) {
+    if (watermark_initialized_ && timestamp_ns < watermark_ns_) return NpmSessionTableError::kLatePacket;
+    if (sessions_->config_.run_mode == NpmRunMode::kOffline) {
+        const int64_t candidate = SaturatingSubtract(timestamp_ns, sessions_->config_.out_of_order_tolerance_ns);
+        if (!watermark_initialized_ || candidate > watermark_ns_) {
+            watermark_initialized_ = true;
+            watermark_ns_ = candidate;
+        }
+    }
+    return NpmSessionTableError::kNone;
 }
 
 NpmSessionTableError NpmSessionTable::SampleProtocol(const NpmSessionKey& key, uint64_t session_id,

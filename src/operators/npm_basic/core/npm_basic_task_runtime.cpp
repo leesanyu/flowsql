@@ -8,6 +8,7 @@
 #include <arrow/api.h>
 #include <arrow/util/byte_size.h>
 
+#include <limits>
 #include <new>
 #include <utility>
 
@@ -87,15 +88,16 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::Create(const NpmBasicTaskConfig& 
                                                       std::shared_ptr<arrow::Schema>* output_schema,
                                                       std::unique_ptr<NpmBasicTaskRuntime>* output,
                                                       std::shared_ptr<NpmTaskBudget> budget,
-                                                      IFlowLabelMatcherV1* matcher) {
+                                                      IFlowLabelMatcherV1* matcher, const NpmModuleCatalogV1& catalog) {
     return CreateWithTimeCapabilities(config, querier, input_schema, {}, output_schema, output, std::move(budget),
-                                      matcher);
+                                      matcher, catalog);
 }
 
 NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
     const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
     const NpmTimeCapabilities& time_capabilities, std::shared_ptr<arrow::Schema>* output_schema,
-    std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcherV1* matcher) {
+    std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcherV1* matcher,
+    const NpmModuleCatalogV1& catalog) {
     MatcherLease matcher_lease(matcher);
     NpmBasicTaskRuntimeStatus status;
     if (!input_schema) {
@@ -126,20 +128,73 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         return status;
     }
 
-    std::unique_ptr<NpmProtocolContext> protocol_context;
-    status.protocol_error = NpmProtocolContext::Create(querier, &protocol_context);
-    if (status.protocol_error != NpmProtocolContextError::kNone) {
-        status.error = NpmBasicTaskRuntimeError::kProtocolContextError;
-        return status;
-    }
-
     try {
+        std::vector<NpmPreparedModuleV1> prepared;
+        status.module_status = PrepareNpmModulesV1(config, catalog, &prepared);
+        if (status.module_status.error != NpmProtocolContractErrorV1::kNone) {
+            status.error = NpmBasicTaskRuntimeError::kModulePlanError;
+            return status;
+        }
+        NpmBasicTaskConfig frozen = config;
+        const std::string observing =
+            config.features.observing_entity.empty()
+                ? (config.features.observing == NpmResultEntity::kSession ? "session" : "basic")
+                : config.features.observing_entity;
+        std::shared_ptr<arrow::Schema> result_schema;
+        NpmModuleCapabilitiesV1 capabilities;
+        capabilities.labeling_enabled = config.features.labeling_enabled;
+        capabilities.labeling_available = matcher != nullptr;
+        for (const auto& entry : prepared) {
+            if (matcher && entry.plan.primary_label_ids) {
+                for (uint32_t id : *entry.plan.primary_label_ids) {
+                    FlowPrimaryLabelViewV1 label;
+                    if (matcher->FindLabel(id, &label)) capabilities.available_label_ids.push_back(id);
+                }
+            }
+            status.module_status = ValidateNpmModulePlanV1(entry.plan, capabilities);
+            if (status.module_status.error != NpmProtocolContractErrorV1::kNone) {
+                status.module_status.field = entry.plan.module_id + "/" + status.module_status.field;
+                status.error = NpmBasicTaskRuntimeError::kModulePlanError;
+                return status;
+            }
+            for (const auto& entity : entry.plan.entities) {
+                if (entity.entity_id == observing) result_schema = entity.schema;
+            }
+        }
+        if (!result_schema) {
+            status.error = NpmBasicTaskRuntimeError::kModulePlanError;
+            status.module_status = {NpmProtocolContractErrorV1::kInvalidEntity, observing};
+            return status;
+        }
+        if (frozen.features.observing == NpmResultEntity::kProtocol) frozen.features.protocol_schema = result_schema;
+        std::unique_ptr<NpmProtocolContext> protocol_context;
+        status.protocol_error = NpmProtocolContext::Create(querier, &protocol_context);
+        if (status.protocol_error != NpmProtocolContextError::kNone) {
+            status.error = NpmBasicTaskRuntimeError::kProtocolContextError;
+            return status;
+        }
+
         if (!budget) budget = std::make_shared<NpmTaskBudget>(config.analysis);
-        std::unique_ptr<NpmBasicTaskRuntime> runtime(
-            new NpmBasicTaskRuntime(config, std::move(protocol_context), std::move(budget), std::move(matcher_lease)));
-        auto result_schema = config.features.observing == NpmResultEntity::kSession
-                                 ? NpmSessionResultSchema(config.features.labeling_enabled)
-                                 : NpmBasicResultSchema(config.features.labeling_enabled);
+        std::unique_ptr<NpmBasicTaskRuntime> runtime(new NpmBasicTaskRuntime(
+            std::move(frozen), std::move(protocol_context), std::move(budget), std::move(matcher_lease)));
+        runtime->prepared_modules_ = std::move(prepared);
+        for (const auto& entry : runtime->prepared_modules_) {
+            auto instance = entry.create(*runtime->protocol_context_, runtime->budget_);
+            if (instance.protocol && !instance.analysis) {
+                auto adapter = std::make_unique<NpmProtocolModuleAdapter>(entry.plan, std::move(instance.protocol),
+                                                                          &runtime->cancellation_requested_);
+                runtime->protocol_modules_.push_back(adapter.get());
+                instance.analysis = std::move(adapter);
+            } else if (instance.protocol || (!instance.analysis && entry.plan.module_id != "basic")) {
+                status.error = NpmBasicTaskRuntimeError::kModuleCreateError;
+                status.module_status = {NpmProtocolContractErrorV1::kInvalidPlan, entry.plan.module_id};
+                return status;
+            }
+            if (instance.analysis) {
+                runtime->modules_.push_back(instance.analysis.get());
+                runtime->owned_modules_.push_back(std::move(instance.analysis));
+            }
+        }
         *output_schema = std::move(result_schema);
         *output = std::move(runtime);
         return status;
@@ -158,13 +213,7 @@ NpmBasicTaskRuntime::NpmBasicTaskRuntime(NpmBasicTaskConfig config,
       matcher_(std::move(matcher)),
       sessions_(std::make_unique<NpmSessionTable>(config_.analysis, budget_)),
       collector_(std::make_unique<NpmBasicResultCollector>(config_.features)),
-      projector_(std::make_unique<NpmBasicResultProjector>(*protocol_context_)) {
-    if (config_.features.session_enabled) {
-        session_module_ = std::make_unique<NpmSessionAnalysisModule>(
-            *protocol_context_, budget_, config_.features.session_max_tcp_ranges_per_direction);
-        modules_.push_back(session_module_.get());
-    }
-}
+      projector_(std::make_unique<NpmBasicResultProjector>(*protocol_context_)) {}
 
 const NpmBasicTaskConfig& NpmBasicTaskRuntime::Config() const noexcept { return config_; }
 
@@ -237,7 +286,7 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::s
         std::vector<NpmSessionEndEvent> ended_events;
         status.process_status =
             ProcessNpmOfflinePacketBatch(config_.domains, *batch, *sessions_, *protocol_context_->Identifier(),
-                                         modules_, *collector_, &ended_events, matcher_.get());
+                                         modules_, *collector_, &ended_events, matcher_.get(), protocol_modules_);
         if (status.process_status.error != NpmPacketBatchProcessError::kNone) {
             return fail(NpmBasicOfflineBatchError::kBatchProcessError, "npm.basic offline batch processing failed");
         }
@@ -343,6 +392,15 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
         if (status.module_error != 0) {
             return fail(NpmBasicRealtimeMaintenanceError::kModuleError, kRealtimeModuleError);
         }
+        if (progress.disposition == NpmCaptureProgressDisposition::kAdvanced) {
+            const NpmModuleTimeV1 time{{progress.watermark_ns}, input.observed_at_ns};
+            for (auto* module : protocol_modules_) {
+                status.module_error = module->OnTime(time);
+                if (status.module_error != 0) {
+                    return fail(NpmBasicRealtimeMaintenanceError::kModuleError, kRealtimeModuleError);
+                }
+            }
+        }
 
         if (status.snapshot_due) {
             std::vector<NpmSessionView> active;
@@ -419,8 +477,8 @@ NpmEofFlushStatus NpmBasicTaskRuntime::FlushOffline(int64_t observed_at, std::sh
     }
 
     std::shared_ptr<arrow::RecordBatch> next_output;
-    auto status = eof_flusher_.Flush(observed_at, *sessions_, modules_, *collector_, *projector_, budget_,
-                                     output == nullptr ? nullptr : &next_output);
+    auto status = eof_flusher_.Flush(observed_at, *sessions_, modules_, protocol_modules_, *collector_, *projector_,
+                                     budget_, output == nullptr ? nullptr : &next_output);
     NpmEofFlushState expected = NpmEofFlushState::kOpen;
     const NpmEofFlushState terminal =
         status.error == NpmEofFlushError::kNone ? NpmEofFlushState::kFlushed : NpmEofFlushState::kFailed;
@@ -444,6 +502,7 @@ void NpmBasicTaskRuntime::Cancel() noexcept {
     if (!state_.compare_exchange_strong(expected, NpmEofFlushState::kCancelled, std::memory_order_acq_rel)) {
         return;
     }
+    cancellation_requested_.store(true, std::memory_order_release);
     SetLastErrorOnce(kCancelledError);
     if (operation_active_.load(std::memory_order_acquire)) return;
     if (!operation_mutex_.try_lock()) return;
@@ -452,6 +511,28 @@ void NpmBasicTaskRuntime::Cancel() noexcept {
         ReleaseResources();
     }
     operation_mutex_.unlock();
+}
+
+NpmMaintenancePlanV1 NpmBasicTaskRuntime::MaintenancePlan() const {
+    std::lock_guard<std::mutex> lock(operation_mutex_);
+    NpmMaintenancePlanV1 plan;
+    if (state_.load(std::memory_order_acquire) != NpmEofFlushState::kOpen) return plan;
+    plan.event_deadline_ns = sessions_->NextEventDeadlineNs();
+    for (const auto* module : protocol_modules_) {
+        const auto deadline = module->NextEventDeadlineNs();
+        if (deadline && (!plan.event_deadline_ns || *deadline < *plan.event_deadline_ns)) {
+            plan.event_deadline_ns = deadline;
+        }
+    }
+    if (config_.analysis.run_mode == NpmRunMode::kRealtime && realtime_clock_initialized_ &&
+        config_.analysis.result_mode == NpmResultMode::kPeriodicSnapshot) {
+        if (last_realtime_snapshot_ns_ > std::numeric_limits<int64_t>::max() - config_.analysis.output_interval_ns) {
+            plan.snapshot_deadline_monotonic_ns = std::numeric_limits<int64_t>::max();
+        } else {
+            plan.snapshot_deadline_monotonic_ns = last_realtime_snapshot_ns_ + config_.analysis.output_interval_ns;
+        }
+    }
+    return plan;
 }
 
 std::string NpmBasicTaskRuntime::LastError() const {
@@ -468,7 +549,9 @@ void NpmBasicTaskRuntime::SetLastErrorOnce(const char* error) noexcept {
 
 void NpmBasicTaskRuntime::ReleaseResources() noexcept {
     modules_.clear();
-    session_module_.reset();
+    protocol_modules_.clear();
+    owned_modules_.clear();
+    prepared_modules_.clear();
     sessions_.reset();
     collector_.reset();
     projector_.reset();

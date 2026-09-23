@@ -3,6 +3,7 @@
 
 #include "npm_packet_processor.h"
 
+#include <algorithm>
 #include <limits>
 #include <new>
 #include <utility>
@@ -208,7 +209,8 @@ NpmPacketProcessStatus ProcessNpmBoundPacket(const packet::PacketView& packet, c
 NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
     const NpmObservationDomainMap& domain_map, const NpmPacketBatchView& batch, NpmSessionTable& sessions,
     packet::IPacketProtocolIdentifier& identifier, const std::vector<INpmAnalysisModule*>& modules,
-    INpmResultWriter& writer, std::vector<NpmSessionEndEvent>* ended_events, const IFlowLabelMatcherV1* matcher) {
+    INpmResultWriter& writer, std::vector<NpmSessionEndEvent>* ended_events, const IFlowLabelMatcherV1* matcher,
+    const std::vector<NpmProtocolModuleAdapter*>& protocol_modules) {
     NpmPacketBatchProcessStatus status;
     if (ended_events == nullptr) {
         status.error = NpmPacketBatchProcessError::kNullOutput;
@@ -221,6 +223,31 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
         }
     }
 
+    const bool control_enabled = std::any_of(protocol_modules.begin(), protocol_modules.end(),
+                                             [](const auto* module) { return module->AcceptsControl(); });
+    const auto is_control = [&](const packet::PacketLayerInfo& layer) { return control_enabled && !layer.ports_valid; };
+    const auto dispatch_control = [&](const packet::PacketView& packet, packet::PacketLayerInfo layer) {
+        NpmPacketProcessStatus result;
+        NpmInputEventV1 event;
+        result.binding_error = BuildNpmControlInput(domain_map, packet, layer, &event);
+        if (result.binding_error != NpmSessionPacketError::kNone) {
+            result.error = NpmPacketProcessError::kBindingError;
+            return result;
+        }
+        if (sessions.IsLatePacket(packet.meta.timestamp_ns)) {
+            result.error = NpmPacketProcessError::kSessionError;
+            result.session_error = NpmSessionTableError::kLatePacket;
+            return result;
+        }
+        for (auto* module : protocol_modules) {
+            result.module_error = module->OnControl(event);
+            if (result.module_error != 0) {
+                result.error = NpmPacketProcessError::kModuleError;
+                return result;
+            }
+        }
+        return result;
+    };
     int64_t current_row = -1;
     try {
         if (matcher == nullptr) {
@@ -236,8 +263,10 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
                 }
 
                 std::vector<NpmSessionSnapshot> observed_sessions;
-                status.packet_status = ProcessNpmPacket(domain_map, packet, layer, sessions, identifier, modules,
-                                                        writer, &observed_sessions);
+                status.packet_status = is_control(layer)
+                                           ? dispatch_control(packet, layer)
+                                           : ProcessNpmPacket(domain_map, packet, layer, sessions, identifier, modules,
+                                                              writer, &observed_sessions);
                 if (status.packet_status.error != NpmPacketProcessError::kNone) {
                     status.error = NpmPacketBatchProcessError::kPacketError;
                     status.row = current_row;
@@ -263,6 +292,17 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
                     status.row = current_row;
                     return status;
                 }
+                if (progress.disposition == NpmCaptureProgressDisposition::kAdvanced) {
+                    const NpmModuleTimeV1 time{{progress.watermark_ns}, packet.meta.timestamp_ns};
+                    for (auto* module : protocol_modules) {
+                        status.module_error = module->OnTime(time);
+                        if (status.module_error != 0) {
+                            status.error = NpmPacketBatchProcessError::kModuleError;
+                            status.row = current_row;
+                            return status;
+                        }
+                    }
+                }
                 AppendSessionEndEvents(&progress.ended_sessions, packet.meta.timestamp_ns, &next_events);
             }
             *ended_events = std::move(next_events);
@@ -275,6 +315,7 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
             size_t candidate_index = std::numeric_limits<size_t>::max();
             size_t payload_offset = 0;
             size_t payload_size = 0;
+            bool control = false;
         };
 
         std::vector<StagedPacket> staged_packets;
@@ -305,6 +346,26 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
 
             StagedPacket staged;
             staged.layer = layer;
+            if (is_control(layer)) {
+                NpmInputEventV1 event;
+                status.packet_status.binding_error = BuildNpmControlInput(domain_map, packet, layer, &event);
+                if (status.packet_status.binding_error != NpmSessionPacketError::kNone) {
+                    status.packet_status.error = NpmPacketProcessError::kBindingError;
+                    status.error = NpmPacketBatchProcessError::kPacketError;
+                    status.row = current_row;
+                    return status;
+                }
+                status.packet_status.session_error = admission_plan.AdvanceControl(packet.meta.timestamp_ns);
+                if (status.packet_status.session_error != NpmSessionTableError::kNone) {
+                    status.packet_status.error = NpmPacketProcessError::kSessionError;
+                    status.error = NpmPacketBatchProcessError::kPacketError;
+                    status.row = current_row;
+                    return status;
+                }
+                staged.control = true;
+                staged_packets.push_back(std::move(staged));
+                continue;
+            }
             status.packet_status.binding_error =
                 BuildNpmSessionPacketBinding(domain_map, packet, layer, &staged.binding);
             if (status.packet_status.binding_error != NpmSessionPacketError::kNone) {
@@ -366,8 +427,10 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
                                                   : candidate_labels[staged.candidate_index];
 
             std::vector<NpmSessionSnapshot> observed_sessions;
-            status.packet_status = ProcessNpmBoundPacket(packet, staged.layer, staged.binding, primary_label_id,
-                                                         sessions, identifier, modules, writer, &observed_sessions);
+            status.packet_status =
+                staged.control ? dispatch_control(packet, staged.layer)
+                               : ProcessNpmBoundPacket(packet, staged.layer, staged.binding, primary_label_id, sessions,
+                                                       identifier, modules, writer, &observed_sessions);
             if (status.packet_status.error != NpmPacketProcessError::kNone) {
                 status.error = NpmPacketBatchProcessError::kPacketError;
                 status.row = current_row;
@@ -392,6 +455,17 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
                 status.error = NpmPacketBatchProcessError::kModuleError;
                 status.row = current_row;
                 return status;
+            }
+            if (progress.disposition == NpmCaptureProgressDisposition::kAdvanced) {
+                const NpmModuleTimeV1 time{{progress.watermark_ns}, packet.meta.timestamp_ns};
+                for (auto* module : protocol_modules) {
+                    status.module_error = module->OnTime(time);
+                    if (status.module_error != 0) {
+                        status.error = NpmPacketBatchProcessError::kModuleError;
+                        status.row = current_row;
+                        return status;
+                    }
+                }
             }
             AppendSessionEndEvents(&progress.ended_sessions, packet.meta.timestamp_ns, &next_events);
         }

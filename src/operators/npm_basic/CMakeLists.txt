@@ -2,6 +2,8 @@ project(flowsql_npm_basic)
 
 add_library(${PROJECT_NAME} SHARED
     npm_analysis_contract.cpp
+    npm_protocol_contract.cpp
+    core/npm_module_catalog.cpp
     npm_basic_operator.cpp
     config/npm_basic_task_config.cpp
     config/npm_parameters.cpp

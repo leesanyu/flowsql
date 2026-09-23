@@ -137,14 +137,17 @@ void PopulateLabelVlans(const packet::PacketView& packet, const packet::PacketLa
 
 }  // namespace
 
-NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap& domain_map,
-                                                   const packet::PacketView& packet,
-                                                   const packet::PacketLayerInfo& layer,
-                                                   NpmSessionPacketBinding* output) {
-    if (!output) return NpmSessionPacketError::kNullOutput;
-
-    uint64_t observation_domain_id = 0;
-    const auto domain_error = ResolveDomain(domain_map, packet.meta.source_id, &observation_domain_id);
+namespace {
+struct NetworkRange {
+    uint64_t domain = 0;
+    size_t end = 0;
+    size_t body = 0;
+    uint8_t protocol = 0;
+    packet::AddressFamily family = packet::AddressFamily::kNone;
+};
+NpmSessionPacketError ValidateNetworkRange(const NpmObservationDomainMap& domain_map, const packet::PacketView& packet,
+                                           const packet::PacketLayerInfo& layer, NetworkRange* range) {
+    const auto domain_error = ResolveDomain(domain_map, packet.meta.source_id, &range->domain);
     if (domain_error != NpmSessionPacketError::kNone) return domain_error;
     if (packet.bytes.size != packet.meta.captured_len || packet.bytes.size == 0 || packet.bytes.data == nullptr ||
         (packet.meta.wire_len != 0 && packet.meta.wire_len < packet.meta.captured_len)) {
@@ -167,8 +170,8 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
     }
 
     const size_t network_offset = layer.layers[network_index].offset;
-    size_t network_end = 0;
-    packet::AddressFamily family = packet::AddressFamily::kNone;
+    size_t& network_end = range->end;
+    auto& family = range->family;
     if (network_kind == static_cast<uint16_t>(eLayer::IPv4)) {
         Ipv4Header header;
         if (!ReadHeader(packet, network_offset, &header)) {
@@ -186,6 +189,8 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
         if ((ntohs(header.fragment_offset) & 0x1fffu) != 0) {
             return NpmSessionPacketError::kNonInitialFragment;
         }
+        range->body = network_offset + header_size;
+        range->protocol = header.protocol;
         family = packet::AddressFamily::kIPv4;
     } else {
         Ipv6Header header;
@@ -198,11 +203,88 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
         }
         const auto fragment_error = ValidateIpv6Fragments(packet, layer, network_index);
         if (fragment_error != NpmSessionPacketError::kNone) return fragment_error;
+        range->body = network_offset + sizeof(Ipv6Header);
+        range->protocol = header.protocol;
         family = packet::AddressFamily::kIPv6;
     }
     if (packet.meta.wire_len != 0 && network_end > packet.meta.wire_len) {
         return NpmSessionPacketError::kInvalidPayloadBounds;
     }
+
+    return NpmSessionPacketError::kNone;
+}
+}  // namespace
+
+NpmSessionPacketError BuildNpmControlInput(const NpmObservationDomainMap& domains, const packet::PacketView& packet,
+                                           packet::PacketLayerInfo& layer, NpmInputEventV1* output) {
+    if (!output) return NpmSessionPacketError::kNullOutput;
+    NetworkRange range;
+    auto error = ValidateNetworkRange(domains, packet, layer, &range);
+    if (error != NpmSessionPacketError::kNone) return error;
+    uint8_t index = layer.network_layer_index + 1;
+    if (range.family == packet::AddressFamily::kIPv6) {
+        // Follow only bounded network extension headers; no control-message content is interpreted.
+        while (range.protocol == 0 || range.protocol == 43 || range.protocol == 44 || range.protocol == 60 ||
+               range.protocol == 51) {
+            if (index >= layer.layer_count || layer.layers[index].offset != range.body ||
+                range.body > packet.bytes.size || packet.bytes.size - range.body < 8 || range.body > range.end ||
+                range.end - range.body < 8)
+                return NpmSessionPacketError::kInvalidPayloadBounds;
+            const auto kind = static_cast<eLayer>(layer.layers[index].kind);
+            const auto expected_kind = range.protocol == 0    ? eLayer::IPv6_EXT_HOPOPTS
+                                       : range.protocol == 43 ? eLayer::IPv6_EXT_ROUTING
+                                       : range.protocol == 44 ? eLayer::IPv6_EXT_FRAGMENT
+                                       : range.protocol == 51 ? eLayer::IPv6_EXT_AH
+                                                              : eLayer::IPv6_EXT_DSTOPTS;
+            if (kind != expected_kind) return NpmSessionPacketError::kInvalidLayerSelection;
+            const auto* bytes = packet.bytes.data + range.body;
+            const size_t length = range.protocol == 44   ? 8
+                                  : range.protocol == 51 ? (bytes[1] + 2) * 4
+                                                         : (bytes[1] + 1) * 8;
+            if (range.protocol == 44 && ((bytes[2] << 8 | bytes[3]) & 0xfff8) != 0)
+                return NpmSessionPacketError::kNonInitialFragment;
+            if (length > packet.bytes.size - range.body || length > range.end - range.body)
+                return NpmSessionPacketError::kInvalidPayloadBounds;
+            range.protocol = bytes[0];
+            range.body += length;
+            ++index;
+        }
+    }
+    const uint8_t expected = range.family == packet::AddressFamily::kIPv4 ? 1 : 58;
+    if (range.protocol != expected) return NpmSessionPacketError::kUnsupportedTransportProtocol;
+    if (range.body > range.end || range.body > packet.bytes.size) return NpmSessionPacketError::kInvalidPayloadBounds;
+    // The decoder may append one TOP marker for the unparsed control body.
+    for (uint8_t i = index; i < layer.layer_count; ++i) {
+        if (layer.layers[i].kind != static_cast<uint16_t>(eLayer::TOP) || layer.layers[i].offset != range.body)
+            return NpmSessionPacketError::kInvalidLayerSelection;
+    }
+    layer.transport_protocol = expected;
+    NpmInputEventV1 next;
+    next.kind = NpmInputKindV1::kControlPacket;
+    next.observation_domain_id = range.domain;
+    next.packet = packet;
+    next.layer = &layer;
+    next.body =
+        Span<const uint8_t>(packet.bytes.data + range.body, std::min(range.end, packet.bytes.size) - range.body);
+    next.body_complete = range.end <= packet.bytes.size;
+    *output = next;
+    return NpmSessionPacketError::kNone;
+}
+
+NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap& domain_map,
+                                                   const packet::PacketView& packet,
+                                                   const packet::PacketLayerInfo& layer,
+                                                   NpmSessionPacketBinding* output) {
+    if (!output) return NpmSessionPacketError::kNullOutput;
+
+    NetworkRange range;
+    const auto error = ValidateNetworkRange(domain_map, packet, layer, &range);
+    if (error != NpmSessionPacketError::kNone) return error;
+    const auto observation_domain_id = range.domain;
+    const auto network_end = range.end;
+    const auto family = range.family;
+    const auto network_index = layer.network_layer_index;
+    const auto network_offset = layer.layers[network_index].offset;
 
     if (layer.transport_layer_index >= layer.layer_count || layer.transport_layer_index <= network_index) {
         return NpmSessionPacketError::kInvalidLayerSelection;

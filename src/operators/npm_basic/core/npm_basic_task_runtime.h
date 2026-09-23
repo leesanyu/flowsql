@@ -39,12 +39,15 @@ enum class NpmBasicTaskRuntimeError : uint8_t {
     kProtocolContextError,
     kLabelingMatcherMissing,
     kAllocationFailed,
+    kModulePlanError,
+    kModuleCreateError,
 };
 
 struct NpmBasicTaskRuntimeStatus {
     NpmBasicTaskRuntimeError error = NpmBasicTaskRuntimeError::kNone;
     NpmTimeCapabilityError time_error = NpmTimeCapabilityError::kNone;
     NpmProtocolContextError protocol_error = NpmProtocolContextError::kNone;
+    NpmProtocolContractStatusV1 module_status;
 };
 
 enum class NpmBasicOfflineBatchError : uint8_t {
@@ -116,14 +119,13 @@ class NpmBasicTaskRuntime final {
                                             std::shared_ptr<arrow::Schema>* output_schema,
                                             std::unique_ptr<NpmBasicTaskRuntime>* output,
                                             std::shared_ptr<NpmTaskBudget> budget = {},
-                                            IFlowLabelMatcherV1* matcher = nullptr);
-    static NpmBasicTaskRuntimeStatus CreateWithTimeCapabilities(const NpmBasicTaskConfig& config, IQuerier* querier,
-                                                                const std::shared_ptr<arrow::Schema>& input_schema,
-                                                                const NpmTimeCapabilities& time_capabilities,
-                                                                std::shared_ptr<arrow::Schema>* output_schema,
-                                                                std::unique_ptr<NpmBasicTaskRuntime>* output,
-                                                                std::shared_ptr<NpmTaskBudget> budget = {},
-                                                                IFlowLabelMatcherV1* matcher = nullptr);
+                                            IFlowLabelMatcherV1* matcher = nullptr,
+                                            const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1());
+    static NpmBasicTaskRuntimeStatus CreateWithTimeCapabilities(
+        const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
+        const NpmTimeCapabilities& time_capabilities, std::shared_ptr<arrow::Schema>* output_schema,
+        std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget = {},
+        IFlowLabelMatcherV1* matcher = nullptr, const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1());
 
     ~NpmBasicTaskRuntime() = default;
     NpmBasicTaskRuntime(const NpmBasicTaskRuntime&) = delete;
@@ -137,6 +139,7 @@ class NpmBasicTaskRuntime final {
     NpmBasicRealtimeMaintenanceStatus DriveRealtimeMaintenance(const NpmBasicRealtimeMaintenanceInput& input,
                                                                std::shared_ptr<arrow::RecordBatch>* output);
     NpmEofFlushStatus FlushOffline(int64_t observed_at, std::shared_ptr<arrow::RecordBatch>* output);
+    NpmMaintenancePlanV1 MaintenancePlan() const;
     void Cancel() noexcept;
     std::string LastError() const;
     /** Canonical lifecycle state; unlike component accessors, valid after resources are released. */
@@ -171,12 +174,15 @@ class NpmBasicTaskRuntime final {
     std::unique_ptr<NpmBasicResultCollector> collector_;
     std::unique_ptr<NpmBasicResultProjector> projector_;
     NpmEofFlusher eof_flusher_;
-    std::unique_ptr<NpmSessionAnalysisModule> session_module_;
+    std::vector<NpmPreparedModuleV1> prepared_modules_;
+    std::vector<std::unique_ptr<INpmAnalysisModule>> owned_modules_;
+    std::vector<NpmProtocolModuleAdapter*> protocol_modules_;
     std::vector<INpmAnalysisModule*> modules_;
     bool realtime_clock_initialized_ = false;
     int64_t last_realtime_drive_ns_ = 0;
     int64_t last_realtime_snapshot_ns_ = 0;
     mutable std::mutex operation_mutex_;
+    std::atomic<bool> cancellation_requested_{false};
     std::atomic<bool> operation_active_{false};
     std::atomic<NpmEofFlushState> state_{NpmEofFlushState::kOpen};
     std::atomic<const char*> last_error_{nullptr};

@@ -4,6 +4,7 @@
 #ifndef _FLOWSQL_OPERATORS_NPM_BASIC_NPM_PACKET_PROCESSOR_H_
 #define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_PACKET_PROCESSOR_H_
 
+#include "npm_module_catalog.h"
 #include "npm_packet_batch_view.h"
 #include "npm_session_table.h"
 
@@ -71,13 +72,11 @@ struct NpmPacketBatchProcessStatus {
 };
 
 /** Processes a validated packet batch and advances offline event time after each successful row. */
-NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(const NpmObservationDomainMap& domain_map,
-                                                         const NpmPacketBatchView& batch, NpmSessionTable& sessions,
-                                                         packet::IPacketProtocolIdentifier& identifier,
-                                                         const std::vector<INpmAnalysisModule*>& modules,
-                                                         INpmResultWriter& writer,
-                                                         std::vector<NpmSessionEndEvent>* ended_events,
-                                                         const IFlowLabelMatcherV1* matcher = nullptr);
+NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
+    const NpmObservationDomainMap& domain_map, const NpmPacketBatchView& batch, NpmSessionTable& sessions,
+    packet::IPacketProtocolIdentifier& identifier, const std::vector<INpmAnalysisModule*>& modules,
+    INpmResultWriter& writer, std::vector<NpmSessionEndEvent>* ended_events,
+    const IFlowLabelMatcherV1* matcher = nullptr, const std::vector<NpmProtocolModuleAdapter*>& protocol_modules = {});
 
 }  // namespace flowsql::npm
 

@@ -6,7 +6,7 @@
 
 #include "npm_parameters.h"
 
-#include <operators/npm_basic/npm_analysis_contract.h>
+#include <operators/npm_basic/core/npm_module_catalog.h>
 
 #include <cstdint>
 #include <string>
@@ -20,6 +20,7 @@ constexpr uint32_t kNpmMaxSessionTcpRangesPerDirection = 65536;
 enum class NpmResultEntity : uint8_t {
     kBasic = 0,
     kSession = 1,
+    kProtocol = 2,
 };
 
 struct NpmBasicFeatureConfig {
@@ -27,6 +28,9 @@ struct NpmBasicFeatureConfig {
     bool session_enabled = false;
     bool labeling_enabled = false;
     NpmResultEntity observing = NpmResultEntity::kBasic;
+    std::vector<std::string> module_ids;
+    std::string observing_entity;
+    std::shared_ptr<arrow::Schema> protocol_schema;
     uint32_t session_max_tcp_ranges_per_direction = kNpmDefaultSessionTcpRangesPerDirection;
 };
 
@@ -34,6 +38,7 @@ struct NpmBasicTaskConfig {
     NpmAnalysisConfig analysis;
     NpmObservationDomainMap domains;
     NpmBasicFeatureConfig features;
+    std::string parameters_json;
     std::string labeling_reference;
     uint32_t labeling_memory_mib = kNpmDefaultLabelingMemoryMiB;
 };
@@ -73,7 +78,8 @@ struct NpmBasicTaskConfigStatus {
 
 /** Parses and owns Scheduler WITH parameters. Output is replaced only after complete validation. */
 NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, NpmBasicTaskConfig* output,
-                                                 bool labeling_available = false);
+                                                 bool labeling_available = false,
+                                                 const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1());
 
 /** Side-effect-free probe used to gate optional provider lookup before consumed-field validation. */
 bool NpmBasicTaskRequestsLabeling(const char* with_params_json) noexcept;

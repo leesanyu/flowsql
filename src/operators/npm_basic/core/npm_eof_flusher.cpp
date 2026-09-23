@@ -33,6 +33,7 @@ void NpmEofFlusher::MarkFailed() noexcept {
 
 NpmEofFlushStatus NpmEofFlusher::Flush(int64_t observed_at, NpmSessionTable& sessions,
                                        const std::vector<INpmAnalysisModule*>& modules,
+                                       const std::vector<NpmProtocolModuleAdapter*>& protocol_modules,
                                        NpmBasicResultCollector& collector, NpmBasicResultProjector& projector,
                                        const std::shared_ptr<INpmTaskBudget>& budget,
                                        std::shared_ptr<arrow::RecordBatch>* output) {
@@ -76,6 +77,14 @@ NpmEofFlushStatus NpmEofFlusher::Flush(int64_t observed_at, NpmSessionTable& ses
         }
         for (auto& snapshot : snapshots) {
             events.push_back(NpmSessionEndEvent{std::move(snapshot), observed_at});
+        }
+        for (auto* module : protocol_modules) {
+            status.module_error = module->Finish(observed_at);
+            if (status.module_error != 0) {
+                status.error = NpmEofFlushError::kModuleError;
+                state_ = NpmEofFlushState::kFailed;
+                return status;
+            }
         }
 
         status.drain_status = collector.Drain(events, projector, budget, output);

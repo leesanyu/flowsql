@@ -5,6 +5,7 @@
 
 #include <rapidjson/document.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <limits>
@@ -131,7 +132,7 @@ std::string_view TrimAsciiWhitespace(std::string_view text) {
     return text;
 }
 
-bool ParseFeatures(std::string_view text, NpmBasicFeatureConfig* config) {
+bool ParseFeatures(std::string_view text, NpmBasicFeatureConfig* config, const NpmModuleCatalogV1& catalog) {
     if (config == nullptr) return false;
     NpmBasicFeatureConfig next;
     next.basic_enabled = false;
@@ -144,17 +145,18 @@ bool ParseFeatures(std::string_view text, NpmBasicFeatureConfig* config) {
         const size_t token_end = separator == std::string_view::npos ? text.size() : separator;
         const std::string_view token = TrimAsciiWhitespace(text.substr(token_begin, token_end - token_begin));
         if (token.empty()) return false;
-        if (token == "basic") {
-            if (next.basic_enabled) return false;
-            next.basic_enabled = true;
-        } else if (token == "session") {
-            if (next.session_enabled) return false;
-            next.session_enabled = true;
-        } else if (token == "labeling") {
+        if (token == "labeling") {
             if (next.labeling_enabled) return false;
             next.labeling_enabled = true;
         } else {
-            return false;
+            const auto entry =
+                std::find_if(catalog.begin(), catalog.end(), [&](const auto& item) { return item.module_id == token; });
+            if (entry == catalog.end() || !entry->available ||
+                std::find(next.module_ids.begin(), next.module_ids.end(), token) != next.module_ids.end())
+                return false;
+            next.module_ids.emplace_back(token);
+            if (token == "basic") next.basic_enabled = true;
+            if (token == "session") next.session_enabled = true;
         }
         if (separator == std::string_view::npos) break;
         token_begin = separator + 1;
@@ -163,42 +165,34 @@ bool ParseFeatures(std::string_view text, NpmBasicFeatureConfig* config) {
     config->basic_enabled = next.basic_enabled;
     config->session_enabled = next.session_enabled;
     config->labeling_enabled = next.labeling_enabled;
-    return config->basic_enabled || config->session_enabled;
-}
-
-bool ParseObserving(std::string_view text, NpmResultEntity* observing) {
-    if (observing == nullptr) return false;
-    text = TrimAsciiWhitespace(text);
-    if (text == "basic") {
-        *observing = NpmResultEntity::kBasic;
-        return true;
-    }
-    if (text == "session") {
-        *observing = NpmResultEntity::kSession;
-        return true;
-    }
-    return false;
+    config->module_ids = std::move(next.module_ids);
+    return !config->module_ids.empty();
 }
 
 NpmBasicTaskConfigStatus ParseFeatureConfig(
     const std::array<const rapidjson::Value*, static_cast<size_t>(TaskConfigField::kCount)>& values,
-    NpmBasicFeatureConfig* config) {
+    NpmBasicFeatureConfig* config, const NpmModuleCatalogV1& catalog) {
+    if (ValidateNpmModuleCatalogV1(catalog).error != NpmProtocolContractErrorV1::kNone)
+        return Fail(NpmBasicTaskConfigError::kInvalidFeatures, "catalog");
     const rapidjson::Value* features = values[FieldIndex(TaskConfigField::kFeatures)];
-    if (features != nullptr &&
-        !ParseFeatures(std::string_view(features->GetString(), features->GetStringLength()), config)) {
-        return Fail(NpmBasicTaskConfigError::kInvalidFeatures, FieldName(TaskConfigField::kFeatures));
-    }
-
+    const std::string_view text =
+        features ? std::string_view(features->GetString(), features->GetStringLength()) : "basic";
+    if (!ParseFeatures(text, config, catalog)) return Fail(NpmBasicTaskConfigError::kInvalidFeatures, "features");
     const rapidjson::Value* observing = values[FieldIndex(TaskConfigField::kObserving)];
-    if (observing != nullptr &&
-        !ParseObserving(std::string_view(observing->GetString(), observing->GetStringLength()), &config->observing)) {
-        return Fail(NpmBasicTaskConfigError::kInvalidObserving, FieldName(TaskConfigField::kObserving));
-    }
-    const bool observing_enabled = (config->observing == NpmResultEntity::kBasic && config->basic_enabled) ||
-                                   (config->observing == NpmResultEntity::kSession && config->session_enabled);
-    if (!observing_enabled) {
-        return Fail(NpmBasicTaskConfigError::kObservingFeatureDisabled, FieldName(TaskConfigField::kObserving));
-    }
+    config->observing_entity =
+        observing
+            ? std::string(TrimAsciiWhitespace(std::string_view(observing->GetString(), observing->GetStringLength())))
+            : "basic";
+    const auto owner = std::find_if(catalog.begin(), catalog.end(), [&](const auto& entry) {
+        return std::find(entry.entity_ids.begin(), entry.entity_ids.end(), config->observing_entity) !=
+               entry.entity_ids.end();
+    });
+    if (owner == catalog.end()) return Fail(NpmBasicTaskConfigError::kInvalidObserving, "observing");
+    if (std::find(config->module_ids.begin(), config->module_ids.end(), owner->module_id) == config->module_ids.end())
+        return Fail(NpmBasicTaskConfigError::kObservingFeatureDisabled, "observing");
+    config->observing = config->observing_entity == "basic"     ? NpmResultEntity::kBasic
+                        : config->observing_entity == "session" ? NpmResultEntity::kSession
+                                                                : NpmResultEntity::kProtocol;
 
     const rapidjson::Value* range_limit = values[FieldIndex(TaskConfigField::kSessionMaxTcpRangesPerDirection)];
     if (range_limit == nullptr) return {};
@@ -348,7 +342,7 @@ NpmBasicTaskConfigStatus ParseIntegerFields(
 }  // namespace
 
 NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, NpmBasicTaskConfig* output,
-                                                 bool labeling_available) {
+                                                 bool labeling_available, const NpmModuleCatalogV1& catalog) {
     if (with_params_json == nullptr) return Fail(NpmBasicTaskConfigError::kNullInput);
     if (with_params_json[0] == '\0') return Fail(NpmBasicTaskConfigError::kEmptyInput);
     if (output == nullptr) return Fail(NpmBasicTaskConfigError::kNullOutput);
@@ -396,7 +390,7 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
             }
 
             NpmBasicTaskConfig next;
-            auto status = ParseFeatureConfig(values, &next.features);
+            auto status = ParseFeatureConfig(values, &next.features, catalog);
             if (status.error != NpmBasicTaskConfigError::kNone) return status;
             status = ParseDomainConfig(values, &next.domains);
             if (status.error != NpmBasicTaskConfigError::kNone) return status;
@@ -420,6 +414,7 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
                 return status;
             }
 
+            next.parameters_json.assign(parameters_text);
             next.analysis = std::move(parsed_parameters.core.analysis);
             if (parsed_parameters.core.labeling_reference.has_value()) {
                 next.labeling_reference = std::move(*parsed_parameters.core.labeling_reference);
@@ -469,7 +464,7 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
 
         auto status = ParseIntegerFields(values, &next.analysis);
         if (status.error != NpmBasicTaskConfigError::kNone) return status;
-        status = ParseFeatureConfig(values, &next.features);
+        status = ParseFeatureConfig(values, &next.features, catalog);
         if (status.error != NpmBasicTaskConfigError::kNone) return status;
 
         status = ParseDomainConfig(values, &next.domains);
@@ -498,7 +493,8 @@ bool NpmBasicTaskRequestsLabeling(const char* with_params_json) noexcept {
         const auto member = document.FindMember("features");
         if (member == document.MemberEnd() || !member->value.IsString()) return false;
         NpmBasicFeatureConfig features;
-        return ParseFeatures(std::string_view(member->value.GetString(), member->value.GetStringLength()), &features) &&
+        return ParseFeatures(std::string_view(member->value.GetString(), member->value.GetStringLength()), &features,
+                             ProductionNpmModuleCatalogV1()) &&
                features.labeling_enabled;
     } catch (const std::bad_alloc&) {
         return false;

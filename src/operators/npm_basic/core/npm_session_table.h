@@ -116,6 +116,14 @@ class NpmSessionTable {
     /** Atomically retires every active session as EOF in ascending session ID order. */
     NpmSessionTableError FinishAllAtEof(std::vector<NpmSessionSnapshot>* output);
 
+    std::optional<int64_t> NextEventDeadlineNs() const noexcept {
+        return deadlines_.empty() ? std::nullopt : std::optional<int64_t>(deadlines_.begin()->first.first);
+    }
+
+    bool IsLatePacket(int64_t timestamp_ns) const noexcept {
+        return watermark_initialized_ && timestamp_ns < watermark_ns_;
+    }
+
     size_t size() const noexcept { return sessions_.size(); }
     uint64_t tracked_bytes() const noexcept { return tracked_session_bytes_; }
 
@@ -170,6 +178,8 @@ class NpmSessionTable {
 class NpmSessionAdmissionPlanner {
  public:
     explicit NpmSessionAdmissionPlanner(const NpmSessionTable& sessions) noexcept;
+
+    NpmSessionTableError AdvanceControl(int64_t timestamp_ns);
 
     /** Mirrors Observe followed by offline capture progress for admission decisions only. */
     NpmSessionTableError ObserveAndAdvance(const NpmSessionPacketBinding& binding, const packet::PacketMeta& meta,

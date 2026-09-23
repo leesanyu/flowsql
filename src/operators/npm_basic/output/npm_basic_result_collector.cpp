@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "npm_basic_result_collector.h"
+#include <arrow/api.h>
 
 #include <cerrno>
 #include <new>
@@ -85,6 +86,15 @@ NpmBasicDrainStatus NpmBasicResultCollector::Drain(const std::vector<NpmSessionE
             return status;
         }
 
+        if (features_.observing == NpmResultEntity::kProtocol) {
+            auto empty = arrow::RecordBatch::MakeEmpty(features_.protocol_schema);
+            if (!empty.ok()) {
+                status.error = NpmBasicDrainError::kEncodeError;
+                return status;
+            }
+            *output = *empty;
+            return status;
+        }
         status.session_encode_error =
             EncodeNpmSessionResultsWithBudget(pending_session_, budget, output, nullptr, features_.labeling_enabled);
         if (status.session_encode_error != NpmSessionEncodeError::kNone) {
