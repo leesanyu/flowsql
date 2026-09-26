@@ -87,16 +87,18 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::Create(
     const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
     std::shared_ptr<arrow::Schema>* output_schema, std::unique_ptr<NpmBasicTaskRuntime>* output,
     std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcherV1* matcher, const NpmModuleCatalogV1& catalog,
-    std::unique_ptr<INpmResultConsumerV1> consumer, std::string task_id) {
+    std::unique_ptr<INpmResultConsumerV1> consumer, std::string task_id,
+    INpmResultConsumerFactoryV1* consumer_factory) {
     return CreateWithTimeCapabilities(config, querier, input_schema, {}, output_schema, output, std::move(budget),
-                                      matcher, catalog, std::move(consumer), std::move(task_id));
+                                      matcher, catalog, std::move(consumer), std::move(task_id), consumer_factory);
 }
 
 NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
     const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
     const NpmTimeCapabilities& time_capabilities, std::shared_ptr<arrow::Schema>* output_schema,
     std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcherV1* matcher,
-    const NpmModuleCatalogV1& catalog, std::unique_ptr<INpmResultConsumerV1> consumer, std::string task_id) {
+    const NpmModuleCatalogV1& catalog, std::unique_ptr<INpmResultConsumerV1> consumer, std::string task_id,
+    INpmResultConsumerFactoryV1* consumer_factory) {
     struct ConsumerGuard {
         std::unique_ptr<INpmResultConsumerV1>& consumer;
         ~ConsumerGuard() {
@@ -115,6 +117,11 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
     }
     if (!output) {
         status.error = NpmBasicTaskRuntimeError::kNullRuntimeOutput;
+        return status;
+    }
+    if (consumer && consumer_factory) {
+        status.error = NpmBasicTaskRuntimeError::kConsumerCreateError;
+        status.consumer_error = "consumer and consumer factory are mutually exclusive";
         return status;
     }
     if (config.features.labeling_enabled != (matcher_lease != nullptr)) {
@@ -185,9 +192,41 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         std::vector<NpmEntityDescriptorV1> entities;
         for (const auto& entry : prepared)
             entities.insert(entities.end(), entry.plan.entities.begin(), entry.plan.entities.end());
+        std::vector<NpmModuleInstanceV1> instances;
+        instances.reserve(prepared.size());
+        struct ProtocolInstanceGuard {
+            std::vector<NpmModuleInstanceV1>& instances;
+            ~ProtocolInstanceGuard() {
+                for (auto& instance : instances) {
+                    if (instance.protocol) instance.protocol->Abort();
+                }
+            }
+        } protocol_instance_guard{instances};
+        for (const auto& entry : prepared) {
+            auto instance = entry.create(*runtime->protocol_context_, runtime->budget_);
+            if ((instance.protocol && instance.analysis) ||
+                (!instance.protocol && !instance.analysis && entry.plan.module_id != "basic")) {
+                if (instance.protocol) instance.protocol->Abort();
+                status.error = NpmBasicTaskRuntimeError::kModuleCreateError;
+                status.module_status = {NpmProtocolContractErrorV1::kInvalidPlan, entry.plan.module_id};
+                return status;
+            }
+            instances.push_back(std::move(instance));
+        }
+        NpmResultContextV1 context = MakeNpmResultContext(std::move(task_id));
+        if (consumer_factory) {
+            std::unique_ptr<INpmManagedResultConsumerV1> managed_consumer;
+            const int consumer_error = consumer_factory->Create(context, entities, runtime->budget_, &managed_consumer);
+            if (consumer_error != 0 || !managed_consumer) {
+                status.error = NpmBasicTaskRuntimeError::kConsumerCreateError;
+                status.consumer_error = consumer_factory->LastError();
+                return status;
+            }
+            consumer = std::move(managed_consumer);
+        }
         runtime->router_ = std::make_shared<NpmResultRouter>(
-            std::move(entities), observing, MakeNpmResultContext(std::move(task_id)), runtime->budget_,
-            std::move(consumer), [self = runtime.get()](const std::function<int()>& callback) {
+            std::move(entities), observing, std::move(context), runtime->budget_, std::move(consumer),
+            [self = runtime.get()](const std::function<int()>& callback) {
                 // The active-operation gate serializes entry while external code runs without the lifecycle lock.
                 self->operation_mutex_.unlock();
                 try {
@@ -201,18 +240,15 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
             });
         runtime->collector_->BindRouter(runtime->router_);
         runtime->prepared_modules_ = std::move(prepared);
-        for (const auto& entry : runtime->prepared_modules_) {
-            auto instance = entry.create(*runtime->protocol_context_, runtime->budget_);
+        for (size_t index = 0; index < runtime->prepared_modules_.size(); ++index) {
+            const auto& entry = runtime->prepared_modules_[index];
+            auto instance = std::move(instances[index]);
             if (instance.protocol && !instance.analysis) {
                 auto adapter = std::make_unique<NpmProtocolModuleAdapter>(entry.plan, std::move(instance.protocol),
                                                                           &runtime->cancellation_requested_,
                                                                           runtime->router_.get());
                 runtime->protocol_modules_.push_back(adapter.get());
                 instance.analysis = std::move(adapter);
-            } else if (instance.protocol || (!instance.analysis && entry.plan.module_id != "basic")) {
-                status.error = NpmBasicTaskRuntimeError::kModuleCreateError;
-                status.module_status = {NpmProtocolContractErrorV1::kInvalidPlan, entry.plan.module_id};
-                return status;
             }
             if (instance.analysis) {
                 runtime->modules_.push_back(instance.analysis.get());
@@ -573,6 +609,8 @@ std::string NpmBasicTaskRuntime::LastError() const {
     return error == nullptr ? std::string() : std::string(error);
 }
 
+std::string NpmBasicTaskRuntime::ManagedResultJson() const { return router_ ? router_->ResultJson() : std::string(); }
+
 NpmEofFlushState NpmBasicTaskRuntime::State() const noexcept { return state_.load(std::memory_order_acquire); }
 
 void NpmBasicTaskRuntime::SetLastErrorOnce(const char* error) noexcept {
@@ -586,9 +624,16 @@ void NpmBasicTaskRuntime::SetLastErrorOnce(const char* error) noexcept {
 
 void NpmBasicTaskRuntime::ReleaseResources() noexcept {
     if (router_) {
+        const auto runtime_state = state_.load(std::memory_order_acquire);
+        const std::string message = router_->LastError().empty() ? LastError() : router_->LastError();
         operation_mutex_.unlock();
         router_->Cancel();
         operation_mutex_.lock();
+        if (runtime_state != NpmEofFlushState::kFlushed) {
+            (void)router_->FailRun(runtime_state == NpmEofFlushState::kCancelled ? ECANCELED : EIO,
+                                   runtime_state == NpmEofFlushState::kCancelled ? "cancel" : "runtime",
+                                   message.empty() ? "npm.basic managed result run failed" : message);
+        }
         router_->Discard();
     }
     modules_.clear();

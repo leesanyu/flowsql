@@ -982,25 +982,24 @@ int SchedulerPlugin::BuildBlockSourceFilterPlan(
     return 0;
 }
 
-int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
-    IBlockStreamChannel* source,
-    BlockTransformProviderRef provider,
-    IDataFrameChannel* sink,
-    const SqlStatement& stmt,
-    const std::shared_ptr<const BoundFilterExpr>& source_residual,
-    BlockExecutionTerminal* terminal,
-    int64_t* rows_affected,
-    std::string* error) {
+int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* source,
+                                                         BlockTransformProviderRef provider, IDataFrameChannel* sink,
+                                                         const BlockTransformManagedSinkBindingV1* managed_sink,
+                                                         const SqlStatement& stmt,
+                                                         const std::shared_ptr<const BoundFilterExpr>& source_residual,
+                                                         BlockExecutionTerminal* terminal, int64_t* rows_affected,
+                                                         std::string* managed_result_json, std::string* error) {
     if (terminal) *terminal = BlockExecutionTerminal::kFailed;
     if (rows_affected) *rows_affected = 0;
+    if (managed_result_json) managed_result_json->clear();
     if (error) error->clear();
-    if (!source || !provider || (provider.v1 && provider.v2) || !sink ||
+    if (!source || !provider || (provider.v1 && provider.v2) || (sink == nullptr) == (managed_sink == nullptr) ||
         stmt.operators.size() != 1) {
         if (error) *error = "block transform pipeline requires one source, provider, operator, and sink";
         return EINVAL;
     }
     auto* appendable_sink = dynamic_cast<IAppendableDataFrameChannel*>(sink);
-    if (!appendable_sink) {
+    if (sink && !appendable_sink) {
         if (error) *error = "block transform pipeline requires an appendable DataFrame sink";
         return EINVAL;
     }
@@ -1010,6 +1009,10 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
         stmt, 1, &duplicate_transform_filter);
     if (duplicate_transform_filter) {
         if (error) *error = "block transform stage contains duplicate filters";
+        return EINVAL;
+    }
+    if (managed_sink && (!stmt.columns.empty() || transform_filter_text != nullptr)) {
+        if (error) *error = "managed sink requires SELECT * without operator-stage WHERE";
         return EINVAL;
     }
     for (const auto& filter : stmt.stage_filters) {
@@ -1207,6 +1210,18 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
         return EIO;
     }
     auto execution = make_task_holder(execution_raw);
+    auto* managed_task = dynamic_cast<IBlockTransformManagedSinkTaskV1*>(execution.get());
+    if (managed_sink) {
+        if (!managed_task) {
+            if (error) *error = "block transform task does not support managed sink";
+            return EINVAL;
+        }
+        const int bind_rc = managed_task->BindManagedSink(*managed_sink);
+        if (bind_rc != 0) {
+            if (error) *error = "managed sink binding failed: " + SafeBlockTransformLastError(execution.get());
+            return bind_rc;
+        }
+    }
     SchemaCheckingBlockTransformTask checked_execution(
         execution.get(), planned_output_schema);
     IBlockTransformTaskV1* runner_task = planned_output_schema
@@ -1220,8 +1235,9 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
     config.time_transform = execution_time;
     config.source_residual = source_residual;
     config.transform_residual = transform_filter_plan.residual_expression;
-    config.output_consumer = [appendable_sink](const BlockTransformOutputV1& output) {
+    config.output_consumer = [appendable_sink, managed_sink](const BlockTransformOutputV1& output) {
         if (!output.batch) return EINVAL;
+        if (managed_sink) return 0;
         DataFrame frame;
         frame.FromArrow(output.batch);
         return appendable_sink->Append(&frame);
@@ -1231,6 +1247,7 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
     BlockTransformPipelineResult result;
     std::string runner_error;
     const auto runner_rc = runner.Run(&result, &runner_error);
+    if (managed_task && managed_result_json) *managed_result_json = managed_task->ManagedSinkResultJson();
     if (rows_affected) *rows_affected = result.output_rows;
     if (result.terminal == BlockTransformPipelineTerminal::kCompleted) {
         if (terminal) *terminal = BlockExecutionTerminal::kCompleted;
@@ -1248,24 +1265,17 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
 }
 
 int SchedulerPlugin::ExecuteBlockTransformPipeline(
-    IBlockStreamChannel* source,
-    const std::vector<BlockTransformProviderRef>& providers,
-    IDataFrameChannel* sink,
-    const SqlStatement& stmt,
-    const std::shared_ptr<const BoundFilterExpr>& source_residual,
-    BlockExecutionTerminal* terminal,
-    int64_t* rows_affected,
-    std::string* error) {
+    IBlockStreamChannel* source, const std::vector<BlockTransformProviderRef>& providers, IDataFrameChannel* sink,
+    const BlockTransformManagedSinkBindingV1* managed_sink, const SqlStatement& stmt,
+    const std::shared_ptr<const BoundFilterExpr>& source_residual, BlockExecutionTerminal* terminal,
+    int64_t* rows_affected, std::string* managed_result_json, std::string* error) {
     if (providers.size() == 1) {
-        return ExecuteSingleBlockTransformPipeline(
-            source,
-            providers.front(),
-            sink,
-            stmt,
-            source_residual,
-            terminal,
-            rows_affected,
-            error);
+        return ExecuteSingleBlockTransformPipeline(source, providers.front(), sink, managed_sink, stmt, source_residual,
+                                                   terminal, rows_affected, managed_result_json, error);
+    }
+    if (managed_sink) {
+        if (error) *error = "managed sink requires exactly one block transform operator";
+        return EINVAL;
     }
 
     if (terminal) *terminal = BlockExecutionTerminal::kFailed;

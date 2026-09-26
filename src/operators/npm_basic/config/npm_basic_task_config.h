@@ -41,6 +41,7 @@ struct NpmBasicTaskConfig {
     std::string parameters_json;
     std::string labeling_reference;
     uint32_t labeling_memory_mib = kNpmDefaultLabelingMemoryMiB;
+    std::optional<uint32_t> result_retention_days;
 };
 
 enum class NpmBasicTaskConfigError : uint8_t {

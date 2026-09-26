@@ -169,21 +169,18 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
                              int64_t* rows_affected,
                              std::string* error);
     int ExecuteBlockTransformPipeline(IBlockStreamChannel* source,
-                                      const std::vector<BlockTransformProviderRef>& providers,
-                                      IDataFrameChannel* sink,
-                                      const SqlStatement& stmt,
+                                      const std::vector<BlockTransformProviderRef>& providers, IDataFrameChannel* sink,
+                                      const BlockTransformManagedSinkBindingV1* managed_sink, const SqlStatement& stmt,
                                       const std::shared_ptr<const BoundFilterExpr>& source_residual,
-                                      BlockExecutionTerminal* terminal,
-                                      int64_t* rows_affected,
-                                      std::string* error);
-    int ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* source,
-                                            BlockTransformProviderRef provider,
+                                      BlockExecutionTerminal* terminal, int64_t* rows_affected,
+                                      std::string* managed_result_json, std::string* error);
+    int ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* source, BlockTransformProviderRef provider,
                                             IDataFrameChannel* sink,
+                                            const BlockTransformManagedSinkBindingV1* managed_sink,
                                             const SqlStatement& stmt,
                                             const std::shared_ptr<const BoundFilterExpr>& source_residual,
-                                            BlockExecutionTerminal* terminal,
-                                            int64_t* rows_affected,
-                                            std::string* error);
+                                            BlockExecutionTerminal* terminal, int64_t* rows_affected,
+                                            std::string* managed_result_json, std::string* error);
 
     // 执行路径
     int ExecuteTransfer(IChannel* source, IChannel* sink,

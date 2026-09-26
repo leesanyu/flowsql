@@ -1,6 +1,7 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <framework/interfaces/iblock_transform_operator.h>
 #include <operators/npm_basic/npm_protocol_contract.h>
 
 #include <arrow/api.h>
@@ -18,9 +19,16 @@ using Error = npm::NpmProtocolContractErrorV1;
 static_assert(std::is_abstract_v<npm::INpmProtocolModuleV1>);
 static_assert(std::is_abstract_v<npm::INpmResultEmitterV1>);
 static_assert(std::is_abstract_v<npm::INpmResultConsumerV1>);
+static_assert(std::is_abstract_v<npm::INpmManagedResultConsumerV1>);
+static_assert(std::is_abstract_v<npm::INpmResultConsumerFactoryV1>);
+static_assert(std::is_abstract_v<flowsql::IBlockTransformManagedSinkTaskV1>);
+static_assert(std::is_base_of_v<npm::INpmResultConsumerV1, npm::INpmManagedResultConsumerV1>);
 static_assert(std::has_virtual_destructor_v<npm::INpmProtocolModuleV1>);
 static_assert(std::has_virtual_destructor_v<npm::INpmResultEmitterV1>);
 static_assert(std::has_virtual_destructor_v<npm::INpmResultConsumerV1>);
+static_assert(std::has_virtual_destructor_v<npm::INpmManagedResultConsumerV1>);
+static_assert(std::has_virtual_destructor_v<npm::INpmResultConsumerFactoryV1>);
+static_assert(std::has_virtual_destructor_v<flowsql::IBlockTransformManagedSinkTaskV1>);
 
 namespace {
 
@@ -72,8 +80,13 @@ void TestEntitiesAndRows() {
         assert(basic.entity_id == "basic" && basic.module_id == "basic");
         assert(session.entity_id == "session" && session.module_id == "session");
         assert(basic.identity_column == "session_id" && session.identity_column == "session_id");
+        const uint32_t expected_version = labeling ? 2 : 1;
+        const std::string expected_version_text = std::to_string(expected_version);
+        assert(basic.schema_version == expected_version && session.schema_version == expected_version);
         assert(basic.schema == npm::NpmBasicResultSchema(labeling));
         assert(session.schema == npm::NpmSessionResultSchema(labeling));
+        assert(basic.schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == expected_version_text);
+        assert(session.schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == expected_version_text);
         assert((basic.schema->GetFieldIndex("primary_label_id") >= 0) == labeling);
         assert((session.schema->GetFieldIndex("primary_label_id") >= 0) == labeling);
     }

@@ -194,6 +194,7 @@ NpmEntityDescriptorV1 NpmBasicEntityDescriptorV1(bool labeling_enabled) {
     NpmEntityDescriptorV1 entity;
     entity.entity_id = "basic";
     entity.module_id = "basic";
+    entity.schema_version = labeling_enabled ? 2 : 1;
     entity.schema = NpmBasicResultSchema(labeling_enabled);
     entity.identity_column = "session_id";
     return entity;
@@ -203,6 +204,7 @@ NpmEntityDescriptorV1 NpmSessionEntityDescriptorV1(bool labeling_enabled) {
     NpmEntityDescriptorV1 entity;
     entity.entity_id = "session";
     entity.module_id = "session";
+    entity.schema_version = labeling_enabled ? 2 : 1;
     entity.schema = NpmSessionResultSchema(labeling_enabled);
     entity.identity_column = "session_id";
     return entity;

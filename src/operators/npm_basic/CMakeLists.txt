@@ -5,6 +5,7 @@ add_library(${PROJECT_NAME} SHARED
     npm_protocol_contract.cpp
     core/npm_module_catalog.cpp
     npm_basic_operator.cpp
+    npm_basic_result_consumer.cpp
     config/npm_basic_task_config.cpp
     config/npm_parameters.cpp
     core/npm_basic_task_runtime.cpp

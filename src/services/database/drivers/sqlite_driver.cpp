@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "sqlite_driver.h"
 
@@ -15,12 +10,76 @@
 #include <arrow/ipc/reader.h>
 #include <arrow/ipc/writer.h>
 
-#include <cstdio>
 #include <common/log.h>
+#include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace flowsql {
 namespace database {
+namespace {
+
+int BindSqliteParameters(sqlite3_stmt* statement, const DatabaseParameterV1* parameters, size_t parameter_count,
+                         std::string* error) {
+    if (parameter_count > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        *error = "prepared command parameter count exceeds SQLite limit";
+        return -1;
+    }
+    if (sqlite3_bind_parameter_count(statement) != static_cast<int>(parameter_count)) {
+        *error = "prepared command parameter count mismatch";
+        return -1;
+    }
+    for (size_t index = 0; index < parameter_count; ++index) {
+        const auto& parameter = parameters[index];
+        const int position = static_cast<int>(index + 1);
+        int rc = SQLITE_MISUSE;
+        switch (parameter.kind) {
+            case DatabaseParameterKindV1::kNull:
+                rc = sqlite3_bind_null(statement, position);
+                break;
+            case DatabaseParameterKindV1::kInt64:
+                rc = sqlite3_bind_int64(statement, position, parameter.int64_value);
+                break;
+            case DatabaseParameterKindV1::kUInt64: {
+                const std::string value = std::to_string(parameter.uint64_value);
+                rc = sqlite3_bind_text(statement, position, value.c_str(), static_cast<int>(value.size()),
+                                       SQLITE_TRANSIENT);
+                break;
+            }
+            case DatabaseParameterKindV1::kDouble:
+                rc = sqlite3_bind_double(statement, position, parameter.double_value);
+                break;
+            case DatabaseParameterKindV1::kString:
+                if ((!parameter.data && parameter.size != 0) ||
+                    parameter.size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+                    rc = SQLITE_MISUSE;
+                } else {
+                    const auto* value = parameter.data ? static_cast<const char*>(parameter.data) : "";
+                    rc = sqlite3_bind_text(statement, position, value, static_cast<int>(parameter.size),
+                                           SQLITE_TRANSIENT);
+                }
+                break;
+            case DatabaseParameterKindV1::kBlob:
+                if ((!parameter.data && parameter.size != 0) ||
+                    parameter.size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+                    rc = SQLITE_MISUSE;
+                } else if (parameter.size == 0) {
+                    rc = sqlite3_bind_zeroblob(statement, position, 0);
+                } else {
+                    rc = sqlite3_bind_blob(statement, position, parameter.data, static_cast<int>(parameter.size),
+                                           SQLITE_TRANSIENT);
+                }
+                break;
+        }
+        if (rc != SQLITE_OK) {
+            *error = sqlite3_errstr(rc);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+}  // namespace
 
 // ==================== SqliteResultSet 实现 ====================
 
@@ -124,6 +183,85 @@ SqliteSession::~SqliteSession() {
         ReturnConnection(conn_);
         conn_ = nullptr;
     }
+}
+
+int SqliteSession::ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) {
+    last_error_.clear();
+    if (!sql || (parameter_count != 0 && !parameters)) {
+        last_error_ = "invalid prepared command";
+        return -1;
+    }
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(conn_, sql, -1, &statement, nullptr) != SQLITE_OK) {
+        last_error_ = sqlite3_errmsg(conn_);
+        return -1;
+    }
+    const auto finalize = [&] { sqlite3_finalize(statement); };
+    if (BindSqliteParameters(statement, parameters, parameter_count, &last_error_) != 0) {
+        finalize();
+        return -1;
+    }
+    const int rc = sqlite3_step(statement);
+    if (rc != SQLITE_DONE) {
+        last_error_ = sqlite3_errmsg(conn_);
+        finalize();
+        return -1;
+    }
+    const int changed = sqlite3_changes(conn_);
+    finalize();
+    return changed;
+}
+
+int SqliteSession::ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+                                        size_t parameters_per_execution, size_t execution_count) {
+    last_error_.clear();
+    if (!sql || parameters_per_execution > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        (execution_count != 0 && (!parameters || parameters_per_execution == 0)) ||
+        (execution_count != 0 && parameters_per_execution > std::numeric_limits<size_t>::max() / execution_count)) {
+        last_error_ = "invalid prepared batch";
+        return -1;
+    }
+    if (execution_count == 0) return 0;
+    if (BeginTransaction() != 0) return -1;
+
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(conn_, sql, -1, &statement, nullptr) != SQLITE_OK) {
+        last_error_ = sqlite3_errmsg(conn_);
+        const std::string failure = last_error_;
+        RollbackTransaction();
+        last_error_ = failure;
+        return -1;
+    }
+    int64_t changed = 0;
+    for (size_t execution = 0; execution < execution_count; ++execution) {
+        const auto* row = parameters + execution * parameters_per_execution;
+        if (BindSqliteParameters(statement, row, parameters_per_execution, &last_error_) != 0 ||
+            sqlite3_step(statement) != SQLITE_DONE) {
+            if (last_error_.empty()) last_error_ = sqlite3_errmsg(conn_);
+            sqlite3_finalize(statement);
+            const std::string failure = last_error_;
+            RollbackTransaction();
+            last_error_ = failure;
+            return -1;
+        }
+        changed += sqlite3_changes(conn_);
+        if (sqlite3_reset(statement) != SQLITE_OK || sqlite3_clear_bindings(statement) != SQLITE_OK) {
+            last_error_ = sqlite3_errmsg(conn_);
+            sqlite3_finalize(statement);
+            const std::string failure = last_error_;
+            RollbackTransaction();
+            last_error_ = failure;
+            return -1;
+        }
+    }
+    sqlite3_finalize(statement);
+    if (CommitTransaction() != 0) {
+        const std::string failure = last_error_;
+        RollbackTransaction();
+        last_error_ = failure;
+        return -1;
+    }
+    return changed > std::numeric_limits<int>::max() ? std::numeric_limits<int>::max() : static_cast<int>(changed);
 }
 
 sqlite3_stmt* SqliteSession::PrepareStatement(sqlite3* db, const char* sql, std::string* error) {

@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_DATABASE_DB_SESSION_H_
 #define _FLOWSQL_SERVICES_DATABASE_DB_SESSION_H_
@@ -148,6 +143,24 @@ public:
      */
     virtual int ExecuteSql(const char* sql) {
         last_error_ = "ExecuteSql not supported";
+        return -1;
+    }
+
+    virtual int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) {
+        (void)sql;
+        (void)parameters;
+        (void)parameter_count;
+        last_error_ = "ExecutePrepared not supported";
+        return -1;
+    }
+
+    virtual int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+                                     size_t parameters_per_execution, size_t execution_count) {
+        (void)sql;
+        (void)parameters;
+        (void)parameters_per_execution;
+        (void)execution_count;
+        last_error_ = "ExecutePreparedBatch not supported";
         return -1;
     }
 

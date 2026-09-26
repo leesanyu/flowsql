@@ -14,9 +14,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../capability_interfaces.h"
 #include "../db_session.h"
 #include "../idb_driver.h"
-#include "../capability_interfaces.h"
 
 namespace flowsql {
 namespace database {
@@ -24,15 +24,17 @@ namespace database {
 // ClickHouseDriver — ClickHouse 数据库驱动
 // 基于 HTTP 接口（8123 端口），使用 cpp-httplib，零新依赖
 // HTTP 无状态，不需要连接池，每次 CreateSession() 创建新 Session
-class __attribute__((visibility("default"))) ClickHouseDriver : public IDbDriver,
-                                                                 public IDbSessionFactoryProvider {
-public:
+class __attribute__((visibility("default"))) ClickHouseDriver : public IDbDriver, public IDbSessionFactoryProvider {
+ public:
     ClickHouseDriver() = default;
     ~ClickHouseDriver() override = default;
 
     // IDbDriver 实现
     int Connect(const std::unordered_map<std::string, std::string>& params) override;
-    int Disconnect() override { connected_ = false; return 0; }
+    int Disconnect() override {
+        connected_ = false;
+        return 0;
+    }
     bool IsConnected() override { return connected_; }
     const char* DriverName() override { return "clickhouse"; }
     const char* LastError() override { return last_error_.c_str(); }
@@ -41,7 +43,7 @@ public:
     // 创建 Session（每次返回新实例，HTTP 无状态）
     std::shared_ptr<IDbSession> CreateSession() override;
 
-private:
+ private:
     std::string host_;
     int port_ = 8123;
     std::string user_;
@@ -55,29 +57,27 @@ private:
 // 直接继承 IDbSession，覆盖 Arrow 方法
 // 同时继承 IArrowReadable + IArrowWritable，供 DatabaseChannel::CreateArrowReader/Writer 的 dynamic_cast 检查
 // 不继承 RelationDbSessionBase（ClickHouse 是列式数据库，不走行式路径）
-class ClickHouseSession : public IDbSession,
-                          public IArrowReadable,
-                          public IArrowWritable {
-public:
-    ClickHouseSession(const std::string& host, int port,
-                      const std::string& user, const std::string& password,
+class ClickHouseSession : public IDbSession, public IArrowReadable, public IArrowWritable {
+ public:
+    ClickHouseSession(const std::string& host, int port, const std::string& user, const std::string& password,
                       const std::string& database);
     ~ClickHouseSession() override = default;
 
     // ==================== 列式接口（核心实现）====================
 
     // 执行 Arrow 查询：构造 "{sql} FORMAT ArrowStream"，POST，解析响应体
-    int ExecuteQueryArrow(const char* sql,
-                          std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) override;
+    int ExecuteQueryArrow(const char* sql, std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) override;
 
     // 写入 Arrow batches：序列化为 Arrow IPC Stream，POST INSERT
-    int WriteArrowBatches(const char* table,
-                          const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) override;
+    int WriteArrowBatches(const char* table, const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) override;
 
     // ==================== 行式接口（DDL 等）====================
 
     // 执行 SQL（DDL/DML），走普通 HTTP 文本响应
     int ExecuteSql(const char* sql) override;
+    int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
+    int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
+                             size_t execution_count) override;
 
     // 健康检查：GET /?query=SELECT+1
     bool Ping() override;
@@ -99,14 +99,14 @@ public:
         return -1;
     }
 
-private:
+ private:
     // 解析 Arrow IPC Stream 响应体
-    int ParseArrowStream(const std::string& body,
-                         std::vector<std::shared_ptr<arrow::RecordBatch>>* batches);
+    int ParseArrowStream(const std::string& body, std::vector<std::shared_ptr<arrow::RecordBatch>>* batches);
 
     // 序列化 batches 为 Arrow IPC Stream
-    int SerializeArrowStream(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                             std::string* body);
+    int SerializeArrowStream(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches, std::string* body);
+
+    int ExecuteParameterizedHttp(const std::string& sql, const DatabaseParameterV1* parameters, size_t parameter_count);
 
     std::string host_;
     int port_;

@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_DATABASE_DRIVERS_SQLITE_DRIVER_H_
 #define _FLOWSQL_SERVICES_DATABASE_DRIVERS_SQLITE_DRIVER_H_
@@ -83,7 +78,7 @@ public:
     int GetString(int index, const char** value, size_t* len) override;
     bool IsNull(int index) override;
 
-protected:
+ protected:
     // 仅供同驱动内部（InferSchema）访问底层 stmt，不对外暴露
     sqlite3_stmt* GetStmt() const { return stmt_; }
     friend class SqliteSession;
@@ -100,8 +95,11 @@ class SqliteSession : public RelationDbSessionBase<SqliteTraits> {
 public:
     SqliteSession(SqliteDriver* driver, sqlite3* db);
     ~SqliteSession() override;
+    int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
+    int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
+                             size_t execution_count) override;
 
-protected:
+ protected:
     // 钩子方法实现
     sqlite3_stmt* PrepareStatement(sqlite3* db, const char* sql, std::string* error) override;
     int ExecuteStatement(sqlite3_stmt* stmt, std::string* error) override;

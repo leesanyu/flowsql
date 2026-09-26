@@ -139,6 +139,28 @@ interface INpmResultConsumerV1 {
     virtual void Cancel() noexcept = 0;
 };
 
+/** Borrowed only for the FailRun call. A failure must not hide the original task error. */
+struct NpmResultFailureV1 {
+    int32_t code = 0;
+    const char* stage = nullptr;
+    const char* message = nullptr;
+};
+
+/** Managed run lifecycle and summary, in addition to the existing synchronous consumer contract. */
+interface INpmManagedResultConsumerV1 : public INpmResultConsumerV1 {
+    virtual int FailRun(const NpmResultFailureV1& failure) = 0;
+    virtual std::string ResultJson() const = 0;
+};
+
+/** Task-private factory; Create validates all enabled entities before runtime publication. */
+interface INpmResultConsumerFactoryV1 {
+    virtual ~INpmResultConsumerFactoryV1() = default;
+    virtual int Create(const NpmResultContextV1& context, const std::vector<NpmEntityDescriptorV1>& entities,
+                       std::shared_ptr<INpmTaskBudget> budget,
+                       std::unique_ptr<INpmManagedResultConsumerV1>* consumer) = 0;
+    virtual std::string LastError() const = 0;
+};
+
 }  // namespace flowsql::npm
 
 #endif  // FLOWSQL_OPERATORS_NPM_BASIC_NPM_PROTOCOL_CONTRACT_H_

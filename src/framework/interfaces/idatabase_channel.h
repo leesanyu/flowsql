@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_FRAMEWORK_INTERFACES_IDATABASE_CHANNEL_H_
 #define _FLOWSQL_FRAMEWORK_INTERFACES_IDATABASE_CHANNEL_H_
@@ -33,6 +28,33 @@ struct BatchWriteStats {
     int64_t rows_written = 0;
     int64_t bytes_written = 0;
     int64_t elapsed_ms = 0;
+};
+
+enum class DatabaseParameterKindV1 : uint8_t {
+    kNull = 0,
+    kInt64,
+    kUInt64,
+    kDouble,
+    kString,
+    kBlob,
+};
+
+/** Borrowed value for one ExecutePrepared call. */
+struct DatabaseParameterV1 {
+    DatabaseParameterKindV1 kind = DatabaseParameterKindV1::kNull;
+    int64_t int64_value = 0;
+    uint64_t uint64_value = 0;
+    double double_value = 0.0;
+    const void* data = nullptr;
+    size_t size = 0;
+};
+
+/** Optional parameterized-command capability; separate from the existing IDatabaseChannel ABI. */
+interface IDatabasePreparedCommandV1 {
+    virtual ~IDatabasePreparedCommandV1() = default;
+    virtual int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) = 0;
+    virtual int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+                                     size_t parameters_per_execution, size_t execution_count) = 0;
 };
 
 /**

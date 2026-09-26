@@ -1,20 +1,16 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "database_plugin.h"
 
-#include <cstdio>
 #include <common/error_code.h>
 #include <common/log.h>
+#include <unistd.h>
+#include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <unistd.h>
 
 #include <arrow/api.h>
 #include <arrow/io/memory.h>
@@ -156,13 +152,19 @@ int DatabasePlugin::Stop() {
 }
 
 // 懒加载获取通道（含断线重连）
-IDatabaseChannel* DatabasePlugin::Get(const char* type, const char* name) {
+IDatabaseChannel* DatabasePlugin::Get(const char* type, const char* name) { return AcquireChannel(type, name).get(); }
+
+std::shared_ptr<IDatabaseChannel> DatabasePlugin::AcquireChannel(const char* type, const char* name) {
     if (!type || !name) {
         last_error_ = "type and name must not be null";
         return nullptr;
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+    return GetSharedLocked(type, name);
+}
+
+std::shared_ptr<DatabaseChannel> DatabasePlugin::GetSharedLocked(const char* type, const char* name) {
     std::string key = std::string(type) + "." + name;
 
     // 1. 查找已存在的通道
@@ -170,10 +172,15 @@ IDatabaseChannel* DatabasePlugin::Get(const char* type, const char* name) {
     if (it != channels_.end()) {
         // 检查连接是否仍然有效，断开则移除并重建
         if (!it->second->IsConnected()) {
+            if (it->second.use_count() > 1) {
+                last_error_ = "disconnected database channel is in use: " + key;
+                return nullptr;
+            }
             LOG_INFO("DatabasePlugin: connection lost for %s, reconnecting...", key.c_str());
             channels_.erase(it);
+            driver_storage_.erase(key);
         } else {
-            return it->second.get();
+            return it->second;
         }
     }
 
@@ -225,7 +232,12 @@ IDatabaseChannel* DatabasePlugin::Get(const char* type, const char* name) {
     // 7. 加入通道池
     channels_[key] = channel;
     LOG_INFO("DatabasePlugin: connected to %s", key.c_str());
-    return channel.get();
+    return channel;
+}
+
+bool DatabasePlugin::HasExternalLeaseLocked(const std::string& key) const {
+    const auto it = channels_.find(key);
+    return it != channels_.end() && it->second.use_count() > 1;
 }
 
 void DatabasePlugin::List(std::function<void(const char* type, const char* name,
@@ -260,6 +272,10 @@ int DatabasePlugin::Release(const char* type, const char* name) {
 
     auto it = channels_.find(key);
     if (it == channels_.end()) return -1;
+    if (HasExternalLeaseLocked(key)) {
+        last_error_ = "database channel is in use: " + key;
+        return EBUSY;
+    }
 
     it->second->Close();
     channels_.erase(it);
@@ -361,6 +377,10 @@ int DatabasePlugin::RemoveChannel(const char* type, const char* name) {
             last_error_ = "channel not found: " + key;
             return -1;
         }
+        if (HasExternalLeaseLocked(key)) {
+            last_error_ = "database channel is in use: " + key;
+            return EBUSY;
+        }
         // 关闭连接
         auto ch_it = channels_.find(key);
         if (ch_it != channels_.end()) {
@@ -413,6 +433,10 @@ int DatabasePlugin::UpdateChannel(const char* config_str) {
         if (!configs_.count(key)) {
             last_error_ = "channel not found: " + key + " (use AddChannel to create)";
             return -1;
+        }
+        if (HasExternalLeaseLocked(key)) {
+            last_error_ = "database channel is in use: " + key;
+            return EBUSY;
         }
         old_params = configs_[key];
         // 关闭旧连接，下次 Get() 时重建

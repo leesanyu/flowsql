@@ -1055,40 +1055,76 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             }
         }
         if (transform_matches == parsed_ops.size()) {
-            if (!stmt.dest.empty() && !IsDataframeRefName(stmt.dest)) {
-                rsp = BuildErrorJson("block transform currently requires a DataFrame destination");
-                return error::BAD_REQUEST;
+            const bool managed_result = !stmt.dest.empty() && !IsDataframeRefName(stmt.dest);
+            std::shared_ptr<IChannel> managed_channel;
+            BlockTransformManagedSinkBindingV1 managed_binding;
+            std::string db_category;
+            std::string db_name;
+            std::string db_relation;
+            if (managed_result) {
+                if (!ParseDatabaseDestination(stmt.dest, &db_category, &db_name, &db_relation) ||
+                    !db_relation.empty() ||
+                    (db_category != "sqlite" && db_category != "mysql" && db_category != "postgres" &&
+                     db_category != "clickhouse")) {
+                    rsp = BuildErrorJson("managed block transform requires a two-part database destination");
+                    return error::BAD_REQUEST;
+                }
+                if (transform_providers.size() != 1 || !stmt.columns.empty() ||
+                    std::any_of(stmt.stage_filters.begin(), stmt.stage_filters.end(),
+                                [](const StageFilterClause& filter) { return filter.after_stage > 0; })) {
+                    rsp = BuildErrorJson(
+                        "managed block transform requires one operator, SELECT *, and no operator-stage WHERE");
+                    return error::BAD_REQUEST;
+                }
+                auto* lease_provider = querier_ ? static_cast<IDatabaseChannelLeaseProviderV1*>(
+                                                      querier_->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1))
+                                                : nullptr;
+                if (!lease_provider) {
+                    rsp = BuildErrorJson("database channel lease provider unavailable");
+                    return error::UNAVAILABLE;
+                }
+                auto leased_database = lease_provider->AcquireChannel(db_category.c_str(), db_name.c_str());
+                managed_channel = std::static_pointer_cast<IChannel>(std::move(leased_database));
+                auto* db = managed_channel ? dynamic_cast<IDatabaseChannel*>(managed_channel.get()) : nullptr;
+                if (!db || !managed_channel || !db->IsOpened() || !db->IsConnected() ||
+                    std::string(db->Category()) != db_category || std::string(db->Name()) != db_name) {
+                    rsp = BuildErrorJson("managed database destination is unavailable: " + stmt.dest);
+                    return error::BAD_REQUEST;
+                }
+                managed_binding.sink_channel = managed_channel.get();
+                managed_binding.target = stmt.dest.c_str();
+                managed_binding.category = db_category.c_str();
+                managed_binding.name = db_name.c_str();
+                managed_binding.relation = db_relation.c_str();
             }
-            if (!stmt.dest.empty() && !ch_registry) {
+            if (!stmt.dest.empty() && !managed_result && !ch_registry) {
                 rsp = BuildErrorJson("channel registry unavailable");
                 return error::INTERNAL_ERROR;
             }
 
-            const bool named_result = !stmt.dest.empty();
+            const bool named_result = !stmt.dest.empty() && !managed_result;
             const std::string dataframe_name = named_result
                                                    ? DataframeNamePart(stmt.dest)
                                                    : std::string("sink");
-            auto dataframe_sink = std::make_shared<DataFrameChannel>(
-                named_result ? "dataframe" : "_temp", dataframe_name);
-            if (dataframe_sink->Open() != 0) {
+            std::shared_ptr<DataFrameChannel> dataframe_sink;
+            if (!managed_result)
+                dataframe_sink =
+                    std::make_shared<DataFrameChannel>(named_result ? "dataframe" : "_temp", dataframe_name);
+            if (dataframe_sink && dataframe_sink->Open() != 0) {
                 rsp = BuildErrorJson("failed to open block transform DataFrame sink");
                 return error::INTERNAL_ERROR;
             }
 
             int64_t rows = 0;
             std::string transform_error;
+            std::string managed_result_json;
             BlockExecutionTerminal transform_terminal = BlockExecutionTerminal::kFailed;
             int transform_rc = 0;
             try {
                 transform_rc = ExecuteBlockTransformPipeline(
-                    source_resolved.block_channels.front().get(),
-                    transform_providers,
-                    dataframe_sink.get(),
-                    stmt,
-                    block_source_residual,
-                    &transform_terminal,
-                    &rows,
-                    &transform_error);
+                    source_resolved.block_channels.front().get(), transform_providers, dataframe_sink.get(),
+                    managed_result ? &managed_binding : nullptr, stmt, block_source_residual, &transform_terminal,
+                    &rows, &managed_result_json, &transform_error);
             } catch (const std::exception& ex) {
                 transform_error = std::string("block transform execution threw: ") + ex.what();
                 transform_rc = EFAULT;
@@ -1107,8 +1143,36 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                                            : ErrorCodeId::kOpExecFail,
                     transform_rc == EINVAL ? ErrorStageId::kCapabilityCheck
                                            : ErrorStageId::kExecute);
+                if (managed_result && !managed_result_json.empty()) {
+                    rapidjson::Document summary;
+                    summary.Parse(managed_result_json.c_str());
+                    if (!summary.HasParseError() && summary.IsObject()) {
+                        rapidjson::Document failure;
+                        failure.Parse(rsp.c_str());
+                        if (!failure.HasParseError() && failure.IsObject()) {
+                            rapidjson::Value copied(summary, failure.GetAllocator());
+                            failure.AddMember("result", copied, failure.GetAllocator());
+                            rapidjson::StringBuffer buffer;
+                            rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+                            failure.Accept(writer);
+                            rsp = buffer.GetString();
+                        }
+                    }
+                }
                 return transform_rc == EINVAL ? error::BAD_REQUEST
                                               : error::INTERNAL_ERROR;
+            }
+
+            rapidjson::Document managed_summary;
+            if (managed_result) {
+                managed_summary.Parse(managed_result_json.c_str());
+                if (managed_summary.HasParseError() || !managed_summary.IsObject() ||
+                    !managed_summary.HasMember("rows_written") || !managed_summary["rows_written"].IsInt64()) {
+                    rsp = BuildExecutionErrorJson("managed block transform returned no valid run summary",
+                                                  ErrorCodeId::kOpExecFail, ErrorStageId::kExecute);
+                    return error::INTERNAL_ERROR;
+                }
+                rows = managed_summary["rows_written"].GetInt64();
             }
 
             if (named_result) {
@@ -1132,8 +1196,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             }
             DataFrame result;
             std::string result_json = "[]";
-            if (!named_result && dataframe_sink->Read(&result) == 0 &&
-                result.RowCount() > 0) {
+            if (!named_result && dataframe_sink && dataframe_sink->Read(&result) == 0 && result.RowCount() > 0) {
                 result_json = result.ToJson();
             }
             rapidjson::StringBuffer transform_buf;
@@ -1147,7 +1210,12 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             transform_writer.Int64(rows);
             transform_writer.Key("result_target");
             transform_writer.String(stmt.dest.c_str());
-            if (!named_result) {
+            if (managed_result) {
+                transform_writer.Key("result");
+                transform_writer.RawValue(managed_result_json.c_str(), managed_result_json.size(),
+                                          rapidjson::kObjectType);
+            }
+            if (!named_result && !managed_result) {
                 transform_writer.Key("data");
                 transform_writer.RawValue(
                     result_json.c_str(), result_json.size(), rapidjson::kArrayType);

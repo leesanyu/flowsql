@@ -15,12 +15,14 @@
 #include <arrow/ipc/reader.h>
 #include <arrow/ipc/writer.h>
 
+#include <common/log.h>
 #include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cstdio>
-#include <common/log.h>
 #include <cstring>
+#include <limits>
+#include <memory>
 
 namespace flowsql {
 namespace database {
@@ -36,9 +38,7 @@ MysqlResultSet::~MysqlResultSet() {
     }
 }
 
-int MysqlResultSet::FieldCount() {
-    return result_ ? mysql_num_fields(result_) : 0;
-}
+int MysqlResultSet::FieldCount() { return result_ ? mysql_num_fields(result_) : 0; }
 
 const char* MysqlResultSet::FieldName(int index) const {
     if (!result_) return nullptr;
@@ -58,9 +58,7 @@ int MysqlResultSet::FieldLength(int index) {
     return (index >= 0 && index < mysql_num_fields(result_)) ? fields[index].length : 0;
 }
 
-bool MysqlResultSet::HasNext() {
-    return has_next_;
-}
+bool MysqlResultSet::HasNext() { return has_next_; }
 
 bool MysqlResultSet::Next() {
     if (!result_ || !has_next_) return false;
@@ -133,8 +131,7 @@ bool MysqlResultSet::IsNull(int index) {
 
 // ==================== MysqlSession 实现 ====================
 
-MysqlSession::MysqlSession(MysqlDriver* driver, MYSQL* conn)
-    : RelationDbSessionBase<MysqlTraits>(driver, conn) {}
+MysqlSession::MysqlSession(MysqlDriver* driver, MYSQL* conn) : RelationDbSessionBase<MysqlTraits>(driver, conn) {}
 
 MysqlSession::~MysqlSession() {
     if (conn_) {
@@ -224,8 +221,7 @@ void MysqlSession::ReturnConnection(MYSQL* conn) {
     }
 }
 
-IResultSet* MysqlSession::CreateResultSet(MYSQL_RES* result,
-                                          std::function<void(MYSQL_RES*)> free_func) {
+IResultSet* MysqlSession::CreateResultSet(MYSQL_RES* result, std::function<void(MYSQL_RES*)> free_func) {
     return new MysqlResultSet(result, free_func);
 }
 
@@ -257,6 +253,130 @@ int MysqlSession::ExecuteSql(const char* sql) {
     return static_cast<int>(mysql_affected_rows(conn_));
 }
 
+namespace {
+
+int BindMysqlParameters(MYSQL_STMT* statement, const DatabaseParameterV1* parameters, size_t parameter_count,
+                        std::string* error) {
+    if (mysql_stmt_param_count(statement) != parameter_count ||
+        parameter_count > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        *error = "prepared command parameter count mismatch";
+        return -1;
+    }
+    std::vector<MYSQL_BIND> bindings(parameter_count);
+    auto nulls = std::make_unique<bool[]>(parameter_count);
+    std::vector<unsigned long> lengths(parameter_count);
+    for (size_t index = 0; index < parameter_count; ++index) {
+        auto& binding = bindings[index];
+        std::memset(&binding, 0, sizeof(binding));
+        nulls[index] = 0;
+        binding.is_null = &nulls[index];
+        const auto& parameter = parameters[index];
+        switch (parameter.kind) {
+            case DatabaseParameterKindV1::kNull:
+                binding.buffer_type = MYSQL_TYPE_NULL;
+                nulls[index] = 1;
+                break;
+            case DatabaseParameterKindV1::kInt64:
+                binding.buffer_type = MYSQL_TYPE_LONGLONG;
+                binding.buffer = const_cast<int64_t*>(&parameter.int64_value);
+                binding.buffer_length = sizeof(parameter.int64_value);
+                break;
+            case DatabaseParameterKindV1::kUInt64:
+                binding.buffer_type = MYSQL_TYPE_LONGLONG;
+                binding.buffer = const_cast<uint64_t*>(&parameter.uint64_value);
+                binding.buffer_length = sizeof(parameter.uint64_value);
+                binding.is_unsigned = 1;
+                break;
+            case DatabaseParameterKindV1::kDouble:
+                binding.buffer_type = MYSQL_TYPE_DOUBLE;
+                binding.buffer = const_cast<double*>(&parameter.double_value);
+                binding.buffer_length = sizeof(parameter.double_value);
+                break;
+            case DatabaseParameterKindV1::kString:
+            case DatabaseParameterKindV1::kBlob:
+                if ((!parameter.data && parameter.size != 0) ||
+                    parameter.size > static_cast<size_t>(std::numeric_limits<unsigned long>::max())) {
+                    *error = "prepared command value exceeds MySQL limit";
+                    return -1;
+                }
+                lengths[index] = static_cast<unsigned long>(parameter.size);
+                binding.buffer_type =
+                    parameter.kind == DatabaseParameterKindV1::kString ? MYSQL_TYPE_STRING : MYSQL_TYPE_BLOB;
+                binding.buffer = const_cast<void*>(parameter.data);
+                binding.buffer_length = lengths[index];
+                binding.length = &lengths[index];
+                break;
+        }
+    }
+    if (parameter_count != 0 && mysql_stmt_bind_param(statement, bindings.data()) != 0) {
+        *error = mysql_stmt_error(statement);
+        return -1;
+    }
+    if (mysql_stmt_execute(statement) != 0) {
+        *error = mysql_stmt_error(statement);
+        return -1;
+    }
+    const auto changed = mysql_stmt_affected_rows(statement);
+    return changed > static_cast<my_ulonglong>(std::numeric_limits<int>::max()) ? std::numeric_limits<int>::max()
+                                                                                : static_cast<int>(changed);
+}
+
+}  // namespace
+
+int MysqlSession::ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) {
+    last_error_.clear();
+    if (!sql || (parameter_count != 0 && !parameters)) {
+        last_error_ = "invalid prepared command";
+        return -1;
+    }
+    MYSQL_STMT* statement = PrepareStatement(conn_, sql, &last_error_);
+    if (!statement) return -1;
+    const int result = BindMysqlParameters(statement, parameters, parameter_count, &last_error_);
+    mysql_stmt_close(statement);
+    return result;
+}
+
+int MysqlSession::ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+                                       size_t parameters_per_execution, size_t execution_count) {
+    last_error_.clear();
+    if (!sql || (execution_count != 0 && (!parameters || parameters_per_execution == 0)) ||
+        (execution_count != 0 && parameters_per_execution > std::numeric_limits<size_t>::max() / execution_count)) {
+        last_error_ = "invalid prepared batch";
+        return -1;
+    }
+    if (execution_count == 0) return 0;
+    if (BeginTransaction() != 0) return -1;
+    MYSQL_STMT* statement = PrepareStatement(conn_, sql, &last_error_);
+    if (!statement) {
+        const std::string failure = last_error_;
+        RollbackTransaction();
+        last_error_ = failure;
+        return -1;
+    }
+    int64_t changed = 0;
+    for (size_t execution = 0; execution < execution_count; ++execution) {
+        const int result = BindMysqlParameters(statement, parameters + execution * parameters_per_execution,
+                                               parameters_per_execution, &last_error_);
+        if (result < 0 || mysql_stmt_reset(statement) != 0) {
+            if (result >= 0) last_error_ = mysql_stmt_error(statement);
+            mysql_stmt_close(statement);
+            const std::string failure = last_error_;
+            RollbackTransaction();
+            last_error_ = failure;
+            return -1;
+        }
+        changed += result;
+    }
+    mysql_stmt_close(statement);
+    if (CommitTransaction() != 0) {
+        const std::string failure = last_error_;
+        RollbackTransaction();
+        last_error_ = failure;
+        return -1;
+    }
+    return changed > std::numeric_limits<int>::max() ? std::numeric_limits<int>::max() : static_cast<int>(changed);
+}
+
 std::shared_ptr<arrow::Schema> MysqlSession::InferSchema(IResultSet* result, std::string* error) {
     auto* rs = static_cast<MysqlResultSet*>(result);
     MYSQL_RES* mysql_res = rs->GetResult();
@@ -265,47 +385,67 @@ std::shared_ptr<arrow::Schema> MysqlSession::InferSchema(IResultSet* result, std
     std::vector<std::shared_ptr<arrow::Field>> arrow_fields;
     for (int i = 0; i < n; ++i) {
         std::shared_ptr<arrow::DataType> type;
+        const bool is_unsigned = (fields[i].flags & UNSIGNED_FLAG) != 0;
         switch (fields[i].type) {
             case MYSQL_TYPE_TINY:
+                if (!is_unsigned && fields[i].length == 1)
+                    type = arrow::boolean();
+                else
+                    type = is_unsigned ? arrow::uint8() : arrow::int8();
+                break;
             case MYSQL_TYPE_SHORT:
+                type = is_unsigned ? arrow::uint16() : arrow::int16();
+                break;
             case MYSQL_TYPE_LONG:
-            case MYSQL_TYPE_INT24:   type = arrow::int32();   break;
-            case MYSQL_TYPE_LONGLONG: type = arrow::int64();  break;
-            case MYSQL_TYPE_FLOAT:   type = arrow::float32(); break;
+            case MYSQL_TYPE_INT24:
+                type = is_unsigned ? arrow::uint32() : arrow::int32();
+                break;
+            case MYSQL_TYPE_LONGLONG:
+                type = is_unsigned ? arrow::uint64() : arrow::int64();
+                break;
+            case MYSQL_TYPE_FLOAT:
+                type = arrow::float32();
+                break;
             case MYSQL_TYPE_DOUBLE:
             case MYSQL_TYPE_DECIMAL:
-            case MYSQL_TYPE_NEWDECIMAL: type = arrow::float64(); break;
+            case MYSQL_TYPE_NEWDECIMAL:
+                type = arrow::float64();
+                break;
             case MYSQL_TYPE_BLOB:
             case MYSQL_TYPE_TINY_BLOB:
             case MYSQL_TYPE_MEDIUM_BLOB:
-            case MYSQL_TYPE_LONG_BLOB: type = arrow::binary(); break;
-            default:                 type = arrow::utf8();    break;
+            case MYSQL_TYPE_LONG_BLOB:
+                type = arrow::binary();
+                break;
+            default:
+                type = arrow::utf8();
+                break;
         }
-        arrow_fields.push_back(arrow::field(fields[i].name, type));
+        arrow_fields.push_back(arrow::field(fields[i].name, type, (fields[i].flags & NOT_NULL_FLAG) == 0));
     }
     return arrow::schema(arrow_fields);
 }
 
-
-IBatchReader* MysqlSession::CreateBatchReader(IResultSet* result,
-                                               std::shared_ptr<arrow::Schema> schema) {
+IBatchReader* MysqlSession::CreateBatchReader(IResultSet* result, std::shared_ptr<arrow::Schema> schema) {
     return new RelationBatchReader(shared_from_this(), result, schema);
 }
 
 // ==================== MysqlBatchWriter 实现 ====================
 
 class MysqlBatchWriter : public RelationBatchWriterBase {
-public:
+ public:
     MysqlBatchWriter(std::shared_ptr<IDbSession> session, const char* table)
         : RelationBatchWriterBase(std::move(session), table) {}
 
-protected:
+ protected:
     // MySQL 用反引号包裹标识符，内部反引号用 `` 转义
     std::string QuoteIdentifier(const std::string& name) override {
         std::string result = "`";
         for (char c : name) {
-            if (c == '`') result += "``";
-            else result += c;
+            if (c == '`')
+                result += "``";
+            else
+                result += c;
         }
         result += "`";
         return result;
@@ -317,11 +457,16 @@ protected:
             if (i > 0) ddl += ", ";
             ddl += QuoteIdentifier(schema->field(i)->name()) + " ";
             auto type_id = schema->field(i)->type()->id();
-            if (type_id == arrow::Type::INT32)  ddl += "INT";
-            else if (type_id == arrow::Type::INT64)  ddl += "BIGINT";
-            else if (type_id == arrow::Type::FLOAT)  ddl += "FLOAT";
-            else if (type_id == arrow::Type::DOUBLE) ddl += "DOUBLE";
-            else ddl += "TEXT";
+            if (type_id == arrow::Type::INT32)
+                ddl += "INT";
+            else if (type_id == arrow::Type::INT64)
+                ddl += "BIGINT";
+            else if (type_id == arrow::Type::FLOAT)
+                ddl += "FLOAT";
+            else if (type_id == arrow::Type::DOUBLE)
+                ddl += "DOUBLE";
+            else
+                ddl += "TEXT";
         }
         ddl += ")";
         if (session_->ExecuteSql(ddl.c_str()) < 0) {
@@ -340,9 +485,12 @@ protected:
         auto quote_string = [](const std::string& s) -> std::string {
             std::string r = "'";
             for (char c : s) {
-                if (c == '\'') r += "\\'";
-                else if (c == '\\') r += "\\\\";
-                else r += c;
+                if (c == '\'')
+                    r += "\\'";
+                else if (c == '\\')
+                    r += "\\\\";
+                else
+                    r += c;
             }
             r += "'";
             return r;
@@ -371,7 +519,6 @@ protected:
 IBatchWriter* MysqlSession::CreateBatchWriter(const char* table) {
     return new MysqlBatchWriter(shared_from_this(), table);
 }
-
 
 // ==================== MysqlDriver 实现 ====================
 
@@ -413,8 +560,8 @@ int MysqlDriver::Connect(const std::unordered_map<std::string, std::string>& par
         }
         mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout_);
         mysql_options(conn, MYSQL_SET_CHARSET_NAME, charset_.c_str());
-        if (!mysql_real_connect(conn, host_.c_str(), user_.c_str(), password_.c_str(),
-                                database_.c_str(), port_, nullptr, 0)) {
+        if (!mysql_real_connect(conn, host_.c_str(), user_.c_str(), password_.c_str(), database_.c_str(), port_,
+                                nullptr, 0)) {
             *error = mysql_error(conn);
             mysql_close(conn);
             return nullptr;
@@ -422,7 +569,9 @@ int MysqlDriver::Connect(const std::unordered_map<std::string, std::string>& par
         return conn;
     };
 
-    auto closer = [](MYSQL* conn) { if (conn) mysql_close(conn); };
+    auto closer = [](MYSQL* conn) {
+        if (conn) mysql_close(conn);
+    };
     auto pinger = [](MYSQL* conn) -> bool { return conn && mysql_ping(conn) == 0; };
 
     pool_ = std::make_unique<ConnectionPool<MYSQL*>>(config, factory, closer, pinger);
@@ -447,9 +596,7 @@ int MysqlDriver::Disconnect() {
     return 0;
 }
 
-bool MysqlDriver::Ping() {
-    return pool_ != nullptr;
-}
+bool MysqlDriver::Ping() { return pool_ != nullptr; }
 
 std::shared_ptr<IDbSession> MysqlDriver::CreateSession() {
     if (!pool_) {

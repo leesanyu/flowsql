@@ -174,6 +174,24 @@ int NpmResultRouter::Finish() {
     finished_ = true;
     return 0;
 }
+int NpmResultRouter::FailRun(int32_t code, std::string stage, std::string message) noexcept {
+    if (finished_ || failure_finalized_.exchange(true)) return 0;
+    auto* managed = dynamic_cast<INpmManagedResultConsumerV1*>(consumer_.get());
+    if (!managed) return 0;
+    NpmResultFailureV1 failure;
+    failure.code = code;
+    failure.stage = stage.c_str();
+    failure.message = message.c_str();
+    try {
+        return invoke_([&] { return managed->FailRun(failure); });
+    } catch (...) {
+        return EFAULT;
+    }
+}
+std::string NpmResultRouter::ResultJson() const {
+    const auto* managed = dynamic_cast<const INpmManagedResultConsumerV1*>(consumer_.get());
+    return managed ? managed->ResultJson() : std::string();
+}
 void NpmResultRouter::Cancel() noexcept {
     if (!finished_ && !cancelled_.exchange(true) && consumer_) consumer_->Cancel();
 }

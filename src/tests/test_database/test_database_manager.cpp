@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 // test_database_manager.cpp — DatabasePlugin 持久化与动态管理单元测试
 //
@@ -13,8 +8,9 @@
 //
 // 环境要求：可写的临时目录（/tmp）
 //
-#include <cassert>
 #include <atomic>
+#include <cassert>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -906,6 +902,42 @@ void test_add_channel_then_get() {
 }
 
 // ============================================================
+// T0: owning database channel leases block destructive lifecycle changes
+// ============================================================
+void test_channel_lease_protects_lifecycle() {
+    printf("[TEST] T0: channel lease protects Release/Update/Remove...\n");
+
+    std::string yml = TmpYaml("t0_lease");
+    RemoveFile(yml);
+
+    DatabasePlugin plugin;
+    plugin.Option(("config_file=" + yml).c_str());
+    plugin.Load(nullptr);
+    plugin.Start();
+    assert(plugin.AddChannel("type=sqlite;name=leasedb;path=:memory:") == 0);
+
+    auto lease = plugin.AcquireChannel("sqlite", "leasedb");
+    assert(lease != nullptr);
+    assert(lease->IsConnected());
+
+    assert(plugin.Release("sqlite", "leasedb") == EBUSY);
+    assert(plugin.UpdateChannel("type=sqlite;name=leasedb;path=/tmp/flowsql_t0_lease.db") == EBUSY);
+    assert(plugin.RemoveChannel("sqlite", "leasedb") == EBUSY);
+
+    lease.reset();
+    assert(plugin.UpdateChannel("type=sqlite;name=leasedb;path=/tmp/flowsql_t0_lease.db") == 0);
+    auto second_lease = plugin.AcquireChannel("sqlite", "leasedb");
+    assert(second_lease != nullptr);
+    assert(plugin.RemoveChannel("sqlite", "leasedb") == EBUSY);
+    second_lease.reset();
+    assert(plugin.RemoveChannel("sqlite", "leasedb") == 0);
+
+    RemoveFile(yml);
+    g_passed++;
+    printf("[PASS] T0: channel lease protects lifecycle\n");
+}
+
+// ============================================================
 // main
 // ============================================================
 int main() {
@@ -931,7 +963,8 @@ int main() {
     test_restart_recovery_field_values();
     test_update_then_restart_recovery();
     test_add_channel_then_get();
+    test_channel_lease_protects_lifecycle();
 
-    printf("\n=== Results: %d/20 passed ===\n", g_passed);
-    return (g_passed == 20) ? 0 : 1;
+    printf("\n=== Results: %d/21 passed ===\n", g_passed);
+    return (g_passed == 21) ? 0 : 1;
 }

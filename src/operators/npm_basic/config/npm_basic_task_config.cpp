@@ -416,6 +416,7 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
 
             next.parameters_json.assign(parameters_text);
             next.analysis = std::move(parsed_parameters.core.analysis);
+            next.result_retention_days = parsed_parameters.core.result_retention_days;
             if (parsed_parameters.core.labeling_reference.has_value()) {
                 next.labeling_reference = std::move(*parsed_parameters.core.labeling_reference);
             }

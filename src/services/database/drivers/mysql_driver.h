@@ -12,13 +12,13 @@
 #include <mysql/mysql.h>
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
-#include <memory>
 
+#include "../capability_interfaces.h"
 #include "../connection_pool.h"
 #include "../db_session.h"
-#include "../capability_interfaces.h"
 #include "../relation_db_session.h"
 
 namespace flowsql {
@@ -37,8 +37,7 @@ class MysqlSession;
 
 // MysqlDriver — MySQL 数据库驱动
 // 基于 libmysqlclient，支持预编译语句和事务
-class __attribute__((visibility("default"))) MysqlDriver : public IDbDriver,
-                                                            public IDbSessionFactoryProvider {
+class __attribute__((visibility("default"))) MysqlDriver : public IDbDriver, public IDbSessionFactoryProvider {
  public:
     MysqlDriver() = default;
     ~MysqlDriver() override;
@@ -73,7 +72,7 @@ class __attribute__((visibility("default"))) MysqlDriver : public IDbDriver,
 
 // MySQL 结果集实现
 class MysqlResultSet : public IResultSet {
-public:
+ public:
     MysqlResultSet(MYSQL_RES* result, std::function<void(MYSQL_RES*)> free_func);
     ~MysqlResultSet() override;
 
@@ -89,12 +88,12 @@ public:
     int GetString(int index, const char** value, size_t* len) override;
     bool IsNull(int index) override;
 
-protected:
+ protected:
     // 仅供同驱动内部（InferSchema）访问底层 MYSQL_RES，不对外暴露
     MYSQL_RES* GetResult() const { return result_; }
     friend class MysqlSession;
 
-private:
+ private:
     MYSQL_RES* result_;
     std::function<void(MYSQL_RES*)> free_func_;
     MYSQL_ROW current_row_;
@@ -104,15 +103,18 @@ private:
 
 // MySQL Session 实现
 class MysqlSession : public RelationDbSessionBase<MysqlTraits> {
-public:
+ public:
     MysqlSession(MysqlDriver* driver, MYSQL* conn);
     ~MysqlSession() override;
 
     // 覆盖基类模板方法，使用简单 API（非 prepared statement）
     int ExecuteQuery(const char* sql, IResultSet** result) override;
     int ExecuteSql(const char* sql) override;
+    int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
+    int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
+                             size_t execution_count) override;
 
-protected:
+ protected:
     // 钩子方法实现
     MYSQL_STMT* PrepareStatement(MYSQL* conn, const char* sql, std::string* error) override;
     int ExecuteStatement(MYSQL_STMT* stmt, std::string* error) override;
@@ -125,10 +127,8 @@ protected:
     void ReturnConnection(MYSQL* conn) override;
 
     // 工厂方法
-    IResultSet* CreateResultSet(MYSQL_RES* result,
-                                std::function<void(MYSQL_RES*)> free_func) override;
-    IBatchReader* CreateBatchReader(IResultSet* result,
-                                    std::shared_ptr<arrow::Schema> schema) override;
+    IResultSet* CreateResultSet(MYSQL_RES* result, std::function<void(MYSQL_RES*)> free_func) override;
+    IBatchReader* CreateBatchReader(IResultSet* result, std::shared_ptr<arrow::Schema> schema) override;
     IBatchWriter* CreateBatchWriter(const char* table) override;
     std::shared_ptr<arrow::Schema> InferSchema(IResultSet* result, std::string* error) override;
 };

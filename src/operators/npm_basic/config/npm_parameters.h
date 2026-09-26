@@ -28,6 +28,7 @@ struct NpmCoreParametersV1 {
     NpmAnalysisConfig analysis;
     std::optional<std::string> labeling_reference;
     std::optional<uint32_t> labeling_memory_mib;
+    std::optional<uint32_t> result_retention_days;
 };
 
 struct NpmBasicModuleParametersV1 {};

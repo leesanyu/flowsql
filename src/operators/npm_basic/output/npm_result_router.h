@@ -20,6 +20,8 @@ class NpmResultRouter final {
     int Emit(std::string_view module, std::string_view entity, const arrow::RecordBatch& rows);
     int Drain(std::shared_ptr<arrow::RecordBatch>* output);
     int Finish();
+    int FailRun(int32_t code, std::string stage, std::string message) noexcept;
+    std::string ResultJson() const;
     int Reject(int code, std::string message) { return Fail(code, std::move(message)); }
     void Cancel() noexcept;
     void Discard() noexcept;
@@ -42,6 +44,7 @@ class NpmResultRouter final {
     std::string error_;
     std::atomic<bool> cancelled_{false};
     std::atomic<bool> finished_{false};
+    std::atomic<bool> failure_finalized_{false};
 };
 
 NpmResultContextV1 MakeNpmResultContext(std::string task_id);

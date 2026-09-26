@@ -34,8 +34,7 @@ struct PostgresTraits {
 
 class PostgresSession;
 
-class __attribute__((visibility("default"))) PostgresDriver : public IDbDriver,
-                                                               public IDbSessionFactoryProvider {
+class __attribute__((visibility("default"))) PostgresDriver : public IDbDriver, public IDbSessionFactoryProvider {
  public:
     PostgresDriver() = default;
     ~PostgresDriver() override;
@@ -82,6 +81,10 @@ class PostgresResultSet : public IResultSet {
     int GetString(int index, const char** value, size_t* len) override;
     bool IsNull(int index) override;
 
+ protected:
+    PGresult* GetResult() const { return result_; }
+    friend class PostgresSession;
+
  private:
     int DecodeBytea(int index, const char** value, size_t* len);
     static int HexValue(char c);
@@ -101,6 +104,9 @@ class PostgresSession : public RelationDbSessionBase<PostgresTraits> {
 
     int ExecuteQuery(const char* sql, IResultSet** result) override;
     int ExecuteSql(const char* sql) override;
+    int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
+    int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
+                             size_t execution_count) override;
 
  protected:
     const char* PrepareStatement(PGconn* conn, const char* sql, std::string* error) override;
@@ -113,10 +119,8 @@ class PostgresSession : public RelationDbSessionBase<PostgresTraits> {
     bool PingImpl(PGconn* conn) override;
     void ReturnConnection(PGconn* conn) override;
 
-    IResultSet* CreateResultSet(PGresult* result,
-                                std::function<void(PGresult*)> free_func) override;
-    IBatchReader* CreateBatchReader(IResultSet* result,
-                                    std::shared_ptr<arrow::Schema> schema) override;
+    IResultSet* CreateResultSet(PGresult* result, std::function<void(PGresult*)> free_func) override;
+    IBatchReader* CreateBatchReader(IResultSet* result, std::shared_ptr<arrow::Schema> schema) override;
     IBatchWriter* CreateBatchWriter(const char* table) override;
     std::shared_ptr<arrow::Schema> InferSchema(IResultSet* result, std::string* error) override;
 };

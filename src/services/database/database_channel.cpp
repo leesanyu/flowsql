@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "database_channel.h"
 
@@ -158,6 +153,39 @@ int DatabaseChannel::ExecuteSql(const char* sql) {
     auto session = session_factory_();
     if (!session) { last_error_ = "failed to create session"; return -1; }
     int ret = session->ExecuteSql(sql);
+    if (ret < 0) last_error_ = session->GetLastError();
+    return ret;
+}
+
+int DatabaseChannel::ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) {
+    last_error_.clear();
+    if (!opened_ || !session_factory_) {
+        last_error_ = "channel not opened or session factory not set";
+        return -1;
+    }
+    auto session = session_factory_();
+    if (!session) {
+        last_error_ = "failed to create session";
+        return -1;
+    }
+    const int ret = session->ExecutePrepared(sql, parameters, parameter_count);
+    if (ret < 0) last_error_ = session->GetLastError();
+    return ret;
+}
+
+int DatabaseChannel::ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+                                          size_t parameters_per_execution, size_t execution_count) {
+    last_error_.clear();
+    if (!opened_ || !session_factory_) {
+        last_error_ = "channel not opened or session factory not set";
+        return -1;
+    }
+    auto session = session_factory_();
+    if (!session) {
+        last_error_ = "failed to create session";
+        return -1;
+    }
+    const int ret = session->ExecutePreparedBatch(sql, parameters, parameters_per_execution, execution_count);
     if (ret < 0) last_error_ = session->GetLastError();
     return ret;
 }

@@ -229,7 +229,7 @@ std::shared_ptr<arrow::Schema> NpmBasicResultSchema(bool labeling_enabled) {
         auto fields = schema->fields();
         fields.insert(fields.begin() + 17, arrow::field("primary_label_id", arrow::uint32(), false));
         auto metadata = arrow::key_value_metadata(
-            {"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit"}, {"npm_basic_result", "1", "ns"});
+            {"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit"}, {"npm_basic_result", "2", "ns"});
         return arrow::schema(std::move(fields), std::move(metadata));
     }();
     return labeling_enabled ? labeled_schema : schema;
@@ -577,7 +577,7 @@ std::shared_ptr<arrow::Schema> NpmSessionResultSchema(bool labeling_enabled) {
         auto metadata = arrow::key_value_metadata(
             {"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit", "flowsql.revision_semantics",
              "flowsql.measurement_scope"},
-            {"npm_session_result", "1", "ns", "cumulative", "single_capture_observed_packets"});
+            {"npm_session_result", "2", "ns", "cumulative", "single_capture_observed_packets"});
         return arrow::schema(std::move(fields), std::move(metadata));
     }();
     return labeling_enabled ? labeled_schema : schema;

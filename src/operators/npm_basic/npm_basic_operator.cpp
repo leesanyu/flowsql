@@ -3,11 +3,14 @@
 
 #include "npm_basic_operator.h"
 
+#include "npm_basic_result_consumer.h"
+
 #include <operators/npm_basic/config/npm_basic_task_config.h>
 #include <operators/npm_basic/core/npm_basic_task_runtime.h>
 
 #include <arrow/api.h>
 #include <framework/interfaces/iconfig_channel_registry.h>
+#include <framework/interfaces/idatabase_channel.h>
 #include <framework/interfaces/iflow_labeling.h>
 #include <plugins/npi/iprotocol.h>
 
@@ -36,6 +39,7 @@ constexpr const char* kLabelingConfigResolveError = "npm.basic labeling config r
 constexpr const char* kLabelingConfigMissingError = "npm.basic labeling exact config reference is required";
 constexpr const char* kLabelingBudgetError = "npm.basic labeling matcher budget reservation failed";
 constexpr const char* kLabelingMatcherError = "npm.basic labeling matcher creation failed";
+constexpr const char* kManagedConsumerUnavailableError = "npm.basic managed result consumer is unavailable";
 constexpr uint32_t kLabelingMaxLabels = 10'000;
 constexpr uint32_t kLabelingMaxLogicalRules = 50'000;
 constexpr uint32_t kLabelingMaxCompiledRules = 100'000;
@@ -112,6 +116,35 @@ NpmBasicTask::NpmBasicTask(const BlockTransformTaskConfigV1& config, IQuerier* q
 
 NpmBasicTask::~NpmBasicTask() = default;
 
+int NpmBasicTask::BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) {
+    if (state_.load(std::memory_order_acquire) != State::kCreated || managed_channel_ != nullptr) return EALREADY;
+    if (binding.struct_size != sizeof(BlockTransformManagedSinkBindingV1) ||
+        binding.contract_version != kBlockTransformManagedSinkContractVersionV1 || !binding.sink_channel ||
+        !binding.target || !binding.category || !binding.name || !binding.relation) {
+        return EINVAL;
+    }
+    auto* db = dynamic_cast<IDatabaseChannel*>(binding.sink_channel);
+    if (!db || !db->IsOpened() || !db->IsConnected() || binding.relation[0] != '\0') return EINVAL;
+    const std::string category(binding.category);
+    const std::string name(binding.name);
+    const std::string target(binding.target);
+    if (name.empty() ||
+        (category != "sqlite" && category != "mysql" && category != "postgres" && category != "clickhouse") ||
+        target != category + "." + name || category != db->Category() || name != db->Name()) {
+        return EINVAL;
+    }
+    managed_target_ = target;
+    managed_category_ = category;
+    managed_name_ = name;
+    managed_channel_ = binding.sink_channel;
+    return 0;
+}
+
+std::string NpmBasicTask::ManagedSinkResultJson() const {
+    const auto runtime = Runtime();
+    return runtime ? runtime->ManagedResultJson() : std::string();
+}
+
 int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema>* output_schema) {
     State expected = State::kCreated;
     if (!state_.compare_exchange_strong(expected, State::kOpening, std::memory_order_acq_rel)) {
@@ -165,8 +198,24 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
         expected = Fail(expected, error);
         return expected == State::kCancelled ? ECANCELED : EINVAL;
     }
+    if (parsed.result_retention_days.has_value() && managed_channel_ == nullptr) {
+        expected = State::kOpening;
+        expected = Fail(expected, "npm.basic result retention requires a managed database sink");
+        return expected == State::kCancelled ? ECANCELED : EINVAL;
+    }
     std::shared_ptr<arrow::Schema> next_schema;
     std::unique_ptr<NpmBasicTaskRuntime> next_runtime;
+    std::unique_ptr<INpmResultConsumerFactoryV1> managed_consumer_factory;
+    if (managed_channel_ != nullptr) {
+        auto* database = dynamic_cast<IDatabaseChannel*>(managed_channel_);
+        if (!database) {
+            expected = State::kOpening;
+            expected = Fail(expected, kManagedConsumerUnavailableError);
+            return expected == State::kCancelled ? ECANCELED : ENOTSUP;
+        }
+        managed_consumer_factory = MakeNpmDatabaseResultConsumerFactory(database, parsed.domains.input_namespace,
+                                                                        parsed.result_retention_days);
+    }
     std::shared_ptr<NpmTaskBudget> labeling_budget;
     IFlowLabelMatcherV1* matcher = nullptr;
     if (parsed.features.labeling_enabled) {
@@ -235,12 +284,13 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
         }
     }
 
-    const auto runtime_status =
-        NpmBasicTaskRuntime::Create(parsed, querier_, input_schema, &next_schema, &next_runtime,
-                                    std::move(labeling_budget), matcher, ProductionNpmModuleCatalogV1(), {}, task_id_);
+    const auto runtime_status = NpmBasicTaskRuntime::Create(
+        parsed, querier_, input_schema, &next_schema, &next_runtime, std::move(labeling_budget), matcher,
+        ProductionNpmModuleCatalogV1(), {}, task_id_, managed_consumer_factory.get());
     if (runtime_status.error != NpmBasicTaskRuntimeError::kNone) {
         expected = State::kOpening;
-        expected = Fail(expected, kRuntimeOpenError);
+        if (!runtime_status.consumer_error.empty()) config_error_ = runtime_status.consumer_error;
+        expected = Fail(expected, config_error_.empty() ? kRuntimeOpenError : config_error_.c_str());
         return expected == State::kCancelled ? ECANCELED : EINVAL;
     }
 

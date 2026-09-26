@@ -10,6 +10,7 @@ target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/n
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_module_catalog.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_basic_operator.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_basic_result_consumer.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/config/npm_basic_task_config.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/config/npm_parameters.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_basic_task_runtime.cpp)
@@ -66,6 +67,34 @@ set_target_properties(test_npm_protocol_contract PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
 add_test(NAME test_npm_protocol_contract COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_protocol_contract)
+
+add_executable(test_npm_result_sqlite test_npm_result_sqlite.cpp)
+target_include_directories(test_npm_result_sqlite PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_result_sqlite PRIVATE -UNDEBUG)
+target_sources(test_npm_result_sqlite PRIVATE
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+)
+add_thirddepen(test_npm_result_sqlite arrow rapidjson sqlite)
+target_link_libraries(test_npm_result_sqlite flowsql_common flowsql_npm_basic flowsql_database)
+set_target_properties(test_npm_result_sqlite PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
+)
+add_test(NAME test_npm_result_sqlite COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_result_sqlite)
+
+add_executable(test_npm_result_backends test_npm_result_backends.cpp)
+target_include_directories(test_npm_result_backends PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_result_backends PRIVATE -UNDEBUG)
+target_sources(test_npm_result_backends PRIVATE
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+)
+add_thirddepen(test_npm_result_backends arrow rapidjson)
+target_link_libraries(test_npm_result_backends flowsql_common flowsql_npm_basic flowsql_database Threads::Threads)
+set_target_properties(test_npm_result_backends PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
+)
+add_test(NAME test_npm_result_backends COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_result_backends)
 
 # Machine-dependent throughput is an observation, not a CTest pass/fail threshold.
 add_executable(benchmark_npm_basic

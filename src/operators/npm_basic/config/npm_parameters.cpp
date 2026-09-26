@@ -218,6 +218,7 @@ NpmParameterStatusV1 ParseCore(const rapidjson::Value* value, const NpmParameter
     output->analysis = DefaultNpmAnalysisConfig(NpmRunMode::kOffline);
     output->labeling_reference.reset();
     output->labeling_memory_mib.reset();
+    output->result_retention_days.reset();
     if (consumers.labeling_enabled && consumers.labeling_available) {
         output->labeling_memory_mib = kNpmDefaultLabelingMemoryMiB;
     }
@@ -240,6 +241,7 @@ NpmParameterStatusV1 ParseCore(const rapidjson::Value* value, const NpmParameter
         "max_pending_output_bytes",
         "labeling",
         "labeling_memory_mib",
+        "result",
     };
     auto status = RejectUnknownFields(*value, "/core", kFields, std::size(kFields));
     if (status.error != NpmParameterErrorV1::kNone) return status;
@@ -319,6 +321,21 @@ NpmParameterStatusV1 ParseCore(const rapidjson::Value* value, const NpmParameter
             return Fail(NpmParameterErrorV1::kInvalidRange, "/core/labeling_memory_mib");
         }
         output->labeling_memory_mib = labeling_memory_mib;
+    }
+    if (const rapidjson::Value* result = Find(*value, "result")) {
+        if (!result->IsObject()) return Fail(NpmParameterErrorV1::kInvalidType, "/core/result");
+        static constexpr const char* kResultFields[] = {"retention_days"};
+        status = RejectUnknownFields(*result, "/core/result", kResultFields, std::size(kResultFields));
+        if (status.error != NpmParameterErrorV1::kNone) return status;
+        if (Find(*result, "retention_days")) {
+            uint32_t days = 0;
+            status = ReadUint32(*result, "retention_days", "/core/result", &days);
+            if (status.error != NpmParameterErrorV1::kNone) return status;
+            if (days < 1 || days > 3650) {
+                return Fail(NpmParameterErrorV1::kInvalidRange, "/core/result/retention_days");
+            }
+            output->result_retention_days = days;
+        }
     }
     return {};
 }

@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_DATABASE_DATABASE_PLUGIN_H_
 #define _FLOWSQL_SERVICES_DATABASE_DATABASE_PLUGIN_H_
@@ -26,8 +21,10 @@ namespace database {
 
 // DatabasePlugin — 数据库通道工厂插件
 // 同时实现 IPlugin（生命周期）、IDatabaseFactory（通道工厂）、IRouterHandle（路由声明）
-class __attribute__((visibility("default"))) DatabasePlugin
-    : public IPlugin, public IDatabaseFactory, public IRouterHandle {
+class __attribute__((visibility("default"))) DatabasePlugin : public IPlugin,
+                                                              public IDatabaseFactory,
+                                                              public IDatabaseChannelLeaseProviderV1,
+                                                              public IRouterHandle {
  public:
     DatabasePlugin() = default;
     ~DatabasePlugin() override = default;
@@ -41,6 +38,7 @@ class __attribute__((visibility("default"))) DatabasePlugin
 
     // IDatabaseFactory
     IDatabaseChannel* Get(const char* type, const char* name) override;
+    std::shared_ptr<IDatabaseChannel> AcquireChannel(const char* type, const char* name) override;
     void List(std::function<void(const char* type, const char* name,
                                   const char* config_json)> callback) override;
     int Release(const char* type, const char* name) override;
@@ -67,6 +65,8 @@ class __attribute__((visibility("default"))) DatabasePlugin
 
     // 内部辅助
     std::unique_ptr<IDbDriver> CreateDriver(const std::string& type);
+    std::shared_ptr<DatabaseChannel> GetSharedLocked(const char* type, const char* name);
+    bool HasExternalLeaseLocked(const std::string& key) const;
     int ParseSingleConfig(const char* arg);
     int LoadFromYaml();
     int SaveToYaml();

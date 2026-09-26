@@ -1,6 +1,7 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <unistd.h>
 #include <cassert>
 #include <cerrno>
 #include <chrono>
@@ -15,7 +16,6 @@
 #include <set>
 #include <string>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 #include <arrow/api.h>
@@ -340,6 +340,99 @@ class SchedulerE2eTransformProvider final : public IBlockTransformOperatorV1 {
  private:
     std::string name_;
     SchedulerE2eTransformKind kind_;
+};
+
+struct SchedulerE2eManagedTrace {
+    int bind_calls = 0;
+    int open_calls = 0;
+    int process_calls = 0;
+    int flush_calls = 0;
+    int release_calls = 0;
+    int64_t input_rows = 0;
+    bool channel_alive_at_release = false;
+    int database_release_rc = 0;
+    std::string target;
+};
+
+class SchedulerE2eManagedTask final : public IBlockTransformTaskV1, public IBlockTransformManagedSinkTaskV1 {
+ public:
+    explicit SchedulerE2eManagedTask(SchedulerE2eManagedTrace* trace) : trace_(trace) {}
+
+    int BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) override {
+        if (trace_->bind_calls++ != 0 || trace_->open_calls != 0 ||
+            binding.contract_version != kBlockTransformManagedSinkContractVersionV1 ||
+            binding.struct_size != sizeof(binding) || !binding.sink_channel || !binding.target || !binding.relation ||
+            binding.relation[0] != '\0') {
+            return EINVAL;
+        }
+        channel_ = dynamic_cast<IDatabaseChannel*>(binding.sink_channel);
+        if (!channel_ || !channel_->IsOpened() || !channel_->IsConnected()) return EINVAL;
+        trace_->target = binding.target;
+        return 0;
+    }
+
+    std::string ManagedSinkResultJson() const override {
+        return R"({"run_id":"probe-run","run_status":"completed","metadata_status":"known","rows_written":7,"entities":[]})";
+    }
+
+    int Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema>* output_schema) override {
+        if (trace_->bind_calls != 1 || !channel_ || !channel_->IsConnected() || !input_schema || !output_schema) {
+            return EINVAL;
+        }
+        ++trace_->open_calls;
+        *output_schema = std::move(input_schema);
+        return 0;
+    }
+
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
+                     std::vector<BlockTransformOutputV1>* outputs) override {
+        if (!input || !outputs || !outputs->empty() || !channel_->IsConnected()) return -EINVAL;
+        ++trace_->process_calls;
+        trace_->input_rows += input->num_rows();
+        outputs->push_back({input, ts_ms});
+        return static_cast<int>(BlockTransformStatusV1::kContinue);
+    }
+
+    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+        if (!outputs || !outputs->empty() || !channel_->IsConnected()) return EINVAL;
+        ++trace_->flush_calls;
+        return 0;
+    }
+
+    void Cancel() override {}
+    std::string LastError() const override { return "managed probe failed"; }
+    bool ChannelAlive() const { return channel_ && channel_->IsConnected(); }
+
+ private:
+    SchedulerE2eManagedTrace* trace_;
+    IDatabaseChannel* channel_ = nullptr;
+};
+
+class SchedulerE2eManagedProvider final : public IBlockTransformOperatorV1 {
+ public:
+    explicit SchedulerE2eManagedProvider(SchedulerE2eManagedTrace* trace) : trace_(trace) {}
+    void SetDatabaseFactory(IDatabaseFactory* factory) { factory_ = factory; }
+    std::string Category() const override { return "test"; }
+    std::string Name() const override { return "managed_probe"; }
+    std::string Description() const override { return "managed sink lifecycle probe"; }
+    int CreateTask(const BlockTransformTaskConfigV1&, IBlockTransformTaskV1** task) override {
+        if (!task) return EINVAL;
+        *task = new SchedulerE2eManagedTask(trace_);
+        return 0;
+    }
+    void ReleaseTask(IBlockTransformTaskV1* task) override {
+        auto* probe = dynamic_cast<SchedulerE2eManagedTask*>(task);
+        ASSERT_TRUE(probe != nullptr);
+        trace_->channel_alive_at_release = probe->ChannelAlive();
+        ASSERT_TRUE(factory_ != nullptr);
+        trace_->database_release_rc = factory_->Release("sqlite", "local");
+        ++trace_->release_calls;
+        delete probe;
+    }
+
+ private:
+    SchedulerE2eManagedTrace* trace_;
+    IDatabaseFactory* factory_ = nullptr;
 };
 
 static void AppendPcapLe16(std::vector<uint8_t>* bytes, uint16_t value) {
@@ -1242,35 +1335,39 @@ int main() {
         out << "      option: \"ring_size=256;batch_rows=128;overflow=drop;ring_mode=spsc;finite=false\"\n";
         out << "    - type: tcp_session_mock\n";
         out << "      name: tcp_src\n";
-        out << "      option: \"mode=keyed;total_records=64;batch_rows=8;partition_count=4;emit_interval_ms=0;ring_size=256;overflow=drop\"\n";
+        out << "      option: "
+               "\"mode=keyed;total_records=64;batch_rows=8;partition_count=4;emit_interval_ms=0;ring_size=256;overflow="
+               "drop\"\n";
         out << "    - type: tcp_session_mock\n";
         out << "      name: tcp_src_stateless\n";
-        out << "      option: \"mode=stateless;total_records=64;batch_rows=8;emit_interval_ms=0;ring_size=256;overflow=drop\"\n";
+        out << "      option: "
+               "\"mode=stateless;total_records=64;batch_rows=8;emit_interval_ms=0;ring_size=256;overflow=drop\"\n";
         out.flush();
     }
 
     PluginLoader* loader = PluginLoader::Single();
     SchedulerE2eProtocol pcap_protocol;
     SchedulerE2eBlockOperator block_operator;
-    SchedulerE2eTransformProvider packet_transform(
-        "packet_to_protocol", SchedulerE2eTransformKind::kPacketToProtocol);
-    SchedulerE2eTransformProvider passthrough_transform(
-        "protocol_passthrough", SchedulerE2eTransformKind::kPassthrough);
-    SchedulerE2eTransformProvider parameter_capture_transform(
-        "parameter_capture", SchedulerE2eTransformKind::kAnyPassthrough);
+    SchedulerE2eTransformProvider packet_transform("packet_to_protocol", SchedulerE2eTransformKind::kPacketToProtocol);
+    SchedulerE2eTransformProvider passthrough_transform("protocol_passthrough",
+                                                        SchedulerE2eTransformKind::kPassthrough);
+    SchedulerE2eTransformProvider parameter_capture_transform("parameter_capture",
+                                                              SchedulerE2eTransformKind::kAnyPassthrough);
+    SchedulerE2eManagedTrace managed_trace;
+    SchedulerE2eManagedProvider managed_transform(&managed_trace);
     loader->Regist(IID_PROTOCOL, &pcap_protocol);
     loader->Regist(IID_BLOCK_STREAM_OPERATOR, &block_operator);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &packet_transform);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &passthrough_transform);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &parameter_capture_transform);
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &managed_transform);
     const char* libs[] = {
         "libflowsql_database.so", "libflowsql_builtin.so",   "libflowsql_catalog.so",  "libflowsql_npi.so",
         "libflowsql_pcapfile.so", "libflowsql_scheduler.so", "libflowsql_binaddon.so", "libflowsql_stream.so",
     };
     std::string db_opt = "type=sqlite;name=local;path=" + db_path.string();
     std::string catalog_opt = "data_dir=" + data_dir.string() + ";operator_db_path=" + operator_db_path.string();
-    std::string npi_opt =
-        std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\",\"concurrency\":2}";
+    std::string npi_opt = std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\",\"concurrency\":2}";
     std::string binaddon_opt =
         "operator_db_path=" + operator_db_path.string() + ";upload_dir=" + binaddon_upload_dir.string();
     std::string stream_opt = "config_file=" + stream_cfg.string() + ";db_path=" + stream_meta_db.string();
@@ -1311,6 +1408,7 @@ int main() {
     ASSERT_TRUE(binaddon_host != nullptr);
     ASSERT_TRUE(binaddon_plugin != nullptr);
     ASSERT_TRUE(filter_domain_resolver != nullptr);
+    managed_transform.SetDatabaseFactory(factory);
     auto* db = dynamic_cast<IDatabaseChannel*>(factory->Get("sqlite", "local"));
     ASSERT_TRUE(db != nullptr);
 
@@ -1339,6 +1437,37 @@ int main() {
     ASSERT_TRUE(stream_list != nullptr);
     ASSERT_TRUE(stream_add != nullptr);
     ASSERT_TRUE(stream_remove != nullptr);
+    {
+        std::string managed_rsp;
+        ASSERT_EQ(
+            stream_add("/channels/stream/add", MakePcapSourceAddRequest("managed_probe_source", pcap_ok), managed_rsp),
+            error::OK);
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq("SELECT * FROM pcapfile.managed_probe_source WHERE timestamp_ns >= 2000000000 "
+                               "USING test.managed_probe INTO sqlite.local"),
+                       managed_rsp),
+                  error::OK);
+        rapidjson::Document response;
+        response.Parse(managed_rsp.c_str());
+        ASSERT_TRUE(!response.HasParseError() && response.IsObject());
+        ASSERT_EQ(std::string(response["status"].GetString()), "completed");
+        ASSERT_EQ(response["rows"].GetInt64(), 7);
+        ASSERT_TRUE(response.HasMember("result") && response["result"].IsObject());
+        ASSERT_EQ(std::string(response["result"]["run_id"].GetString()), "probe-run");
+        ASSERT_TRUE(!response.HasMember("data"));
+        ASSERT_EQ(managed_trace.bind_calls, 1);
+        ASSERT_EQ(managed_trace.open_calls, 1);
+        ASSERT_TRUE(managed_trace.process_calls > 0);
+        ASSERT_EQ(managed_trace.input_rows, 1);
+        ASSERT_EQ(managed_trace.flush_calls, 1);
+        ASSERT_EQ(managed_trace.release_calls, 1);
+        ASSERT_TRUE(managed_trace.channel_alive_at_release);
+        ASSERT_EQ(managed_trace.database_release_rc, EBUSY);
+        ASSERT_EQ(managed_trace.target, "sqlite.local");
+        ASSERT_EQ(
+            stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest("managed_probe_source"), managed_rsp),
+            error::OK);
+    }
     ASSERT_TRUE(stream_reset != nullptr);
     ASSERT_TRUE(stream_definitions_query != nullptr);
     ASSERT_TRUE(sql_classify != nullptr);
@@ -1445,30 +1574,27 @@ int main() {
                 "description":"captures Scheduler WITH parameter JSON",
                 "position":"DATA"
             }]
-        })JSON", rsp), error::OK);
-        ASSERT_EQ(activate("/operators/activate",
-                           R"JSON({"name":"custom.parameter_capture_stream"})JSON",
-                           rsp),
+        })JSON",
+                               rsp),
                   error::OK);
-        ASSERT_EQ(stream_add(
-                      "/channels/stream/add",
-                      R"JSON({"type":"ring","name":"npm_parameter_in",)JSON"
-                      R"JSON("option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false"})JSON",
-                      rsp),
+        ASSERT_EQ(activate("/operators/activate", R"JSON({"name":"custom.parameter_capture_stream"})JSON", rsp),
                   error::OK);
-        ASSERT_EQ(stream_add(
-                      "/channels/stream/add",
-                      R"JSON({"type":"ring","name":"npm_parameter_out",)JSON"
-                      R"JSON("option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false"})JSON",
-                      rsp),
+        ASSERT_EQ(stream_add("/channels/stream/add",
+                             R"JSON({"type":"ring","name":"npm_parameter_in",)JSON"
+                             R"JSON("option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false"})JSON",
+                             rsp),
+                  error::OK);
+        ASSERT_EQ(stream_add("/channels/stream/add",
+                             R"JSON({"type":"ring","name":"npm_parameter_out",)JSON"
+                             R"JSON("option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false"})JSON",
+                             rsp),
                   error::OK);
         const std::string stream_sql =
             "SELECT * FROM ring.npm_parameter_in "
             "USING custom.parameter_capture_stream WITH "
             R"SQL(parameters="{""schema_version"":1,""future"":{""text"":""stream;value""}}",)SQL"
             "mode=legacy INTO stream.npm_parameter_out;";
-        ASSERT_EQ(stream_exec("/scheduler/stream/execute", MakeStreamReq(stream_sql), rsp),
-                  error::OK);
+        ASSERT_EQ(stream_exec("/scheduler/stream/execute", MakeStreamReq(stream_sql), rsp), error::OK);
         const std::string task_id = ParseTaskId(rsp);
         ASSERT_TRUE(!task_id.empty());
         ASSERT_EQ(stream_stop("/scheduler/stream/stop", MakeTaskReq(task_id), rsp), error::OK);
@@ -1864,6 +1990,84 @@ int main() {
         ASSERT_EQ(std::string(npm_detail["name"].GetString()), "npm.basic");
         ASSERT_EQ(std::string(npm_detail["contract"].GetString()), "block_transform_v1");
 
+        const std::string managed_sql = "SELECT * FROM " + input_namespace + " USING npm.basic WITH input_namespace='" +
+                                        input_namespace +
+                                        "',source_domains='0:77',features='basic,session',observing='session' INTO "
+                                        "sqlite.local";
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(managed_sql), rsp), error::OK);
+        rapidjson::Document managed_completed;
+        managed_completed.Parse(rsp.c_str());
+        ASSERT_TRUE(!managed_completed.HasParseError() && managed_completed.IsObject());
+        ASSERT_EQ(std::string(managed_completed["status"].GetString()), "completed");
+        ASSERT_TRUE(managed_completed.HasMember("result") && managed_completed["result"].IsObject());
+        const auto& managed_result = managed_completed["result"];
+        ASSERT_TRUE(managed_result.HasMember("run_id") && managed_result["run_id"].IsString());
+        ASSERT_EQ(std::string(managed_result["run_status"].GetString()), "completed");
+        ASSERT_EQ(std::string(managed_result["metadata_status"].GetString()), "known");
+        ASSERT_TRUE(managed_result["rows_written"].IsInt64() && managed_result["rows_written"].GetInt64() >= 2);
+        ASSERT_TRUE(managed_result["entities"].IsArray() && managed_result["entities"].Size() == 2);
+        const std::string managed_run_id = managed_result["run_id"].GetString();
+        std::string basic_latest_relation;
+        for (const auto& entity : managed_result["entities"].GetArray()) {
+            ASSERT_TRUE(entity.IsObject());
+            ASSERT_TRUE(entity.HasMember("entity_id") && entity["entity_id"].IsString());
+            ASSERT_TRUE(entity.HasMember("schema_version") && entity["schema_version"].IsUint());
+            ASSERT_TRUE(entity.HasMember("history_relation") && entity["history_relation"].IsString());
+            ASSERT_TRUE(entity.HasMember("latest_relation") && entity["latest_relation"].IsString());
+            ASSERT_TRUE(entity.HasMember("final_relation") && entity["final_relation"].IsString());
+            ASSERT_TRUE(entity.HasMember("rows_written") && entity["rows_written"].IsInt64());
+            const std::string entity_id = entity["entity_id"].GetString();
+            const std::string version = std::to_string(entity["schema_version"].GetUint());
+            ASSERT_EQ(std::string(entity["history_relation"].GetString()), "npm_" + entity_id + "_history_v" + version);
+            ASSERT_EQ(std::string(entity["latest_relation"].GetString()), "npm_" + entity_id + "_latest_v" + version);
+            ASSERT_EQ(std::string(entity["final_relation"].GetString()), "npm_" + entity_id + "_final_v" + version);
+            if (entity_id == "basic") basic_latest_relation = entity["latest_relation"].GetString();
+        }
+        ASSERT_TRUE(!managed_run_id.empty() && !basic_latest_relation.empty());
+        const std::string managed_query_dataframe = "scheduler_npm_managed_latest";
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq("SELECT * FROM sqlite.local." + basic_latest_relation + " WHERE __npm_run_id='" +
+                               managed_run_id + "' INTO dataframe." + managed_query_dataframe),
+                       rsp),
+                  error::OK);
+        auto managed_query_output =
+            std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(managed_query_dataframe.c_str()));
+        ASSERT_TRUE(managed_query_output != nullptr);
+        DataFrame managed_query_result;
+        ASSERT_EQ(managed_query_output->Read(&managed_query_result), 0);
+        const auto managed_query_batch = managed_query_result.ToArrow();
+        ASSERT_TRUE(managed_query_batch != nullptr && managed_query_batch->num_rows() == 1);
+        const auto queried_run_ids =
+            std::dynamic_pointer_cast<arrow::StringArray>(managed_query_batch->GetColumnByName("__npm_run_id"));
+        const auto queried_run_status =
+            std::dynamic_pointer_cast<arrow::StringArray>(managed_query_batch->GetColumnByName("__npm_run_status"));
+        ASSERT_TRUE(queried_run_ids && queried_run_status);
+        ASSERT_EQ(queried_run_ids->GetString(0), managed_run_id);
+        ASSERT_EQ(queried_run_status->GetString(0), "completed");
+        ASSERT_EQ(registry->Unregister(managed_query_dataframe.c_str()), 0);
+        ASSERT_TRUE(!registry->Get("local"));
+        ASSERT_EQ(
+            exec("/scheduler/batch/execute",
+                 MakeReq("SELECT session_id FROM " + input_namespace + " USING npm.basic INTO sqlite.local"), rsp),
+            error::BAD_REQUEST);
+        ASSERT_TRUE(rsp.find("SELECT *") != std::string::npos);
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq("SELECT * FROM " + input_namespace +
+                               " USING npm.basic WHERE session_id > 0 INTO sqlite.local"),
+                       rsp),
+                  error::BAD_REQUEST);
+        ASSERT_TRUE(rsp.find("operator-stage WHERE") != std::string::npos);
+        ASSERT_EQ(
+            exec("/scheduler/batch/execute",
+                 MakeReq("SELECT * FROM " + input_namespace + " USING npm.basic INTO sqlite.local.user_table"), rsp),
+            error::BAD_REQUEST);
+        ASSERT_TRUE(rsp.find("two-part") != std::string::npos);
+        ASSERT_EQ(
+            exec("/scheduler/batch/execute",
+                 MakeReq("SELECT * FROM " + input_namespace + " USING test.packet_to_protocol INTO sqlite.local"), rsp),
+            error::BAD_REQUEST);
+        ASSERT_TRUE(rsp.find("does not support managed sink") != std::string::npos);
+
         CppOperatorCapabilityLeaseV1 live_lease;
         ASSERT_EQ(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR_V1, &live_lease), 0);
         auto* live_provider = static_cast<IBlockTransformOperatorV1*>(live_lease.capability);
@@ -1878,8 +2082,43 @@ int main() {
         IBlockTransformTaskV1* live_task = nullptr;
         ASSERT_EQ(live_provider->CreateTask(live_config, &live_task), 0);
         ASSERT_TRUE(live_task != nullptr);
+        auto* managed_live_task = dynamic_cast<IBlockTransformManagedSinkTaskV1*>(live_task);
+        ASSERT_TRUE(managed_live_task != nullptr);
+        BlockTransformManagedSinkBindingV1 binding;
+        binding.sink_channel = db;
+        binding.target = "sqlite.local";
+        binding.category = "sqlite";
+        binding.name = "local";
+        binding.relation = "";
+        auto invalid_binding = binding;
+        invalid_binding.contract_version += 1;
+        ASSERT_EQ(managed_live_task->BindManagedSink(invalid_binding), EINVAL);
+        invalid_binding = binding;
+        invalid_binding.relation = "user_table";
+        ASSERT_EQ(managed_live_task->BindManagedSink(invalid_binding), EINVAL);
+        invalid_binding = binding;
+        invalid_binding.target = "sqlite.other";
+        ASSERT_EQ(managed_live_task->BindManagedSink(invalid_binding), EINVAL);
+        ASSERT_EQ(managed_live_task->BindManagedSink(binding), 0);
+        ASSERT_EQ(managed_live_task->BindManagedSink(binding), EALREADY);
+        std::shared_ptr<arrow::Schema> managed_output_schema;
+        ASSERT_EQ(live_task->Open(packet::PacketSchema(), &managed_output_schema), 0);
+        ASSERT_TRUE(managed_output_schema != nullptr);
+        rapidjson::Document writing_result;
+        writing_result.Parse(managed_live_task->ManagedSinkResultJson().c_str());
+        ASSERT_TRUE(!writing_result.HasParseError() && writing_result.IsObject());
+        ASSERT_EQ(std::string(writing_result["run_status"].GetString()), "writing");
+        ASSERT_EQ(std::string(writing_result["metadata_status"].GetString()), "known");
+        ASSERT_EQ(writing_result["rows_written"].GetInt64(), 0);
+        ASSERT_TRUE(writing_result["entities"].IsArray() && writing_result["entities"].Size() == 1);
         ASSERT_EQ(deactivate("/operators/deactivate", plugin_request, rsp), error::CONFLICT);
         ASSERT_TRUE(rsp.find("plugin is in use") != std::string::npos);
+        live_task->Cancel();
+        rapidjson::Document cancelled_result;
+        cancelled_result.Parse(managed_live_task->ManagedSinkResultJson().c_str());
+        ASSERT_TRUE(!cancelled_result.HasParseError() && cancelled_result.IsObject());
+        ASSERT_EQ(std::string(cancelled_result["run_status"].GetString()), "incomplete");
+        ASSERT_EQ(std::string(cancelled_result["metadata_status"].GetString()), "known");
         live_provider->ReleaseTask(live_task);
         live_lease = {};
 
@@ -2229,7 +2468,8 @@ int main() {
         ASSERT_EQ(std::string(batch_doc["task_kind"].GetString()), "batch");
 
         ASSERT_EQ(sql_classify("/scheduler/sql/classify",
-                               MakeReq("SELECT * FROM tcp_session_mock.tcp_src USING builtin.tcp_service_merge_stream INTO dataframe.classify_stream"),
+                               MakeReq("SELECT * FROM tcp_session_mock.tcp_src USING builtin.tcp_service_merge_stream "
+                                       "INTO dataframe.classify_stream"),
                                rsp),
                   error::OK);
         rapidjson::Document stream_doc;
@@ -3072,14 +3312,17 @@ int main() {
                     "position":"DATA"
                 }
             ]
-        })", rsp), error::OK);
+        })",
+                               rsp),
+                  error::OK);
         ASSERT_EQ(activate("/operators/activate", R"({"name":"custom.parallel_passthrough_stream"})", rsp), error::OK);
 
-        ASSERT_EQ(stream_exec("/scheduler/stream/execute",
-                              MakeStreamReq("SELECT * FROM tcp_session_mock.tcp_src_stateless "
+        ASSERT_EQ(
+            stream_exec("/scheduler/stream/execute",
+                        MakeStreamReq("SELECT * FROM tcp_session_mock.tcp_src_stateless "
                                       "USING custom.parallel_passthrough_stream INTO dataframe.stream_single_writer"),
-                              rsp),
-                  error::BAD_REQUEST);
+                        rsp),
+            error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("STREAM_SINK_CAPABILITY_MISMATCH") != std::string::npos);
     }
     std::puts("[PASS] T42");
@@ -3102,7 +3345,9 @@ int main() {
                     "position":"DATA"
                 }
             ]
-        })", rsp), error::OK);
+        })",
+                               rsp),
+                  error::OK);
         ASSERT_EQ(activate("/operators/activate", R"({"name":"custom.db_direct_writer_stream"})", rsp), error::OK);
 
         auto wait_stream_terminal = [&](const std::string& task_id, std::string* final_status) -> bool {
@@ -3211,7 +3456,9 @@ int main() {
                 "partition_ring_mode":"spsc",
                 "partition_ring_size":256
             }
-        })", rsp), error::OK);
+        })",
+                             rsp),
+                  error::OK);
 
         ASSERT_EQ(stream_add("/channels/stream/add", R"({
             "type":"stream_hub",
@@ -3223,7 +3470,9 @@ int main() {
                 "partition_ring_mode":"spsc",
                 "partition_ring_size":256
             }
-        })", rsp), error::OK);
+        })",
+                             rsp),
+                  error::OK);
 
         ASSERT_EQ(stream_add("/channels/stream/add", R"({
             "type":"ring",
@@ -3235,7 +3484,9 @@ int main() {
                 "overflow":"drop",
                 "finite":false
             }
-        })", rsp), error::OK);
+        })",
+                             rsp),
+                  error::OK);
 
         ASSERT_EQ(stream_add("/channels/stream/add", R"({
             "type":"ring",
@@ -3247,39 +3498,41 @@ int main() {
                 "overflow":"drop",
                 "finite":false
             }
-        })", rsp), error::OK);
+        })",
+                             rsp),
+                  error::OK);
 
         ASSERT_EQ(stream_exec("/scheduler/stream/execute",
                               MakeStreamReq("SELECT * FROM tcp_session_mock.tcp_src "
-                                      "USING builtin.passthrough_stream INTO stream.source_only_ring"),
+                                            "USING builtin.passthrough_stream INTO stream.source_only_ring"),
                               rsp),
                   error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("STREAM_CHANNEL_ROLE_MISMATCH") != std::string::npos);
 
         ASSERT_EQ(stream_exec("/scheduler/stream/execute",
                               MakeStreamReq("SELECT * FROM stream.sink_only_ring "
-                                      "USING builtin.passthrough_stream INTO dataframe.sink_role_bad"),
+                                            "USING builtin.passthrough_stream INTO dataframe.sink_role_bad"),
                               rsp),
                   error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("STREAM_CHANNEL_ROLE_MISMATCH") != std::string::npos);
 
         ASSERT_EQ(stream_exec("/scheduler/stream/execute",
                               MakeStreamReq("SELECT * FROM tcp_session_mock.tcp_src "
-                                      "USING builtin.passthrough_stream INTO stream.npm_hub[0]"),
+                                            "USING builtin.passthrough_stream INTO stream.npm_hub[0]"),
                               rsp),
                   error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("STREAM_HUB_SELECTOR_NOT_ALLOWED_INTO") != std::string::npos);
 
         ASSERT_EQ(stream_exec("/scheduler/stream/execute",
                               MakeStreamReq("SELECT * FROM stream.npm_merge[*] "
-                                      "USING builtin.passthrough_stream INTO dataframe.npm_merge_bad"),
+                                            "USING builtin.passthrough_stream INTO dataframe.npm_merge_bad"),
                               rsp),
                   error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("STREAM_HUB_SELECTOR_NOT_ALLOWED_MERGE") != std::string::npos);
 
         ASSERT_EQ(stream_exec("/scheduler/stream/execute",
                               MakeStreamReq("SELECT * FROM tcp_session_mock.tcp_src "
-                                      "USING builtin.passthrough_stream INTO stream.npm_hub"),
+                                            "USING builtin.passthrough_stream INTO stream.npm_hub"),
                               rsp),
                   error::OK);
         std::string producer_task_id = ParseTaskId(rsp);
@@ -3808,7 +4061,9 @@ int main() {
                     "position":"DATA"
                 }
             ]
-        })", rsp), error::OK);
+        })",
+                               rsp),
+                  error::OK);
         ASSERT_EQ(activate("/operators/activate", R"({"name":"custom.slow_passthrough_stream_late"})", rsp), error::OK);
         ASSERT_EQ(activate("/operators/activate", R"({"name":"builtin.passthrough_stream"})", rsp), error::OK);
 
@@ -5055,7 +5310,9 @@ int main() {
                     "position":"DATA"
                 }
             ]
-        })", rsp), error::OK);
+        })",
+                               rsp),
+                  error::OK);
         ASSERT_EQ(activate("/operators/activate", R"({"name":"custom.slow_passthrough_stream"})", rsp), error::OK);
         ASSERT_EQ(activate("/operators/activate", R"({"name":"builtin.passthrough_stream"})", rsp), error::OK);
 

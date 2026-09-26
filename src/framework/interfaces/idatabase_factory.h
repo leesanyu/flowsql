@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_FRAMEWORK_INTERFACES_IDATABASE_FACTORY_H_
 #define _FLOWSQL_FRAMEWORK_INTERFACES_IDATABASE_FACTORY_H_
@@ -13,6 +8,7 @@
 #include <common/typedef.h>
 
 #include <functional>
+#include <memory>
 
 #include "idatabase_channel.h"
 
@@ -21,6 +17,16 @@ namespace flowsql {
 // {0xa9b8c7d6, 0xe5f4, 0x3210, {0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10}}
 const Guid IID_DATABASE_FACTORY = {0xa9b8c7d6, 0xe5f4, 0x3210,
                                    {0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10}};
+
+// {0x7b56c4e1, 0x5db8, 0x4af6, {0xb7, 0x1d, 0x7e, 0xe1, 0x9d, 0x32, 0x7a, 0x44}}
+const Guid IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1 = {
+    0x7b56c4e1, 0x5db8, 0x4af6, {0xb7, 0x1d, 0x7e, 0xe1, 0x9d, 0x32, 0x7a, 0x44}};
+
+/** Optional owning lease capability while the provider plugin is running. */
+interface IDatabaseChannelLeaseProviderV1 {
+    virtual ~IDatabaseChannelLeaseProviderV1() = default;
+    virtual std::shared_ptr<IDatabaseChannel> AcquireChannel(const char* type, const char* name) = 0;
+};
 
 /**
  * @brief 数据库通道工厂接口，负责数据库通道生命周期管理。

@@ -19,6 +19,8 @@ class Schema;
 
 namespace flowsql {
 
+class IChannel;
+
 // {0x5de2079a-b463-48cf-917d-6ae82534cbf0}
 const Guid IID_BLOCK_TRANSFORM_OPERATOR_V1 = {
     0x5de2079a, 0xb463, 0x48cf, {0x91, 0x7d, 0x6a, 0xe8, 0x25, 0x34, 0xcb, 0xf0}};
@@ -128,6 +130,26 @@ interface IBlockTransformTimeDrivenTaskV1 {
 /** V2 task combines the unchanged V1 data lifecycle with the optional time capability. */
 interface IBlockTransformTaskV2 : public IBlockTransformTaskV1,
                                   public IBlockTransformTimeDrivenTaskV1 {};
+
+constexpr uint32_t kBlockTransformManagedSinkContractVersionV1 = 1;
+
+/** Borrowed binding; the Scheduler keeps sink_channel leased through ReleaseTask. */
+struct BlockTransformManagedSinkBindingV1 {
+    uint32_t struct_size = sizeof(BlockTransformManagedSinkBindingV1);
+    uint32_t contract_version = kBlockTransformManagedSinkContractVersionV1;
+    IChannel* sink_channel = nullptr;
+    const char* target = nullptr;
+    const char* category = nullptr;
+    const char* name = nullptr;
+    const char* relation = nullptr;
+};
+
+/** Optional task capability. Bind once before Open; task copies all required text. */
+interface IBlockTransformManagedSinkTaskV1 {
+    virtual ~IBlockTransformManagedSinkTaskV1() = default;
+    virtual int BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) = 0;
+    virtual std::string ManagedSinkResultJson() const = 0;
+};
 
 /** Stateless provider discovered through IID_BLOCK_TRANSFORM_OPERATOR_V1. */
 interface IBlockTransformOperatorV1 {

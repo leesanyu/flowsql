@@ -6965,6 +6965,23 @@ void TestNpmParametersV1UsesCoreNamespaceExclusively() {
 
 void TestNpmParametersV1ValidatesCoreAndConditionalLabeling() {
     npm::NpmParameterConsumersV1 consumers;
+    npm::NpmTaskParametersV1 retention;
+    for (uint32_t days : {1U, 3650U}) {
+        const std::string json =
+            R"JSON({"schema_version":1,"core":{"result":{"retention_days":)JSON" + std::to_string(days) + "}}}";
+        assert(npm::ParseNpmParametersV1(json.c_str(), consumers, &retention).error == npm::NpmParameterErrorV1::kNone);
+        assert(retention.core.result_retention_days == days);
+    }
+    for (const char* invalid : {"0", "3651", "null", "\"1\""}) {
+        const std::string json =
+            std::string(R"JSON({"schema_version":1,"core":{"result":{"retention_days":)JSON") + invalid + "}}}";
+        ParseParametersFailure(json.c_str(), consumers,
+                               invalid[0] == 'n' || invalid[0] == '"' ? npm::NpmParameterErrorV1::kInvalidType
+                                                                      : npm::NpmParameterErrorV1::kInvalidRange,
+                               "/core/result/retention_days");
+    }
+    ParseParametersFailure(R"JSON({"schema_version":1,"core":{"result":{"unknown":1}}})JSON", consumers,
+                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/core/result/unknown");
     ParseParametersFailure(R"JSON({"schema_version":1,"core":{"unknown":1}})JSON", consumers,
                            npm::NpmParameterErrorV1::kUnknownConsumedField, "/core/unknown");
     ParseParametersFailure(R"JSON({"schema_version":1,"core":{"":1}})JSON", consumers,
@@ -11052,6 +11069,17 @@ void TestNpmBasicTaskMethodPreconditions() {
     std::vector<flowsql::BlockTransformOutputV1> outputs;
     flowsql::IBlockTransformTaskV1* task = nullptr;
 
+    const std::string retained_with =
+        R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77","parameters":"{\"schema_version\":1,\"core\":{\"result\":{\"retention_days\":1}}}"})JSON";
+    const auto retained_config = MakeOperatorTaskConfig(task_id, retained_with, filter_plan);
+    assert(provider.CreateTask(retained_config, &task) == 0);
+    std::shared_ptr<arrow::Schema> retained_schema = sentinel_schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &retained_schema) == EINVAL);
+    assert(retained_schema == sentinel_schema);
+    assert(task->LastError().find("retention requires a managed database sink") != std::string::npos);
+    provider.ReleaseTask(task);
+    task = nullptr;
+
     assert(provider.CreateTask(config, &task) == 0);
     assert(task->ProcessBlock(input, 1, &outputs) < 0 && outputs.empty());
     const auto before_open_error = task->LastError();
@@ -11877,6 +11905,18 @@ void TestProtocolLifecycleRealtimeDeferralAndCallbackCancel() {
     assert(trace.abort_calls == 1);
 }
 
+class UnexpectedManagedFactory final : public npm::INpmResultConsumerFactoryV1 {
+ public:
+    int Create(const npm::NpmResultContextV1&, const std::vector<npm::NpmEntityDescriptorV1>&,
+               std::shared_ptr<npm::INpmTaskBudget>, std::unique_ptr<npm::INpmManagedResultConsumerV1>*) override {
+        ++create_calls;
+        return EFAULT;
+    }
+    std::string LastError() const override { return "managed factory must not run before module validation"; }
+
+    int create_calls = 0;
+};
+
 void TestProtocolLabelIsolationAndAtomicFactoryFailure() {
     ProtocolInputTrace selected, all, control;
     auto catalog = npm::ProductionNpmModuleCatalogV1();
@@ -11941,10 +11981,13 @@ void TestProtocolLabelIsolationAndAtomicFactoryFailure() {
         return status;
     };
     const int aborted = selected.aborted;
+    UnexpectedManagedFactory managed_factory;
     assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
-                                            new ProtocolLabelMatcher(&labels), catalog)
+                                            new ProtocolLabelMatcher(&labels), catalog, {}, "atomic-factory-task",
+                                            &managed_factory)
                .error == npm::NpmBasicTaskRuntimeError::kModuleCreateError);
-    assert(!runtime && schema == previous_schema && selected.aborted == aborted + 1);
+    assert(!runtime && schema == previous_schema && selected.aborted == aborted + 1 &&
+           managed_factory.create_calls == 0);
     assert(pool.acquire_calls == pool.release_calls);
 }
 
@@ -12066,11 +12109,25 @@ void TestUnifiedConsumerBasicSessionSnapshotsFinalsAndRunIdentity() {
     ContextPool pool(&protocol);
     SinglePoolQuerier querier(&pool);
     std::string previous_run;
-    for (bool session : {false, true}) {
+    struct Scenario {
+        bool basic_enabled;
+        bool session_enabled;
+        npm::NpmResultEntity observing;
+        std::vector<std::string> snapshot_entities;
+        std::vector<std::string> all_entities;
+    };
+    const std::vector<Scenario> scenarios = {
+        {true, false, npm::NpmResultEntity::kBasic, {"basic"}, {"basic", "basic"}},
+        {true, true, npm::NpmResultEntity::kBasic, {"basic", "session"}, {"basic", "session", "session", "basic"}},
+        {false, true, npm::NpmResultEntity::kSession, {"session"}, {"session", "session"}},
+        {true, true, npm::NpmResultEntity::kSession, {"basic", "session"}, {"basic", "session", "session", "basic"}},
+    };
+    for (const auto& scenario : scenarios) {
         ResultConsumerTrace trace;
         auto config = MakeRuntimeTaskConfig(npm::NpmRunMode::kRealtime);
-        config.features.session_enabled = true;
-        config.features.observing = session ? npm::NpmResultEntity::kSession : npm::NpmResultEntity::kBasic;
+        config.features.basic_enabled = scenario.basic_enabled;
+        config.features.session_enabled = scenario.session_enabled;
+        config.features.observing = scenario.observing;
         config.analysis.output_interval_ns = 100;
         auto runtime = CreateConsumingRuntime(config, &querier, &trace);
         assert(previous_run != runtime->ResultContext().run_id);
@@ -12093,16 +12150,21 @@ void TestUnifiedConsumerBasicSessionSnapshotsFinalsAndRunIdentity() {
         drive.observed_at_ns = 1100;
         assert(runtime->DriveRealtimeMaintenance(drive, &output).error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(output->num_rows() == 1);
-        assert(
-            output->schema()->Equals(*(session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema()), true));
-        assert((trace.entities == std::vector<std::string>{"basic", "session"}));
-        assert((trace.revisions == std::vector<uint64_t>{1, 1}));
-        assert(!trace.finals[0] && !trace.finals[1]);
+        const auto observed_schema = scenario.observing == npm::NpmResultEntity::kSession
+                                         ? npm::NpmSessionResultSchema()
+                                         : npm::NpmBasicResultSchema();
+        assert(output->schema()->Equals(*observed_schema, true));
+        assert(trace.entities == scenario.snapshot_entities);
+        assert(std::all_of(trace.revisions.begin(), trace.revisions.end(), [](uint64_t value) { return value == 1; }));
+        assert(std::none_of(trace.finals.begin(), trace.finals.end(), [](bool value) { return value; }));
+        const size_t snapshot_count = trace.entities.size();
         output.reset();
         assert(runtime->FlushOffline(1200, &output).error == npm::NpmEofFlushError::kNone);
-        assert((trace.entities == std::vector<std::string>{"basic", "session", "session", "basic"}));
-        assert((trace.revisions == std::vector<uint64_t>{1, 1, 2, 2}));
-        assert(trace.finals[2] && trace.finals[3]);
+        assert(trace.entities == scenario.all_entities);
+        assert(std::all_of(trace.revisions.begin() + snapshot_count, trace.revisions.end(),
+                           [](uint64_t value) { return value == 2; }));
+        assert(
+            std::all_of(trace.finals.begin() + snapshot_count, trace.finals.end(), [](bool value) { return value; }));
         assert(trace.finishes == 1 && trace.cancels == 0);
         assert(runtime->FlushOffline(1300, &output).error == npm::NpmEofFlushError::kAlreadyFlushed);
         runtime->Cancel();

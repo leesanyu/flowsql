@@ -17,6 +17,9 @@
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 
 #include <common/log.h>
 
@@ -47,9 +50,7 @@ PostgresResultSet::~PostgresResultSet() {
     }
 }
 
-int PostgresResultSet::FieldCount() {
-    return result_ ? PQnfields(result_) : 0;
-}
+int PostgresResultSet::FieldCount() { return result_ ? PQnfields(result_) : 0; }
 
 const char* PostgresResultSet::FieldName(int index) const {
     if (!result_) return nullptr;
@@ -238,6 +239,160 @@ int PostgresSession::ExecuteSql(const char* sql) {
     return affected_rows;
 }
 
+namespace {
+
+std::string PostgresParameterSql(std::string_view sql, size_t expected_parameters, bool* valid) {
+    std::string converted;
+    converted.reserve(sql.size() + expected_parameters * 2);
+    size_t parameter = 0;
+    bool single_quoted = false;
+    bool double_quoted = false;
+    for (size_t index = 0; index < sql.size(); ++index) {
+        const char character = sql[index];
+        if (character == '\'' && !double_quoted) {
+            if (single_quoted && index + 1 < sql.size() && sql[index + 1] == '\'') {
+                converted += "''";
+                ++index;
+                continue;
+            }
+            single_quoted = !single_quoted;
+        } else if (character == '"' && !single_quoted) {
+            if (double_quoted && index + 1 < sql.size() && sql[index + 1] == '"') {
+                converted += "\"\"";
+                ++index;
+                continue;
+            }
+            double_quoted = !double_quoted;
+        }
+        if (character == '?' && !single_quoted && !double_quoted) {
+            converted += '$' + std::to_string(++parameter);
+        } else {
+            converted += character;
+        }
+    }
+    *valid = !single_quoted && !double_quoted && parameter == expected_parameters;
+    return converted;
+}
+
+int ExecutePostgresParameters(PGconn* connection, const char* sql, const DatabaseParameterV1* parameters,
+                              size_t parameter_count, std::string* error) {
+    if (parameter_count > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        *error = "prepared command parameter count exceeds PostgreSQL limit";
+        return -1;
+    }
+    bool valid_sql = false;
+    const std::string converted = PostgresParameterSql(sql, parameter_count, &valid_sql);
+    if (!valid_sql) {
+        *error = "prepared command parameter count mismatch";
+        return -1;
+    }
+    std::vector<std::string> values(parameter_count);
+    std::vector<const char*> pointers(parameter_count);
+    std::vector<int> lengths(parameter_count);
+    std::vector<int> formats(parameter_count);
+    std::vector<Oid> types(parameter_count);
+    for (size_t index = 0; index < parameter_count; ++index) {
+        const auto& parameter = parameters[index];
+        switch (parameter.kind) {
+            case DatabaseParameterKindV1::kNull:
+                pointers[index] = nullptr;
+                break;
+            case DatabaseParameterKindV1::kInt64:
+                values[index] = std::to_string(parameter.int64_value);
+                break;
+            case DatabaseParameterKindV1::kUInt64:
+                types[index] = kPostgresOidNumeric;
+                values[index] = std::to_string(parameter.uint64_value);
+                break;
+            case DatabaseParameterKindV1::kDouble: {
+                types[index] = kPostgresOidFloat8;
+                std::ostringstream text;
+                text << std::setprecision(std::numeric_limits<double>::max_digits10) << parameter.double_value;
+                values[index] = text.str();
+                break;
+            }
+            case DatabaseParameterKindV1::kString:
+                types[index] = 25;
+                if (!parameter.data && parameter.size != 0) {
+                    *error = "invalid PostgreSQL string parameter";
+                    return -1;
+                }
+                values[index].assign(parameter.data ? static_cast<const char*>(parameter.data) : "", parameter.size);
+                if (values[index].find('\0') != std::string::npos) {
+                    *error = "PostgreSQL text parameter contains NUL";
+                    return -1;
+                }
+                break;
+            case DatabaseParameterKindV1::kBlob:
+                types[index] = kPostgresOidBytea;
+                if ((!parameter.data && parameter.size != 0) ||
+                    parameter.size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+                    *error = "invalid PostgreSQL blob parameter";
+                    return -1;
+                }
+                pointers[index] = parameter.data ? static_cast<const char*>(parameter.data) : "";
+                lengths[index] = static_cast<int>(parameter.size);
+                formats[index] = 1;
+                continue;
+        }
+        if (parameter.kind != DatabaseParameterKindV1::kNull) pointers[index] = values[index].c_str();
+    }
+    PGresult* result = PQexecParams(connection, converted.c_str(), static_cast<int>(parameter_count), types.data(),
+                                    pointers.data(), lengths.data(), formats.data(), 0);
+    if (!result || PQresultStatus(result) != PGRES_COMMAND_OK) {
+        *error = PQerrorMessage(connection);
+        if (result) PQclear(result);
+        return -1;
+    }
+    int changed = 0;
+    const char* tuples = PQcmdTuples(result);
+    if (tuples && tuples[0] != '\0') changed = std::atoi(tuples);
+    PQclear(result);
+    return changed;
+}
+
+}  // namespace
+
+int PostgresSession::ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) {
+    last_error_.clear();
+    if (!sql || (parameter_count != 0 && !parameters)) {
+        last_error_ = "invalid prepared command";
+        return -1;
+    }
+    return ExecutePostgresParameters(conn_, sql, parameters, parameter_count, &last_error_);
+}
+
+int PostgresSession::ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+                                          size_t parameters_per_execution, size_t execution_count) {
+    last_error_.clear();
+    if (!sql || (execution_count != 0 && (!parameters || parameters_per_execution == 0)) ||
+        (execution_count != 0 && parameters_per_execution > std::numeric_limits<size_t>::max() / execution_count)) {
+        last_error_ = "invalid prepared batch";
+        return -1;
+    }
+    if (execution_count == 0) return 0;
+    if (BeginTransaction() != 0) return -1;
+    int64_t changed = 0;
+    for (size_t execution = 0; execution < execution_count; ++execution) {
+        const int result = ExecutePostgresParameters(conn_, sql, parameters + execution * parameters_per_execution,
+                                                     parameters_per_execution, &last_error_);
+        if (result < 0) {
+            const std::string failure = last_error_;
+            RollbackTransaction();
+            last_error_ = failure;
+            return -1;
+        }
+        changed += result;
+    }
+    if (CommitTransaction() != 0) {
+        const std::string failure = last_error_;
+        RollbackTransaction();
+        last_error_ = failure;
+        return -1;
+    }
+    return changed > std::numeric_limits<int>::max() ? std::numeric_limits<int>::max() : static_cast<int>(changed);
+}
+
 const char* PostgresSession::PrepareStatement(PGconn* conn, const char* sql, std::string* error) {
     if (!conn || !sql) {
         if (error) *error = "null connection or sql";
@@ -272,9 +427,7 @@ void PostgresSession::FreeResult(PGresult* result) {
     if (result) PQclear(result);
 }
 
-void PostgresSession::FreeStatement(const char* stmt_name) {
-    (void)stmt_name;
-}
+void PostgresSession::FreeStatement(const char* stmt_name) { (void)stmt_name; }
 
 bool PostgresSession::PingImpl(PGconn* conn) {
     if (!conn) return false;
@@ -292,13 +445,11 @@ void PostgresSession::ReturnConnection(PGconn* conn) {
     }
 }
 
-IResultSet* PostgresSession::CreateResultSet(PGresult* result,
-                                             std::function<void(PGresult*)> free_func) {
+IResultSet* PostgresSession::CreateResultSet(PGresult* result, std::function<void(PGresult*)> free_func) {
     return new PostgresResultSet(result, std::move(free_func));
 }
 
-IBatchReader* PostgresSession::CreateBatchReader(IResultSet* result,
-                                                 std::shared_ptr<arrow::Schema> schema) {
+IBatchReader* PostgresSession::CreateBatchReader(IResultSet* result, std::shared_ptr<arrow::Schema> schema) {
     return new RelationBatchReader(shared_from_this(), result, std::move(schema));
 }
 
@@ -311,8 +462,10 @@ class PostgresBatchWriter : public RelationBatchWriterBase {
     std::string QuoteIdentifier(const std::string& name) override {
         std::string result = "\"";
         for (char c : name) {
-            if (c == '"') result += "\"\"";
-            else result += c;
+            if (c == '"')
+                result += "\"\"";
+            else
+                result += c;
         }
         result += "\"";
         return result;
@@ -324,13 +477,20 @@ class PostgresBatchWriter : public RelationBatchWriterBase {
             if (i > 0) ddl += ", ";
             ddl += QuoteIdentifier(schema->field(i)->name()) + " ";
             const auto type_id = schema->field(i)->type()->id();
-            if (type_id == arrow::Type::INT32) ddl += "INTEGER";
-            else if (type_id == arrow::Type::INT64) ddl += "BIGINT";
-            else if (type_id == arrow::Type::FLOAT) ddl += "REAL";
-            else if (type_id == arrow::Type::DOUBLE) ddl += "DOUBLE PRECISION";
-            else if (type_id == arrow::Type::BOOL) ddl += "BOOLEAN";
-            else if (type_id == arrow::Type::BINARY) ddl += "BYTEA";
-            else ddl += "TEXT";
+            if (type_id == arrow::Type::INT32)
+                ddl += "INTEGER";
+            else if (type_id == arrow::Type::INT64)
+                ddl += "BIGINT";
+            else if (type_id == arrow::Type::FLOAT)
+                ddl += "REAL";
+            else if (type_id == arrow::Type::DOUBLE)
+                ddl += "DOUBLE PRECISION";
+            else if (type_id == arrow::Type::BOOL)
+                ddl += "BOOLEAN";
+            else if (type_id == arrow::Type::BINARY)
+                ddl += "BYTEA";
+            else
+                ddl += "TEXT";
         }
         ddl += ")";
         if (session_->ExecuteSql(ddl.c_str()) < 0) {
@@ -346,8 +506,10 @@ class PostgresBatchWriter : public RelationBatchWriterBase {
         auto quote_string = [](const std::string& s) -> std::string {
             std::string out = "'";
             for (char c : s) {
-                if (c == '\'') out += "''";
-                else out += c;
+                if (c == '\'')
+                    out += "''";
+                else
+                    out += c;
             }
             out += "'";
             return out;
@@ -386,8 +548,7 @@ class PostgresBatchWriter : public RelationBatchWriterBase {
                         sql += "decode('";
                         for (size_t i = 0; i < blob.size(); ++i) {
                             char hex[3];
-                            std::snprintf(hex, sizeof(hex), "%02X",
-                                          static_cast<unsigned char>(blob.data()[i]));
+                            std::snprintf(hex, sizeof(hex), "%02X", static_cast<unsigned char>(blob.data()[i]));
                             sql += hex;
                         }
                         sql += "','hex')";
@@ -414,6 +575,8 @@ IBatchWriter* PostgresSession::CreateBatchWriter(const char* table) {
 
 std::shared_ptr<arrow::Schema> PostgresSession::InferSchema(IResultSet* result, std::string* error) {
     (void)error;
+    auto* postgres_result = static_cast<PostgresResultSet*>(result);
+    PGresult* native_result = postgres_result ? postgres_result->GetResult() : nullptr;
     const int n = result ? result->FieldCount() : 0;
     std::vector<std::shared_ptr<arrow::Field>> fields;
     fields.reserve(static_cast<size_t>(n));
@@ -421,15 +584,36 @@ std::shared_ptr<arrow::Schema> PostgresSession::InferSchema(IResultSet* result, 
         std::shared_ptr<arrow::DataType> type = arrow::utf8();
         const int oid = result->FieldType(i);
         switch (oid) {
-            case kPostgresOidBool: type = arrow::boolean(); break;
+            case kPostgresOidBool:
+                type = arrow::boolean();
+                break;
             case kPostgresOidInt2:
-            case kPostgresOidInt4: type = arrow::int32(); break;
-            case kPostgresOidInt8: type = arrow::int64(); break;
-            case kPostgresOidFloat4: type = arrow::float32(); break;
+            case kPostgresOidInt4:
+                type = arrow::int32();
+                break;
+            case kPostgresOidInt8:
+                type = arrow::int64();
+                break;
+            case kPostgresOidFloat4:
+                type = arrow::float32();
+                break;
             case kPostgresOidFloat8:
-            case kPostgresOidNumeric: type = arrow::float64(); break;
-            case kPostgresOidBytea: type = arrow::binary(); break;
-            default: type = arrow::utf8(); break;
+                type = arrow::float64();
+                break;
+            case kPostgresOidNumeric: {
+                const int modifier = native_result ? PQfmod(native_result, i) : -1;
+                const int encoded = modifier >= 4 ? modifier - 4 : -1;
+                const int precision = encoded >= 0 ? (encoded >> 16) & 0xffff : -1;
+                const int scale = encoded >= 0 ? encoded & 0xffff : -1;
+                type = precision == 20 && scale == 0 ? arrow::uint64() : arrow::float64();
+                break;
+            }
+            case kPostgresOidBytea:
+                type = arrow::binary();
+                break;
+            default:
+                type = arrow::utf8();
+                break;
         }
         const char* name = result->FieldName(i);
         fields.push_back(arrow::field(name ? name : "", std::move(type)));
@@ -440,12 +624,8 @@ std::shared_ptr<arrow::Schema> PostgresSession::InferSchema(IResultSet* result, 
 PostgresDriver::~PostgresDriver() = default;
 
 std::string PostgresDriver::BuildConninfo() const {
-    return "host=" + host_ +
-           " port=" + std::to_string(port_) +
-           " user=" + user_ +
-           " password=" + password_ +
-           " dbname=" + database_ +
-           " connect_timeout=" + std::to_string(timeout_);
+    return "host=" + host_ + " port=" + std::to_string(port_) + " user=" + user_ + " password=" + password_ +
+           " dbname=" + database_ + " connect_timeout=" + std::to_string(timeout_);
 }
 
 int PostgresDriver::Connect(const std::unordered_map<std::string, std::string>& params) {
@@ -506,8 +686,7 @@ int PostgresDriver::Connect(const std::unordered_map<std::string, std::string>& 
         return -1;
     }
     pool_->Return(probe);
-    LOG_INFO("PostgresDriver: initialized connection pool for %s:%d/%s",
-             host_.c_str(), port_, database_.c_str());
+    LOG_INFO("PostgresDriver: initialized connection pool for %s:%d/%s", host_.c_str(), port_, database_.c_str());
     return 0;
 }
 

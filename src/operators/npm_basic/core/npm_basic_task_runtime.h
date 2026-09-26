@@ -42,6 +42,7 @@ enum class NpmBasicTaskRuntimeError : uint8_t {
     kAllocationFailed,
     kModulePlanError,
     kModuleCreateError,
+    kConsumerCreateError,
 };
 
 struct NpmBasicTaskRuntimeStatus {
@@ -49,6 +50,7 @@ struct NpmBasicTaskRuntimeStatus {
     NpmTimeCapabilityError time_error = NpmTimeCapabilityError::kNone;
     NpmProtocolContextError protocol_error = NpmProtocolContextError::kNone;
     NpmProtocolContractStatusV1 module_status;
+    std::string consumer_error;
 };
 
 enum class NpmBasicOfflineBatchError : uint8_t {
@@ -120,13 +122,15 @@ class NpmBasicTaskRuntime final {
         std::shared_ptr<arrow::Schema>* output_schema, std::unique_ptr<NpmBasicTaskRuntime>* output,
         std::shared_ptr<NpmTaskBudget> budget = {}, IFlowLabelMatcherV1* matcher = nullptr,
         const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1(),
-        std::unique_ptr<INpmResultConsumerV1> consumer = {}, std::string task_id = {});
+        std::unique_ptr<INpmResultConsumerV1> consumer = {}, std::string task_id = {},
+        INpmResultConsumerFactoryV1* consumer_factory = nullptr);
     static NpmBasicTaskRuntimeStatus CreateWithTimeCapabilities(
         const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
         const NpmTimeCapabilities& time_capabilities, std::shared_ptr<arrow::Schema>* output_schema,
         std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget = {},
         IFlowLabelMatcherV1* matcher = nullptr, const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1(),
-        std::unique_ptr<INpmResultConsumerV1> consumer = {}, std::string task_id = {});
+        std::unique_ptr<INpmResultConsumerV1> consumer = {}, std::string task_id = {},
+        INpmResultConsumerFactoryV1* consumer_factory = nullptr);
 
     ~NpmBasicTaskRuntime();
     const NpmResultContextV1& ResultContext() const { return router_->Context(); }
@@ -144,6 +148,7 @@ class NpmBasicTaskRuntime final {
     NpmMaintenancePlanV1 MaintenancePlan() const;
     void Cancel() noexcept;
     std::string LastError() const;
+    std::string ManagedResultJson() const;
     /** Canonical lifecycle state; unlike component accessors, valid after resources are released. */
     NpmEofFlushState State() const noexcept;
     /** The following component accessors are valid only while State() is kOpen. */

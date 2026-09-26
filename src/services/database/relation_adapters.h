@@ -17,10 +17,13 @@
 #include <arrow/ipc/reader.h>
 #include <arrow/ipc/writer.h>
 
+#include <cctype>
+#include <charconv>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <vector>
-#include <cctype>
 
 namespace flowsql {
 namespace database {
@@ -29,17 +32,12 @@ namespace database {
 // 将 IResultSet（行式游标）适配为 IBatchReader（Arrow IPC 流）
 // MySQL 和 SQLite 共用此实现，无需各自重复
 class RelationBatchReader : public IBatchReader {
-public:
-    RelationBatchReader(std::shared_ptr<IDbSession> session,
-                        IResultSet* result,
-                        std::shared_ptr<arrow::Schema> schema,
+ public:
+    RelationBatchReader(std::shared_ptr<IDbSession> session, IResultSet* result, std::shared_ptr<arrow::Schema> schema,
                         int batch_size = 1024)
-        : session_(std::move(session)), result_(result),
-          schema_(std::move(schema)), batch_size_(batch_size) {}
+        : session_(std::move(session)), result_(result), schema_(std::move(schema)), batch_size_(batch_size) {}
 
-    ~RelationBatchReader() override {
-        delete result_;
-    }
+    ~RelationBatchReader() override { delete result_; }
 
     int GetSchema(const uint8_t** data, size_t* size) override {
         if (schema_buffer_) {
@@ -59,48 +57,109 @@ public:
     }
 
     int Next(const uint8_t** data, size_t* size) override {
-        if (done_) { *data = nullptr; *size = 0; return 1; }
+        if (done_) {
+            *data = nullptr;
+            *size = 0;
+            return 1;
+        }
 
         // 为每列创建 Builder
         std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;
         for (const auto& field : schema_->fields()) {
             std::unique_ptr<arrow::ArrayBuilder> b;
-            if (!arrow::MakeBuilder(arrow::default_memory_pool(), field->type(), &b).ok())
-                return -1;
+            if (!arrow::MakeBuilder(arrow::default_memory_pool(), field->type(), &b).ok()) return -1;
             builders.push_back(std::move(b));
         }
 
         int row_count = 0;
         for (int i = 0; i < batch_size_; ++i) {
-            if (!result_->Next()) { done_ = true; break; }
+            if (!result_->Next()) {
+                done_ = true;
+                break;
+            }
 
             for (int col = 0; col < schema_->num_fields(); ++col) {
                 auto* b = builders[col].get();
-                if (result_->IsNull(col)) { (void)b->AppendNull(); continue; }
+                if (result_->IsNull(col)) {
+                    (void)b->AppendNull();
+                    continue;
+                }
 
                 switch (b->type()->id()) {
+                    case arrow::Type::INT8: {
+                        int v;
+                        if (result_->GetInt(col, &v) == 0)
+                            (void)static_cast<arrow::Int8Builder*>(b)->Append(static_cast<int8_t>(v));
+                        else
+                            (void)b->AppendNull();
+                        break;
+                    }
+                    case arrow::Type::INT16: {
+                        int v;
+                        if (result_->GetInt(col, &v) == 0)
+                            (void)static_cast<arrow::Int16Builder*>(b)->Append(static_cast<int16_t>(v));
+                        else
+                            (void)b->AppendNull();
+                        break;
+                    }
                     case arrow::Type::INT32: {
-                        int v; if (result_->GetInt(col, &v) == 0)
+                        int v;
+                        if (result_->GetInt(col, &v) == 0)
                             (void)static_cast<arrow::Int32Builder*>(b)->Append(v);
-                        else (void)b->AppendNull();
+                        else
+                            (void)b->AppendNull();
+                        break;
+                    }
+                    case arrow::Type::UINT8:
+                    case arrow::Type::UINT16:
+                    case arrow::Type::UINT32:
+                    case arrow::Type::UINT64: {
+                        const char* text = nullptr;
+                        size_t length = 0;
+                        uint64_t value = 0;
+                        bool parsed = result_->GetString(col, &text, &length) == 0 && text != nullptr;
+                        if (parsed) {
+                            const auto converted = std::from_chars(text, text + length, value);
+                            parsed = converted.ec == std::errc() && converted.ptr == text + length;
+                        }
+                        if (!parsed || (b->type()->id() == arrow::Type::UINT8 && value > UINT8_MAX) ||
+                            (b->type()->id() == arrow::Type::UINT16 && value > UINT16_MAX) ||
+                            (b->type()->id() == arrow::Type::UINT32 && value > UINT32_MAX)) {
+                            (void)b->AppendNull();
+                            break;
+                        }
+                        if (b->type()->id() == arrow::Type::UINT8)
+                            (void)static_cast<arrow::UInt8Builder*>(b)->Append(static_cast<uint8_t>(value));
+                        else if (b->type()->id() == arrow::Type::UINT16)
+                            (void)static_cast<arrow::UInt16Builder*>(b)->Append(static_cast<uint16_t>(value));
+                        else if (b->type()->id() == arrow::Type::UINT32)
+                            (void)static_cast<arrow::UInt32Builder*>(b)->Append(static_cast<uint32_t>(value));
+                        else
+                            (void)static_cast<arrow::UInt64Builder*>(b)->Append(value);
                         break;
                     }
                     case arrow::Type::INT64: {
-                        int64_t v; if (result_->GetInt64(col, &v) == 0)
+                        int64_t v;
+                        if (result_->GetInt64(col, &v) == 0)
                             (void)static_cast<arrow::Int64Builder*>(b)->Append(v);
-                        else (void)b->AppendNull();
+                        else
+                            (void)b->AppendNull();
                         break;
                     }
                     case arrow::Type::FLOAT: {
-                        double v; if (result_->GetDouble(col, &v) == 0)
+                        double v;
+                        if (result_->GetDouble(col, &v) == 0)
                             (void)static_cast<arrow::FloatBuilder*>(b)->Append(static_cast<float>(v));
-                        else (void)b->AppendNull();
+                        else
+                            (void)b->AppendNull();
                         break;
                     }
                     case arrow::Type::DOUBLE: {
-                        double v; if (result_->GetDouble(col, &v) == 0)
+                        double v;
+                        if (result_->GetDouble(col, &v) == 0)
                             (void)static_cast<arrow::DoubleBuilder*>(b)->Append(v);
-                        else (void)b->AppendNull();
+                        else
+                            (void)b->AppendNull();
                         break;
                     }
                     case arrow::Type::BOOL: {
@@ -128,23 +187,29 @@ public:
                                 parsed = true;
                             }
                         }
-                        if (parsed) (void)static_cast<arrow::BooleanBuilder*>(b)->Append(val);
-                        else (void)b->AppendNull();
+                        if (parsed)
+                            (void)static_cast<arrow::BooleanBuilder*>(b)->Append(val);
+                        else
+                            (void)b->AppendNull();
                         break;
                     }
                     case arrow::Type::BINARY: {
-                        const char* s; size_t len;
+                        const char* s;
+                        size_t len;
                         if (result_->GetString(col, &s, &len) == 0)
-                            (void)static_cast<arrow::BinaryBuilder*>(b)->Append(
-                                reinterpret_cast<const uint8_t*>(s), len);
-                        else (void)b->AppendNull();
+                            (void)static_cast<arrow::BinaryBuilder*>(b)->Append(reinterpret_cast<const uint8_t*>(s),
+                                                                                len);
+                        else
+                            (void)b->AppendNull();
                         break;
                     }
                     default: {  // STRING / UTF8 及其他文本类型
-                        const char* s; size_t len;
+                        const char* s;
+                        size_t len;
                         if (result_->GetString(col, &s, &len) == 0)
                             (void)static_cast<arrow::StringBuilder*>(b)->Append(s, len);
-                        else (void)b->AppendNull();
+                        else
+                            (void)b->AppendNull();
                         break;
                     }
                 }
@@ -152,7 +217,11 @@ public:
             ++row_count;
         }
 
-        if (row_count == 0) { *data = nullptr; *size = 0; return 1; }
+        if (row_count == 0) {
+            *data = nullptr;
+            *size = 0;
+            return 1;
+        }
 
         std::vector<std::shared_ptr<arrow::Array>> arrays;
         for (auto& b : builders) {
@@ -179,7 +248,7 @@ public:
     const char* GetLastError() override { return last_error_.c_str(); }
     void Release() override { delete this; }
 
-private:
+ private:
     std::shared_ptr<IDbSession> session_;
     IResultSet* result_;
     std::shared_ptr<arrow::Schema> schema_;
@@ -197,7 +266,7 @@ private:
 //   - CreateTable：建表 DDL（类型映射因数据库而异）
 //   - InsertBatch：插入策略（MySQL 分块多值 INSERT，SQLite 逐行 INSERT）
 class RelationBatchWriterBase : public IBatchWriter {
-public:
+ public:
     RelationBatchWriterBase(std::shared_ptr<IDbSession> session, const char* table)
         : session_(std::move(session)), table_(table) {}
 
@@ -249,7 +318,7 @@ public:
     const char* GetLastError() override { return last_error_.c_str(); }
     void Release() override { delete this; }
 
-protected:
+ protected:
     // 标识符引用（子类实现各自的 SQL 方言）
     virtual std::string QuoteIdentifier(const std::string& name) = 0;
 
@@ -261,10 +330,8 @@ protected:
 
     // 构造单行值列表字符串，供子类的 InsertBatch 使用
     // 子类传入自己的 QuoteString 函数（因转义规则不同）
-    static std::string BuildRowValues(
-        const std::shared_ptr<arrow::RecordBatch>& batch,
-        int64_t row,
-        const std::function<std::string(const std::string&)>& quote_string) {
+    static std::string BuildRowValues(const std::shared_ptr<arrow::RecordBatch>& batch, int64_t row,
+                                      const std::function<std::string(const std::string&)>& quote_string) {
         std::string values = "(";
         for (int col = 0; col < batch->num_columns(); ++col) {
             if (col > 0) values += ", ";
@@ -272,17 +339,13 @@ protected:
             if (array->IsNull(row)) {
                 values += "NULL";
             } else if (array->type()->id() == arrow::Type::INT32) {
-                values += std::to_string(
-                    std::static_pointer_cast<arrow::Int32Array>(array)->Value(row));
+                values += std::to_string(std::static_pointer_cast<arrow::Int32Array>(array)->Value(row));
             } else if (array->type()->id() == arrow::Type::INT64) {
-                values += std::to_string(
-                    std::static_pointer_cast<arrow::Int64Array>(array)->Value(row));
+                values += std::to_string(std::static_pointer_cast<arrow::Int64Array>(array)->Value(row));
             } else if (array->type()->id() == arrow::Type::FLOAT) {
-                values += std::to_string(
-                    std::static_pointer_cast<arrow::FloatArray>(array)->Value(row));
+                values += std::to_string(std::static_pointer_cast<arrow::FloatArray>(array)->Value(row));
             } else if (array->type()->id() == arrow::Type::DOUBLE) {
-                values += std::to_string(
-                    std::static_pointer_cast<arrow::DoubleArray>(array)->Value(row));
+                values += std::to_string(std::static_pointer_cast<arrow::DoubleArray>(array)->Value(row));
             } else {
                 auto str_array = std::static_pointer_cast<arrow::StringArray>(array);
                 values += quote_string(str_array->GetString(row));
@@ -292,7 +355,7 @@ protected:
         return values;
     }
 
-protected:
+ protected:
     std::shared_ptr<IDbSession> session_;
     std::string table_;
     std::string last_error_;
