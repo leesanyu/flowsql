@@ -103,6 +103,8 @@ struct NpmSourceDomainBinding {
 struct NpmObservationDomainMap {
     std::string input_namespace;
     std::vector<NpmSourceDomainBinding> bindings;
+    // Accept all sources with domain=source_id; explicit maps keep strict unknown-source rejection.
+    bool source_id_as_domain = false;
 };
 
 enum class NpmObservationDomainError : uint8_t {

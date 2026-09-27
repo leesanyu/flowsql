@@ -761,6 +761,14 @@ void TestObservationDomainMapping() {
     const npm::NpmObservationDomainMap duplicate_source{"pcapfile.capture", {{4, 7}, {4, 8}}};
     assert(npm::ValidateNpmObservationDomainMap(duplicate_source) ==
            npm::NpmObservationDomainError::kDuplicateSourceId);
+
+    const npm::NpmObservationDomainMap all_sources{"pcapfile.capture", {}, true};
+    assert(npm::ValidateNpmObservationDomainMap(all_sources) == npm::NpmObservationDomainError::kNone);
+    for (const uint32_t source : {0u, 11u, UINT32_MAX}) {
+        assert(npm::ResolveNpmObservationDomain(all_sources, source, &observation_domain_id) ==
+               npm::NpmObservationDomainError::kNone);
+        assert(observation_domain_id == source);
+    }
 }
 
 void TestBasicResultNullableContract() {
@@ -6254,6 +6262,51 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
     assert(output.domains.bindings[0].observation_domain_id == UINT64_MAX);
 }
 
+void TestNpmBasicTaskConfigInputDefaults() {
+    npm::NpmBasicTaskConfig config;
+    for (const char* json : {"{}", R"({"source_domains":"all"})", R"({"parameters":"{\"schema_version\":1}"})"}) {
+        assert(npm::ParseNpmBasicTaskConfig(json, &config).error == npm::NpmBasicTaskConfigError::kNone);
+        assert(config.domains.input_namespace == "default");
+        assert(config.domains.bindings.empty() && config.domains.source_id_as_domain);
+        uint64_t domain = 99;
+        assert(npm::ResolveNpmObservationDomain(config.domains, UINT32_MAX, &domain) ==
+               npm::NpmObservationDomainError::kNone);
+        assert(domain == UINT32_MAX);
+    }
+    assert(npm::ParseNpmBasicTaskConfig("{}", &config, false, npm::ProductionNpmModuleCatalogV1(), "pcapfile.http")
+               .error == npm::NpmBasicTaskConfigError::kNone);
+    assert(config.domains.input_namespace == "pcapfile.http");
+    assert(npm::ParseNpmBasicTaskConfig(R"({"input_namespace":"custom"})", &config, false,
+                                        npm::ProductionNpmModuleCatalogV1(), "pcapfile.http")
+               .error == npm::NpmBasicTaskConfigError::kNone);
+    assert(config.domains.input_namespace == "custom" && config.domains.source_id_as_domain);
+    assert(npm::ParseNpmBasicTaskConfig(R"({"source_domains":"0:7;1:7"})", &config).error ==
+           npm::NpmBasicTaskConfigError::kNone);
+    assert(config.domains.input_namespace == "default" && !config.domains.source_id_as_domain);
+    uint64_t domain = 99;
+    assert(npm::ResolveNpmObservationDomain(config.domains, 1, &domain) == npm::NpmObservationDomainError::kNone);
+    assert(domain == 7);
+    assert(npm::ResolveNpmObservationDomain(config.domains, 2, &domain) ==
+           npm::NpmObservationDomainError::kUnknownSourceId);
+
+    // Identical endpoints from separate sources stay separate; an explicit mapping may merge them.
+    const auto packet = MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, {});
+    for (const bool merge : {false, true}) {
+        assert(npm::ParseNpmBasicTaskConfig(merge ? R"({"source_domains":"0:7;1:7"})" : "{}", &config).error ==
+               npm::NpmBasicTaskConfigError::kNone);
+        npm::NpmSessionTable table(2);
+        flowsql::packet::PacketMeta meta;
+        npm::NpmSessionView first;
+        npm::NpmSessionView second;
+        const auto binding0 = BuildBinding(config.domains, packet, 0, 10, 80, &meta);
+        assert(ObserveActive(table, binding0, meta, &first) == npm::NpmSessionTableError::kNone);
+        const auto binding1 = BuildBinding(config.domains, packet, 1, 20, 80, &meta);
+        assert(ObserveActive(table, binding1, meta, &second) == npm::NpmSessionTableError::kNone);
+        assert((first.session_id == second.session_id) == merge);
+        assert(table.size() == (merge ? 1u : 2u));
+    }
+}
+
 void TestNpmBasicTaskConfigRejectsMalformedFieldsAtomically() {
     ParseTaskConfigFailure(nullptr, npm::NpmBasicTaskConfigError::kNullInput);
     ParseTaskConfigFailure("", npm::NpmBasicTaskConfigError::kEmptyInput);
@@ -6268,9 +6321,7 @@ void TestNpmBasicTaskConfigRejectsMalformedFieldsAtomically() {
                            npm::NpmBasicTaskConfigError::kUnknownField, "mystery");
     ParseTaskConfigFailure(R"JSON({"input_namespace":7,"source_domains":"0:0"})JSON",
                            npm::NpmBasicTaskConfigError::kNonStringValue, "input_namespace");
-    ParseTaskConfigFailure(R"JSON({"source_domains":"0:0"})JSON", npm::NpmBasicTaskConfigError::kMissingRequiredField,
-                           "input_namespace");
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a"})JSON", npm::NpmBasicTaskConfigError::kMissingRequiredField,
+    ParseTaskConfigFailure(R"JSON({"source_domains":7})JSON", npm::NpmBasicTaskConfigError::kNonStringValue,
                            "source_domains");
 
     ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","run_mode":"batch"})JSON",
@@ -10505,6 +10556,14 @@ void TestNpmBasicOperatorCopiesConfigAndOwnsTasks() {
 
     auto* concrete = dynamic_cast<npm::NpmBasicTask*>(first);
     assert(concrete != nullptr);
+    auto* input_task = dynamic_cast<flowsql::IBlockTransformInputSourceTaskV1*>(first);
+    assert(input_task != nullptr);
+    assert(input_task->BindInputSource(nullptr) == EINVAL);
+    assert(input_task->BindInputSource("") == EINVAL);
+    std::string source = "pcapfile.http";
+    assert(input_task->BindInputSource(source.c_str()) == 0);
+    source.assign("changed");
+    assert(input_task->BindInputSource("pcapfile.other") == EALREADY);
     task_id.assign("mutated-task");
     with_json.assign("mutated-with");
     filter_plan.assign("mutated-plan");
@@ -12571,6 +12630,7 @@ int main() {
     TestNpmBasicResultPendingOutputBudgetAndLifetime();
     TestNpmBasicResultPendingOutputFailuresAreAtomic();
     TestNpmBasicTaskConfigParsesOwnedValues();
+    TestNpmBasicTaskConfigInputDefaults();
     TestNpmBasicTaskConfigRejectsMalformedFieldsAtomically();
     TestNpmBasicTaskConfigRejectsMappingsAndRanges();
     TestNpmBasicTaskConfigNumericBoundaries();

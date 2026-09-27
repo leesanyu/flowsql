@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace flowsql::npm {
 
@@ -53,7 +54,6 @@ enum class NpmBasicTaskConfigError : uint8_t {
     kDuplicateField,
     kUnknownField,
     kNonStringValue,
-    kMissingRequiredField,
     kInvalidEnum,
     kInvalidInteger,
     kInvalidFeatures,
@@ -77,10 +77,11 @@ struct NpmBasicTaskConfigStatus {
     NpmParameterStatusV1 parameter_status;
 };
 
-/** Parses and owns Scheduler WITH parameters. Output is replaced only after complete validation. */
+/** Owns WITH parameters. Omitted namespace uses the caller's source; omitted domains accept all sources. */
 NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, NpmBasicTaskConfig* output,
                                                  bool labeling_available = false,
-                                                 const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1());
+                                                 const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1(),
+                                                 std::string_view default_input_namespace = "default");
 
 /** Side-effect-free probe used to gate optional provider lookup before consumed-field validation. */
 bool NpmBasicTaskRequestsLabeling(const char* with_params_json) noexcept;

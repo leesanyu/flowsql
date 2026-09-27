@@ -118,6 +118,12 @@ interface IBlockTransformTaskV1 {
     virtual std::string LastError() const = 0;
 };
 
+/** Optional input identity. Bind once before Open; task copies the borrowed FROM source text. */
+interface IBlockTransformInputSourceTaskV1 {
+    virtual ~IBlockTransformInputSourceTaskV1() = default;
+    virtual int BindInputSource(const char* source) = 0;
+};
+
 /** Optional task-local time capability. Calls are serialized with ProcessBlock and Flush. */
 interface IBlockTransformTimeDrivenTaskV1 {
     virtual ~IBlockTransformTimeDrivenTaskV1() = default;

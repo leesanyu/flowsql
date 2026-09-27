@@ -982,6 +982,22 @@ int SchedulerPlugin::BuildBlockSourceFilterPlan(
     return 0;
 }
 
+static int BindBlockTransformInputSource(IBlockTransformTaskV1* task, const std::string& source, std::string* error) {
+    auto* input_task = dynamic_cast<IBlockTransformInputSourceTaskV1*>(task);
+    if (!input_task) return 0;
+    try {
+        const int rc = input_task->BindInputSource(source.c_str());
+        if (rc != 0 && error) *error = "block transform input source binding failed";
+        return rc;
+    } catch (const std::exception& ex) {
+        if (error) *error = std::string("block transform input source binding threw: ") + ex.what();
+        return EFAULT;
+    } catch (...) {
+        if (error) *error = "block transform input source binding threw an unknown exception";
+        return EFAULT;
+    }
+}
+
 int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* source,
                                                          BlockTransformProviderRef provider, IDataFrameChannel* sink,
                                                          const BlockTransformManagedSinkBindingV1* managed_sink,
@@ -1117,6 +1133,8 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
             return EIO;
         }
         auto probe = make_task_holder(probe_raw);
+        const int input_bind_rc = BindBlockTransformInputSource(probe.get(), stmt.source, error);
+        if (input_bind_rc != 0) return input_bind_rc;
 
         int probe_open_rc = 0;
         try {
@@ -1210,6 +1228,8 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
         return EIO;
     }
     auto execution = make_task_holder(execution_raw);
+    const int input_bind_rc = BindBlockTransformInputSource(execution.get(), stmt.source, error);
+    if (input_bind_rc != 0) return input_bind_rc;
     auto* managed_task = dynamic_cast<IBlockTransformManagedSinkTaskV1*>(execution.get());
     if (managed_sink) {
         if (!managed_task) {
@@ -1435,6 +1455,8 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
             return EIO;
         }
         auto probe = make_task_holder(plan.provider, probe_raw);
+        const int input_bind_rc = BindBlockTransformInputSource(probe.get(), stmt.source, error);
+        if (input_bind_rc != 0) return input_bind_rc;
 
         int probe_open_rc = 0;
         try {
@@ -1567,10 +1589,12 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
             }
             return EIO;
         }
+        auto execution = make_task_holder(plan.provider, execution_raw);
+        const int input_bind_rc = BindBlockTransformInputSource(execution.get(), stmt.source, error);
+        if (input_bind_rc != 0) return input_bind_rc;
         execution_tasks.push_back(execution_raw);
         time_tasks.push_back(execution_time);
-        execution_holders.push_back(
-            make_task_holder(plan.provider, execution_raw));
+        execution_holders.push_back(std::move(execution));
     }
 
     std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas;

@@ -1990,9 +1990,8 @@ int main() {
         ASSERT_EQ(std::string(npm_detail["name"].GetString()), "npm.basic");
         ASSERT_EQ(std::string(npm_detail["contract"].GetString()), "block_transform_v1");
 
-        const std::string managed_sql = "SELECT * FROM " + input_namespace + " USING npm.basic WITH input_namespace='" +
-                                        input_namespace +
-                                        "',source_domains='0:77',features='basic,session',observing='session' INTO "
+        const std::string managed_sql = "SELECT * FROM " + input_namespace +
+                                        " USING npm.basic WITH features='basic,session',observing='session' INTO "
                                         "sqlite.local";
         ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(managed_sql), rsp), error::OK);
         rapidjson::Document managed_completed;
@@ -2044,7 +2043,29 @@ int main() {
         ASSERT_TRUE(queried_run_ids && queried_run_status);
         ASSERT_EQ(queried_run_ids->GetString(0), managed_run_id);
         ASSERT_EQ(queried_run_status->GetString(0), "completed");
+        const auto queried_domains = std::dynamic_pointer_cast<arrow::StringArray>(
+            managed_query_batch->GetColumnByName("observation_domain_id"));
+        ASSERT_TRUE(queried_domains != nullptr);
+        ASSERT_EQ(queried_domains->GetString(0), "0");
         ASSERT_EQ(registry->Unregister(managed_query_dataframe.c_str()), 0);
+
+        const std::string metadata_dataframe = "scheduler_npm_run_source";
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq("SELECT input_namespace FROM sqlite.local.npm_result_runs WHERE run_id='" +
+                               managed_run_id + "' INTO dataframe." + metadata_dataframe),
+                       rsp),
+                  error::OK);
+        auto metadata_output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(metadata_dataframe.c_str()));
+        ASSERT_TRUE(metadata_output != nullptr);
+        DataFrame metadata_result;
+        ASSERT_EQ(metadata_output->Read(&metadata_result), 0);
+        const auto metadata_batch = metadata_result.ToArrow();
+        ASSERT_TRUE(metadata_batch != nullptr && metadata_batch->num_rows() == 1);
+        const auto namespaces =
+            std::dynamic_pointer_cast<arrow::StringArray>(metadata_batch->GetColumnByName("input_namespace"));
+        ASSERT_TRUE(namespaces != nullptr);
+        ASSERT_EQ(namespaces->GetString(0), input_namespace);
+        ASSERT_EQ(registry->Unregister(metadata_dataframe.c_str()), 0);
         ASSERT_TRUE(!registry->Get("local"));
         ASSERT_EQ(
             exec("/scheduler/batch/execute",
@@ -2224,6 +2245,25 @@ int main() {
         ASSERT_TRUE(protocol_sub_id->IsNull(0));
         ASSERT_TRUE(protocol_name->IsNull(0));
         ASSERT_EQ(end_reason->GetString(0), "closed");
+
+        // Omitted WITH also works, including the separate Schema probe for an operator-stage WHERE.
+        const std::string default_dataframe = "scheduler_npm_defaults";
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq("SELECT * FROM " + input_namespace +
+                               " USING npm.basic WHERE session_id > 0 INTO dataframe." + default_dataframe),
+                       rsp),
+                  error::OK);
+        auto default_output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(default_dataframe.c_str()));
+        ASSERT_TRUE(default_output != nullptr);
+        DataFrame default_result;
+        ASSERT_EQ(default_output->Read(&default_result), 0);
+        const auto default_batch = default_result.ToArrow();
+        ASSERT_TRUE(default_batch != nullptr && default_batch->num_rows() == 1);
+        const auto default_domains =
+            std::dynamic_pointer_cast<arrow::UInt64Array>(default_batch->GetColumnByName("observation_domain_id"));
+        ASSERT_TRUE(default_domains != nullptr);
+        ASSERT_EQ(default_domains->Value(0), 0);
+        ASSERT_EQ(registry->Unregister(default_dataframe.c_str()), 0);
 
         const std::string parameters_basic_dataframe_name =
             "scheduler_npm_basic_parameters";

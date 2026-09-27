@@ -116,6 +116,17 @@ NpmBasicTask::NpmBasicTask(const BlockTransformTaskConfigV1& config, IQuerier* q
 
 NpmBasicTask::~NpmBasicTask() = default;
 
+int NpmBasicTask::BindInputSource(const char* source) {
+    if (state_.load(std::memory_order_acquire) != State::kCreated || !input_source_.empty()) return EALREADY;
+    if (source == nullptr || source[0] == '\0') return EINVAL;
+    try {
+        input_source_ = source;
+        return 0;
+    } catch (const std::bad_alloc&) {
+        return ENOMEM;
+    }
+}
+
 int NpmBasicTask::BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) {
     if (state_.load(std::memory_order_acquire) != State::kCreated || managed_channel_ != nullptr) return EALREADY;
     if (binding.struct_size != sizeof(BlockTransformManagedSinkBindingV1) ||
@@ -186,7 +197,9 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
     }
 
     NpmBasicTaskConfig parsed;
-    const auto parse_status = ParseNpmBasicTaskConfig(with_params_json_.c_str(), &parsed, labeling_requested);
+    const auto parse_status =
+        ParseNpmBasicTaskConfig(with_params_json_.c_str(), &parsed, labeling_requested, ProductionNpmModuleCatalogV1(),
+                                input_source_.empty() ? task_id_ : input_source_);
     if (parse_status.error != NpmBasicTaskConfigError::kNone) {
         const char* error = kConfigError;
         try {

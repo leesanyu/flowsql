@@ -409,14 +409,54 @@ SQL；自定义部署也必须保持三个插件位于同一 Scheduler 进程。
 SELECT *
 FROM pcapfile.capture
 USING npm.basic
-WITH input_namespace='pcapfile.capture',
-     source_domains='0:7'
 INTO dataframe.basic_metrics
 ```
 
-`input_namespace` 和 `source_domains` 必填。后者为十进制 `source_id:observation_domain_id` 显式映射，以分号
-分隔，例如 `'0:7;1:7;2:8'`：接口 0、1 归同一观测域，接口 2 隔离。映射必须覆盖实际输入的 source ID；
-未知来源报错，不按队列号或哈希自动生成观测域。不同 namespace 或观测域的相同五元组不会合并。
+`input_namespace` 和 `source_domains` 均为选填。SQL 省略 `input_namespace` 时默认使用 `FROM` 的通道名，
+例如 `pcapfile.capture`；显式指定非空值可覆盖默认名称。不同 namespace 或观测域的相同五元组不会合并。
+
+#### source_domains：采集来源到观测域的映射语法
+
+观测域表示一组可以一起统计会话的采集来源。`source_id` 是输入报文的采集来源编号，
+`observation_domain_id` 是用户指定的观测域编号；同一 namespace 下，来源映射到同一观测域时，
+相同双向五元组可以归入同一个会话。普通 PCAP 的 `source_id` 为 `0`；PCAPNG 的接口描述块按文件读取顺序
+获得从 `0` 开始的来源编号，跨 section 继续递增，因此应使用报文的实际 `source_id`。
+
+配置写在 SQL 的 `WITH` 子句中，完整值用单引号括起来：
+
+```text
+source_domains='all'
+source_domains='source_id:observation_domain_id[;source_id:observation_domain_id...]'
+```
+
+第二行是语法模板，方括号表示可重复的映射项，不属于实际配置值。冒号左边为来源编号，右边为观测域编号。
+
+| 配置值 | 含义 |
+| --- | --- |
+| 省略，或 `'all'` | 接受所有来源，默认 `observation_domain_id=source_id`；不同来源分别统计。 |
+| `'0:1'` | 来源 0 归入观测域 1。 |
+| `'0:7;1:7;2:8'` | 来源 0、1 归入观测域 7，来源 2 归入观测域 8。 |
+
+- 多条映射用**分号 `;`**分隔；不同 `WITH` 参数用**逗号 `,`**分隔。字符串内的分号不会结束 SQL。
+- 编号仅接受非负十进制整数：来源编号范围为 `0..4294967295`，观测域编号范围为
+  `0..18446744073709551615`。映射值内不加空格、正负号或末尾分号；`all` 使用小写。
+- 同一个来源编号只能出现一次；多个来源可以使用同一个观测域编号。
+- 显式映射必须覆盖实际输入的所有来源；遇到未映射来源会报错。需要筛选来源时使用 source-stage
+  `WHERE source_id ...`。
+- 确认多个来源属于同一观测范围、应共享会话统计时，才将它们映射到同一个观测域。
+
+例如，显式指定观测域并保存 Basic、Session 结果：
+
+```sql
+SELECT *
+FROM pcapfile.http
+USING npm.basic
+WITH source_domains='0:7;1:7;2:8',
+     features='basic,session',
+     observing='session'
+INTO mysql.flowsql-mysql
+```
+
 默认 `run_mode='offline'`、`result_mode='final'`；其他配置及范围见
 [NPM 基础分析契约](tasks/archive/feat-npm-basic-analysis.md#核心契约)。
 

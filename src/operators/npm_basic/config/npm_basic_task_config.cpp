@@ -244,12 +244,16 @@ bool ParseSourceDomains(std::string_view text, std::vector<NpmSourceDomainBindin
 
 NpmBasicTaskConfigStatus ParseDomainConfig(
     const std::array<const rapidjson::Value*, static_cast<size_t>(TaskConfigField::kCount)>& values,
-    NpmObservationDomainMap* domains) {
+    std::string_view default_input_namespace, NpmObservationDomainMap* domains) {
     const rapidjson::Value* input_namespace = values[FieldIndex(TaskConfigField::kInputNamespace)];
-    domains->input_namespace.assign(input_namespace->GetString(), input_namespace->GetStringLength());
+    domains->input_namespace = input_namespace
+                                   ? std::string_view(input_namespace->GetString(), input_namespace->GetStringLength())
+                                   : default_input_namespace;
     const rapidjson::Value* source_domains = values[FieldIndex(TaskConfigField::kSourceDomains)];
-    if (!ParseSourceDomains(std::string_view(source_domains->GetString(), source_domains->GetStringLength()),
-                            &domains->bindings)) {
+    const std::string_view source_text =
+        source_domains ? std::string_view(source_domains->GetString(), source_domains->GetStringLength()) : "all";
+    domains->source_id_as_domain = source_text == "all";
+    if (!domains->source_id_as_domain && !ParseSourceDomains(source_text, &domains->bindings)) {
         return Fail(NpmBasicTaskConfigError::kInvalidSourceDomains, FieldName(TaskConfigField::kSourceDomains));
     }
 
@@ -342,7 +346,8 @@ NpmBasicTaskConfigStatus ParseIntegerFields(
 }  // namespace
 
 NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, NpmBasicTaskConfig* output,
-                                                 bool labeling_available, const NpmModuleCatalogV1& catalog) {
+                                                 bool labeling_available, const NpmModuleCatalogV1& catalog,
+                                                 std::string_view default_input_namespace) {
     if (with_params_json == nullptr) return Fail(NpmBasicTaskConfigError::kNullInput);
     if (with_params_json[0] == '\0') return Fail(NpmBasicTaskConfigError::kEmptyInput);
     if (output == nullptr) return Fail(NpmBasicTaskConfigError::kNullOutput);
@@ -370,15 +375,6 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
             values[static_cast<size_t>(field_index)] = &member->value;
         }
 
-        const auto input_namespace_index = FieldIndex(TaskConfigField::kInputNamespace);
-        const auto source_domains_index = FieldIndex(TaskConfigField::kSourceDomains);
-        if (values[input_namespace_index] == nullptr) {
-            return Fail(NpmBasicTaskConfigError::kMissingRequiredField, FieldName(TaskConfigField::kInputNamespace));
-        }
-        if (values[source_domains_index] == nullptr) {
-            return Fail(NpmBasicTaskConfigError::kMissingRequiredField, FieldName(TaskConfigField::kSourceDomains));
-        }
-
         const rapidjson::Value* parameters = values[FieldIndex(TaskConfigField::kParameters)];
         if (parameters != nullptr) {
             for (const TaskConfigField legacy_field : kLegacyTuningFields) {
@@ -392,7 +388,7 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
             NpmBasicTaskConfig next;
             auto status = ParseFeatureConfig(values, &next.features, catalog);
             if (status.error != NpmBasicTaskConfigError::kNone) return status;
-            status = ParseDomainConfig(values, &next.domains);
+            status = ParseDomainConfig(values, default_input_namespace, &next.domains);
             if (status.error != NpmBasicTaskConfigError::kNone) return status;
 
             NpmParameterConsumersV1 consumers;
@@ -468,7 +464,7 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
         status = ParseFeatureConfig(values, &next.features, catalog);
         if (status.error != NpmBasicTaskConfigError::kNone) return status;
 
-        status = ParseDomainConfig(values, &next.domains);
+        status = ParseDomainConfig(values, default_input_namespace, &next.domains);
         if (status.error != NpmBasicTaskConfigError::kNone) return status;
 
         const auto analysis_error = ValidateNpmAnalysisConfig(next.analysis);

@@ -17,7 +17,9 @@ namespace flowsql::npm {
 class NpmBasicOperator;
 class NpmBasicTaskRuntime;
 
-class NpmBasicTask final : public IBlockTransformTaskV1, public IBlockTransformManagedSinkTaskV1 {
+class NpmBasicTask final : public IBlockTransformTaskV1,
+                           public IBlockTransformManagedSinkTaskV1,
+                           public IBlockTransformInputSourceTaskV1 {
  public:
     NpmBasicTask(const NpmBasicTask&) = delete;
     NpmBasicTask& operator=(const NpmBasicTask&) = delete;
@@ -32,6 +34,7 @@ class NpmBasicTask final : public IBlockTransformTaskV1, public IBlockTransformM
     int Flush(std::vector<BlockTransformOutputV1>* outputs) override;
     void Cancel() override;
     std::string LastError() const override;
+    int BindInputSource(const char* source) override;
     int BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) override;
     std::string ManagedSinkResultJson() const override;
 
@@ -65,6 +68,7 @@ class NpmBasicTask final : public IBlockTransformTaskV1, public IBlockTransformM
     std::string with_params_json_;
     std::string pushed_filter_plan_json_;
     std::string config_error_;
+    std::string input_source_;
     std::string managed_target_;
     std::string managed_category_;
     std::string managed_name_;

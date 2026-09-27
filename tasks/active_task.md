@@ -1,73 +1,73 @@
 # 即时工作台
 
-事项：`npm-result-query` T4 显式保留、清理恢复与组合回归
-关联 Feature Task：`tasks/archive/feat-npm-result-query.md` T4。
-当前 Atomic Slice：无。
-状态：已完成；WIP=0。T0～T4 已验收并归档。
+事项：撤回 SQL 工作台固定展示的 `npm.basic` 观测域说明。
+关联 Feature Task：用户对上一轮配置说明交付的修正；`npm-result-query` 已完成。
+当前 Atomic Slice：只撤回 SQL 工作台中的固定说明及其样式。
+状态：已完成；WIP=0。
 
 ## 业务意图
 
-- 托管 run 可显式设定 1～3650 天保留期；无策略时永久保留。到期的终态 run 从查询中消失，并由后续 Open 有界清理。
-- 清理中断后继续推进，不自动删除 writing；并发新 run 不与旧 run 混淆。
+SQL 工作台面向多种算子，不应固定展示单个算子的参数说明；恢复编辑器原有布局。README 保留观测域语法说明。
 
 ## Non-Goals
 
-- 不实现崩溃后 writer fencing、人工篡改表修复、备份恢复、跨后端复制或后台定时服务。
-- 不改 NPM 实体业务 Schema、普通单表 sink、三段式查询语义或现有结果消费者 ABI。
-- 不 push；T0～T3 的差异与 T4 一同按用户明确指令在本地提交。
+- 不实现 SQL 自动提示、补全或浮动帮助，这些能力后续单独设计。
+- 不修改 README、参数解析、来源映射、会话隔离或其他前端页面；本次用户已明确要求提交当前代码，仅本地提交，不推送。
 
-## 冻结契约与测试锚点
+## 冻结撤回契约与验收锚点
 
-- `parameters.core.result.retention_days` 为可选整数 1～3650；只允许托管 sink 使用。无值时 `expires_at_ns` 为 NULL。
-- factory Open 按当前时间计算本次 run 的 `expires_at_ns`，只清理到期 completed/incomplete 或已标记 purging 的 run。
-- 清理先条件更新为 purging；公开关系立即隔离。每次 Open 最多选择一个旧 run、一张目录数据表及固定数量业务行；目录游标持久化，重试幂等。
-- 清理完成所有数据表后删除 run 元数据。writing 和无期限 run 保留；维护错误保留现场，后续 Open 可重试，不让当前新 run 错标终态。
-- 测试锚点：参数边界与非托管拒绝、无策略、到期/未到期、writing 保留、purging 隔离、跨表分批与中断恢复、失败注入与并发 run、四后端同语义。
+- `src/frontend/src/views/Tasks.vue` 恢复到上一轮新增固定帮助面板前的内容；只撤回该面板及 `.npm-domain-help` 样式。
+- 前端生产构建通过，将新资源同步到 `build/output/static`；构建资源不再包含固定帮助标题。
+- 本轮只修改工作台和 `Tasks.vue`；之前的 README 与 C++ 差异保持原样。
+
+## 既有实现契约（已验收）
+
+- `input_namespace` 选填，SQL 默认取 FROM 来源；显式非空值优先。直接调用没有 SQL 来源时默认取 task_id，纯配置解析默认 `default`。
+- `source_domains` 选填；省略或 `all` 时对任意 uint32 source_id 采用 `observation_domain_id=source_id`，不同来源保持隔离。
+- 显式 `source_id:domain_id;...` 保留原严格映射：可合并到同一域，重复/非法映射或未映射来源继续报错。
+- 新增独立可选接口 `IBlockTransformInputSourceTaskV1::BindInputSource(const char*)`，Scheduler 在 Schema 探测和执行 task 的 Open 前绑定一次；task 拷贝文本。
+- 测试锚点：独立省略/全部省略、all、parameters 路径、显式覆盖、uint32 极值、相同五元组多来源隔离、绑定生命周期、无 WITH SQL、托管 SQL 的业务行和 run 来源元数据。
 
 ## 允许修改文件
 
 - `tasks/active_task.md`
-- `tasks/archive/feat-npm-result-query.md`（验收后归档）
-- `tasks/product_backlog.md`
-- `src/operators/npm_basic/config/npm_parameters.h`
-- `src/operators/npm_basic/config/npm_parameters.cpp`
-- `src/operators/npm_basic/config/npm_basic_task_config.h`
-- `src/operators/npm_basic/config/npm_basic_task_config.cpp`
-- `src/operators/npm_basic/npm_basic_operator.cpp`
-- `src/operators/npm_basic/npm_basic_result_consumer.h`
-- `src/operators/npm_basic/npm_basic_result_consumer.cpp`
-- `src/tests/test_npm_basic/test_npm_basic.cpp`
-- `src/tests/test_npm_basic/test_npm_result_sqlite.cpp`
-- `src/tests/test_npm_basic/test_npm_result_backends.cpp`
-- `src/tests/test_scheduler_e2e/test_scheduler_e2e.cpp`
+- `src/frontend/src/views/Tasks.vue`
 
-每次 patch 后核对 `git diff --name-only` 和未跟踪文件；T0～T3 既有差异不清理、不覆盖。
+每次 patch 后执行 `git diff --name-only`，核对本轮增量；上一轮 README 和 10 个 C++ 文件的既有差异保留，本轮不修改。
 
 ## 验收命令
 
 ```bash
-cmake -B build src
-cmake --build build --target test_npm_basic test_npm_result_sqlite test_npm_result_backends test_scheduler_e2e -j8
-ctest --test-dir build -R '^(test_npm_basic|test_npm_result_sqlite|test_npm_result_backends|test_scheduler_e2e)$' --output-on-failure
-cmake --build build -j8
-ctest --test-dir build --output-on-failure
+npm run build --prefix src/frontend
+cmake -E copy_directory src/frontend/dist build/output/static
+git diff -- src/frontend/src/views/Tasks.vue tasks/active_task.md
 git diff --check
 git diff --name-only
 git status --short --untracked-files=all
 ```
 
-定向 Sanitizer 使用独立构建目录，至少执行结果存储/清理专项测试；C++ 变更通过 `clang-format-diff-18 -p1` 核查。
-
 ## 时间盒与停止条件
 
-- 用户明确要求完成 T4 并忽略 30 分钟切片时间限制；本轮持续至 T4 验收完成或出现有复现证据的外部阻塞。
-- 完成上述锚点和全量验证后勾选 T4、记录证据、归档规格并更新 Backlog；不启动其他 Feature。
+- 10～30 分钟内完成撤回与前端构建。
+- `Tasks.vue` 无残余差异、前端构建与静态资源核查通过后，记录完成证据，WIP=0 并停止。
 
-## 完成证据
+## 上一轮完成证据
 
-- 实现：托管模式解析 1～3650 天保留期，精确计算本次 run 到期时间；无策略为 NULL，非托管目标拒绝保留配置。
-- 清理：后续 Open 先标记到期终态 run 为 purging，再按一个 run、一张实体表、最多 64 行推进；持久游标支持中断恢复；writing 保留，公开关系在到期和 purging 时隔离。
-- 兼容：四后端识别并验证 T3 旧目录后追加清理游标列；不兼容目录继续拒绝。
-- 测试：SQLite 注入失败与跨表分批恢复、四后端到期/未到期及旧目录迁移专项通过；ASan/UBSan SQLite 和四后端专项通过（禁用当前环境无法运行的 LeakSanitizer）。
-- 回归：`cmake -B build src`、`cmake --build build -j8`、完整 CTest 19/19；MySQL 19/19、PostgreSQL 7/7、ClickHouse 21/21 且零 skip。
-- 质量：clang-format 检查和 `git diff --check` 通过；T0～T3 差异与 T4 一同本地提交，不 push。
+- `input_namespace`、`source_domains` 均已选填。Scheduler 在 Schema 探测和正式执行时将 FROM 来源绑定给支持该可选接口的 task；NPM 显式参数保持优先。
+- 默认来源映射覆盖全部 uint32 source ID，并将不同 source ID 放入不同观测域；显式映射继续可归一多个来源且对未知来源严格报错。
+- 配置单测覆盖独立/共同省略、`all`、`parameters`、显式覆盖、uint32 极值与相同五元组跨来源隔离；SQL E2E 覆盖无 WITH、托管写入和 run 的来源元数据。
+- `cmake -B build src`、定向构建及两项定向测试通过；全量构建通过，完整 CTest 19/19 通过；`clang-format-diff-18` 无差异，`git diff --check` 通过。
+- 改动仅在冻结的允许文件范围内；未提交或推送。
+
+## 上一轮说明完成证据（本轮撤回其中的前端部分）
+
+- README 的 NPM 配置说明已将旧“必填”描述更新为选填，增加观测域映射的语法、默认值、范围、分隔符、来源编号来源及完整 SQL 示例。
+- SQL 工作台曾增加固定的 `npm.basic` 说明面板，本轮按用户要求撤回。
+- 上一轮前端构建通过；本轮已重新构建并覆盖当前部署入口引用的静态资源。
+- `git diff --check` 通过；本轮增量仅为 README、Tasks.vue 和工作台，上一轮 C++ 差异保留。
+
+## 本轮撤回证据
+
+- `git diff --exit-code -- src/frontend/src/views/Tasks.vue` 通过，SQL 工作台源码恢复为加入固定帮助前的内容。
+- `npm run build --prefix src/frontend` 通过；已同步 `build/output/static`。本次 Tasks 构建资源不含该帮助标题，部署资源与构建产物一致。
+- `git diff --check` 通过；README 中的 `source_domains` 语法说明和前一轮 C++ 改动均未修改。

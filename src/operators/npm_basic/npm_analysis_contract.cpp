@@ -110,7 +110,7 @@ NpmObservationDomainError ValidateNpmObservationDomainMap(const NpmObservationDo
     if (domain_map.input_namespace.empty()) {
         return NpmObservationDomainError::kEmptyInputNamespace;
     }
-    if (domain_map.bindings.empty()) {
+    if (domain_map.bindings.empty() && !domain_map.source_id_as_domain) {
         return NpmObservationDomainError::kEmptyBindings;
     }
     for (std::size_t i = 0; i < domain_map.bindings.size(); ++i) {
@@ -138,6 +138,10 @@ NpmObservationDomainError ResolveNpmObservationDomain(const NpmObservationDomain
             *observation_domain_id = binding.observation_domain_id;
             return NpmObservationDomainError::kNone;
         }
+    }
+    if (domain_map.source_id_as_domain) {
+        *observation_domain_id = source_id;
+        return NpmObservationDomainError::kNone;
     }
     return NpmObservationDomainError::kUnknownSourceId;
 }
