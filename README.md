@@ -104,6 +104,63 @@ LD_LIBRARY_PATH=. ./flowsql --config ../../config/deploy-multi.yaml
 
 启动后浏览器访问 `http://127.0.0.1:8081` 进入管理界面。
 
+### Docker 镜像发布与部署
+
+`Dockerfile` 负责把已编译的 C++ 程序、插件、前端静态资源和 Python Worker 打包成同一个镜像；
+`docker-compose.yml` 使用该镜像启动 Gateway、Web、Scheduler 和 Python Worker。
+`docker-compose.databases.yml` 是可选的叠加文件，为基础编排增加 MySQL、PostgreSQL、ClickHouse，
+并让 Scheduler 等待这些数据库就绪；它不能单独运行。
+
+在**构建机器的仓库根目录**，先生成前端和 C++ 产物，再制作镜像。Dockerfile 会直接复制 `build/output` 和
+`.thirdparts_installed/yaml-cpp` 的产物，不会在镜像内编译 C++。Compose 固定加载 Flow Labeling 插件，
+因此这里用 `FLOWSQL_FLOW_LABELING=ON`，使缺少 DPDK 构建依赖时配置直接失败：
+
+```bash
+npm install --prefix src/frontend
+npm run build --prefix src/frontend
+cmake -B build src -DFLOWSQL_FLOW_LABELING=ON
+cmake --build build -j$(nproc)
+docker build -t flowsql:latest .
+```
+
+在同一台机器部署基础服务：
+
+```bash
+docker compose -f docker-compose.yml config --quiet
+docker compose -f docker-compose.yml up -d
+docker compose -f docker-compose.yml ps
+```
+
+若要同时由 Compose 启动三个数据库，部署目录还需包含 `docker-compose.databases.yml` 和
+`config/clickhouse/` 下的 `config.xml`、`users.xml`、`default-user.xml`，然后使用两份文件：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.databases.yml config --quiet
+docker compose -f docker-compose.yml -f docker-compose.databases.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.databases.yml ps
+```
+
+两种方式的 Web 入口都是 `http://部署主机:8081`。基础编排不启动 MySQL，而镜像内的初始数据库通道指向
+`mysql:3306`；只用基础编排时，需要将数据库通道改为实际可达的数据库地址。数据库叠加文件使用示例密码，
+正式部署前应同步修改数据库服务密码与初始 MySQL 通道配置 `config/docker/flowsql.yml`，并按需要调整对宿主机开放的端口。
+
+跨机器发布时，将镜像推送到镜像仓库，并把所用的 Compose 文件复制到部署机器；使用数据库叠加文件时还需复制 ClickHouse XML 文件。
+两份 Compose 文件目前都引用 `flowsql:latest`，所以拉取带版本号的镜像后需在部署机器标记为该名称：
+
+```bash
+# 构建机器：将地址与版本号替换为实际值
+docker tag flowsql:latest registry.example.com/flowsql:1.0.0
+docker push registry.example.com/flowsql:1.0.0
+
+# 部署机器
+docker pull registry.example.com/flowsql:1.0.0
+docker tag registry.example.com/flowsql:1.0.0 flowsql:latest
+docker compose -f docker-compose.yml -f docker-compose.databases.yml up -d
+```
+
+Compose 使用 named volumes 持久化配置、上传文件和算子；数据库叠加文件还会持久化数据库数据。`flowsql-config` 首次创建时从镜像获得
+初始配置，此后更新镜像不会覆盖卷内的 `flowsql.yml`；升级前应备份需要保留的卷，并单独处理配置变更。
+
 ### PCAP 文件通道持久化
 
 正式部署中的 `pcapfile` 插件会持久化已经创建或上传的离线通道配置。SQL 任务执行完成以及插件 `Stop()`

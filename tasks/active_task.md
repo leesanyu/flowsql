@@ -1,52 +1,52 @@
 # 即时工作台
 
-事项：将 Docker 数据库扩展 Compose 文件改为准确名称。
-关联 Feature Task：无；部署配置命名修正。
-当前 Atomic Slice：把 `docker-compose.full.yml` 改名为 `docker-compose.databases.yml` 并同步当前引用。
+事项：在 README 补充 Docker 镜像发布与 Compose 部署方式。
+关联 Feature Task：无；已交付部署能力的使用文档同步。
+当前 Atomic Slice：只更新快速开始中的镜像构建、服务编排、跨机器发布和数据持久化说明。
 状态：已完成；WIP=0。
 
 ## 业务意图
 
-让文件名表明它为基础 Compose 增加 MySQL、PostgreSQL、ClickHouse 及 Scheduler 的数据库就绪依赖。
+让发布者按当前 Dockerfile 与两份 Compose 文件构建并分发镜像，明确基础服务和数据库叠加服务的启动方式。
 
 ## Non-Goals
 
-- 不改变服务、数据卷、端口或数据库配置语义。
-- 不启动或停止容器，不迁移数据库数据。
-- 不重写历史 Sprint 记录，不提交或推送。
+- 不修改 Dockerfile、Compose、构建脚本或程序行为。
+- 不发布镜像、不启动容器、不修改线上数据。
+- 不自动提交或推送。
 
 ## 核心契约与事实锚点
 
-- 新文件作为 `docker-compose.yml` 的叠加文件使用，合并后服务与卷保持一致。
-- 部署契约测试读取新路径，并继续检查 PostgreSQL 服务。
+- Dockerfile 从本地 `build/output` 和依赖缓存复制产物；Scheduler 固定加载 Flow Labeling 插件，构建时需保证产物存在。
+- 两份 Compose 均引用 `flowsql:latest`；数据库文件只作为基础 Compose 的叠加文件使用，ClickHouse XML 从部署目录挂载。
+- Docker 的运行数据使用 named volumes；首次创建 `flowsql-config` 后，更新镜像不会覆盖卷内配置。
 
 ## 允许修改文件
 
+- `README.md`
 - `tasks/active_task.md`
-- `docker-compose.full.yml`（重命名前路径）
-- `docker-compose.databases.yml`（重命名后路径）
-- `src/tests/test_framework/test_docker_deploy_config.cpp`
 
-每次 patch 后执行 `git diff --name-only` 和 `git status --short` 检查改动边界；仓库其他已有未提交改动保持原状。
+每次 patch 后执行 `git diff --name-only`，确认只有以上文件。
 
 ## 验收命令
 
 ```bash
+docker compose -f docker-compose.yml config --quiet
 docker compose -f docker-compose.yml -f docker-compose.databases.yml config --quiet
-cmake --build build --target test_docker_deploy_config -j8
-./build/output/test_docker_deploy_config
-clang-format-18 --dry-run --Werror src/tests/test_framework/test_docker_deploy_config.cpp
 git diff --check
+git diff -- README.md tasks/active_task.md
 ```
+
+并只读核对 README 命令引用的文件、目录及构建输入实际存在。
 
 ## 时间盒与停止条件
 
-- 本轮约 10～30 分钟；文件改名、引用更新及上述校验通过后记录证据并停止。
-- 仅处理 Compose 叠加文件命名及直接引用。
+- 本轮约 10～30 分钟；文档与配置吻合、验收通过后记录证据并停止。
+- 仅处理 Docker 镜像发布与部署用法。
 
 ## 完成证据
 
-- `docker compose -f docker-compose.yml -f docker-compose.databases.yml config --quiet` 通过。
-- `cmake --build build --target test_docker_deploy_config -j8` 与 `./build/output/test_docker_deploy_config` 通过。
-- `clang-format-18 --dry-run --Werror` 与 `git diff --check` 通过。
-- 当前代码和 Compose 使用处均改为新文件名；历史 Sprint 记录保留原名。未提交或推送。
+- README 已补齐镜像构建、基础与数据库叠加编排、跨机器发布、初始数据库配置和 named volume 升级说明。
+- 两种 Compose `config --quiet`、`git diff --check` 通过；README 代码围栏成对。
+- 已核对 Dockerfile 引用的构建产物，以及数据库叠加文件引用的 ClickHouse XML 文件均存在。
+- 改动限于 README 和工作台；本轮未提交或推送。
