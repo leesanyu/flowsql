@@ -17,6 +17,9 @@ FlowSQL 是一个全栈式实时数据处理与分析平台，通过扩展的 SQ
 - **SQL 驱动**：扩展 SQL 语法统一数据采集、分析、探索操作
 - **流批双模式统一**：Batch 与 Stream 均采用 SQL 驱动、统一任务管理与统一插件体系
 - **三类算子统一管理**：内置算子（builtin）+ Python 算子 + C++ 插件算子统一走 `/api/operators/*`
+- **离线网络分析**：PCAP/PCAPNG 文件通道、阶段过滤，以及 `npm.basic` 的 Basic/Session 会话分析与可选流量标签
+- **NPM 结果存储与查询**：SQLite、MySQL、PostgreSQL、ClickHouse 托管多实体结果，按运行实例查询历史、最新快照和终态
+- **配置资源版本化**：JSON/YAML/XML 配置通道持久化，消费者通过精确 revision 冻结任务配置
 - **在线基线检测**：Baseline 插件通过 `IBaselineService` 提供 `Optional Bootstrap`、在线 rolling、基线 band、maturity / score trust 和 Relation fusion 能力
 - **Web 管理**：Vue.js 前端 + REST API，支持通道/算子/任务管理
 
@@ -46,12 +49,13 @@ docker compose -f config/docker-compose-clickhouse.yml up -d
 docker compose -f config/docker-compose-postgres.yml up -d
 ```
 
-连接参数：`127.0.0.1:5432`，用户 `flowsql_user`，密码 `flowSQL@user`，库 `flowsql_db`
+连接参数：`127.0.0.1:5432`，用户 `flowsql_user`，密码 `flowSQL@postgres`，库 `flowsql_db`
 
 ### 环境要求
 
 - CMake 3.12+，C++17 编译器（GCC 7+），Linux
 - Python 3.8+（Python 算子运行时）
+- Node.js 20.19+（20.x）或 22.12+、npm（构建当前 Vite 7 前端时需要）
 
 ### 系统编译依赖
 
@@ -65,18 +69,31 @@ pip3 install -e src/python/ --break-system-packages
 
 ### 编译
 
+首次完整构建先生成前端 `dist`，供 Web 插件构建步骤同步：
+
 ```bash
-cmake -B build src && cmake --build build -j$(nproc)
+npm install --prefix src/frontend
+npm run build --prefix src/frontend
+```
+
+随后从仓库根目录配置并编译 C++：
+
+```bash
+cmake -B build src
+cmake --build build -j$(nproc)
 ```
 
 ### 运行
 
 **单进程模式（开发调试）**
 
+完成上述构建后，在仓库根目录执行：
+
 ```bash
-cd build/output
-LD_LIBRARY_PATH=. ./flowsql --config ../../config/deploy-single.yaml
+./start.sh
 ```
+
+`start.sh` 从 `build/output` 启动，使用同步到该目录的 `config/deploy-single.yaml`；普通启动复用已有前端资源。
 
 **多进程模式（生产部署）**
 
@@ -120,13 +137,39 @@ JSON、YAML、XML 原文及其不可变 revision。消费者只使用 `config.<n
 
 ### 前端构建
 
+在仓库根目录安装依赖。首次运行或前端修改后，用 `--build-frontend` 重建、同步静态资源并启动：
+
 ```bash
-cd src/frontend && npm install && npm run build
-# 构建产物由 CMake 自动同步到 build/output/static/
-# 或手动：rm -rf build/output/static/assets && cp -r src/frontend/dist/* build/output/static/
+npm install --prefix src/frontend
+./start.sh --build-frontend
 ```
 
+只构建和同步、不启动服务时执行：
+
+```bash
+npm run build --prefix src/frontend
+cmake -E copy_directory src/frontend/dist build/output/static
+```
+
+`flowsql_web` 重新链接时也会同步已有 `dist`。仅修改 Vue/JS 后，普通 C++ 增量构建可能不会触发该步骤，
+此时使用上述显式重建入口。
+
 ### 测试
+
+在仓库根目录运行已注册的回归测试；完整 CTest 包含 NPM 数据库集成测试，需先启动上述三种数据库服务：
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+仅验证 NPM 配置、结果存储和 Scheduler 链路时：
+
+```bash
+cmake --build build --target test_npm_basic test_npm_result_sqlite test_npm_result_backends test_scheduler_e2e -j8
+ctest --test-dir build -R '^(test_npm_basic|test_npm_result_sqlite|test_npm_result_backends|test_scheduler_e2e)$' --output-on-failure
+```
+
+其他专项测试可从构建输出目录直接运行：
 
 ```bash
 cd build/output
@@ -141,7 +184,7 @@ export FLOWSQL_SECRET_KEY="your-32-byte-secret-key-here!!"
 ./test_router       # 路由表单元测试
 ./test_builtin      # Catalog/BinAddon/算子管理链路
 ./test_stream       # 流式通道与运行时
-./test_scheduler_e2e # Stream Group DAG 端到端回归
+./test_scheduler_e2e # SQL、NPM 托管结果、算子生命周期和 Stream DAG 回归
 ./test_baseline     # Baseline 插件 B1-B7 集成路径
 ./test_baseline_rolling_feature_batch # Baseline B8 批量特征缓存
 ./test_baseline_batch_prediction_perf # Baseline 批量预测等价与性能
@@ -185,12 +228,17 @@ IPlugin（生命周期）
 ├── IChannel（数据通道）
 │   ├── IDataFrameChannel（批处理）
 │   ├── IDatabaseChannel（数据库 Reader/Writer 工厂）
-│   └── IStreamChannel（流式，已实现）
+│   ├── IStreamChannel（流式）
+│   └── IBlockStreamChannel（批次数据流，如 pcapfile）
 ├── IOperator（数据算子：Work(in, out)）
+├── IBlockTransformOperatorV1/V2（创建任务私有的批次变换会话）
+├── IConfigChannelRegistryV1（精确版本的配置快照）
+├── IFlowLabelingProviderV1（会话主标签匹配能力）
 └── IBaselineService（进程内在线基线能力，不直接暴露 HTTP 路由）
 ```
 
-IPlugin 生命周期由宿主框架串行推进。框架不得在同一插件实例的
+IPlugin 生命周期由宿主框架分阶段推进：先调用全部插件的 `Option()`，再调用全部 `Load()`，最后调用全部
+`Start()`，使启动阶段能发现同进程已注册的接口。框架不得在同一插件实例的
 `Option()` / `Load()` / `Start()` / `Stop()` / `Unload()` 回调之间制造并发，
 也不得让 `Stop()` / `Unload()` 与该插件已经暴露出去的业务接口调用并发执行。
 插件业务接口自身的并发能力由各接口文档单独声明。
@@ -387,23 +435,25 @@ INTO dataframe.dns_pair
 pcapfile 过滤只做链路层/网络层/传输层 Layer 解码，不执行应用协议识别；不支持 payload 内容、正则、BPF/
 tcpdump 语法，也不代表 TCP stream、重组、会话或客户端/服务端方向分析。
 
-### npm.basic 离线会话基础分析
+### npm.basic 离线会话分析
 
 `npm.basic` 消费固定 Packet RecordBatch，对端点完整的 TCP/UDP 进行双向会话归属、基础计数和有限 payload
-采样识别，输出会话结果，不保留 `raw_data`；它不提供 RTT/重传算法、TCP 重组或应用交易解析。不能区分隧道
-上下文的封装流量会明确报错，不按内层五元组合并。
+采样识别；可同时启用 Basic 基础结果与 Session 性能结果，复用一次解码、会话化和协议识别。
+Session 提供当前捕获点可观察的速率、TCP RTT/重传等指标，以状态和 nullable 值表达证据不足；结果不保留
+`raw_data`。TCP 字节流重组及 DNS、HTTP、TLS、ICMP 专用结果模块尚未交付，不能区分隧道上下文的封装
+流量会明确报错。
 
 需要按 observation domain、MAC、VLAN、IP/CIDR、传输协议和端口为双向会话绑定唯一主标签时，参见
 [Flow Labeling 构建、部署、规则配置与容量指引](docs/flow-labeling.md)。该文档说明 DPDK 依赖、CMake 三态、
 Scheduler EAL option、Config Channel 精确快照、`labeling_memory_mib` 连续任务预算及可复核 benchmark。
 
-部署前必须在 Scheduler **同一进程**加载 `libflowsql_npi.so`、`libflowsql_pcapfile.so` 和
-`libflowsql_npm_basic.so`。NPI 的 JSON option 必须包含指向可读协议词典的 `ldfile`，例如原生运行目录中的
+运行前需要在 Scheduler **同一进程**加载 NPI、pcapfile 和已激活的 `npm.basic` 算子。
+原生部署配置已包含 NPI、pcapfile 与 BinAddonHost；通过 Web「算子管理 → C++ 插件」上传并激活构建产物
+`build/output/libflowsql_npm_basic.so`。更新算子后也需使运行中的插件使用新版本。
+NPI 的 JSON option 必须包含指向可读协议词典的 `ldfile`，例如原生运行目录中的
 `{"ldfile":"./config/protocols.yml"}`，Docker 中为 `/opt/flowsql/config/protocols.yml`。
-仓库提供的原生单进程、Guardian 和 Docker Scheduler 配置均已默认加载上述三个插件，可直接执行以下离线
-SQL；自定义部署也必须保持三个插件位于同一 Scheduler 进程。
 
-对已经创建或上传的离线通道执行：
+对已经创建或上传的离线通道执行，默认生成 Basic 结果：
 
 ```sql
 SELECT *
@@ -411,6 +461,33 @@ FROM pcapfile.capture
 USING npm.basic
 INTO dataframe.basic_metrics
 ```
+
+#### 模块选择与前台结果
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `features` | `'basic'` | 启用的结果模块，当前支持 `basic`、`session`；可附加能力项 `labeling`。 |
+| `observing` | `'basic'` | 普通 DataFrame 目标接收的结果实体，必须已在 `features` 中启用。 |
+| `input_namespace` | `FROM` 通道名 | 本次输入的逻辑来源名称，可用非空值覆盖。 |
+| `source_domains` | `'all'` | 采集来源到观测域的映射，语法见下文。 |
+| `parameters` | 各配置项默认值 | JSON 字符串；`schema_version=1`，`core` 放共享配置，模块名放私有配置。 |
+
+例如同时计算 Basic、Session，并将 Session 结果写入 DataFrame：
+
+```sql
+SELECT *
+FROM pcapfile.http
+USING npm.basic
+WITH features='basic,session',
+     observing='session'
+INTO dataframe.session_metrics
+```
+
+`features='session'` 时也必须指定 `observing='session'`；`observing` 不会隐式启用模块。
+普通 DataFrame 只接收所选实体；需要留存所有已启用实体时，使用下文的数据库托管目标。
+共享参数使用 `parameters.core`，例如 `parameters='{"schema_version":1,"core":{"max_active_sessions":100000}}'`。
+使用 `parameters` 时，不能同时提供旧的顶层调优参数（如 `run_mode`、`max_active_sessions`），
+但 `features`、`observing`、`input_namespace`、`source_domains` 可照常使用。
 
 `input_namespace` 和 `source_domains` 均为选填。SQL 省略 `input_namespace` 时默认使用 `FROM` 的通道名，
 例如 `pcapfile.capture`；显式指定非空值可覆盖默认名称。不同 namespace 或观测域的相同五元组不会合并。
@@ -457,23 +534,96 @@ WITH source_domains='0:7;1:7;2:8',
 INTO mysql.flowsql-mysql
 ```
 
-默认 `run_mode='offline'`、`result_mode='final'`；其他配置及范围见
-[NPM 基础分析契约](tasks/archive/feat-npm-basic-analysis.md#核心契约)。
+#### 结果、过滤与运行边界
 
-输出是固定 22 列 `npm_basic_result`，包括 session ID、规范化 A/B 端点、起止时间、双向包数/wire bytes、
-识别状态及协议 ID/名称、`revision`、`observed_at`、`is_final` 和 `end_reason`，不包含原始包。
-metadata 为 `flowsql.entity=npm_basic_result`、`flowsql.schema_version=1`、`flowsql.timestamp_unit=ns`；
-结果中的时间均为 Unix epoch 纳秒。最终行不再是 `pending`；`unknown` 的协议 ID/名称为空。
-`session_id` 只在任务内唯一，跨任务关联需结合任务标识；同一任务/会话的多个 revision 是累计快照，不能
-直接求和，最新版本查询及持久化归后续 `npm-result-query`。
+默认离线模式 `run_mode='offline'`、最终结果模式 `result_mode='final'`；共享配置和模块配置详见
+[NPM 参数契约](tasks/archive/feat-npm-basic-parameters.md)。
+
+| 结果实体 | 无标签 Schema v1 | 启用 labeling 的 Schema v2 |
+| --- | --- | --- |
+| `basic` / `npm_basic_result` | 22 列，含会话身份、双向计数、协议识别与终结信息 | 增加 `primary_label_id`，共 23 列 |
+| `session` / `npm_session_result` | 49 列，含会话身份、速率与 TCP/UDP 性能指标 | 增加 `primary_label_id`，共 50 列 |
+
+结果包含 `session_id`、`observation_domain_id`、`revision`、`observed_at`、`is_final` 等字段。
+metadata 中的 `flowsql.schema_version` 随是否包含主标签列区分为 1 或 2；时间戳使用 Unix epoch 纳秒，
+持续时间与 RTT 等时长使用纳秒。最终行不再是 `pending`；`unknown` 的协议 ID/名称为空。
+`session_id` 在任务内唯一，托管结果使用 `__npm_run_id` 区分运行；同一运行/会话的多个 revision 为累计快照，
+不能直接求和。性能指标的解释与边界见 [Session 分析契约](tasks/archive/feat-npm-session-analysis.md)。
 
 离线正常 EOF 立即结束剩余会话并排空结果，不等待 idle timeout。最终 `end_reason` 明确区分 `closed`、
 `idle_timeout`、`tuple_reuse` 和 `eof`；`eof` 不代表 TCP 正常关闭。取消或读取错误只异常清理，不输出伪装
-完整的正常 EOF 结果。协议条件应放在 `USING npm.basic ... WITH ...` 后的结果阶段，例如
-`WHERE protocol = 'HTTP'`，不能用原包预过滤代替会话识别而丢失识别前计数。
+完整的正常 EOF 结果。普通 DataFrame 输出可在 `USING npm.basic ... WITH ...` 后使用结果阶段过滤，
+例如 `WHERE protocol = 'HTTP'`；放在 `USING` 前的 source-stage 过滤会改变所有模块的输入与统计。
 
-生产实时 SQL 尚不可用：周期维护、revision 和慢 sink 预算已通过模拟 runtime 测试，但生产时间通知与采集
-事实接线仍等待 `stream-time-drive` 和 `npm-capture-contract`。模拟时间入口不是生产实时能力。
+#### 多实体结果存储与查询
+
+`npm.basic` 已支持 SQLite、MySQL、PostgreSQL、ClickHouse 的托管多实体结果存储。先创建可写的数据库通道，
+再使用两段式目标 `<数据库类型>.<通道名>`。例如 `mysql.flowsql-mysql` 中，`flowsql-mysql` 是 FlowSQL
+通道名，数据库连接和库名由该通道配置决定：
+
+```sql
+SELECT *
+FROM pcapfile.http
+USING npm.basic
+WITH features='basic,session',
+     observing='session'
+INTO mysql.flowsql-mysql
+```
+
+这条 SQL 会持久化 **Basic 和 Session 全部结果**，`observing` 不缩小持久化范围。每次执行创建独立 `run_id`；
+完成响应的 `result` 包含 `run_id`、`run_status`、`metadata_status`、`rows_written` 和 `entities[]`，
+各实体给出 Schema 版本以及 `history_relation`、`latest_relation`、`final_relation`。
+
+每个实体/Schema 版本提供三种只读关系：
+
+| 关系名 | 查询内容 |
+| --- | --- |
+| `npm_<entity>_history_v<version>` | 可见运行中的全部 revision |
+| `npm_<entity>_latest_v<version>` | 每个运行、每个实体实例的最大 revision |
+| `npm_<entity>_final_v<version>` | `is_final=true` 的终态结果 |
+
+例如，用本次响应中的 `run_id` 读取无标签 Session 的最新结果：
+
+```sql
+SELECT *
+FROM mysql.flowsql-mysql.npm_session_latest_v1
+WHERE __npm_run_id='替换为本次响应中的run_id'
+INTO dataframe.session_latest
+```
+
+- 使用响应返回的关系名；含标签列的 Basic/Session 使用 `_v2`。`latest` 按每个运行分别取最新 revision，
+  因此需要用 `__npm_run_id` 选择本次运行。
+- 三种关系都包含 `__npm_run_id`、`__npm_task_id`、`__npm_run_status`。失败前已提交的数据可能保留为
+  `incomplete`，可据此排查；`metadata_status='unknown'` 表示运行状态落库结果无法确认。
+- 托管写入要求 `SELECT *` 和单个 `npm.basic`；可以使用 source-stage `WHERE`，但拒绝结果投影和
+  operator-stage `WHERE`。结果筛选应放在后续数据库查询中。
+- 每条分析 SQL 只有一个目标；需要 DataFrame 时使用上述查询另行物化。三段式目标
+  `INTO mysql.flowsql-mysql.some_table` 是普通单表目标，当前 NPM 托管路径不接受它。
+
+#### 结果保留期
+
+省略保留策略时结果不会自动过期。托管目标可设置 `parameters.core.result.retention_days`，取值为整数
+`1..3650`，仅对本次运行生效；例如保留 30 天：
+
+```sql
+SELECT *
+FROM pcapfile.http
+USING npm.basic
+WITH features='basic,session',
+     observing='session',
+     parameters='{"schema_version":1,"core":{"result":{"retention_days":30}}}'
+INTO mysql.flowsql-mysql
+```
+
+保留期从 run 创建时计算。到期的终态运行从公开查询关系中消失，物理数据由后续托管任务打开时分批清理；
+没有新任务时，物理回收可以延后。`writing` 运行不自动删除。非托管 DataFrame 目标不接受保留期配置。
+详细语义见 [NPM 多实体结果存储与查询](tasks/archive/feat-npm-result-query.md)。
+
+#### 生产实时边界
+
+框架时间驱动 `stream-time-drive` 与 NPM 协议模块运行时已经交付；生产 NPM 实时 SQL 仍待
+`npm-capture-contract` 和 `npm-basic-realtime-integration` 接入真实采集事实。当前可用的是离线 SQL，
+任务内周期维护和模块时间契约已通过模拟测试。
 
 #### 基础引擎性能基线
 
@@ -531,6 +681,7 @@ SQL 任务类型由 Source 通道类型决定（看 `FROM`，不看 `INTO`）：
 - `INTO` 目标通道类型不参与任务类型判定。
 - `USING` 本身不决定任务类型，但 `stream` 执行入口要求包含流式算子。
 - 任务类型与执行入口必须匹配：`stream` 走 `/api/tasks/stream/execute`，`batch` 走 `/api/tasks/batch/execute`。
+- `pcapfile.* USING npm.basic` 是离线批任务，使用 batch 入口；内部按 Packet RecordBatch 处理不等于实时采集。
 
 示例：
 
@@ -683,23 +834,35 @@ flowSQL/
 │   │   ├── catalog/        # CatalogPlugin（通道目录 + 算子目录 + /operators/*）
 │   │   ├── binaddon/       # BinAddonHostPlugin（C++ 算子插件管理）
 │   │   └── bridge/         # BridgePlugin（C++ ↔ Python 桥接）
+│   ├── channels/
+│   │   ├── pcapfile/       # PCAP/PCAPNG 离线输入与阶段过滤
+│   │   └── config/         # 不可变 revision 的配置资源通道
+│   ├── operators/
+│   │   └── npm_basic/      # NPM 共享核心、Basic/Session 模块及结果存储
 │   ├── plugins/
 │   │   ├── baseline/       # Baseline 插件（在线基线、bootstrap、relation rolling/fusion）
+│   │   ├── flow_labeling/  # 基于 DPDK ACL 的会话主标签能力
 │   │   └── npi/            # NPI 协议识别
 │   ├── python/             # Python Worker（FastAPI）
 │   ├── frontend/           # Vue.js 前端
 │   └── tests/
 ├── docs/                   # 设计文档
 ├── samples/                # 开发者样例工程（如 C++ 算子插件）
-└── tasks/                  # Sprint 任务管理
+└── tasks/                  # Backlog、Feature 规格、即时工作台与归档
 ```
 
 ## 文档
 
 - [项目愿景](docs/vision.md)
 - [架构设计](docs/framework.md)
+- [Flow Labeling 构建与配置](docs/flow-labeling.md)
+- [NPM 参数契约](tasks/archive/feat-npm-basic-parameters.md)
+- [NPM Session 性能分析](tasks/archive/feat-npm-session-analysis.md)
+- [NPM 协议模块运行时](tasks/archive/feat-npm-protocol-analysis.md)
+- [NPM 多实体结果存储与查询](tasks/archive/feat-npm-result-query.md)
 - [Baseline 插件说明](src/plugins/baseline/README.md)
 - [C++ 算子插件 Sample](samples/cpp_operator/README.md)
+- [产品需求与当前进度](tasks/product_backlog.md)
 
 ## 许可证
 
