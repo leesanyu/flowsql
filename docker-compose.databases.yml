@@ -1,9 +1,7 @@
-# docker-compose.full.yml — 包含 MySQL + ClickHouse 外部数据库
-# 使用方式: docker compose -f docker-compose.yml -f docker-compose.full.yml up
+# docker-compose.databases.yml — 添加 MySQL、PostgreSQL 和 ClickHouse 数据库服务
+# 使用方式: docker compose -f docker-compose.yml -f docker-compose.databases.yml up
 #
 # 此文件仅覆盖/扩展 docker-compose.yml 中的差异部分
-
-version: '3.8'
 
 services:
 
@@ -29,6 +27,27 @@ services:
       - flowsql-net
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pflowSQL@mysql"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---- PostgreSQL ----
+  postgres:
+    image: postgres:16
+    container_name: flowsql-postgres
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: "flowSQL@postgres"
+      POSTGRES_DB: flowsql_db
+      POSTGRES_USER: flowsql_user
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - flowsql-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowsql_user -d flowsql_db"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -69,10 +88,13 @@ services:
         condition: service_healthy
       mysql:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
       clickhouse:
         condition: service_healthy
 
 volumes:
   mysql_data:
+  postgres_data:
   clickhouse_data:
   clickhouse_logs:

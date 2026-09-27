@@ -39,7 +39,7 @@ services:
       - --port
       - "18802"
       - --plugins
-      - 'libflowsql_web.so:host=0.0.0.0;port=8081;gateway=gateway:18800;upload_dir=/opt/flowsql/uploads,libflowsql_router.so:host=0.0.0.0;port=18802;gateway=gateway:18800'
+      - 'libflowsql_web.so:host=0.0.0.0;port=8081;gateway=gateway:18800;worker_host=pyworker;worker_port=18900;db_path=/opt/flowsql/uploads/web.db;upload_dir=/opt/flowsql/uploads,libflowsql_router.so:host=web;port=18802;gateway=gateway:18800'
     ports:
       - "8081:8081"
     expose:
@@ -60,21 +60,24 @@ services:
       - flowsql
       - --role
       - scheduler
-      - --port
-      - "18803"
       - --plugins
-      - 'libflowsql_router.so,libflowsql_npi.so:{"ldfile":"/opt/flowsql/config/protocols.yml"},libflowsql_pcapfile.so:db_path=/opt/flowsql/uploads/.meta/pcapfile.db,libflowsql_config_channel.so:db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db,libflowsql_flow_labeling.so:eal_memory_mib=512,libflowsql_scheduler.so,libflowsql_bridge.so,libflowsql_builtin.so,libflowsql_catalog.so:data_dir=/opt/flowsql/uploads/dataframes;operator_db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db,libflowsql_binaddon.so:operator_db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db;upload_dir=/opt/flowsql/uploads/binaddon,libflowsql_database.so'
-      - --option
-      - "host=0.0.0.0;port=18803;gateway=gateway:18800;config_file=../config/flowsql.yml"
+      - 'libflowsql_router.so:host=scheduler;port=18803;gateway=gateway:18800,libflowsql_task.so:db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db,libflowsql_npi.so:{"ldfile":"/opt/flowsql/config/protocols.yml"},libflowsql_pcapfile.so:db_path=/opt/flowsql/uploads/.meta/pcapfile.db,libflowsql_config_channel.so:db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db,libflowsql_builtin.so,libflowsql_flow_labeling.so:eal_memory_mib=512,libflowsql_scheduler.so:host=0.0.0.0;port=18803,libflowsql_bridge.so:worker_host=pyworker;worker_port=18900,libflowsql_catalog.so:data_dir=/opt/flowsql/uploads/dataframes;operator_db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db,libflowsql_binaddon.so:operator_db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db;upload_dir=/opt/flowsql/uploads/binaddon,libflowsql_database.so:config_file=/opt/flowsql/config/flowsql.yml,libflowsql_stream.so:config_file=/opt/flowsql/config/flowsql.yml;db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db'
     expose:
       - "18803"
     volumes:
-      - ./config/flowsql.yml:/opt/flowsql/config/flowsql.yml:ro
+      - flowsql-config:/opt/flowsql/config
       - pcap-uploads:/opt/flowsql/uploads
+      - python-ipc:/tmp
+      - python-operators:/opt/flowsql/bin/operators
+    ipc: service:pyworker
+    environment:
+      FLOWSQL_GATEWAY_ADDR: gateway:18800
     networks:
       - flowsql-net
     depends_on:
       gateway:
+        condition: service_healthy
+      pyworker:
         condition: service_healthy
     restart: always
 
@@ -82,7 +85,14 @@ services:
   pyworker:
     image: flowsql:latest
     command: >
-      python3 -m flowsql.worker --port 18900
+      python3 -m flowsql.worker --host pyworker --port 18900
+    environment:
+      FLOWSQL_GATEWAY_ADDR: gateway:18800
+    ipc: shareable
+    shm_size: 512m
+    volumes:
+      - python-ipc:/tmp
+      - python-operators:/opt/flowsql/bin/operators
     expose:
       - "18900"
     networks:
@@ -90,9 +100,18 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://pyworker:18900/operators/python/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     restart: always
 
 volumes:
+  flowsql-config:
+  python-ipc:
+  python-operators:
   pcap-uploads:
 
 networks:

@@ -1,0 +1,16 @@
+channels:
+  database_channels:
+    - type: mysql
+      name: flowsql_db
+      database: flowsql_db
+      host: mysql
+      port: 3306
+      user: flowsql_user
+      password: flowSQL@user
+  stream_channels:
+    - type: ring
+      name: demo
+      option: "ring_size=64;batch_rows=1024;overflow=drop;ring_mode=spsc;finite=false"
+    - type: tcp_session_mock
+      name: tcp_src
+      option: "mode=keyed;total_records=64;batch_rows=8;partition_count=4;emit_interval_ms=0;ring_size=256;overflow=drop"

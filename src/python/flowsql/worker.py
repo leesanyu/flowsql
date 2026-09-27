@@ -108,18 +108,12 @@ def _register_with_gateway(gateway_addr: str, service_name: str, local_addr: str
             print(f"Worker: failed to register route {prefix}: {e}")
 
 
-def _heartbeat_loop(gateway_addr: str, service_name: str, interval: int):
-    """心跳线程"""
+def _heartbeat_loop(gateway_addr: str, service_name: str, local_addr: str,
+                    prefixes: list, interval: int):
+    """定期续注册路由，避免 Gateway 的 TTL 清理移除 Worker。"""
     while True:
-        try:
-            httpx.post(
-                f"http://{gateway_addr}/gateway/heartbeat",
-                json={"service": service_name},
-                timeout=2,
-            )
-        except Exception:
-            pass
         time.sleep(interval)
+        _register_with_gateway(gateway_addr, service_name, local_addr, prefixes)
 
 
 def main():
@@ -142,8 +136,10 @@ def main():
                     "/operators/python/configure"]
         _register_with_gateway(gateway_addr, "pyworker", local_addr, prefixes)
 
-        # 启动心跳线程
-        t = threading.Thread(target=_heartbeat_loop, args=(gateway_addr, "pyworker", 5), daemon=True)
+        # Gateway 通过重复注册刷新每条路由的 TTL。
+        t = threading.Thread(target=_heartbeat_loop,
+                             args=(gateway_addr, "pyworker", local_addr, prefixes, 5),
+                             daemon=True)
         t.start()
 
     # 3. 启动 HTTP 服务
