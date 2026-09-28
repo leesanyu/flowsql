@@ -144,7 +144,7 @@ docker compose -f docker-compose.yml -f docker-compose.databases.yml ps
 `mysql:3306`；只用基础编排时，需要将数据库通道改为实际可达的数据库地址。数据库叠加文件使用示例密码，
 正式部署前应同步修改数据库服务密码与初始 MySQL 通道配置 `config/docker/flowsql.yml`，并按需要调整对宿主机开放的端口。
 
-跨机器发布时，将镜像推送到镜像仓库，并把所用的 Compose 文件复制到部署机器；使用数据库叠加文件时还需复制 ClickHouse XML 文件。
+**通过镜像仓库跨机器发布**：将镜像推送到镜像仓库，并把所用的 Compose 文件复制到部署机器；使用数据库叠加文件时还需复制 ClickHouse XML 文件。
 两份 Compose 文件目前都引用 `flowsql:latest`，所以拉取带版本号的镜像后需在部署机器标记为该名称：
 
 ```bash
@@ -157,6 +157,44 @@ docker pull registry.example.com/flowsql:1.0.0
 docker tag registry.example.com/flowsql:1.0.0 flowsql:latest
 docker compose -f docker-compose.yml -f docker-compose.databases.yml up -d
 ```
+
+**通过镜像文件跨机器交付（无需镜像仓库）**：在构建机器完成上述 `docker build` 后，使用 `docker save`
+保存镜像及 `flowsql:latest` 标签，并将部署配置一起打包：
+
+```bash
+# 构建机器，在仓库根目录执行
+docker save flowsql:latest | gzip > flowsql-latest.tar.gz
+tar -czf flowsql-compose.tar.gz docker-compose.yml docker-compose.databases.yml config/clickhouse
+```
+
+将这两个压缩包复制到部署机器，在一个新的部署目录中导入镜像并解开配置，然后启动基础服务：
+
+```bash
+gzip -dc flowsql-latest.tar.gz | docker load
+tar -xzf flowsql-compose.tar.gz
+docker image inspect flowsql:latest
+docker compose -f docker-compose.yml config --quiet
+docker compose -f docker-compose.yml up -d --pull never
+```
+
+若部署机器**完全离线**且要使用数据库叠加文件，还须在有网络的构建机器取得与 Compose 一致的三个数据库镜像，
+将它们单独打包并复制到部署机器：
+
+```bash
+# 构建机器
+docker pull mysql:8.0
+docker pull postgres:16
+docker pull clickhouse/clickhouse-server:24.3
+docker save mysql:8.0 postgres:16 clickhouse/clickhouse-server:24.3 | gzip > flowsql-databases.tar.gz
+
+# 部署机器：已导入 flowsql-latest.tar.gz 并解开 flowsql-compose.tar.gz
+gzip -dc flowsql-databases.tar.gz | docker load
+docker compose -f docker-compose.yml -f docker-compose.databases.yml config --quiet
+docker compose -f docker-compose.yml -f docker-compose.databases.yml up -d --pull never
+```
+
+镜像文件只包含程序和镜像内的初始配置，不包含 Compose named volumes 中的运行数据；迁移已有部署时须单独备份和恢复这些卷。
+构建机器与部署机器还应使用兼容的 CPU 架构。保留镜像标签请使用 `docker save/load`，不要使用容器的 `docker export/import`。
 
 Compose 使用 named volumes 持久化配置、上传文件和算子；数据库叠加文件还会持久化数据库数据。`flowsql-config` 首次创建时从镜像获得
 初始配置，此后更新镜像不会覆盖卷内的 `flowsql.yml`；升级前应备份需要保留的卷，并单独处理配置变更。
