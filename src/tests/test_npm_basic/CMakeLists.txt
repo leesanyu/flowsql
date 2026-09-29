@@ -68,6 +68,34 @@ set_target_properties(test_npm_protocol_contract PROPERTIES
 )
 add_test(NAME test_npm_protocol_contract COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_protocol_contract)
 
+add_executable(test_npm_tcp_stream
+    test_npm_tcp_stream.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_tcp_stream_direction.cpp
+)
+target_include_directories(test_npm_tcp_stream PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_tcp_stream PRIVATE -UNDEBUG -Wall -Wextra -Wno-pessimizing-move)
+option(FLOWSQL_NPM_TCP_STREAM_SANITIZERS "Sanitize the isolated NPM TCP stream test" OFF)
+if(FLOWSQL_NPM_TCP_STREAM_SANITIZERS)
+    target_compile_options(test_npm_tcp_stream PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_libraries(test_npm_tcp_stream PRIVATE -fsanitize=address,undefined)
+endif()
+set_target_properties(test_npm_tcp_stream PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_tcp_stream COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_tcp_stream)
+
+add_executable(test_npm_tcp_stream_shared
+    test_npm_tcp_stream_shared.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_tcp_stream_direction.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_tcp_stream_shared.cpp
+)
+target_include_directories(test_npm_tcp_stream_shared PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_tcp_stream_shared PRIVATE -UNDEBUG -Wall -Wextra -Wno-pessimizing-move)
+if(FLOWSQL_NPM_TCP_STREAM_SANITIZERS)
+    target_compile_options(test_npm_tcp_stream_shared PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_libraries(test_npm_tcp_stream_shared PRIVATE -fsanitize=address,undefined)
+endif()
+set_target_properties(test_npm_tcp_stream_shared PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_tcp_stream_shared COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_tcp_stream_shared)
+
 add_executable(test_npm_result_sqlite test_npm_result_sqlite.cpp)
 target_include_directories(test_npm_result_sqlite PRIVATE ${CMAKE_SOURCE_DIR})
 target_compile_options(test_npm_result_sqlite PRIVATE -UNDEBUG)

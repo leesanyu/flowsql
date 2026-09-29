@@ -219,6 +219,7 @@ NpmParameterStatusV1 ParseCore(const rapidjson::Value* value, const NpmParameter
     output->labeling_reference.reset();
     output->labeling_memory_mib.reset();
     output->result_retention_days.reset();
+    output->tcp_stream = NpmTcpStreamConfigV1{};
     if (consumers.labeling_enabled && consumers.labeling_available) {
         output->labeling_memory_mib = kNpmDefaultLabelingMemoryMiB;
     }
@@ -242,6 +243,7 @@ NpmParameterStatusV1 ParseCore(const rapidjson::Value* value, const NpmParameter
         "labeling",
         "labeling_memory_mib",
         "result",
+        "tcp_stream",
     };
     auto status = RejectUnknownFields(*value, "/core", kFields, std::size(kFields));
     if (status.error != NpmParameterErrorV1::kNone) return status;
@@ -336,6 +338,29 @@ NpmParameterStatusV1 ParseCore(const rapidjson::Value* value, const NpmParameter
             }
             output->result_retention_days = days;
         }
+    }
+    if (const rapidjson::Value* stream = Find(*value, "tcp_stream")) {
+        if (!stream->IsObject()) return Fail(NpmParameterErrorV1::kInvalidType, "/core/tcp_stream");
+        static constexpr const char* kStreamFields[] = {"max_buffered_bytes_per_direction", "gap_timeout_ns"};
+        status = RejectUnknownFields(*stream, "/core/tcp_stream", kStreamFields, std::size(kStreamFields));
+        if (status.error != NpmParameterErrorV1::kNone) return status;
+
+        uint64_t max_buffered = output->tcp_stream.max_buffered_bytes_per_direction;
+        status = ReadUint64(*stream, "max_buffered_bytes_per_direction", "/core/tcp_stream", &max_buffered);
+        if (status.error != NpmParameterErrorV1::kNone) return status;
+        if (max_buffered < kNpmMinTcpStreamBufferedBytesPerDirection ||
+            max_buffered > kNpmMaxTcpStreamBufferedBytesPerDirection) {
+            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/tcp_stream/max_buffered_bytes_per_direction");
+        }
+
+        int64_t gap_timeout = output->tcp_stream.gap_timeout_ns;
+        status = ReadInt64(*stream, "gap_timeout_ns", "/core/tcp_stream", &gap_timeout);
+        if (status.error != NpmParameterErrorV1::kNone) return status;
+        if (gap_timeout < kNpmMinTcpStreamGapTimeoutNs || gap_timeout > kNpmMaxTcpStreamGapTimeoutNs) {
+            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/tcp_stream/gap_timeout_ns");
+        }
+        output->tcp_stream.max_buffered_bytes_per_direction = max_buffered;
+        output->tcp_stream.gap_timeout_ns = gap_timeout;
     }
     return {};
 }

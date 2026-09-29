@@ -204,11 +204,10 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         } protocol_instance_guard{instances};
         for (const auto& entry : prepared) {
             auto instance = entry.create(*runtime->protocol_context_, runtime->budget_);
-            if ((instance.protocol && instance.analysis) ||
-                (!instance.protocol && !instance.analysis && entry.plan.module_id != "basic")) {
+            status.module_status = ValidateNpmModuleInstanceV1(entry.plan, instance);
+            if (status.module_status.error != NpmProtocolContractErrorV1::kNone) {
                 if (instance.protocol) instance.protocol->Abort();
                 status.error = NpmBasicTaskRuntimeError::kModuleCreateError;
-                status.module_status = {NpmProtocolContractErrorV1::kInvalidPlan, entry.plan.module_id};
                 return status;
             }
             instances.push_back(std::move(instance));

@@ -21,6 +21,20 @@ NpmProtocolContractStatusV1 Invalid(std::string field) {
 }
 }  // namespace
 
+NpmProtocolContractStatusV1 ValidateNpmModuleInstanceV1(const NpmModulePlanV1& plan,
+                                                        const NpmModuleInstanceV1& instance) {
+    if ((instance.protocol && instance.analysis) ||
+        (!instance.protocol && !instance.analysis && plan.module_id != "basic")) {
+        return Invalid(plan.module_id);
+    }
+    if (plan.requires_tcp_stream != (instance.tcp_stream_consumer != nullptr) ||
+        (instance.tcp_stream_consumer != nullptr &&
+         dynamic_cast<INpmTcpStreamConsumerV1*>(instance.protocol.get()) != instance.tcp_stream_consumer)) {
+        return Invalid(plan.module_id + "/tcp_stream_consumer");
+    }
+    return {};
+}
+
 const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1() {
     static const NpmModuleCatalogV1 catalog = {
         {"basic",

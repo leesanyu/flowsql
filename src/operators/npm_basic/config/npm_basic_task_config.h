@@ -43,6 +43,7 @@ struct NpmBasicTaskConfig {
     std::string labeling_reference;
     uint32_t labeling_memory_mib = kNpmDefaultLabelingMemoryMiB;
     std::optional<uint32_t> result_retention_days;
+    NpmTcpStreamConfigV1 tcp_stream;
 };
 
 enum class NpmBasicTaskConfigError : uint8_t {

@@ -6779,6 +6779,7 @@ npm::NpmParameterStatusV1 ParseParametersFailure(const char* json, const npm::Np
     output.core.analysis.max_active_sessions = 123;
     output.core.labeling_reference = "sentinel";
     output.core.labeling_memory_mib = 8;
+    output.core.tcp_stream = {131072, 12345};
     output.basic.reset();
     output.session = npm::NpmSessionModuleParametersV1{321};
 
@@ -6791,6 +6792,8 @@ npm::NpmParameterStatusV1 ParseParametersFailure(const char* json, const npm::Np
     assert(output.core.analysis.max_active_sessions == 123);
     assert(output.core.labeling_reference == "sentinel");
     assert(output.core.labeling_memory_mib == 8);
+    assert(output.core.tcp_stream.max_buffered_bytes_per_direction == 131072);
+    assert(output.core.tcp_stream.gap_timeout_ns == 12345);
     assert(!output.basic.has_value());
     assert(output.session.has_value());
     assert(output.session->max_tcp_ranges_per_direction == 321);
@@ -6813,11 +6816,86 @@ void AssertEquivalentParameters(const npm::NpmTaskParametersV1& left, const npm:
     assert(left.core.analysis.overload_policy == right.core.analysis.overload_policy);
     assert(left.core.labeling_reference == right.core.labeling_reference);
     assert(left.core.labeling_memory_mib == right.core.labeling_memory_mib);
+    assert(left.core.tcp_stream.max_buffered_bytes_per_direction ==
+           right.core.tcp_stream.max_buffered_bytes_per_direction);
+    assert(left.core.tcp_stream.gap_timeout_ns == right.core.tcp_stream.gap_timeout_ns);
     assert(left.basic.has_value() == right.basic.has_value());
     assert(left.session.has_value() == right.session.has_value());
     if (left.session) {
         assert(left.session->max_tcp_ranges_per_direction == right.session->max_tcp_ranges_per_direction);
     }
+}
+
+void TestNpmTcpStreamParameters() {
+    for (const char* json : {R"({"schema_version":1})", R"({"schema_version":1,"core":{}})",
+                             R"({"schema_version":1,"core":{"tcp_stream":{}}})"}) {
+        npm::NpmTaskParametersV1 output;
+        output.core.tcp_stream = {65536, 0};
+        assert(npm::ParseNpmParametersV1(json, {}, &output).error == npm::NpmParameterErrorV1::kNone);
+        assert(output.core.tcp_stream.max_buffered_bytes_per_direction == 1048576);
+        assert(output.core.tcp_stream.gap_timeout_ns == 1000000000);
+    }
+    for (const auto bytes : {65536ULL, 131072ULL, 67108864ULL}) {
+        for (const auto timeout : {0LL, 12345LL, 60000000000LL}) {
+            std::string json = R"({"schema_version":1,"core":{"tcp_stream":{"max_buffered_bytes_per_direction":)" +
+                               std::to_string(bytes) + R"(,"gap_timeout_ns":)" + std::to_string(timeout) + "}}}";
+            npm::NpmTaskParametersV1 output;
+            assert(npm::ParseNpmParametersV1(json.c_str(), {}, &output).error == npm::NpmParameterErrorV1::kNone);
+            json.assign(json.size(), 'x');
+            assert(output.core.tcp_stream.max_buffered_bytes_per_direction == bytes);
+            assert(output.core.tcp_stream.gap_timeout_ns == timeout);
+            assert(!output.session && !output.core.labeling_reference);
+        }
+    }
+    using Error = npm::NpmParameterErrorV1;
+    struct InvalidCase {
+        const char* node;
+        Error error;
+        const char* suffix;
+    };
+    const InvalidCase invalid[] = {
+        {"null", Error::kInvalidType, ""},
+        {"[]", Error::kInvalidType, ""},
+        {"1", Error::kInvalidType, ""},
+        {R"({"unknown":1})", Error::kUnknownConsumedField, "/unknown"},
+        {R"({"bad/~":1})", Error::kUnknownConsumedField, "/bad~1~0"},
+        {R"({"gap_timeout_ns":0,"gap_timeout_ns":1})", Error::kDuplicateField, "/gap_timeout_ns"},
+        {R"({"max_buffered_bytes_per_direction":65535})", Error::kInvalidRange, "/max_buffered_bytes_per_direction"},
+        {R"({"max_buffered_bytes_per_direction":67108865})", Error::kInvalidRange, "/max_buffered_bytes_per_direction"},
+        {R"({"max_buffered_bytes_per_direction":18446744073709551615})", Error::kInvalidRange,
+         "/max_buffered_bytes_per_direction"},
+        {R"({"max_buffered_bytes_per_direction":-1})", Error::kInvalidType, "/max_buffered_bytes_per_direction"},
+        {R"({"max_buffered_bytes_per_direction":"65536"})", Error::kInvalidType, "/max_buffered_bytes_per_direction"},
+        {R"({"max_buffered_bytes_per_direction":null})", Error::kInvalidType, "/max_buffered_bytes_per_direction"},
+        {R"({"max_buffered_bytes_per_direction":65536.0})", Error::kInvalidType, "/max_buffered_bytes_per_direction"},
+        {R"({"max_buffered_bytes_per_direction":true})", Error::kInvalidType, "/max_buffered_bytes_per_direction"},
+        {R"({"gap_timeout_ns":-1})", Error::kInvalidRange, "/gap_timeout_ns"},
+        {R"({"gap_timeout_ns":60000000001})", Error::kInvalidRange, "/gap_timeout_ns"},
+        {R"({"gap_timeout_ns":18446744073709551615})", Error::kInvalidType, "/gap_timeout_ns"},
+        {R"({"gap_timeout_ns":"0"})", Error::kInvalidType, "/gap_timeout_ns"},
+        {R"({"gap_timeout_ns":null})", Error::kInvalidType, "/gap_timeout_ns"},
+        {R"({"gap_timeout_ns":0.5})", Error::kInvalidType, "/gap_timeout_ns"},
+        {R"({"gap_timeout_ns":false})", Error::kInvalidType, "/gap_timeout_ns"},
+    };
+    for (const auto& test : invalid) {
+        const std::string json = std::string(R"({"schema_version":1,"core":{"tcp_stream":)") + test.node + "}}";
+        const std::string path = std::string("/core/tcp_stream") + test.suffix;
+        ParseParametersFailure(json.c_str(), {}, test.error, path.c_str());
+    }
+    ParseParametersFailure(R"({"schema_version":1,"core":{"tcp_stream":{},"tcp_stream":{}}})", {},
+                           Error::kDuplicateField, "/core/tcp_stream");
+
+    npm::NpmBasicTaskConfig config;
+    config.tcp_stream = {131072, 12345};
+    const auto status = npm::ParseNpmBasicTaskConfig(
+        R"({"parameters":"{\"schema_version\":1,\"core\":{\"tcp_stream\":{\"gap_timeout_ns\":-1}}}"})", &config);
+    assert(status.error == npm::NpmBasicTaskConfigError::kInvalidParameters);
+    assert(status.parameter_status.error == Error::kInvalidRange);
+    assert(status.parameter_status.path == "/core/tcp_stream/gap_timeout_ns");
+    assert(config.tcp_stream.max_buffered_bytes_per_direction == 131072 && config.tcp_stream.gap_timeout_ns == 12345);
+    assert(npm::ParseNpmBasicTaskConfig("{}", &config).error == npm::NpmBasicTaskConfigError::kNone);
+    assert(config.tcp_stream.max_buffered_bytes_per_direction == 1048576 &&
+           config.tcp_stream.gap_timeout_ns == 1000000000);
 }
 
 void TestNpmParametersV1OwnsCanonicalConfig() {
@@ -11623,6 +11701,156 @@ class ProtocolLabelMatcher final : public flowsql::IFlowLabelMatcherV1 {
     LabelingMatcherStats* stats_;
 };
 
+class StreamContractModule final : public npm::INpmProtocolModuleV1, public npm::INpmTcpStreamConsumerV1 {
+ public:
+    explicit StreamContractModule(int* aborts) : aborts_(aborts) {}
+    int OnInput(const npm::NpmInputEventV1&, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
+                     npm::INpmResultEmitterV1&) override {
+        return 0;
+    }
+    std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
+    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    void Abort() noexcept override { ++*aborts_; }
+    int OnTcpStreamReadable(const npm::NpmTcpStreamContextV1&, npm::INpmTcpStreamCursorV1&,
+                            npm::INpmResultEmitterV1&) override {
+        assert(false && "T0 must not dispatch TCP stream events");
+        return EINVAL;
+    }
+
+ private:
+    int* aborts_;
+};
+
+void TestNpmTcpStreamModuleInstanceContract() {
+    static_assert(std::is_abstract_v<npm::INpmTcpStreamCursorV1>);
+    static_assert(std::is_abstract_v<npm::INpmTcpStreamConsumerV1>);
+    static_assert(!std::is_abstract_v<CountingProtocolModule>);  // Existing V1 needs no new overrides.
+    using Error = npm::NpmProtocolContractErrorV1;
+    npm::NpmModulePlanV1 plan;
+    plan.module_id = "probe";
+    plan.requires_tcp_stream = true;
+    int aborts = 0;
+    npm::NpmModuleInstanceV1 instance;
+    auto module = std::make_unique<StreamContractModule>(&aborts);
+    instance.tcp_stream_consumer = module.get();
+    instance.protocol = std::move(module);
+    assert(npm::ValidateNpmModuleInstanceV1(plan, instance).error == Error::kNone);
+    auto* consumer = instance.tcp_stream_consumer;
+    instance.tcp_stream_consumer = nullptr;
+    auto status = npm::ValidateNpmModuleInstanceV1(plan, instance);
+    assert(status.error == Error::kInvalidPlan && status.field == "probe/tcp_stream_consumer");
+    StreamContractModule unrelated(&aborts);
+    instance.tcp_stream_consumer = &unrelated;
+    assert(npm::ValidateNpmModuleInstanceV1(plan, instance).error == Error::kInvalidPlan);
+    instance.tcp_stream_consumer = consumer;
+    auto moved = std::move(instance);
+    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kNone);
+    plan.requires_tcp_stream = false;
+    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kInvalidPlan);
+    moved.tcp_stream_consumer = nullptr;
+    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kNone);
+    ProtocolInputTrace trace;
+    moved.protocol = std::make_unique<CountingProtocolModule>(&trace);
+    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kNone);
+    plan.requires_tcp_stream = true;
+    moved.tcp_stream_consumer = &unrelated;
+    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kInvalidPlan);
+    moved.protocol.reset();
+    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kInvalidPlan);
+    moved.tcp_stream_consumer = nullptr;
+    plan.requires_tcp_stream = false;
+    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kInvalidPlan);
+    plan.module_id = "basic";
+    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kNone);
+    assert(aborts == 0);  // Validation has no lifecycle side effects.
+}
+
+void TestNpmTcpStreamOpenGatesAndFrozenConfig() {
+    using Error = npm::NpmProtocolContractErrorV1;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    auto schema = arrow::schema({});
+    const auto original_schema = schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    npm::NpmBasicTaskConfig config;
+    std::string json =
+        R"({"parameters":"{\"schema_version\":1,\"core\":{\"tcp_stream\":{\"max_buffered_bytes_per_direction\":131072,\"gap_timeout_ns\":12345}}}"})";
+    assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config).error == npm::NpmBasicTaskConfigError::kNone);
+    const auto expected_json = config.parameters_json;
+    assert(config.features.module_ids == std::vector<std::string>{"basic"});
+    assert(!config.features.session_enabled && !config.features.labeling_enabled);
+    assert(
+        npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime).error ==
+        npm::NpmBasicTaskRuntimeError::kNone);
+    json.assign(json.size(), 'x');
+    config.parameters_json.clear();
+    config.tcp_stream = {};
+    assert(runtime->Config().tcp_stream.max_buffered_bytes_per_direction == 131072);
+    assert(runtime->Config().tcp_stream.gap_timeout_ns == 12345);
+    assert(runtime->Config().parameters_json == expected_json);
+    assert(runtime->Modules().empty());
+    assert(runtime->Sessions().size() == 0);
+    assert(runtime->Budget()->Usage().module_state_bytes == 0);
+    runtime.reset();
+    schema = original_schema;
+
+    ProtocolInputTrace trace;
+    LabelingMatcherStats matcher_stats;
+    for (const auto& labels : std::vector<std::vector<uint32_t>>{{1001}, {}, {0}, {1001, 1001}, {999}}) {
+        auto catalog = npm::ProductionNpmModuleCatalogV1();
+        catalog.push_back(CountingRegistration("probe", 1, &trace, true, labels));
+        assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic,labeling,probe"})", &config, true, catalog).error ==
+               npm::NpmBasicTaskConfigError::kNone);
+        const auto status =
+            npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
+                                             new ProtocolLabelMatcher(&matcher_stats), catalog);
+        assert(status.error == npm::NpmBasicTaskRuntimeError::kModulePlanError);
+        const bool valid_labels = labels == std::vector<uint32_t>{1001};
+        assert(status.module_status.error ==
+               (valid_labels ? Error::kUnavailableCapability : Error::kInvalidLabelSelection));
+        assert(status.module_status.field == (valid_labels ? "probe/tcp_stream" : "probe/primary_label_ids"));
+        assert(!runtime && schema == original_schema && trace.created == 0);
+    }
+    assert(matcher_stats.release_calls == 5 && matcher_stats.classify_calls == 0);
+
+    // An undeclared consumer must fail before publishing the runtime, aborting already-created modules as well.
+    int aborts = 0;
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    catalog.push_back(CountingRegistration("prior", 1, &trace));
+    auto invalid = CountingRegistration("probe", 1, &trace);
+    const auto prepare = invalid.prepare;
+    invalid.prepare = [prepare, &aborts](const npm::NpmBasicTaskConfig& cfg, std::string_view text,
+                                         npm::NpmPreparedModuleV1* out) {
+        auto status = prepare(cfg, text, out);
+        out->create = [&aborts](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
+            npm::NpmModuleInstanceV1 instance;
+            auto module = std::make_unique<StreamContractModule>(&aborts);
+            instance.tcp_stream_consumer = module.get();
+            instance.protocol = std::move(module);
+            return instance;
+        };
+        return status;
+    };
+    catalog.push_back(std::move(invalid));
+    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic,prior,probe"})", &config, false, catalog).error ==
+           npm::NpmBasicTaskConfigError::kNone);
+    auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+    const auto status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema,
+                                                         &runtime, budget, nullptr, catalog);
+    assert(status.error == npm::NpmBasicTaskRuntimeError::kModuleCreateError);
+    assert(status.module_status.error == Error::kInvalidPlan &&
+           status.module_status.field == "probe/tcp_stream_consumer");
+    assert(!runtime && schema == original_schema);
+    assert(aborts == 1 && trace.created == 1 && trace.aborted == 1);
+    assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+    assert(pool.acquire_calls == pool.release_calls);
+}
+
 struct ProtocolLifecycleTrace {
     int created = 0;
     int finish_calls = 0;
@@ -12548,6 +12776,9 @@ void TestProtocolProductionCatalogAndConcurrentDualEntityControlRuntime() {
 }  // namespace
 
 int main() {
+    TestNpmTcpStreamParameters();
+    TestNpmTcpStreamModuleInstanceContract();
+    TestNpmTcpStreamOpenGatesAndFrozenConfig();
     TestProtocolProductionCatalogAndConcurrentDualEntityControlRuntime();
     TestResultRouterValidationBudgetAndUnobservedRelease();
     TestUnifiedConsumerBasicSessionSnapshotsFinalsAndRunIdentity();

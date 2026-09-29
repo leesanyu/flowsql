@@ -5,6 +5,7 @@
 #define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_PARAMETERS_H_
 
 #include <operators/npm_basic/npm_analysis_contract.h>
+#include <operators/npm_basic/npm_tcp_stream_contract.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +30,7 @@ struct NpmCoreParametersV1 {
     std::optional<std::string> labeling_reference;
     std::optional<uint32_t> labeling_memory_mib;
     std::optional<uint32_t> result_retention_days;
+    NpmTcpStreamConfigV1 tcp_stream;
 };
 
 struct NpmBasicModuleParametersV1 {};

@@ -5,6 +5,7 @@
 #define FLOWSQL_NPM_MODULE_CATALOG_H_
 
 #include <operators/npm_basic/npm_protocol_contract.h>
+#include <operators/npm_basic/npm_tcp_stream_contract.h>
 
 #include <atomic>
 #include <functional>
@@ -18,7 +19,13 @@ class NpmResultRouter;
 struct NpmModuleInstanceV1 {
     std::unique_ptr<INpmAnalysisModule> analysis;
     std::unique_ptr<INpmProtocolModuleV1> protocol;
+    // Optional, non-owning interface of the same protocol object; this factory struct is internal, not plugin ABI.
+    INpmTcpStreamConsumerV1* tcp_stream_consumer = nullptr;
 };
+
+/** Checks instance shape, declared stream consumption and interface ownership before runtime publication. */
+NpmProtocolContractStatusV1 ValidateNpmModuleInstanceV1(const NpmModulePlanV1& plan,
+                                                        const NpmModuleInstanceV1& instance);
 
 struct NpmPreparedModuleV1 {
     NpmModulePlanV1 plan;
