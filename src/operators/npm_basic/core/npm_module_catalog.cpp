@@ -5,6 +5,8 @@
 #include <operators/npm_basic/output/npm_result_router.h>
 
 #include <operators/npm_basic/config/npm_basic_task_config.h>
+#include <operators/npm_basic/modules/dns/npm_dns_contract.h>
+#include <operators/npm_basic/modules/dns/npm_dns_module.h>
 #include <operators/npm_basic/modules/session/npm_session_analysis_module.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -58,6 +60,26 @@ const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1() {
              out->create = [ranges](NpmProtocolContext& context, std::shared_ptr<INpmTaskBudget> budget) {
                  NpmModuleInstanceV1 result;
                  result.analysis = std::make_unique<NpmSessionAnalysisModule>(context, std::move(budget), ranges);
+                 return result;
+             };
+             return NpmProtocolContractStatusV1{};
+         }},
+        {"dns",
+         true,
+         {"dns_transaction"},
+         [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
+             NpmDnsConfigV1 config;
+             const auto parsed = ParseNpmDnsConfigV1(json, &config);
+             if (parsed.error != NpmDnsConfigErrorV1::kNone) {
+                 const std::string prefix = "/dns/";
+                 return Invalid(parsed.path == "/dns" ? "config" : parsed.path.substr(prefix.size()));
+             }
+             out->plan = NpmDnsModulePlanV1(config);
+             out->create = [config = std::move(config)](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget> budget) {
+                 NpmModuleInstanceV1 result;
+                 auto module = std::make_unique<NpmDnsProtocolModuleV1>(config, std::move(budget));
+                 result.tcp_stream_consumer = module.get();
+                 result.protocol = std::move(module);
                  return result;
              };
              return NpmProtocolContractStatusV1{};

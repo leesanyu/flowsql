@@ -25,6 +25,11 @@ target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/c
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_tcp_stream_shared.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_tcp_stream_provider.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/basic/npm_basic_result_projector.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_contract.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_module.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_result_encoder.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_tcp.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_udp.cpp)
 target_sources(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/session/npm_session_analysis_module.cpp)
 target_sources(${PROJECT_NAME} PRIVATE
@@ -59,18 +64,85 @@ add_test(NAME test_npm_tcp_stream_runtime COMMAND ${CMAKE_BINARY_DIR}/output/tes
 
 add_executable(test_npm_protocol_contract
     test_npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
 )
 target_include_directories(test_npm_protocol_contract PRIVATE ${CMAKE_SOURCE_DIR})
 target_compile_options(test_npm_protocol_contract PRIVATE -UNDEBUG)
-add_thirddepen(test_npm_protocol_contract arrow)
+add_thirddepen(test_npm_protocol_contract arrow rapidjson)
 add_dependencies(test_npm_protocol_contract flowsql_npm_basic)
 target_link_libraries(test_npm_protocol_contract flowsql_common)
 set_target_properties(test_npm_protocol_contract PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
 add_test(NAME test_npm_protocol_contract COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_protocol_contract)
+
+add_executable(test_npm_dns_udp
+    test_npm_dns_udp.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_udp.cpp
+)
+target_include_directories(test_npm_dns_udp PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_dns_udp PRIVATE -UNDEBUG -Wall -Wextra -Wno-pessimizing-move)
+add_dependencies(test_npm_dns_udp flowsql_npm_basic)
+target_link_libraries(test_npm_dns_udp flowsql_npm_basic)
+set_target_properties(test_npm_dns_udp PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_dns_udp COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_dns_udp)
+
+add_executable(test_npm_dns_tcp
+    test_npm_dns_tcp.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_task_budget.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_tcp_stream_direction.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_tcp_stream_shared.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_tcp.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_udp.cpp
+)
+target_include_directories(test_npm_dns_tcp PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_dns_tcp PRIVATE -UNDEBUG -Wall -Wextra -Wno-pessimizing-move)
+add_dependencies(test_npm_dns_tcp flowsql_npm_basic)
+target_link_libraries(test_npm_dns_tcp flowsql_npm_basic)
+set_target_properties(test_npm_dns_tcp PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_dns_tcp COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_dns_tcp)
+
+add_executable(test_npm_dns_result_encoder
+    test_npm_dns_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+)
+target_include_directories(test_npm_dns_result_encoder PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_dns_result_encoder PRIVATE -UNDEBUG -Wall -Wextra -Wno-pessimizing-move)
+add_thirddepen(test_npm_dns_result_encoder arrow)
+target_link_libraries(test_npm_dns_result_encoder flowsql_npm_basic flowsql_common)
+set_target_properties(test_npm_dns_result_encoder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_dns_result_encoder COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_dns_result_encoder)
+
+add_executable(test_npm_dns_module
+    test_npm_dns_module.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_module.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_tcp.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_udp.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+)
+target_include_directories(test_npm_dns_module PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_dns_module PRIVATE -UNDEBUG -Wall -Wextra -Wno-pessimizing-move)
+add_thirddepen(test_npm_dns_module arrow)
+target_link_libraries(test_npm_dns_module flowsql_npm_basic flowsql_common)
+set_target_properties(test_npm_dns_module PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_dns_module COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_dns_module)
+
+option(FLOWSQL_NPM_DNS_SANITIZERS "Sanitize the isolated NPM DNS tests" OFF)
+if(FLOWSQL_NPM_DNS_SANITIZERS)
+    foreach(dns_target IN ITEMS test_npm_dns_udp test_npm_dns_tcp test_npm_dns_result_encoder test_npm_dns_module)
+        target_compile_options(${dns_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${dns_target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
 
 add_executable(test_npm_tcp_stream
     test_npm_tcp_stream.cpp
@@ -108,6 +180,7 @@ target_compile_options(test_npm_result_sqlite PRIVATE -UNDEBUG)
 target_sources(test_npm_result_sqlite PRIVATE
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_contract.cpp
 )
 add_thirddepen(test_npm_result_sqlite arrow rapidjson sqlite)
 target_link_libraries(test_npm_result_sqlite flowsql_common flowsql_npm_basic flowsql_database)

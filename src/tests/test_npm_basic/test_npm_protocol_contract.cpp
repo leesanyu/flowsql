@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <framework/interfaces/iblock_transform_operator.h>
+#include <operators/npm_basic/modules/dns/npm_dns_contract.h>
 #include <operators/npm_basic/npm_protocol_contract.h>
 
 #include <arrow/api.h>
@@ -10,6 +11,7 @@
 #include <cassert>
 #include <cstdio>
 #include <optional>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -221,6 +223,142 @@ void TestPlans() {
     Expect(npm::ValidateNpmModulePlanV1(plan, capabilities), Error::kInvalidPlan);
 }
 
+void TestDnsConfigAndPlan() {
+    using ConfigError = npm::NpmDnsConfigErrorV1;
+    npm::NpmDnsConfigV1 config;
+    config.primary_label_ids = {77};
+    const auto reject = [&](std::string_view json, ConfigError error, std::string_view path) {
+        const auto status = npm::ParseNpmDnsConfigV1(json, &config);
+        assert(status.error == error && status.path == path);
+        assert(config.primary_label_ids == std::vector<uint32_t>{77});
+    };
+    reject("", ConfigError::kMissing, "/dns");
+    reject("null", ConfigError::kInvalidType, "/dns");
+    reject("{}", ConfigError::kMissing, "/dns/primary_label_ids");
+    reject(R"({"primary_label_ids":null})", ConfigError::kInvalidType, "/dns/primary_label_ids");
+    reject(R"({"primary_label_ids":[]})", ConfigError::kInvalidRange, "/dns/primary_label_ids");
+    reject(R"({"primary_label_ids":[0]})", ConfigError::kInvalidRange, "/dns/primary_label_ids/0");
+    reject(R"({"primary_label_ids":[1,1]})", ConfigError::kInvalidRange, "/dns/primary_label_ids/1");
+    reject(R"({"primary_label_ids":[4294967296]})", ConfigError::kInvalidRange, "/dns/primary_label_ids/0");
+    reject(R"({"primary_label_ids":["1"]})", ConfigError::kInvalidType, "/dns/primary_label_ids/0");
+    reject(R"({"primary_label_ids":[1],"extra":0})", ConfigError::kUnknownField, "/dns/extra");
+    reject(R"({"primary_label_ids":[1],"primary_label_ids":[2]})", ConfigError::kDuplicateField,
+           "/dns/primary_label_ids");
+    reject(R"({"primary_label_ids":[1],"response_timeout_ns":null})", ConfigError::kInvalidType,
+           "/dns/response_timeout_ns");
+    reject(R"({"primary_label_ids":[1],"response_timeout_ns":999999})", ConfigError::kInvalidRange,
+           "/dns/response_timeout_ns");
+    reject(R"({"primary_label_ids":[1],"response_timeout_ns":300000000001})", ConfigError::kInvalidRange,
+           "/dns/response_timeout_ns");
+    reject(R"({"primary_label_ids":[1],"max_pending_per_session":0})", ConfigError::kInvalidRange,
+           "/dns/max_pending_per_session");
+    reject(R"({"primary_label_ids":[1],"max_pending_per_session":4097})", ConfigError::kInvalidRange,
+           "/dns/max_pending_per_session");
+    std::string labels_json = R"({"primary_label_ids":[)";
+    for (uint32_t id = 1; id <= 257; ++id) {
+        if (id != 1) labels_json += ',';
+        labels_json += std::to_string(id);
+    }
+    labels_json += "]}";
+    reject(labels_json, ConfigError::kInvalidRange, "/dns/primary_label_ids");
+    labels_json.erase(labels_json.rfind(",257"), 4);
+    npm::NpmDnsConfigV1 boundary;
+    assert(npm::ParseNpmDnsConfigV1(labels_json, &boundary).error == ConfigError::kNone);
+    assert(boundary.primary_label_ids.size() == 256);
+    assert(npm::ParseNpmDnsConfigV1(R"({"primary_label_ids":[1001,2]})", &config).error == ConfigError::kNone);
+    assert(config.primary_label_ids == (std::vector<uint32_t>{1001, 2}));
+    assert(config.response_timeout_ns == 5'000'000'000 && config.max_pending_per_session == 256);
+    std::string json = R"({"primary_label_ids":[1001],"response_timeout_ns":1000000,"max_pending_per_session":4096})";
+    assert(npm::ParseNpmDnsConfigV1(json, &config).error == ConfigError::kNone);
+    json.assign(json.size(), 'x');
+    assert(config.primary_label_ids == std::vector<uint32_t>{1001});
+    assert(config.response_timeout_ns == 1'000'000 && config.max_pending_per_session == 4096);
+
+    const auto plan = npm::NpmDnsModulePlanV1(config);
+    assert(plan.module_id == "dns" && plan.input_mask == 3);
+    assert(plan.requires_labeling && plan.requires_tcp_stream);
+    assert(plan.primary_label_ids == config.primary_label_ids);
+    npm::NpmModuleCapabilitiesV1 capabilities;
+    capabilities.available_label_ids = {1001};
+    Expect(npm::ValidateNpmModulePlanV1(plan, capabilities), Error::kUnavailableCapability);
+    capabilities.labeling_enabled = true;
+    Expect(npm::ValidateNpmModulePlanV1(plan, capabilities), Error::kUnavailableCapability);
+    capabilities.labeling_available = true;
+    Expect(npm::ValidateNpmModulePlanV1(plan, capabilities), Error::kUnavailableCapability);
+    capabilities.tcp_stream_available = true;
+    Expect(npm::ValidateNpmModulePlanV1(plan, capabilities), Error::kNone);
+    capabilities.available_label_ids.clear();
+    Expect(npm::ValidateNpmModulePlanV1(plan, capabilities), Error::kInvalidLabelSelection);
+}
+
+void TestDnsEntitySchemaAndRows() {
+    const auto entity = npm::NpmDnsTransactionEntityDescriptorV1();
+    Expect(npm::ValidateNpmEntityDescriptorV1(entity), Error::kNone);
+    assert(entity.entity_id == "dns_transaction" && entity.module_id == "dns");
+    assert(entity.schema_version == 1 && entity.revision_semantics == npm::NpmRevisionSemanticsV1::kEvent);
+    assert(entity.schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == "1");
+    assert(entity.schema->metadata()->Get("flowsql.revision_semantics").ValueOrDie() == "event");
+    const std::vector<std::tuple<const char*, arrow::Type::type, bool>> fields = {
+        {"entity_instance_id", arrow::Type::UINT64, false},
+        {"revision", arrow::Type::UINT64, false},
+        {"observed_at", arrow::Type::INT64, false},
+        {"is_final", arrow::Type::BOOL, false},
+        {"session_id", arrow::Type::UINT64, false},
+        {"observation_domain_id", arrow::Type::UINT64, false},
+        {"transport_protocol", arrow::Type::UINT8, false},
+        {"a_ip", arrow::Type::STRING, false},
+        {"b_ip", arrow::Type::STRING, false},
+        {"a_port", arrow::Type::UINT16, false},
+        {"b_port", arrow::Type::UINT16, false},
+        {"dns_id", arrow::Type::UINT16, false},
+        {"outcome", arrow::Type::STRING, false},
+        {"query_retries", arrow::Type::UINT32, false},
+        {"query_direction", arrow::Type::UINT8, true},
+        {"response_direction", arrow::Type::UINT8, true},
+        {"qname", arrow::Type::STRING, true},
+        {"qtype", arrow::Type::UINT16, true},
+        {"qclass", arrow::Type::UINT16, true},
+        {"query_at_ns", arrow::Type::INT64, true},
+        {"response_at_ns", arrow::Type::INT64, true},
+        {"latency_ns", arrow::Type::INT64, true},
+        {"response_rcode", arrow::Type::UINT16, true},
+        {"response_tc", arrow::Type::BOOL, true},
+        {"incomplete_reason", arrow::Type::STRING, true}};
+    assert(entity.schema->num_fields() == static_cast<int>(fields.size()));
+    std::vector<std::shared_ptr<arrow::Array>> columns;
+    for (size_t index = 0; index < fields.size(); ++index) {
+        const auto& [name, type, nullable] = fields[index];
+        const auto& field = entity.schema->field(static_cast<int>(index));
+        assert(field->name() == name && field->type()->id() == type && field->nullable() == nullable);
+        if (nullable) {
+            columns.push_back(arrow::MakeArrayOfNull(field->type(), 1).ValueOrDie());
+        } else if (type == arrow::Type::UINT64) {
+            columns.push_back(Values<arrow::UInt64Builder, uint64_t>({1}));
+        } else if (type == arrow::Type::INT64) {
+            columns.push_back(Values<arrow::Int64Builder, int64_t>({100}));
+        } else if (type == arrow::Type::BOOL) {
+            columns.push_back(Values<arrow::BooleanBuilder, bool>({true}));
+        } else if (type == arrow::Type::UINT8) {
+            columns.push_back(Values<arrow::UInt8Builder, uint8_t>({17}));
+        } else if (type == arrow::Type::UINT16) {
+            columns.push_back(Values<arrow::UInt16Builder, uint16_t>({53}));
+        } else if (type == arrow::Type::UINT32) {
+            columns.push_back(Values<arrow::UInt32Builder, uint32_t>({0}));
+        } else {
+            columns.push_back(Values<arrow::StringBuilder, std::string>({std::string("x")}));
+        }
+    }
+    auto rows = arrow::RecordBatch::Make(entity.schema, 1, columns);
+    Expect(npm::ValidateNpmEntityRowsV1("dns", entity, *rows), Error::kNone);
+    columns[1] = Values<arrow::UInt64Builder, uint64_t>({2});
+    Expect(npm::ValidateNpmEntityRowsV1("dns", entity, *arrow::RecordBatch::Make(entity.schema, 1, columns)),
+           Error::kInvalidRows);
+    columns[1] = Values<arrow::UInt64Builder, uint64_t>({1});
+    columns[3] = Values<arrow::BooleanBuilder, bool>({false});
+    Expect(npm::ValidateNpmEntityRowsV1("dns", entity, *arrow::RecordBatch::Make(entity.schema, 1, columns)),
+           Error::kInvalidRows);
+}
+
 void TestInputRelationships() {
     std::array<uint8_t, 32> bytes{};
     flowsql::packet::PacketLayerInfo layer;
@@ -299,6 +437,8 @@ void TestInputRelationships() {
 int main() {
     TestEntitiesAndRows();
     TestPlans();
+    TestDnsConfigAndPlan();
+    TestDnsEntitySchemaAndRows();
     TestInputRelationships();
     std::puts("NPM protocol contract tests passed");
     return 0;

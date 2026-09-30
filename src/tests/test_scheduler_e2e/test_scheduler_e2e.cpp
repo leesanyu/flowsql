@@ -46,6 +46,8 @@
 #include <framework/interfaces/istream_channel.h>
 #include <framework/interfaces/istream_factory.h>
 #include <framework/interfaces/istream_operator.h>
+#include <operators/npm_basic/modules/dns/npm_dns_contract.h>
+#include <operators/npm_basic/npm_basic_result_consumer.h>
 #include <plugins/npi/iprotocol.h>
 #include <common/loader.hpp>
 
@@ -1244,6 +1246,68 @@ static int64_t QueryCount(IDatabaseChannel* db, const std::string& query) {
     return rows;
 }
 
+class SchedulerDnsBudget final : public npm::INpmTaskBudget {
+ public:
+    npm::NpmBudgetError Reserve(npm::NpmBudgetCategory, uint64_t bytes) override {
+        usage_.pending_output_bytes += bytes;
+        return npm::NpmBudgetError::kNone;
+    }
+    npm::NpmBudgetError Release(npm::NpmBudgetCategory, uint64_t bytes) override {
+        ASSERT_TRUE(usage_.pending_output_bytes >= bytes);
+        usage_.pending_output_bytes -= bytes;
+        return npm::NpmBudgetError::kNone;
+    }
+    npm::NpmBudgetUsage Usage() const override { return usage_; }
+
+ private:
+    npm::NpmBudgetUsage usage_;
+};
+
+static std::shared_ptr<arrow::RecordBatch> MakeSchedulerDnsRows(const npm::NpmEntityDescriptorV1& entity) {
+    std::vector<std::shared_ptr<arrow::Array>> columns;
+    for (const auto& field : entity.schema->fields()) {
+        std::unique_ptr<arrow::ArrayBuilder> builder;
+        ASSERT_TRUE(arrow::MakeBuilder(arrow::default_memory_pool(), field->type(), &builder).ok());
+        if (field->nullable()) {
+            ASSERT_TRUE(builder->AppendNull().ok());
+        } else {
+            switch (field->type()->id()) {
+                case arrow::Type::UINT64:
+                    ASSERT_TRUE(static_cast<arrow::UInt64Builder*>(builder.get())->Append(1).ok());
+                    break;
+                case arrow::Type::UINT32:
+                    ASSERT_TRUE(static_cast<arrow::UInt32Builder*>(builder.get())->Append(0).ok());
+                    break;
+                case arrow::Type::UINT16:
+                    ASSERT_TRUE(static_cast<arrow::UInt16Builder*>(builder.get())->Append(9).ok());
+                    break;
+                case arrow::Type::UINT8:
+                    ASSERT_TRUE(static_cast<arrow::UInt8Builder*>(builder.get())->Append(17).ok());
+                    break;
+                case arrow::Type::INT64:
+                    ASSERT_TRUE(static_cast<arrow::Int64Builder*>(builder.get())->Append(100).ok());
+                    break;
+                case arrow::Type::BOOL:
+                    ASSERT_TRUE(static_cast<arrow::BooleanBuilder*>(builder.get())->Append(true).ok());
+                    break;
+                case arrow::Type::STRING:
+                    ASSERT_TRUE(static_cast<arrow::StringBuilder*>(builder.get())
+                                    ->Append(field->name() == "outcome" ? "response_only" : "endpoint")
+                                    .ok());
+                    break;
+                default:
+                    ASSERT_TRUE(false);
+            }
+        }
+        std::shared_ptr<arrow::Array> array;
+        ASSERT_TRUE(builder->Finish(&array).ok());
+        columns.push_back(std::move(array));
+    }
+    auto rows = arrow::RecordBatch::Make(entity.schema, 1, std::move(columns));
+    ASSERT_TRUE(rows->ValidateFull().ok());
+    return rows;
+}
+
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     std::puts("=== Scheduler E2E Tests (Story 9.3) ===");
@@ -2048,6 +2112,38 @@ int main() {
         ASSERT_TRUE(queried_domains != nullptr);
         ASSERT_EQ(queried_domains->GetString(0), "0");
         ASSERT_EQ(registry->Unregister(managed_query_dataframe.c_str()), 0);
+
+        const auto dns_entity = npm::NpmDnsTransactionEntityDescriptorV1();
+        auto dns_factory = npm::MakeNpmDatabaseResultConsumerFactory(db, input_namespace);
+        auto dns_budget = std::make_shared<SchedulerDnsBudget>();
+        const std::string dns_run_id = "scheduler-dns-" + suffix;
+        std::unique_ptr<npm::INpmManagedResultConsumerV1> dns_consumer;
+        ASSERT_EQ(dns_factory->Create({"scheduler-dns-task", dns_run_id}, {dns_entity}, dns_budget, &dns_consumer), 0);
+        ASSERT_TRUE(dns_consumer != nullptr);
+        ASSERT_EQ(
+            dns_consumer->Consume({"scheduler-dns-task", dns_run_id}, dns_entity, *MakeSchedulerDnsRows(dns_entity)),
+            0);
+        ASSERT_EQ(dns_consumer->Finish(), 0);
+        ASSERT_EQ(dns_budget->Usage().pending_output_bytes, 0ULL);
+        for (const char* relation : {"history", "latest", "final"}) {
+            const std::string dataframe_name = std::string("scheduler_dns_") + relation;
+            const std::string sql = "SELECT * FROM sqlite.local.npm_dns_transaction_" + std::string(relation) +
+                                    "_v1 WHERE __npm_run_id='" + dns_run_id + "' INTO dataframe." + dataframe_name;
+            ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
+            auto result_channel = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(dataframe_name.c_str()));
+            ASSERT_TRUE(result_channel != nullptr);
+            DataFrame result;
+            ASSERT_EQ(result_channel->Read(&result), 0);
+            auto batch = result.ToArrow();
+            ASSERT_TRUE(batch != nullptr && batch->num_rows() == 1);
+            const auto run_ids = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("__npm_run_id"));
+            ASSERT_TRUE(run_ids && run_ids->GetString(0) == dns_run_id);
+            ASSERT_TRUE(batch->GetColumnByName("outcome") != nullptr);
+            ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
+        }
+        ASSERT_EQ(
+            QueryCount(db, "SELECT * FROM npm_dns_transaction_final_v1 WHERE __npm_run_id='" + managed_run_id + "'"),
+            0);
 
         const std::string metadata_dataframe = "scheduler_npm_run_source";
         ASSERT_EQ(exec("/scheduler/batch/execute",

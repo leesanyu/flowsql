@@ -535,8 +535,8 @@ tcpdump 语法，也不代表 TCP stream、重组、会话或客户端/服务端
 `npm.basic` 消费固定 Packet RecordBatch，对端点完整的 TCP/UDP 进行双向会话归属、基础计数和有限 payload
 采样识别；可同时启用 Basic 基础结果与 Session 性能结果，复用一次解码、会话化和协议识别。
 Session 提供当前捕获点可观察的速率、TCP RTT/重传等指标，以状态和 nullable 值表达证据不足；结果不保留
-`raw_data`。任务内部已提供按主标签准入的共享有界 TCP 字节流，供后续协议模块复用；生产目录当前仍只有
-Basic/Session，DNS、HTTP、TLS、ICMP 专用结果模块尚未交付。不能区分隧道上下文的封装流量会明确报错。
+`raw_data`。任务内部已提供按主标签准入的共享有界 TCP 字节流，供 DNS 等协议模块复用；生产目录支持
+Basic、Session、DNS，HTTP、TLS、ICMP 专用结果模块尚未交付。不能区分隧道上下文的封装流量会明确报错。
 共享流的消费、资源和缺口语义见 [NPM 共享有界 TCP 字节流接入说明](docs/npm-tcp-stream.md)。
 
 需要按 observation domain、MAC、VLAN、IP/CIDR、传输协议和端口为双向会话绑定唯一主标签时，参见
@@ -562,7 +562,7 @@ INTO dataframe.basic_metrics
 
 | 参数 | 默认值 | 含义 |
 | --- | --- | --- |
-| `features` | `'basic'` | 启用的结果模块，当前支持 `basic`、`session`；可附加能力项 `labeling`。 |
+| `features` | `'basic'` | 启用的结果模块，当前支持 `basic`、`session`、`dns`；DNS 需同时启用能力项 `labeling`。 |
 | `observing` | `'basic'` | 普通 DataFrame 目标接收的结果实体，必须已在 `features` 中启用。 |
 | `input_namespace` | `FROM` 通道名 | 本次输入的逻辑来源名称，可用非空值覆盖。 |
 | `source_domains` | `'all'` | 采集来源到观测域的映射，语法见下文。 |
@@ -584,6 +584,43 @@ INTO dataframe.session_metrics
 共享参数使用 `parameters.core`，例如 `parameters='{"schema_version":1,"core":{"max_active_sessions":100000}}'`。
 使用 `parameters` 时，不能同时提供旧的顶层调优参数（如 `run_mode`、`max_active_sessions`），
 但 `features`、`observing`、`input_namespace`、`source_domains` 可照常使用。
+
+#### DNS 事务分析
+
+DNS 是显式启用的独立实体 `dns_transaction`，支持 UDP datagram 和共享 TCP 字节流。先按
+[Flow Labeling 指引](docs/flow-labeling.md)部署可用的 provider 和 `FlowLabelingSet`，使目标 DNS 会话的
+主标签命中配置的 `primary_label_ids`；下面的 `config.dns-labels@7` 与标签 `1001` 是示例，必须替换为
+当前环境中存在的精确快照引用和标签 ID。缺少 labeling、标签无效或省略 `parameters.dns` 时任务打开失败。
+
+```sql
+SELECT *
+FROM pcapfile.capture
+USING npm.basic
+WITH features='dns,labeling',
+     observing='dns_transaction',
+     parameters='{"schema_version":1,"core":{"labeling":"config.dns-labels@7"},"dns":{"primary_label_ids":[1001],"response_timeout_ns":5000000000}}'
+INTO dataframe.dns_transactions
+```
+
+`observing='dns_transaction'` 只选择普通 DataFrame 的前台结果；同时启用 `basic`、`session` 时，
+它们仍被计算并送往已配置的托管消费者。`response_timeout_ns` 只按捕获水位判断“截至水位未见响应”，
+不代表网络超时；默认 5 秒。`max_pending_per_session` 默认 256，达到上限会使任务失败。
+结果的 `outcome` 可为 `matched`、`truncated_response`、`query_only`、`response_only` 或
+`unsupported_message`；结合 nullable 的时间、RCODE、TC 与 `incomplete_reason` 解释捕获点可见事实。
+DNS Schema 固定为 v1，与 Basic/Session 的标签 Schema 版本独立。未启用 DNS 时，原有 SQL 无需修改。
+
+需要留存全部已启用实体时，将上例目标改为可写数据库通道，例如 `INTO sqlite.local`。完成响应中的
+`run_id` 和 `entities[]` 给出 DNS 的三个关系名；可用下列查询读取本次运行的最终事务：
+
+```sql
+SELECT *
+FROM sqlite.local.npm_dns_transaction_final_v1
+WHERE __npm_run_id='替换为本次响应中的run_id'
+INTO dataframe.dns_final
+```
+
+同一实体还有 `npm_dns_transaction_history_v1` 和 `npm_dns_transaction_latest_v1`。每次运行的
+`__npm_run_id` 相互隔离；查询时按本次响应的关系名和运行 ID 过滤。
 
 `input_namespace` 和 `source_domains` 均为选填。SQL 省略 `input_namespace` 时默认使用 `FROM` 的通道名，
 例如 `pcapfile.capture`；显式指定非空值可覆盖默认名称。不同 namespace 或观测域的相同五元组不会合并。
@@ -639,9 +676,10 @@ INTO mysql.flowsql-mysql
 | --- | --- | --- |
 | `basic` / `npm_basic_result` | 22 列，含会话身份、双向计数、协议识别与终结信息 | 增加 `primary_label_id`，共 23 列 |
 | `session` / `npm_session_result` | 49 列，含会话身份、速率与 TCP/UDP 性能指标 | 增加 `primary_label_id`，共 50 列 |
+| `dns_transaction` | 固定 Schema v1，含查询、响应、时长与不完整原因 | 与左列相同；准入标签不新增结果列 |
 
 结果包含 `session_id`、`observation_domain_id`、`revision`、`observed_at`、`is_final` 等字段。
-metadata 中的 `flowsql.schema_version` 随是否包含主标签列区分为 1 或 2；时间戳使用 Unix epoch 纳秒，
+Basic/Session metadata 中的 `flowsql.schema_version` 随是否包含主标签列区分为 1 或 2；时间戳使用 Unix epoch 纳秒，
 持续时间与 RTT 等时长使用纳秒。最终行不再是 `pending`；`unknown` 的协议 ID/名称为空。
 `session_id` 在任务内唯一，托管结果使用 `__npm_run_id` 区分运行；同一运行/会话的多个 revision 为累计快照，
 不能直接求和。性能指标的解释与边界见 [Session 分析契约](tasks/archive/feat-npm-session-analysis.md)。

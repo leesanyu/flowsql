@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include <operators/npm_basic/modules/dns/npm_dns_contract.h>
 #include <operators/npm_basic/npm_basic_result_consumer.h>
 #include <services/database/database_plugin.h>
 
@@ -356,6 +357,26 @@ int main() {
     assert(probe.Text("SELECT __npm_run_status FROM npm_event_probe_history_v7 WHERE "
                       "__npm_run_id='run-relations'") == "completed");
 
+    const auto dns = flowsql::npm::NpmDnsTransactionEntityDescriptorV1();
+    auto dns_first = CreateConsumer(factory.get(), {"task-dns", "run-dns-1"}, {dns}, std::make_shared<BoundedBudget>());
+    assert(dns_first->Consume({"task-dns", "run-dns-1"}, dns, *MakeRows(dns, 9001, 1)) == 0);
+    assert(dns_first->Finish() == 0);
+    AssertSummary(dns_first->ResultJson(), "run-dns-1", "completed", 1, 1);
+    auto dns_second =
+        CreateConsumer(factory.get(), {"task-dns", "run-dns-2"}, {dns}, std::make_shared<BoundedBudget>());
+    assert(dns_second->Consume({"task-dns", "run-dns-2"}, dns, *MakeRows(dns, 9001, 1)) == 0);
+    assert(dns_second->Finish() == 0);
+    for (const char* relation : {"history", "latest", "final"}) {
+        const std::string name = std::string("npm_dns_transaction_") + relation + "_v1";
+        assert(probe.Text("SELECT type FROM sqlite_master WHERE name='" + name + "'") == "view");
+        assert(probe.Int64("SELECT COUNT(*) FROM " + name + " WHERE __npm_run_id='run-dns-1'") == 1);
+        assert(probe.Int64("SELECT COUNT(*) FROM " + name + " WHERE __npm_run_id='run-dns-2'") == 1);
+        assert(probe.Int64("SELECT COUNT(*) FROM " + name + " WHERE __npm_run_id='run-1'") == 0);
+    }
+    assert(probe.Text("SELECT entity_instance_id FROM npm_dns_transaction_final_v1 WHERE "
+                      "__npm_run_id='run-dns-1'") == "9001");
+    assert(probe.Int64("SELECT schema_version FROM npm_result_entities WHERE entity_id='dns_transaction'") == 1);
+
     auto second_budget = std::make_shared<BoundedBudget>();
     auto second = CreateConsumer(factory.get(), {"task-repeat", "run-2"}, entities, second_budget);
     assert(second->Consume({"task-repeat", "run-2"}, basic, *MakeRows(basic, 101, 1)) == 0);
@@ -469,6 +490,8 @@ int main() {
     advance(4);
     advance(5);
     advance(6);
+    advance(7);
+    advance(8);
     assert(probe.Int64("SELECT COUNT(*) FROM npm_result_runs WHERE run_id='run-retained'") == 0);
     assert(probe.Int64("SELECT COUNT(*) FROM npm_session_v1_data WHERE __npm_run_id='run-retained'") == 0);
     assert(probe.Text("SELECT status FROM npm_result_runs WHERE run_id='run-writing'") == "writing");

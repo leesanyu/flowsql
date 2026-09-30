@@ -1,6 +1,9 @@
 project(test_scheduler_e2e)
 
 add_executable(${PROJECT_NAME} test_scheduler_e2e.cpp)
+target_sources(${PROJECT_NAME} PRIVATE
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_contract.cpp
+)
 
 add_executable(test_scheduler_mutation_guard
     test_scheduler_mutation_guard.cpp
@@ -52,7 +55,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     FLOWSQL_NPI_PROTOCOLS_PATH="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml"
     FLOWSQL_NPM_BASIC_PLUGIN_PATH="$<TARGET_FILE:flowsql_npm_basic>"
 )
-target_link_libraries(${PROJECT_NAME} flowsql_common)
+target_link_libraries(${PROJECT_NAME} flowsql_common flowsql_npm_basic)
 target_link_libraries(test_scheduler_mutation_guard flowsql_common)
 
 target_compile_options(${PROJECT_NAME} PRIVATE -UNDEBUG)

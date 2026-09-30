@@ -17,6 +17,8 @@
 #include <operators/npm_basic/core/npm_session_table.h>
 #include <operators/npm_basic/core/npm_task_budget.h>
 #include <operators/npm_basic/modules/basic/npm_basic_result_projector.h>
+#include <operators/npm_basic/modules/dns/npm_dns_contract.h>
+#include <operators/npm_basic/modules/dns/npm_dns_module.h>
 #include <operators/npm_basic/modules/session/npm_session_analysis_module.h>
 #include <operators/npm_basic/modules/session/npm_tcp_performance_tracker.h>
 #include <operators/npm_basic/npm_analysis_contract.h>
@@ -6490,7 +6492,7 @@ void TestNpmBasicTaskConfigFeatureSelection() {
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,basic"})JSON",
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,labeling,labeling"})JSON",
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":"labeling"})JSON",
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,dns"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,http1"})JSON",
     };
     for (const char* json : invalid_features) {
         ParseTaskConfigFailure(json, npm::NpmBasicTaskConfigError::kInvalidFeatures, "features");
@@ -11537,7 +11539,7 @@ PacketFixture MakeControlPacket(bool ipv6 = false) {
 void TestProtocolCatalogOpenAndDispatch() {
     ProtocolInputTrace first, second, control;
     auto catalog = npm::ProductionNpmModuleCatalogV1();
-    assert(catalog.size() == 2);
+    assert(catalog.size() == 3);
     catalog.push_back(CountingRegistration("probe", 3, &first));
     catalog.push_back(CountingRegistration("mirror", 3, &second));
     catalog.push_back(CountingRegistration("control", 4, &control));
@@ -11612,7 +11614,7 @@ void TestProtocolOpenRejectionsAndControlCompatibility() {
     assert(!runtime && schema == original_schema && trace.created == 0);
     assert(status.module_status.field.find("probe") != std::string::npos);
     assert(pool.acquire_calls == 0);
-    for (const char* features : {"basic,dns", "basic,basic", "basic,", "labeling", "basic,probe,probe"}) {
+    for (const char* features : {"basic,http1", "basic,basic", "basic,", "labeling", "basic,probe,probe"}) {
         const std::string text =
             std::string(R"({"input_namespace":"capture","source_domains":"1:77","features":")") + features + "\"}";
         assert(npm::ParseNpmBasicTaskConfig(text.c_str(), &config, false, catalog).error !=
@@ -11855,6 +11857,129 @@ void TestNpmTcpStreamOpenGatesAndFrozenConfig() {
     assert(aborts == 1 && trace.created == prior_created + 1 && trace.aborted == prior_aborted + 1);
     assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
     assert(pool.acquire_calls == pool.release_calls);
+}
+
+void TestDnsT0OpenContract() {
+    using Error = npm::NpmBasicTaskRuntimeError;
+    using ContractError = npm::NpmProtocolContractErrorV1;
+    const auto& production = npm::ProductionNpmModuleCatalogV1();
+    assert(production.size() == 3 && production[0].module_id == "basic" && production[1].module_id == "session" &&
+           production[2].module_id == "dns");
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    LabelingMatcherStats matcher_stats;
+    int aborts = 0;
+    StreamContractModule unrelated(&aborts);
+    int consumer_mode = 0;  // 0: valid; 1: missing; 2: wrong object.
+    auto catalog = production;
+    catalog.pop_back();  // Replace production DNS with the controllable test module.
+    npm::NpmModuleRegistrationV1 registration;
+    registration.module_id = "dns";
+    registration.entity_ids = {"dns_transaction"};
+    registration.prepare = [&aborts, &consumer_mode, &unrelated](const npm::NpmBasicTaskConfig&, std::string_view json,
+                                                                 npm::NpmPreparedModuleV1* output) {
+        npm::NpmDnsConfigV1 dns;
+        const auto parsed = npm::ParseNpmDnsConfigV1(json, &dns);
+        if (parsed.error != npm::NpmDnsConfigErrorV1::kNone) {
+            const std::string prefix = "/dns/";
+            return npm::NpmProtocolContractStatusV1{
+                ContractError::kInvalidPlan, parsed.path == "/dns" ? "config" : parsed.path.substr(prefix.size())};
+        }
+        output->plan = npm::NpmDnsModulePlanV1(dns);
+        output->create = [&aborts, &consumer_mode, &unrelated](npm::NpmProtocolContext&,
+                                                               std::shared_ptr<npm::INpmTaskBudget>) {
+            npm::NpmModuleInstanceV1 instance;
+            auto module = std::make_unique<StreamContractModule>(&aborts);
+            instance.tcp_stream_consumer = consumer_mode == 1   ? nullptr
+                                           : consumer_mode == 2 ? &unrelated
+                                                                : module.get();
+            instance.protocol = std::move(module);
+            return instance;
+        };
+        return npm::NpmProtocolContractStatusV1{};
+    };
+    catalog.push_back(std::move(registration));
+
+    const auto parse = [&](const char* json, bool labeling = true) {
+        npm::NpmBasicTaskConfig config;
+        assert(npm::ParseNpmBasicTaskConfig(json, &config, labeling, catalog).error ==
+               npm::NpmBasicTaskConfigError::kNone);
+        return config;
+    };
+    const auto open = [&](const npm::NpmBasicTaskConfig& config, bool matcher_available,
+                          std::shared_ptr<arrow::Schema>* schema, std::unique_ptr<npm::NpmBasicTaskRuntime>* runtime) {
+        return npm::NpmBasicTaskRuntime::Create(
+            config, &querier, flowsql::packet::PacketSchema(), schema, runtime, {},
+            matcher_available ? static_cast<flowsql::IFlowLabelMatcherV1*>(new ProtocolLabelMatcher(&matcher_stats))
+                              : nullptr,
+            catalog);
+    };
+    auto sentinel = arrow::schema({arrow::field("sentinel", arrow::int8())});
+    auto schema = sentinel;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    const char* valid =
+        R"({"features":"dns,labeling","observing":"dns_transaction","parameters":"{\"schema_version\":1,\"dns\":{\"primary_label_ids\":[1001]}}"})";
+    auto config = parse(valid);
+    auto status = open(config, false, &schema, &runtime);
+    assert(status.error == Error::kLabelingMatcherMissing);
+    assert(schema == sentinel && !runtime);
+    config = parse(
+        R"({"features":"dns","observing":"dns_transaction","parameters":"{\"schema_version\":1,\"dns\":{\"primary_label_ids\":[1001]}}"})");
+    status = open(config, false, &schema, &runtime);
+    assert(status.error == Error::kModulePlanError &&
+           status.module_status.error == ContractError::kUnavailableCapability);
+    assert(schema == sentinel && !runtime);
+    config = parse(
+        R"({"features":"dns,labeling","observing":"dns_transaction","parameters":"{\"schema_version\":1,\"dns\":{\"primary_label_ids\":[999]}}"})");
+    status = open(config, true, &schema, &runtime);
+    assert(status.error == Error::kModulePlanError &&
+           status.module_status.error == ContractError::kInvalidLabelSelection);
+    assert(schema == sentinel && !runtime);
+    for (const char* node : {"{}", R"({"primary_label_ids":[]})", R"({"primary_label_ids":[1001],"bad":1})"}) {
+        npm::NpmBasicTaskConfig invalid = parse(valid);
+        invalid.parameters_json = std::string(R"({"schema_version":1,"dns":)") + node + "}";
+        status = open(invalid, true, &schema, &runtime);
+        assert(status.error == Error::kModulePlanError && status.module_status.error == ContractError::kInvalidPlan);
+        assert(schema == sentinel && !runtime);
+    }
+    config =
+        parse(R"({"features":"dns,labeling","observing":"dns_transaction","parameters":"{\"schema_version\":1}"})");
+    status = open(config, true, &schema, &runtime);
+    assert(status.error == Error::kModulePlanError && status.module_status.field == "dns/primary_label_ids");
+    assert(schema == sentinel && !runtime);
+    config = parse(valid);
+    for (consumer_mode = 1; consumer_mode <= 2; ++consumer_mode) {
+        const int previous_aborts = aborts;
+        status = open(config, true, &schema, &runtime);
+        assert(status.error == Error::kModuleCreateError && status.module_status.field == "dns/tcp_stream_consumer");
+        assert(aborts == previous_aborts + 1 && schema == sentinel && !runtime);
+    }
+    consumer_mode = 0;
+    status = open(config, true, &schema, &runtime);
+    assert(status.error == Error::kNone && runtime);
+    assert(schema->Equals(*npm::NpmDnsTransactionEntityDescriptorV1().schema, true));
+    runtime->Cancel();
+    runtime.reset();
+    config = parse(
+        R"({"features":"basic","observing":"basic","parameters":"{\"schema_version\":1,\"dns\":{\"unknown\":null}}"})");
+    status = open(config, false, &schema, &runtime);
+    assert(status.error == Error::kNone && runtime);
+    assert(schema->Equals(*npm::NpmBasicResultSchema(), true) && runtime->Modules().empty());
+    runtime->Cancel();
+    runtime.reset();
+    assert(pool.acquire_calls == pool.release_calls);
+    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"dns_transaction"})", &config, true, catalog)
+               .error == npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
+    assert(
+        npm::ParseNpmBasicTaskConfig(R"({"features":"dns,labeling","observing":"dns_transaction"})", &config).error ==
+        npm::NpmBasicTaskConfigError::kNone);
+    schema = sentinel;
+    status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
+                                              new ProtocolLabelMatcher(&matcher_stats));
+    assert(status.error == Error::kModulePlanError && status.module_status.field == "dns/primary_label_ids");
+    assert(schema == sentinel && !runtime);
 }
 
 struct ProtocolLifecycleTrace {
@@ -12251,13 +12376,13 @@ void TestProtocolLabelIsolationAndAtomicFactoryFailure() {
     runtime.reset();
 
     auto bad_catalog = catalog;
-    bad_catalog[2] = CountingRegistration("selected", 1, &selected, false, std::vector<uint32_t>{999});
+    bad_catalog[3] = CountingRegistration("selected", 1, &selected, false, std::vector<uint32_t>{999});
     const auto previous_schema = schema;
     assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                             new ProtocolLabelMatcher(&labels), bad_catalog)
                .error == npm::NpmBasicTaskRuntimeError::kModulePlanError);
     assert(!runtime && schema == previous_schema);
-    bad_catalog[2] = CountingRegistration("selected", 1, &selected, true, std::vector<uint32_t>{1001});
+    bad_catalog[3] = CountingRegistration("selected", 1, &selected, true, std::vector<uint32_t>{1001});
     const auto stream_error =
         npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                          new ProtocolLabelMatcher(&labels), bad_catalog);
@@ -12289,6 +12414,9 @@ struct ResultConsumerTrace {
     std::vector<npm::NpmResultContextV1> contexts;
     std::vector<uint64_t> revisions;
     std::vector<bool> finals;
+    std::vector<uint64_t> dns_domains;
+    std::vector<uint16_t> dns_ids;
+    std::vector<std::string> dns_outcomes;
     int attempts = 0;
     int fail_at = 0;
     int finishes = 0;
@@ -12314,6 +12442,15 @@ class RecordingResultConsumer final : public npm::INpmResultConsumerV1 {
                 std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName(entity.revision_column))->Value(i));
             trace_->finals.push_back(
                 std::static_pointer_cast<arrow::BooleanArray>(rows.GetColumnByName(entity.is_final_column))->Value(i));
+            if (entity.entity_id == "dns_transaction") {
+                trace_->dns_domains.push_back(
+                    std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("observation_domain_id"))
+                        ->Value(i));
+                trace_->dns_ids.push_back(
+                    std::static_pointer_cast<arrow::UInt16Array>(rows.GetColumnByName("dns_id"))->Value(i));
+                trace_->dns_outcomes.push_back(
+                    std::static_pointer_cast<arrow::StringArray>(rows.GetColumnByName("outcome"))->GetString(i));
+            }
         }
         return 0;
     }
@@ -12690,16 +12827,17 @@ npm::NpmModuleCatalogV1 DualEntityCatalog(DualEntityProtocolTrace* trace, uint64
 
 void TestProtocolProductionCatalogAndConcurrentDualEntityControlRuntime() {
     const auto& production = npm::ProductionNpmModuleCatalogV1();
-    assert(production.size() == 2);
+    assert(production.size() == 3);
     assert(production[0].module_id == "basic" && production[0].entity_ids == std::vector<std::string>{"basic"});
     assert(production[1].module_id == "session" && production[1].entity_ids == std::vector<std::string>{"session"});
+    assert(production[2].module_id == "dns" && production[2].entity_ids == std::vector<std::string>{"dns_transaction"});
 
     ContextDictionary first_dictionary, second_dictionary;
     ContextProtocol first_protocol(&first_dictionary), second_protocol(&second_dictionary);
     ContextPool first_pool(&first_protocol), second_pool(&second_protocol);
     SinglePoolQuerier first_querier(&first_pool), second_querier(&second_pool);
 
-    for (const char* unavailable : {"dns", "http1", "tls", "icmp"}) {
+    for (const char* unavailable : {"http1", "tls", "icmp"}) {
         auto config = MakeRuntimeTaskConfig();
         config.features.module_ids = {unavailable};
         config.features.basic_enabled = false;
@@ -13330,6 +13468,104 @@ void TestTcpStreamRecordBatchTypedResultRouting() {
     assert(std::get<0>(events[0]) == static_cast<uint8_t>(npm::NpmPacketDirection::kAToB));
 }
 
+void TestDnsT3RuntimeRouting() {
+    const auto& catalog = npm::ProductionNpmModuleCatalogV1();
+
+    const std::vector<uint8_t> query = {0, 9, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 'a', 0, 0, 1, 0, 1};
+    auto answer = query;
+    answer[2] = 0x80;
+    const auto q = MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 443, query);
+    const auto a = MakeIpv6UdpPacket("2001:db8::2", 443, "2001:db8::1", 53000, answer);
+    const auto batch =
+        MakeEncodedPacketBatch({MakeBatchPacketRecord(q, 1, 100, 1), MakeBatchPacketRecord(a, 1, 200, 2),
+                                MakeBatchPacketRecord(q, 2, 300, 3), MakeBatchPacketRecord(a, 2, 400, 4)});
+    const auto first_query = MakeEncodedPacketBatch({MakeBatchPacketRecord(q, 1, 100, 1)});
+    const auto remaining =
+        MakeEncodedPacketBatch({MakeBatchPacketRecord(a, 1, 200, 2), MakeBatchPacketRecord(q, 2, 300, 3),
+                                MakeBatchPacketRecord(a, 2, 400, 4)});
+    struct Scenario {
+        const char* features;
+        const char* observing;
+    };
+    for (const auto scenario :
+         {Scenario{"dns,labeling", "dns_transaction"}, Scenario{"labeling,dns,basic", "dns_transaction"},
+          Scenario{"basic,dns,labeling", "basic"}, Scenario{"basic,session,dns,labeling", "session"}}) {
+        ContextDictionary dictionary;
+        ContextProtocol protocol(&dictionary);
+        ContextPool pool(&protocol);
+        SinglePoolQuerier querier(&pool);
+        LabelingMatcherStats labels;
+        ResultConsumerTrace trace;
+        npm::NpmBasicTaskConfig config;
+        const std::string json =
+            std::string(R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":")") +
+            scenario.features + R"(","observing":")" + scenario.observing + R"("})";
+        assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config, true, catalog).error ==
+               npm::NpmBasicTaskConfigError::kNone);
+        config.parameters_json = R"({"schema_version":1,"dns":{"primary_label_ids":[1001]}})";
+        auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+        std::shared_ptr<arrow::Schema> schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+        assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                                budget, new ProtocolLabelMatcher(&labels), catalog,
+                                                std::make_unique<RecordingResultConsumer>(&trace))
+                   .error == npm::NpmBasicTaskRuntimeError::kNone);
+        std::shared_ptr<arrow::RecordBatch> output;
+        assert(runtime->ProcessOfflineBatch(first_query, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(runtime->MaintenancePlan().event_deadline_ns == 5'000'000'100);
+        output.reset();
+        assert(runtime->ProcessOfflineBatch(remaining, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(output && output->schema()->Equals(*schema, true));
+        const int64_t foreground_dns =
+            std::string_view(scenario.observing) == "dns_transaction" ? output->num_rows() : 0;
+        output.reset();
+        assert(runtime->FlushOffline(500, &output).error == npm::NpmEofFlushError::kNone);
+        assert(output && output->schema()->Equals(*schema, true));
+        assert(trace.dns_domains == (std::vector<uint64_t>{77, 78}));
+        assert(trace.dns_ids == (std::vector<uint16_t>{9, 9}));
+        assert(trace.dns_outcomes == (std::vector<std::string>{"matched", "matched"}));
+        if (std::string_view(scenario.features).find("basic") != std::string_view::npos)
+            assert(std::find(trace.entities.begin(), trace.entities.end(), "basic") != trace.entities.end());
+        if (std::string_view(scenario.features).find("session") != std::string_view::npos)
+            assert(std::find(trace.entities.begin(), trace.entities.end(), "session") != trace.entities.end());
+        assert(foreground_dns == (std::string_view(scenario.observing) == "dns_transaction" ? 2 : 0));
+        assert(trace.finishes == 1);
+        output.reset();
+        runtime.reset();
+        assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0 && labels.release_calls == 1);
+    }
+    {
+        ContextDictionary dictionary;
+        ContextProtocol protocol(&dictionary);
+        ContextPool pool(&protocol);
+        SinglePoolQuerier querier(&pool);
+        LabelingMatcherStats labels;
+        ResultConsumerTrace trace;
+        trace.fail_at = 2;
+        npm::NpmBasicTaskConfig config;
+        assert(
+            npm::ParseNpmBasicTaskConfig(
+                R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":"dns,labeling","observing":"dns_transaction"})",
+                &config, true, catalog)
+                .error == npm::NpmBasicTaskConfigError::kNone);
+        config.parameters_json = R"({"schema_version":1,"dns":{"primary_label_ids":[1001]}})";
+        auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+        std::shared_ptr<arrow::Schema> schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+        assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                                budget, new ProtocolLabelMatcher(&labels), catalog,
+                                                std::make_unique<RecordingResultConsumer>(&trace))
+                   .error == npm::NpmBasicTaskRuntimeError::kNone);
+        std::shared_ptr<arrow::RecordBatch> output;
+        assert(runtime->ProcessOfflineBatch(batch, &output).error ==
+               npm::NpmBasicOfflineBatchError::kBatchProcessError);
+        assert(!output && trace.attempts == 2 && trace.dns_outcomes == (std::vector<std::string>{"matched"}));
+        assert(trace.cancels == 1 && trace.finishes == 0);
+        runtime.reset();
+        assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--tcp-stream-only") {
         TestTcpStreamRecordBatchTypedResultRouting();
@@ -13349,6 +13585,8 @@ int main(int argc, char** argv) {
     TestNpmTcpStreamParameters();
     TestNpmTcpStreamModuleInstanceContract();
     TestNpmTcpStreamOpenGatesAndFrozenConfig();
+    TestDnsT0OpenContract();
+    TestDnsT3RuntimeRouting();
     TestProtocolProductionCatalogAndConcurrentDualEntityControlRuntime();
     TestResultRouterValidationBudgetAndUnobservedRelease();
     TestUnifiedConsumerBasicSessionSnapshotsFinalsAndRunIdentity();

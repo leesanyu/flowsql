@@ -1,38 +1,41 @@
 # 即时工作台
 
-事项：NPM 共享有界 TCP 字节流（`npm-shared-tcp-stream`）T4 实施。
-关联 Feature Task：T4 — 交付端到端回归与接入说明，证明批次边界、失败/取消和既有 Basic/Session 使用方式不破坏共享流保证。
-当前 Atomic Slice：T4 A11 跨 RecordBatch 类型化结果与 owner 回收、A12 完整回归和接入说明。
-状态：已完成；WIP=0。
+事项：NPM DNS 事务分析（npm-dns-analysis）T4。
+关联 Feature Task：T4，交付生产目录接入、组合回归与使用说明，使离线用户可显式启用 DNS 并观察结果，既有 Basic/Session 行为保持稳定。
+当前 Atomic Slice：T4 使用说明与 Feature 全量验收；WIP=0，状态：已完成；T4 与 Feature 整体已完成。
 
 ## 业务意图
 
-用同一组捕获事实的不同 RecordBatch 切分驱动真实 NPM runtime，验证共享流事件与类型化结果一致；完成全量回归并说明后续协议模块的内部接入方式和现有离线用户边界。
+说明离线 SQL 显式启用 DNS、观察前台和查询托管结果的方法，并用全量构建、完整 CTest 与 Sanitizer 验证最终交付。
 
 ## Non-Goals
 
-- 不新增 DNS/HTTP/TLS 生产模块、SQL 结果实体、第二套会话链或实时采集入口。
-- 不重写 T0～T3 的流核心、预算或运行时机制；仅在本轮测试暴露 P0/P1 阻塞问题时修复。
-- 不修改无关模块，不提交或推送。
+- 不新增 DNS 协议能力、存储后端或实时采集入口；不更改现有插件 ABI。
+- 不提交或推送。
 
-## 冻结契约与测试
+## 冻结边界
 
-- 保留 `INpmProtocolModuleV1` 虚表及 `INpmTcpStreamConsumerV1` 数据契约；测试模块只通过本地 catalog 注入，生产目录仍仅 Basic/Session。
-- A11 测试模块按 Data/Gap/End 发射带身份、revision、时间、区间及字节的类型化 Arrow 实体，`NpmResultRouter` 前台和结果消费者均接收有效行。
-- 相同报文按单批次和跨批次送入时，按事件字段规范化后序列一致；不同 `observing` 只改变前台实体，结果消费者看到全部启用实体；输入批次 owner 在流仍存活时可释放。
-- 既有失败/取消、Basic/Session 和流核心锚点由定向与完整 CTest 覆盖；相关运行时和流目标通过 ASan/UBSan。
+- README 增加准确的 DNS 配置、标签依赖、观察与托管关系说明。
+- DNS 定向测试在 ASan/UBSan 构建下覆盖 UDP、TCP、预算、终结路径；运行标准全量构建和完整 CTest。
+- 仅修复本 Feature 验收阻塞，完成后勾选 T4、归档规格、更新 Backlog 和工作台。
 
 ## 允许修改文件
 
-- `tasks/active_task.md`
-- `tasks/specs/feat-npm-shared-tcp-stream.md`（完成后移入 `tasks/archive/`）
-- `tasks/archive/feat-npm-shared-tcp-stream.md`（归档目标）
-- `tasks/product_backlog.md`（仅 Feature 状态与规格链接）
-- `src/tests/test_npm_basic/test_npm_basic.cpp`
-- `README.md`
-- `docs/npm-tcp-stream.md`（新增）
-
-每次 patch 后检查 `git diff --name-only` 与未跟踪文件；T0～T3 原有未提交改动是起点，禁止覆盖或清理。起点提交 `4cb275e`。
+- tasks/active_task.md
+- tasks/specs/feat-npm-dns-analysis.md
+- tasks/archive/feat-npm-dns-analysis.md
+- tasks/product_backlog.md
+- README.md
+- .gitignore
+- src/tests/test_npm_basic/CMakeLists.txt
+- src/tests/test_npm_basic/test_npm_dns_udp.cpp
+- src/tests/test_npm_basic/test_npm_dns_tcp.cpp
+- src/tests/test_npm_basic/test_npm_dns_result_encoder.cpp
+- src/tests/test_npm_basic/test_npm_dns_module.cpp
+- src/operators/npm_basic/modules/dns/npm_dns_udp.cpp
+- src/operators/npm_basic/modules/dns/npm_dns_tcp.cpp
+- src/operators/npm_basic/modules/dns/npm_dns_result_encoder.cpp
+- src/operators/npm_basic/modules/dns/npm_dns_module.cpp
 
 ## 验收命令
 
@@ -40,23 +43,21 @@
 cmake -B build src
 cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
-cmake --build build --target test_npm_basic test_npm_tcp_stream test_npm_tcp_stream_shared test_npm_protocol_contract -j8
-ctest --test-dir build -R '^test_npm_(basic|tcp_stream_runtime|tcp_stream_shared|tcp_stream|protocol_contract)$' --output-on-failure
-clang-format-18 --dry-run --Werror src/tests/test_npm_basic/test_npm_basic.cpp
+cmake -B build-npm-dns-sanitizer src -DFLOWSQL_NPM_DNS_SANITIZERS=ON
+cmake --build build-npm-dns-sanitizer --target test_npm_dns_udp test_npm_dns_tcp test_npm_dns_result_encoder test_npm_dns_module -j$(nproc)
+ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-npm-dns-sanitizer -R '^test_npm_dns_(udp|tcp|result_encoder|module)$' --output-on-failure
+clang-format-18 --dry-run --Werror src/operators/npm_basic/core/npm_module_catalog.cpp src/operators/npm_basic/modules/dns/*.cpp src/operators/npm_basic/modules/dns/*.h src/tests/test_npm_basic/test_npm_dns_*.cpp src/tests/test_npm_basic/test_npm_basic.cpp src/tests/test_npm_basic/test_npm_result_sqlite.cpp
 git diff --check
+git diff --name-only
+git ls-files --others --exclude-standard
 ```
-
-相关流核心、共享方向和运行时另用 `FLOWSQL_NPM_TCP_STREAM_SANITIZERS=ON` 的独立构建执行 ASan/UBSan；核对生产 catalog 只含 Basic/Session，并记录外部依赖状态及完整 CTest 结果。
 
 ## 时间盒与停止条件
 
-- 2026-09-30 16:25（Asia/Shanghai）开始；每 10～30 分钟记录同一 T4 的检查点，用户要求持续到 T4 完成。
-- 每个检查点只能记为“进行中且检查点通过”“当前错误待修复”或“被明确问题阻塞”，不扩文件或任务边界。
-- A11/A12、文档、构建/测试/格式/diff 审查全通过后勾选 T4，归档 Feature、更新 Backlog，WIP=0，停止。
+- 2026-10-01 00:21（Asia/Shanghai）起，每个 10～30 分钟检查点继续同一 T4，直至 A11/A12 全部满足并归档；用户已明确要求中间不要停。
 
 ## 检查点
 
-- 2026-09-30 16:25（Asia/Shanghai）：T4 边界已冻结；待添加 A11 断言并执行验收。
-- 2026-09-30 16:46（Asia/Shanghai）：T4 已完成。跨 RecordBatch 类型化 Data/Gap/End 结果在单批次和逐包批次一致；stream 与 session 两种 observing 的前台输出符合选择，结果消费者仍收到 stream、Basic、Session；输入 owner 及时释放，EOF/任务预算归零。
-- 验收：标准 CMake 配置和全量构建通过；完整 CTest 22/22 通过、0 失败，覆盖 NPM/参数/标签/结果后端/Scheduler；独立 ASan/UBSan/LeakSanitizer 流核心、共享方向和运行时 3/3 通过、0 失败。沙箱内 LeakSanitizer 受 ptrace 限制，在沙箱外重跑通过。格式、版权、diff 检查通过；生产 catalog 仍仅 Basic/Session。
-- T4 已勾选，规格移入 `tasks/archive/`，Backlog 标记完成。T0～T3 的未提交改动仍保留；本轮未提交或推送。
+- 2026-09-30 23:48～2026-10-01 00:05：生产目录注册 DNS，真实 runtime 测试改用生产目录；`test_npm_basic` 通过。
+- 2026-10-01 00:06～00:20：SQLite DNS v1 三关系、两个 run_id、Scheduler SQL/DataFrame 三关系读回与旧 SQL 组合通过；三项定向 CTest 3/3，改动行格式和 diff 检查通过。
+- 2026-10-01 00:21～00:34：README 增加 DNS 显式启用、标签快照、前台观察和托管关系查询说明；标准配置与全量构建通过，完整 CTest 26/26。独立 ASan/UBSan 四项 DNS 定向测试 4/4；本机 ptrace 下 LeakSanitizer 无法启动，设置 `ASAN_OPTIONS=detect_leaks=0` 保留 ASan 内存访问检查与 UBSan。全部改动 C++ 格式、Scheduler 改动行格式、`git diff --check` 通过；P0/P1 diff 审查未见阻塞。T4 已勾选、规格已归档、Backlog 已完成；未提交或推送。
