@@ -18,6 +18,7 @@ add_library(${PROJECT_NAME} SHARED
     core/npm_task_budget.cpp
     core/npm_tcp_stream_direction.cpp
     core/npm_tcp_stream_shared.cpp
+    core/npm_tcp_stream_provider.cpp
     modules/basic/npm_basic_result_projector.cpp
     modules/session/npm_session_analysis_module.cpp
     modules/session/npm_tcp_performance_tracker.cpp

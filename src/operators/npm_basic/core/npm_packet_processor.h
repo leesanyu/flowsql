@@ -7,6 +7,7 @@
 #include "npm_module_catalog.h"
 #include "npm_packet_batch_view.h"
 #include "npm_session_table.h"
+#include "npm_tcp_stream_provider.h"
 
 #include <cstdint>
 #include <vector>
@@ -42,7 +43,8 @@ NpmPacketProcessStatus ProcessNpmBoundPacket(const packet::PacketView& packet, c
                                              uint32_t new_session_primary_label_id, NpmSessionTable& sessions,
                                              packet::IPacketProtocolIdentifier& identifier,
                                              const std::vector<INpmAnalysisModule*>& modules, INpmResultWriter& writer,
-                                             std::vector<NpmSessionSnapshot>* ended_sessions);
+                                             std::vector<NpmSessionSnapshot>* ended_sessions,
+                                             NpmTcpStreamProvider* streams = nullptr);
 
 struct NpmSessionEndEvent {
     NpmSessionSnapshot snapshot;
@@ -76,7 +78,8 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
     const NpmObservationDomainMap& domain_map, const NpmPacketBatchView& batch, NpmSessionTable& sessions,
     packet::IPacketProtocolIdentifier& identifier, const std::vector<INpmAnalysisModule*>& modules,
     INpmResultWriter& writer, std::vector<NpmSessionEndEvent>* ended_events,
-    const IFlowLabelMatcherV1* matcher = nullptr, const std::vector<NpmProtocolModuleAdapter*>& protocol_modules = {});
+    const IFlowLabelMatcherV1* matcher = nullptr, const std::vector<NpmProtocolModuleAdapter*>& protocol_modules = {},
+    NpmTcpStreamProvider* streams = nullptr);
 
 }  // namespace flowsql::npm
 

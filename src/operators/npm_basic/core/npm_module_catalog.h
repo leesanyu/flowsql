@@ -59,6 +59,8 @@ class NpmProtocolModuleAdapter final : public INpmAnalysisModule, private INpmRe
     int OnTime(const NpmModuleTimeV1& time);
     int Finish(int64_t observed_at_ns);
     void Abort() noexcept;
+    const NpmModulePlanV1& Plan() const noexcept { return plan_; }
+    INpmResultEmitterV1* StreamEmitter() noexcept { return this; }
     int OnPacket(const NpmPacketView&, const NpmSessionView&, INpmResultWriter&) override;
     int OnSessionSnapshot(const NpmSessionView&, int64_t, INpmResultWriter&) override;
     int OnSessionEnd(const NpmSessionView&, NpmSessionEndReason, int64_t, INpmResultWriter&) override;

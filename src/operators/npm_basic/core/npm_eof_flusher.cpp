@@ -3,6 +3,8 @@
 
 #include "npm_eof_flusher.h"
 
+#include "npm_tcp_stream_provider.h"
+
 #include <new>
 #include <utility>
 
@@ -36,7 +38,7 @@ NpmEofFlushStatus NpmEofFlusher::Flush(int64_t observed_at, NpmSessionTable& ses
                                        const std::vector<NpmProtocolModuleAdapter*>& protocol_modules,
                                        NpmBasicResultCollector& collector, NpmBasicResultProjector& projector,
                                        const std::shared_ptr<INpmTaskBudget>& budget,
-                                       std::shared_ptr<arrow::RecordBatch>* output) {
+                                       std::shared_ptr<arrow::RecordBatch>* output, NpmTcpStreamProvider* streams) {
     if (state_ != NpmEofFlushState::kOpen) return TerminalStatus(state_);
 
     NpmEofFlushStatus status;
@@ -69,6 +71,16 @@ NpmEofFlushStatus NpmEofFlusher::Flush(int64_t observed_at, NpmSessionTable& ses
 
         std::vector<NpmSessionEndEvent> events;
         events.reserve(snapshots.size());
+        if (streams) {
+            for (const auto& snapshot : snapshots) {
+                if (streams->OnSessionEnd(snapshot, observed_at) != 0) {
+                    status.error = NpmEofFlushError::kModuleError;
+                    status.module_error = EIO;
+                    state_ = NpmEofFlushState::kFailed;
+                    return status;
+                }
+            }
+        }
         status.module_error = NotifyNpmSessionEnd(snapshots, modules, observed_at, collector);
         if (status.module_error != 0) {
             status.error = NpmEofFlushError::kModuleError;

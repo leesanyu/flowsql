@@ -25,8 +25,9 @@ void AppendSessionEndEvents(std::vector<NpmSessionSnapshot>* snapshots, int64_t 
 
 int NotifySessionEndRange(const std::vector<NpmSessionSnapshot>& ended_sessions, size_t begin, size_t end,
                           const std::vector<INpmAnalysisModule*>& modules, int64_t observed_at_ns,
-                          INpmResultWriter& writer) {
+                          INpmResultWriter& writer, NpmTcpStreamProvider* streams) {
     for (size_t index = begin; index < end; ++index) {
+        if (streams && streams->OnSessionEnd(ended_sessions[index], observed_at_ns) != 0) return EIO;
         const auto view = ended_sessions[index].View();
         for (auto* module : modules) {
             const int error = module->OnSessionEnd(view, ended_sessions[index].end_reason, observed_at_ns, writer);
@@ -95,7 +96,8 @@ NpmPacketProcessStatus ProcessNpmBoundPacket(const packet::PacketView& packet, c
                                              uint32_t new_session_primary_label_id, NpmSessionTable& sessions,
                                              packet::IPacketProtocolIdentifier& identifier,
                                              const std::vector<INpmAnalysisModule*>& modules, INpmResultWriter& writer,
-                                             std::vector<NpmSessionSnapshot>* ended_sessions) {
+                                             std::vector<NpmSessionSnapshot>* ended_sessions,
+                                             NpmTcpStreamProvider* streams) {
     NpmPacketProcessStatus status;
     if (ended_sessions == nullptr) {
         status.error = NpmPacketProcessError::kNullOutput;
@@ -143,7 +145,7 @@ NpmPacketProcessStatus ProcessNpmBoundPacket(const packet::PacketView& packet, c
 
     if (observed.has_active_session) {
         status.module_error = NotifySessionEndRange(observed.ended_sessions, 0, observed.ended_sessions.size(), modules,
-                                                    packet.meta.timestamp_ns, writer);
+                                                    packet.meta.timestamp_ns, writer, streams);
         if (status.module_error != 0) {
             status.error = NpmPacketProcessError::kModuleError;
             return status;
@@ -164,6 +166,10 @@ NpmPacketProcessStatus ProcessNpmBoundPacket(const packet::PacketView& packet, c
                 return status;
             }
         }
+        if (streams && (status.module_error = streams->OnPacket(npm_packet, sampled)) != 0) {
+            status.error = NpmPacketProcessError::kModuleError;
+            return status;
+        }
     } else if (!observed.ended_sessions.empty()) {
         const size_t current_session_index = observed.ended_sessions.size() - 1;
         auto& current_snapshot = observed.ended_sessions[current_session_index];
@@ -171,7 +177,7 @@ NpmPacketProcessStatus ProcessNpmBoundPacket(const packet::PacketView& packet, c
                                                      current_snapshot.session_id != existing_session_id ||
                                                      existing_protocol_status == NpmProtocolStatus::kPending;
         status.module_error = NotifySessionEndRange(observed.ended_sessions, 0, current_session_index, modules,
-                                                    packet.meta.timestamp_ns, writer);
+                                                    packet.meta.timestamp_ns, writer, streams);
         if (status.module_error != 0) {
             status.error = NpmPacketProcessError::kModuleError;
             return status;
@@ -192,10 +198,14 @@ NpmPacketProcessStatus ProcessNpmBoundPacket(const packet::PacketView& packet, c
                 return status;
             }
         }
+        if (streams && (status.module_error = streams->OnPacket(npm_packet, current_session)) != 0) {
+            status.error = NpmPacketProcessError::kModuleError;
+            return status;
+        }
 
         status.module_error =
             NotifySessionEndRange(observed.ended_sessions, current_session_index, observed.ended_sessions.size(),
-                                  modules, packet.meta.timestamp_ns, writer);
+                                  modules, packet.meta.timestamp_ns, writer, streams);
         if (status.module_error != 0) {
             status.error = NpmPacketProcessError::kModuleError;
             return status;
@@ -210,7 +220,7 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
     const NpmObservationDomainMap& domain_map, const NpmPacketBatchView& batch, NpmSessionTable& sessions,
     packet::IPacketProtocolIdentifier& identifier, const std::vector<INpmAnalysisModule*>& modules,
     INpmResultWriter& writer, std::vector<NpmSessionEndEvent>* ended_events, const IFlowLabelMatcherV1* matcher,
-    const std::vector<NpmProtocolModuleAdapter*>& protocol_modules) {
+    const std::vector<NpmProtocolModuleAdapter*>& protocol_modules, NpmTcpStreamProvider* streams) {
     NpmPacketBatchProcessStatus status;
     if (ended_events == nullptr) {
         status.error = NpmPacketBatchProcessError::kNullOutput;
@@ -285,14 +295,19 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
                     return status;
                 }
 
-                status.module_error =
-                    NotifyNpmSessionEnd(progress.ended_sessions, modules, packet.meta.timestamp_ns, writer);
+                status.module_error = NotifySessionEndRange(progress.ended_sessions, 0, progress.ended_sessions.size(),
+                                                            modules, packet.meta.timestamp_ns, writer, streams);
                 if (status.module_error != 0) {
                     status.error = NpmPacketBatchProcessError::kModuleError;
                     status.row = current_row;
                     return status;
                 }
                 if (progress.disposition == NpmCaptureProgressDisposition::kAdvanced) {
+                    if (streams && (status.module_error = streams->AdvanceWatermark(progress.watermark_ns)) != 0) {
+                        status.error = NpmPacketBatchProcessError::kModuleError;
+                        status.row = current_row;
+                        return status;
+                    }
                     const NpmModuleTimeV1 time{{progress.watermark_ns}, packet.meta.timestamp_ns};
                     for (auto* module : protocol_modules) {
                         status.module_error = module->OnTime(time);
@@ -430,7 +445,7 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
             status.packet_status =
                 staged.control ? dispatch_control(packet, staged.layer)
                                : ProcessNpmBoundPacket(packet, staged.layer, staged.binding, primary_label_id, sessions,
-                                                       identifier, modules, writer, &observed_sessions);
+                                                       identifier, modules, writer, &observed_sessions, streams);
             if (status.packet_status.error != NpmPacketProcessError::kNone) {
                 status.error = NpmPacketBatchProcessError::kPacketError;
                 status.row = current_row;
@@ -449,14 +464,19 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
                 return status;
             }
 
-            status.module_error =
-                NotifyNpmSessionEnd(progress.ended_sessions, modules, packet.meta.timestamp_ns, writer);
+            status.module_error = NotifySessionEndRange(progress.ended_sessions, 0, progress.ended_sessions.size(),
+                                                        modules, packet.meta.timestamp_ns, writer, streams);
             if (status.module_error != 0) {
                 status.error = NpmPacketBatchProcessError::kModuleError;
                 status.row = current_row;
                 return status;
             }
             if (progress.disposition == NpmCaptureProgressDisposition::kAdvanced) {
+                if (streams && (status.module_error = streams->AdvanceWatermark(progress.watermark_ns)) != 0) {
+                    status.error = NpmPacketBatchProcessError::kModuleError;
+                    status.row = current_row;
+                    return status;
+                }
                 const NpmModuleTimeV1 time{{progress.watermark_ns}, packet.meta.timestamp_ns};
                 for (auto* module : protocol_modules) {
                     status.module_error = module->OnTime(time);

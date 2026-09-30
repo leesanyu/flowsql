@@ -156,6 +156,7 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         NpmModuleCapabilitiesV1 capabilities;
         capabilities.labeling_enabled = config.features.labeling_enabled;
         capabilities.labeling_available = matcher != nullptr;
+        capabilities.tcp_stream_available = true;
         for (const auto& entry : prepared) {
             if (matcher && entry.plan.primary_label_ids) {
                 for (uint32_t id : *entry.plan.primary_label_ids) {
@@ -239,6 +240,7 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
             });
         runtime->collector_->BindRouter(runtime->router_);
         runtime->prepared_modules_ = std::move(prepared);
+        std::vector<NpmTcpStreamRegistration> stream_registrations;
         for (size_t index = 0; index < runtime->prepared_modules_.size(); ++index) {
             const auto& entry = runtime->prepared_modules_[index];
             auto instance = std::move(instances[index]);
@@ -246,12 +248,25 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
                 auto adapter = std::make_unique<NpmProtocolModuleAdapter>(entry.plan, std::move(instance.protocol),
                                                                           &runtime->cancellation_requested_,
                                                                           runtime->router_.get());
+                if (instance.tcp_stream_consumer) {
+                    stream_registrations.push_back({adapter.get(), instance.tcp_stream_consumer});
+                }
                 runtime->protocol_modules_.push_back(adapter.get());
                 instance.analysis = std::move(adapter);
             }
             if (instance.analysis) {
                 runtime->modules_.push_back(instance.analysis.get());
                 runtime->owned_modules_.push_back(std::move(instance.analysis));
+            }
+        }
+        if (!stream_registrations.empty()) {
+            const auto error = NpmTcpStreamProvider::Create(runtime->config_.tcp_stream, runtime->budget_,
+                                                            {stream_registrations.data(), stream_registrations.size()},
+                                                            &runtime->streams_, &runtime->cancellation_requested_);
+            if (error != NpmTcpStreamError::kNone) {
+                status.error = NpmBasicTaskRuntimeError::kModuleCreateError;
+                status.module_status = {NpmProtocolContractErrorV1::kUnavailableCapability, "tcp_stream/provider"};
+                return status;
             }
         }
         *output_schema = std::move(result_schema);
@@ -352,10 +367,11 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::s
         if (state_.load(std::memory_order_acquire) == NpmEofFlushState::kCancelled) return cancel();
 
         std::vector<NpmSessionEndEvent> ended_events;
-        status.process_status =
-            ProcessNpmOfflinePacketBatch(config_.domains, *batch, *sessions_, *protocol_context_->Identifier(),
-                                         modules_, *collector_, &ended_events, matcher_.get(), protocol_modules_);
+        status.process_status = ProcessNpmOfflinePacketBatch(
+            config_.domains, *batch, *sessions_, *protocol_context_->Identifier(), modules_, *collector_, &ended_events,
+            matcher_.get(), protocol_modules_, streams_.get());
         if (status.process_status.error != NpmPacketBatchProcessError::kNone) {
+            RememberStreamFailure();
             return fail(NpmBasicOfflineBatchError::kBatchProcessError, "npm.basic offline batch processing failed");
         }
         if (state_.load(std::memory_order_acquire) == NpmEofFlushState::kCancelled) return cancel();
@@ -453,11 +469,24 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
         auto progress = sessions_->AdvanceCaptureProgress(input.capture_progress);
         status.progress_disposition = progress.disposition;
         status.ended_sessions = progress.ended_sessions.size();
+        if (streams_) {
+            for (const auto& ended : progress.ended_sessions) {
+                status.module_error = streams_->OnSessionEnd(ended, input.observed_at_ns);
+                if (status.module_error != 0) {
+                    RememberStreamFailure();
+                    return fail(NpmBasicRealtimeMaintenanceError::kModuleError, kRealtimeModuleError);
+                }
+            }
+        }
         status.module_error = NotifyNpmSessionEnd(progress.ended_sessions, modules_, input.observed_at_ns, *collector_);
         if (status.module_error != 0) {
             return fail(NpmBasicRealtimeMaintenanceError::kModuleError, kRealtimeModuleError);
         }
         if (progress.disposition == NpmCaptureProgressDisposition::kAdvanced) {
+            if (streams_ && (status.module_error = streams_->AdvanceWatermark(progress.watermark_ns)) != 0) {
+                RememberStreamFailure();
+                return fail(NpmBasicRealtimeMaintenanceError::kModuleError, kRealtimeModuleError);
+            }
             const NpmModuleTimeV1 time{{progress.watermark_ns}, input.observed_at_ns};
             for (auto* module : protocol_modules_) {
                 status.module_error = module->OnTime(time);
@@ -544,7 +573,8 @@ NpmEofFlushStatus NpmBasicTaskRuntime::FlushOffline(int64_t observed_at, std::sh
 
     std::shared_ptr<arrow::RecordBatch> next_output;
     auto status = eof_flusher_.Flush(observed_at, *sessions_, modules_, protocol_modules_, *collector_, *projector_,
-                                     budget_, output == nullptr ? nullptr : &next_output);
+                                     budget_, output == nullptr ? nullptr : &next_output, streams_.get());
+    if (status.error != NpmEofFlushError::kNone) RememberStreamFailure();
     NpmEofFlushState expected = NpmEofFlushState::kOpen;
     const NpmEofFlushState terminal =
         status.error == NpmEofFlushError::kNone ? NpmEofFlushState::kFlushed : NpmEofFlushState::kFailed;
@@ -586,6 +616,11 @@ NpmMaintenancePlanV1 NpmBasicTaskRuntime::MaintenancePlan() const {
     NpmMaintenancePlanV1 plan;
     if (state_.load(std::memory_order_acquire) != NpmEofFlushState::kOpen) return plan;
     plan.event_deadline_ns = sessions_->NextEventDeadlineNs();
+    if (streams_) {
+        const auto deadline = streams_->NextEventDeadlineNs();
+        if (deadline && (!plan.event_deadline_ns || *deadline < *plan.event_deadline_ns))
+            plan.event_deadline_ns = deadline;
+    }
     for (const auto* module : protocol_modules_) {
         const auto deadline = module->NextEventDeadlineNs();
         if (deadline && (!plan.event_deadline_ns || *deadline < *plan.event_deadline_ns)) {
@@ -621,6 +656,47 @@ void NpmBasicTaskRuntime::SetLastErrorOnce(const char* error) noexcept {
     }
 }
 
+void NpmBasicTaskRuntime::RememberStreamFailure() noexcept {
+    if (!streams_ || streams_->Failure().error == NpmTcpStreamError::kNone) return;
+    try {
+        const auto& failure = streams_->Failure();
+        const char* kind = "stream processing failed";
+        switch (failure.error) {
+            case NpmTcpStreamError::kDirectionLimitExceeded:
+                kind = "direction limit exceeded";
+                break;
+            case NpmTcpStreamError::kTaskBudgetExceeded:
+                kind = "task budget exceeded";
+                break;
+            case NpmTcpStreamError::kAllocationFailed:
+                kind = "allocation failed";
+                break;
+            case NpmTcpStreamError::kInvalidConsume:
+                kind = "invalid consume";
+                break;
+            case NpmTcpStreamError::kConsumerError:
+                kind = "consumer callback failed";
+                break;
+            case NpmTcpStreamError::kEmitterError:
+                kind = "result emitter failed";
+                break;
+            case NpmTcpStreamError::kNotDrained:
+                kind = "consumer did not drain End";
+                break;
+            default:
+                break;
+        }
+        stream_error_ = std::string("npm.basic tcp stream ") + kind +
+                        " session_id=" + std::to_string(failure.session_id) +
+                        " direction=" + (failure.direction == NpmPacketDirection::kAToB ? "A->B" : "B->A") +
+                        " retaining=" + std::string(failure.retaining_consumer) +
+                        " failing=" + std::string(failure.failing_consumer);
+        SetLastErrorOnce(stream_error_.c_str());
+    } catch (const std::bad_alloc&) {
+        // The existing generic runtime failure remains available if formatting cannot allocate.
+    }
+}
+
 void NpmBasicTaskRuntime::ReleaseResources() noexcept {
     if (router_) {
         const auto runtime_state = state_.load(std::memory_order_acquire);
@@ -635,6 +711,8 @@ void NpmBasicTaskRuntime::ReleaseResources() noexcept {
         }
         router_->Discard();
     }
+    if (streams_) streams_->Abort();
+    streams_.reset();
     modules_.clear();
     protocol_modules_.clear();
     owned_modules_.clear();

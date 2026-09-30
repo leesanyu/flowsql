@@ -535,8 +535,9 @@ tcpdump 语法，也不代表 TCP stream、重组、会话或客户端/服务端
 `npm.basic` 消费固定 Packet RecordBatch，对端点完整的 TCP/UDP 进行双向会话归属、基础计数和有限 payload
 采样识别；可同时启用 Basic 基础结果与 Session 性能结果，复用一次解码、会话化和协议识别。
 Session 提供当前捕获点可观察的速率、TCP RTT/重传等指标，以状态和 nullable 值表达证据不足；结果不保留
-`raw_data`。TCP 字节流重组及 DNS、HTTP、TLS、ICMP 专用结果模块尚未交付，不能区分隧道上下文的封装
-流量会明确报错。
+`raw_data`。任务内部已提供按主标签准入的共享有界 TCP 字节流，供后续协议模块复用；生产目录当前仍只有
+Basic/Session，DNS、HTTP、TLS、ICMP 专用结果模块尚未交付。不能区分隧道上下文的封装流量会明确报错。
+共享流的消费、资源和缺口语义见 [NPM 共享有界 TCP 字节流接入说明](docs/npm-tcp-stream.md)。
 
 需要按 observation domain、MAC、VLAN、IP/CIDR、传输协议和端口为双向会话绑定唯一主标签时，参见
 [Flow Labeling 构建、部署、规则配置与容量指引](docs/flow-labeling.md)。该文档说明 DPDK 依赖、CMake 三态、
@@ -955,6 +956,7 @@ flowSQL/
 - [NPM Session 性能分析](tasks/archive/feat-npm-session-analysis.md)
 - [NPM 协议模块运行时](tasks/archive/feat-npm-protocol-analysis.md)
 - [NPM 多实体结果存储与查询](tasks/archive/feat-npm-result-query.md)
+- [NPM 共享有界 TCP 字节流接入说明](docs/npm-tcp-stream.md)
 - [Baseline 插件说明](src/plugins/baseline/README.md)
 - [C++ 算子插件 Sample](samples/cpp_operator/README.md)
 - [产品需求与当前进度](tasks/product_backlog.md)

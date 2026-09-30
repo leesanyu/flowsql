@@ -8,6 +8,7 @@
 #include "npm_protocol_context.h"
 #include "npm_session_table.h"
 #include "npm_task_budget.h"
+#include "npm_tcp_stream_provider.h"
 
 #include <framework/interfaces/iflow_labeling.h>
 #include <operators/npm_basic/config/npm_basic_task_config.h>
@@ -171,6 +172,7 @@ class NpmBasicTaskRuntime final {
     NpmBasicTaskRuntime(NpmBasicTaskConfig config, std::unique_ptr<NpmProtocolContext> protocol_context,
                         std::shared_ptr<NpmTaskBudget> budget, MatcherLease matcher);
     void SetLastErrorOnce(const char* error) noexcept;
+    void RememberStreamFailure() noexcept;
     void ReleaseResources() noexcept;
 
     std::shared_ptr<NpmResultRouter> router_;
@@ -185,6 +187,7 @@ class NpmBasicTaskRuntime final {
     std::vector<NpmPreparedModuleV1> prepared_modules_;
     std::vector<std::unique_ptr<INpmAnalysisModule>> owned_modules_;
     std::vector<NpmProtocolModuleAdapter*> protocol_modules_;
+    std::unique_ptr<NpmTcpStreamProvider> streams_;
     std::vector<INpmAnalysisModule*> modules_;
     bool realtime_clock_initialized_ = false;
     int64_t last_realtime_drive_ns_ = 0;
@@ -195,6 +198,7 @@ class NpmBasicTaskRuntime final {
     std::atomic<bool> operation_active_{false};
     std::atomic<NpmEofFlushState> state_{NpmEofFlushState::kOpen};
     std::atomic<const char*> last_error_{nullptr};
+    std::string stream_error_;
 };
 
 }  // namespace flowsql::npm

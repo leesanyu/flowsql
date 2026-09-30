@@ -1,6 +1,6 @@
 # Feature: NPM 共享有界 TCP 字节流
 
-状态：`[-]` 实施中；T0～T2 已完成，T3～T4 待实施（2026-09-29）
+状态：`[x]` 已完成；T0～T4 已验收（2026-09-30）
 优先级：P1
 前置：[协议模块运行时](../archive/feat-npm-protocol-analysis.md)、[通用参数](../archive/feat-npm-basic-parameters.md)、[流量标签](../archive/feat-flow-labeling.md)
 后续：DNS TCP、HTTP/1、TLS 握手分析；结果持久化复用已完成的 `npm-result-query`。
@@ -150,8 +150,8 @@ Gap 只说明本捕获视图缺少某段字节，不代表网络丢包或应用�
 | [x] T0 | 交付可编译的流消费契约与冻结配置，让非法能力组合和参数在任务发布前失败，既有模块接口保持兼容。 | A1、A2 |
 | [x] T1 | 交付单方向确定性字节视图，使重传、重叠、乱序、截断、wrap 和终结具有统一且不伪造字节的解释。 | A3～A6 |
 | [x] T2 | 交付共享缓存、独立游标与统一计费，使多个消费者读取一致内容，慢消费者和预算不足可控且资源完整释放。 | A7、A8 |
-| [ ] T3 | 交付标签准入与现有运行时集成，使测试协议模块经唯一主链路获得字节、时间和会话终结通知，保持原有输出语义。 | A9、A10 |
-| [ ] T4 | 交付端到端回归与接入说明，证明批次边界、失败/取消和既有 Basic/Session 使用方式不破坏共享流保证。 | A11、A12；全部前序锚点 |
+| [x] T3 | 交付标签准入与现有运行时集成，使测试协议模块经唯一主链路获得字节、时间和会话终结通知，保持原有输出语义。 | A9、A10 |
+| [x] T4 | 交付端到端回归与接入说明，证明批次边界、失败/取消和既有 Basic/Session 使用方式不破坏共享流保证。 | A11、A12；全部前序锚点 |
 
 以下是实现时必须落成的自动断言；以任务勾选及完成证据为准，未完成任务的锚点不视为已通过。
 
@@ -199,3 +199,10 @@ Feature 完成时运行标准 CMake 构建、完整 CTest 与相关 Sanitizer，
 - 单方向核心/共享方向 ASan+UBSan（detect_leaks=1）CTest 2/2 通过，0 失败，0.07 秒；沙箱 ptrace 阻止 LeakSanitizer 后获准沙箱外重跑。普通/消毒器构建无 Warning/Error，五个 C++ 文件格式/版权、diff 和允许文件基线检查通过。
 - 首轮任务预算测试同时越过两个限额，优先报方向限额与断言不符；已调整测试输入只耗尽任务预算，两类错误均独立验证。未改变限额优先级来迎合测试。
 - T2 完成后没有启用生产 stream provider；T3 承接标签准入、会话元数据/任务级调度计费及既有 Cancel 操作门集成，T4 承接完整 CTest 和跨批次结果链路。未提交或推送，保留全部前序未提交改动。
+- 2026-09-30 T3：生产 runtime 在 Open 时按已校验的主标签订阅创建共享 provider。包经原模块后入流；会话实例替换与终结包先排空流再通知模块，FIN 半关闭只结束该方向，EOF 先结束所有流再 Finish。provider 以会话快照驱动水位和 deadline，并把订阅、索引及方向状态计入任务预算；取消及失败在现有操作门下清理流和模块。
+- A9/A10 的定向测试覆盖无订阅、label 0/未命中、同标签双消费者、观测域隔离、features 顺序、未启用 session、RST/旧实例复用、FIN 半关闭、EOF、Gap 期限及先于 OnTime 的顺序、回调内取消和限额失败诊断。实时维护入口也已接入流排空/水位回调；本阶段的摄取验收使用离线批次入口，实时模式不能用该入口构造测试数据。
+- T3 验证：标准 CMake 配置、四个相关目标构建成功；相关 CTest 5/5 通过；流核心/共享方向/运行时 ASan+UBSan+LeakSanitizer 3/3 通过。10 个 C++ 文件格式和版权头、`git diff --check` 与允许文件检查通过。完整 CTest 和跨 RecordBatch 类型化结果链路仍归 T4；未提交或推送。
+- 2026-09-30 T4：测试目录内的 `stream_probe` 消费 Data/Gap/End 并发射含身份、方向、区间、字节、捕获时间的类型化 Arrow 事件实体。相同 TCP 报文在单批次与逐包 RecordBatch 输入下，结果消费者与前台 stream 结果一致；`observing=session` 时结果消费者仍收到 stream、Basic、Session 全部实体，前台只返回 Session。输入 RecordBatch owner 在流仍存活时释放；结果/模块各 Finish 一次且任务计费回零。
+- A11 定向测试通过；A12 在标准 `cmake -B build src` 和 `cmake --build build -j$(nproc)` 构建后由完整 CTest 22/22 通过、0 失败验证，覆盖原有 NPM、参数、标签、SQLite/MySQL/PostgreSQL/ClickHouse 结果与 Scheduler 回归。生产 catalog 的 Basic/Session 两项断言继续通过，测试模块未注册到生产目录。
+- 独立 `FLOWSQL_NPM_TCP_STREAM_SANITIZERS=ON` 构建后，流核心、共享方向和运行时 ASan/UBSan/LeakSanitizer 3/3 通过、0 失败。沙箱内 LeakSanitizer 因 ptrace 限制无法启动，获准在沙箱外重跑通过。`clang-format-18 --dry-run --Werror`、`git diff --check` 与本轮允许文件审查通过；未提交或推送。
+- 接入说明位于 `docs/npm-tcp-stream.md`，README 更正生产边界：内部共享流已交付，DNS/HTTP/TLS/ICMP 生产模块仍未交付。Feature 已归档并在 Backlog 标记完成。

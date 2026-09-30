@@ -1,76 +1,62 @@
 # 即时工作台
 
-事项：NPM 共享有界 TCP 字节流（`npm-shared-tcp-stream`）T2 实施。
-关联 Feature Task：T2 — 共享缓存、独立游标与统一计费；多消费者内容一致，慢消费者和预算不足可控。
-当前 Atomic Slice：共享方向组件、独立消费/终结排空和 A7/A8 验证闭环。
+事项：NPM 共享有界 TCP 字节流（`npm-shared-tcp-stream`）T4 实施。
+关联 Feature Task：T4 — 交付端到端回归与接入说明，证明批次边界、失败/取消和既有 Basic/Session 使用方式不破坏共享流保证。
+当前 Atomic Slice：T4 A11 跨 RecordBatch 类型化结果与 owner 回收、A12 完整回归和接入说明。
 状态：已完成；WIP=0。
 
 ## 业务意图
 
-让同一方向的协议消费者共享一份确定性字节，各自推进且不互相丢数据，全部保留状态受方向和任务预算共同约束。
+用同一组捕获事实的不同 RecordBatch 切分驱动真实 NPM runtime，验证共享流事件与类型化结果一致；完成全量回归并说明后续协议模块的内部接入方式和现有离线用户边界。
 
 ## Non-Goals
 
-- 不实现 T3 标签准入、session map、runtime 分发、时间调度和 Cancel 操作门；组件由调用方串行调用。
-- 不改变 SQL、生产目录、stream provider 不可用闸门、Basic/Session 算法或既有公共 V1 虚表。
-- 不实现应用协议解析，不提交或推送，不提前实施 T3/T4。
+- 不新增 DNS/HTTP/TLS 生产模块、SQL 结果实体、第二套会话链或实时采集入口。
+- 不重写 T0～T3 的流核心、预算或运行时机制；仅在本轮测试暴露 P0/P1 阻塞问题时修复。
+- 不修改无关模块，不提交或推送。
 
-## 冻结契约与步骤
+## 冻结契约与测试
 
-- 新增内部 `NpmTcpStreamSharedDirection`，固定消费者集合，事件节点共享，游标独立；回调借用上下文/字节。
-- 每次输入或实际水位推进最多通知各可读消费者一次；final drain 必须确认 End，非法 Consume/emitter 错误即使被忽略仍锁存失败。
-- T1 sink 增加内部可选拥有权转交路径；共享缓存接管 payload 及已有预算，不产生第二份字节副本；原借用 sink 行为兼容。
-- 方向预算适配器将核心未决区间、共享事件、订阅/游标/固定对象合计限制并转记任务 kModuleState；所有堆分配前 Reserve。
-- 只回收所有消费者确认的事件前缀；部分 Data 的原始容量保留到整个事件被所有消费者读完。
-- 错误诊断含限额类别、session_id、方向、首个保留最早缓存的消费者与失败消费者。消费者名借用任务冻结目录，生命周期覆盖组件及诊断。
-- 组件不保存借用 session 指针，输入/水位/End 调用显式提供当前 session；T3 provider 负责拥有时间路径元数据。
-- Abort 不发送 End；重入锁存错误，在当前回调退出后清理，避免释放在用游标。跨线程取消仍由 T3 原有操作门协调。
-- 先头文件和测试，再实现；测试真实 new/new[] 分配失败、成功输出前缀保留与所有释放路径。
+- 保留 `INpmProtocolModuleV1` 虚表及 `INpmTcpStreamConsumerV1` 数据契约；测试模块只通过本地 catalog 注入，生产目录仍仅 Basic/Session。
+- A11 测试模块按 Data/Gap/End 发射带身份、revision、时间、区间及字节的类型化 Arrow 实体，`NpmResultRouter` 前台和结果消费者均接收有效行。
+- 相同报文按单批次和跨批次送入时，按事件字段规范化后序列一致；不同 `observing` 只改变前台实体，结果消费者看到全部启用实体；输入批次 owner 在流仍存活时可释放。
+- 既有失败/取消、Basic/Session 和流核心锚点由定向与完整 CTest 覆盖；相关运行时和流目标通过 ASan/UBSan。
 
 ## 允许修改文件
 
 - `tasks/active_task.md`
-- `tasks/specs/feat-npm-shared-tcp-stream.md`（仅 T2 状态/证据）
-- `src/operators/npm_basic/core/npm_tcp_stream_direction.h`
-- `src/operators/npm_basic/core/npm_tcp_stream_direction.cpp`
-- `src/operators/npm_basic/core/npm_tcp_stream_shared.h`（新增）
-- `src/operators/npm_basic/core/npm_tcp_stream_shared.cpp`（新增）
-- `src/operators/npm_basic/CMakeLists.txt`
-- `src/tests/test_npm_basic/test_npm_tcp_stream_shared.cpp`（新增）
-- `src/tests/test_npm_basic/CMakeLists.txt`
+- `tasks/specs/feat-npm-shared-tcp-stream.md`（完成后移入 `tasks/archive/`）
+- `tasks/archive/feat-npm-shared-tcp-stream.md`（归档目标）
+- `tasks/product_backlog.md`（仅 Feature 状态与规格链接）
+- `src/tests/test_npm_basic/test_npm_basic.cpp`
+- `README.md`
+- `docs/npm-tcp-stream.md`（新增）
 
-T0/T1/规格和产品报告的已有改动按 `/tmp/flowsql-t2-baseline.json` 保留，副本位于 `/tmp/flowsql-t2-before`。
-每次 patch 后检查 `git diff --name-only` 与新增文件；清单外文件不得变化。
+每次 patch 后检查 `git diff --name-only` 与未跟踪文件；T0～T3 原有未提交改动是起点，禁止覆盖或清理。起点提交 `4cb275e`。
 
 ## 验收命令
 
 ```bash
 cmake -B build src
-cmake --build build --target test_npm_tcp_stream_shared test_npm_tcp_stream test_npm_basic test_npm_protocol_contract -j8
-ctest --test-dir build -R '^test_npm_(tcp_stream_shared|tcp_stream|basic|protocol_contract)$' --output-on-failure
-clang-format-18 --dry-run --Werror src/operators/npm_basic/core/npm_tcp_stream_{direction,shared}.{h,cpp} src/tests/test_npm_basic/test_npm_tcp_stream_shared.cpp
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure
+cmake --build build --target test_npm_basic test_npm_tcp_stream test_npm_tcp_stream_shared test_npm_protocol_contract -j8
+ctest --test-dir build -R '^test_npm_(basic|tcp_stream_runtime|tcp_stream_shared|tcp_stream|protocol_contract)$' --output-on-failure
+clang-format-18 --dry-run --Werror src/tests/test_npm_basic/test_npm_basic.cpp
 git diff --check
-git diff --name-only
 ```
 
-复用 `/tmp/flowsql-t1-sanitizer`，标准 src 入口、`FLOWSQL_NPM_TCP_STREAM_SANITIZERS=ON`；运行两个流目标 ASan/UBSan 和泄漏检测。
-全量 CTest、生产 runtime 与跨 batch 集成验证留 T4。
+相关流核心、共享方向和运行时另用 `FLOWSQL_NPM_TCP_STREAM_SANITIZERS=ON` 的独立构建执行 ASan/UBSan；核对生产 catalog 只含 Basic/Session，并记录外部依赖状态及完整 CTest 结果。
 
 ## 时间盒与停止条件
 
-- 2026-09-29 20:55（Asia/Shanghai）开始，以 10～30 分钟为检查点。
-- 用户要求持续实施 T2 至完成；检查点后继续同一范围，自主修复本轮编译/测试错误。
-- A7/A8、相关回归、核心/共享流 Sanitizer、格式/diff/基线检查通过后勾选 T2，WIP=0 并停止。
+- 2026-09-30 16:25（Asia/Shanghai）开始；每 10～30 分钟记录同一 T4 的检查点，用户要求持续到 T4 完成。
+- 每个检查点只能记为“进行中且检查点通过”“当前错误待修复”或“被明确问题阻塞”，不扩文件或任务边界。
+- A11/A12、文档、构建/测试/格式/diff 审查全通过后勾选 T4，归档 Feature、更新 Backlog，WIP=0，停止。
 
-## 完成证据
+## 检查点
 
-- T2 的 A7/A8 已完成，规格仅新增勾选 T2；T3/T4 未开始。
-- 新增共享方向组件及 7 组共享流测试；核心仅增加内部 payload/计费转交和嵌入式预算使用，既有 sink 兼容。
-- 快慢消费者使用独立事件/字节游标；共享 payload 单份，所有消费者确认后回收事件前缀，部分读取时原始容量继续计费。
-- 方向和任务统一预算覆盖未决核心/共享缓存/对象/订阅游标；实际分配失败遍历、已转交部分事件后失败、两方向任务预算隔离均通过。
-- 非法 Consume、消费者/emitter 返回错误和异常锁存；final drain 未确认 End 明确失败；失败/Abort/析构预算归零且不回滚已输出前缀。
-- 标准配置与 `test_npm_tcp_stream_shared test_npm_tcp_stream test_npm_basic test_npm_protocol_contract` 四目标构建成功，日志无 Warning/Error。
-- 相关 CTest 4/4 通过，0 失败，0.79 秒。首轮任务预算用例同时超过两级限额，改为单独耗尽任务预算后通过；实现的限额优先级保持不变。
-- `/tmp/flowsql-t1-sanitizer` 的两个流目标 ASan/UBSan+LSan 2/2 通过，0.07 秒。沙箱 ptrace 限制使首次 LSan 无法执行，获准沙箱外运行后通过。
-- 五个修改/新增 C++ 文件 clang-format-18、版权头及 diff 审查通过；清单外已有改动哈希与 `/tmp/flowsql-t2-baseline.json` 一致。
-- 2026-09-29 21:24（Asia/Shanghai）完成本轮实现和验收，WIP=0；未接入生产 runtime、未执行全量 Feature 回归、未提交或推送。
+- 2026-09-30 16:25（Asia/Shanghai）：T4 边界已冻结；待添加 A11 断言并执行验收。
+- 2026-09-30 16:46（Asia/Shanghai）：T4 已完成。跨 RecordBatch 类型化 Data/Gap/End 结果在单批次和逐包批次一致；stream 与 session 两种 observing 的前台输出符合选择，结果消费者仍收到 stream、Basic、Session；输入 owner 及时释放，EOF/任务预算归零。
+- 验收：标准 CMake 配置和全量构建通过；完整 CTest 22/22 通过、0 失败，覆盖 NPM/参数/标签/结果后端/Scheduler；独立 ASan/UBSan/LeakSanitizer 流核心、共享方向和运行时 3/3 通过、0 失败。沙箱内 LeakSanitizer 受 ptrace 限制，在沙箱外重跑通过。格式、版权、diff 检查通过；生产 catalog 仍仅 Basic/Session。
+- T4 已勾选，规格移入 `tasks/archive/`，Backlog 标记完成。T0～T3 的未提交改动仍保留；本轮未提交或推送。

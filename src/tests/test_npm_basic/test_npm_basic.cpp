@@ -11802,6 +11802,8 @@ void TestNpmTcpStreamOpenGatesAndFrozenConfig() {
     ProtocolInputTrace trace;
     LabelingMatcherStats matcher_stats;
     for (const auto& labels : std::vector<std::vector<uint32_t>>{{1001}, {}, {0}, {1001, 1001}, {999}}) {
+        const int created_before = trace.created;
+        const int aborted_before = trace.aborted;
         auto catalog = npm::ProductionNpmModuleCatalogV1();
         catalog.push_back(CountingRegistration("probe", 1, &trace, true, labels));
         assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic,labeling,probe"})", &config, true, catalog).error ==
@@ -11809,12 +11811,14 @@ void TestNpmTcpStreamOpenGatesAndFrozenConfig() {
         const auto status =
             npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                              new ProtocolLabelMatcher(&matcher_stats), catalog);
-        assert(status.error == npm::NpmBasicTaskRuntimeError::kModulePlanError);
         const bool valid_labels = labels == std::vector<uint32_t>{1001};
-        assert(status.module_status.error ==
-               (valid_labels ? Error::kUnavailableCapability : Error::kInvalidLabelSelection));
-        assert(status.module_status.field == (valid_labels ? "probe/tcp_stream" : "probe/primary_label_ids"));
-        assert(!runtime && schema == original_schema && trace.created == 0);
+        assert(status.error == (valid_labels ? npm::NpmBasicTaskRuntimeError::kModuleCreateError
+                                             : npm::NpmBasicTaskRuntimeError::kModulePlanError));
+        assert(status.module_status.error == (valid_labels ? Error::kInvalidPlan : Error::kInvalidLabelSelection));
+        assert(status.module_status.field == (valid_labels ? "probe/tcp_stream_consumer" : "probe/primary_label_ids"));
+        assert(!runtime && schema == original_schema);
+        assert(trace.created == created_before + static_cast<int>(valid_labels));
+        assert(trace.aborted == aborted_before + static_cast<int>(valid_labels));
     }
     assert(matcher_stats.release_calls == 5 && matcher_stats.classify_calls == 0);
 
@@ -11840,13 +11844,15 @@ void TestNpmTcpStreamOpenGatesAndFrozenConfig() {
     assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic,prior,probe"})", &config, false, catalog).error ==
            npm::NpmBasicTaskConfigError::kNone);
     auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+    const int prior_created = trace.created;
+    const int prior_aborted = trace.aborted;
     const auto status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema,
                                                          &runtime, budget, nullptr, catalog);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kModuleCreateError);
     assert(status.module_status.error == Error::kInvalidPlan &&
            status.module_status.field == "probe/tcp_stream_consumer");
     assert(!runtime && schema == original_schema);
-    assert(aborts == 1 && trace.created == 1 && trace.aborted == 1);
+    assert(aborts == 1 && trace.created == prior_created + 1 && trace.aborted == prior_aborted + 1);
     assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
     assert(pool.acquire_calls == pool.release_calls);
 }
@@ -12255,8 +12261,8 @@ void TestProtocolLabelIsolationAndAtomicFactoryFailure() {
     const auto stream_error =
         npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                          new ProtocolLabelMatcher(&labels), bad_catalog);
-    assert(stream_error.error == npm::NpmBasicTaskRuntimeError::kModulePlanError);
-    assert(stream_error.module_status.field == "selected/tcp_stream");
+    assert(stream_error.error == npm::NpmBasicTaskRuntimeError::kModuleCreateError);
+    assert(stream_error.module_status.field == "selected/tcp_stream_consumer");
     // Fail after an earlier module was instantiated; neither runtime nor schema is published.
     auto prepare = catalog.back().prepare;
     catalog.back().prepare = [prepare](const npm::NpmBasicTaskConfig& cfg, std::string_view json,
@@ -12775,7 +12781,571 @@ void TestProtocolProductionCatalogAndConcurrentDualEntityControlRuntime() {
 
 }  // namespace
 
-int main() {
+struct StreamRuntimeTrace {
+    std::string name;
+    std::vector<std::string> calls;
+    std::vector<std::tuple<uint64_t, uint64_t, npm::NpmPacketDirection, std::string>> data;
+    int stream_ends = 0;
+    int stream_gaps = 0;
+    int module_ends = 0;
+    int finishes = 0;
+    int aborts = 0;
+    bool hold_stream = false;
+    npm::NpmBasicTaskRuntime* cancel_during_stream = nullptr;
+};
+
+class StreamRuntimeModule final : public npm::INpmProtocolModuleV1, public npm::INpmTcpStreamConsumerV1 {
+ public:
+    explicit StreamRuntimeModule(StreamRuntimeTrace* trace) : trace_(trace) {}
+    int OnInput(const npm::NpmInputEventV1& event, npm::INpmResultEmitterV1&) override {
+        assert(event.kind == npm::NpmInputKindV1::kTcpPacket);
+        trace_->calls.push_back("packet");
+        return 0;
+    }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
+                     npm::INpmResultEmitterV1&) override {
+        trace_->calls.push_back("module_end");
+        ++trace_->module_ends;
+        return 0;
+    }
+    std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
+    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override {
+        trace_->calls.push_back("time");
+        return 0;
+    }
+    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+        trace_->calls.push_back("finish");
+        ++trace_->finishes;
+        return 0;
+    }
+    void Abort() noexcept override { ++trace_->aborts; }
+    int OnTcpStreamReadable(const npm::NpmTcpStreamContextV1& context, npm::INpmTcpStreamCursorV1& cursor,
+                            npm::INpmResultEmitterV1&) override {
+        assert(context.session && context.session->key);
+        if (trace_->cancel_during_stream) {
+            trace_->calls.push_back("cancel_stream");
+            trace_->cancel_during_stream->Cancel();
+            return 0;
+        }
+        if (trace_->hold_stream) return 0;
+        npm::NpmTcpStreamEventV1 event;
+        while (cursor.Peek(&event)) {
+            if (event.kind == npm::NpmTcpStreamEventKindV1::kData) {
+                trace_->calls.push_back("data");
+                trace_->data.emplace_back(
+                    context.session->key->observation_domain_id, context.session->session_id, context.direction,
+                    std::string(reinterpret_cast<const char*>(event.bytes.data), event.bytes.size));
+                assert(cursor.Consume(event.bytes.size) == 0);
+            } else if (event.kind == npm::NpmTcpStreamEventKindV1::kGap) {
+                trace_->calls.push_back("gap");
+                ++trace_->stream_gaps;
+                assert(cursor.Consume(0) == 0);
+            } else {
+                assert(context.final_drain);
+                trace_->calls.push_back("stream_end");
+                ++trace_->stream_ends;
+                assert(cursor.Consume(0) == 0);
+            }
+        }
+        return 0;
+    }
+
+ private:
+    StreamRuntimeTrace* trace_;
+};
+
+npm::NpmModuleRegistrationV1 StreamRuntimeRegistration(const char* name, StreamRuntimeTrace* trace) {
+    npm::NpmModuleRegistrationV1 registration;
+    registration.module_id = name;
+    registration.entity_ids = {std::string(name) + "_event"};
+    registration.prepare = [name = std::string(name), trace](const npm::NpmBasicTaskConfig&, std::string_view,
+                                                             npm::NpmPreparedModuleV1* output) {
+        output->plan.module_id = name;
+        output->plan.input_mask = static_cast<uint8_t>(npm::NpmInputKindV1::kTcpPacket);
+        output->plan.requires_labeling = true;
+        output->plan.requires_tcp_stream = true;
+        output->plan.primary_label_ids = std::vector<uint32_t>{1001};
+        auto entity = npm::NpmBasicEntityDescriptorV1(true);
+        entity.entity_id = name + "_event";
+        entity.module_id = name;
+        output->plan.entities = {entity};
+        output->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
+            npm::NpmModuleInstanceV1 instance;
+            auto module = std::make_unique<StreamRuntimeModule>(trace);
+            instance.tcp_stream_consumer = module.get();
+            instance.protocol = std::move(module);
+            return instance;
+        };
+        return npm::NpmProtocolContractStatusV1{};
+    };
+    return registration;
+}
+
+void TestTcpStreamRuntimeAdmissionAndLifecycle() {
+    {
+        auto budget = std::make_shared<npm::NpmTaskBudget>(npm::NpmAnalysisConfig{});
+        std::unique_ptr<npm::NpmTcpStreamProvider> empty;
+        assert(npm::NpmTcpStreamProvider::Create({}, budget, {}, &empty) == npm::NpmTcpStreamError::kNone);
+        assert(!empty && budget->Usage().module_state_bytes == 0);
+    }
+    for (const char* features : {"basic,labeling,alpha,beta", "beta,alpha,labeling,basic"}) {
+        StreamRuntimeTrace alpha{"alpha"}, beta{"beta"};
+        auto catalog = npm::ProductionNpmModuleCatalogV1();
+        catalog.push_back(StreamRuntimeRegistration("alpha", &alpha));
+        catalog.push_back(StreamRuntimeRegistration("beta", &beta));
+        npm::NpmBasicTaskConfig config;
+        const std::string json =
+            std::string(R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":")") + features + "\"}";
+        assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config, true, catalog).error ==
+               npm::NpmBasicTaskConfigError::kNone);
+        assert(!config.features.session_enabled);
+        ContextDictionary dictionary;
+        ContextProtocol protocol(&dictionary);
+        ContextPool pool(&protocol);
+        SinglePoolQuerier querier(&pool);
+        LabelingMatcherStats matcher_stats;
+        auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+        std::shared_ptr<arrow::Schema> schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+        assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                                budget, new ProtocolLabelMatcher(&matcher_stats), catalog)
+                   .error == npm::NpmBasicTaskRuntimeError::kNone);
+        const auto baseline_module_bytes = budget->Usage().module_state_bytes;
+        auto a = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {}, kTcpSyn, 100);
+        auto b = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {'A', 'B', 'C'}, kTcpAck, 101);
+        auto unmatched = MakeIpv4TcpPacket("192.0.2.1", 50001, "198.51.100.1", 80, {'n'}, kTcpAck, 10);
+        auto other_domain = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {'Q'}, kTcpAck, 501);
+        auto reverse = MakeIpv4TcpPacket("198.51.100.1", 443, "192.0.2.1", 50000, {'Z'}, kTcpAck, 800);
+        auto rst = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {}, kTcpRst, 104);
+        auto replacement = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {}, kTcpSyn, 200);
+        auto new_data = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {'X', 'Y'}, kTcpAck, 201);
+        auto half_close = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {}, kTcpFin, 203);
+        std::shared_ptr<arrow::RecordBatch> output;
+        auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(unmatched, 1, 9, 1)});
+        assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(budget->Usage().module_state_bytes == baseline_module_bytes);
+        assert(std::find(alpha.calls.begin(), alpha.calls.end(), "packet") == alpha.calls.end());
+        assert(std::find(alpha.calls.begin(), alpha.calls.end(), "data") == alpha.calls.end());
+        input = MakeEncodedPacketBatch({MakeBatchPacketRecord(a, 1, 10, 1), MakeBatchPacketRecord(b, 1, 11, 2),
+                                        MakeBatchPacketRecord(other_domain, 2, 13, 4),
+                                        MakeBatchPacketRecord(reverse, 1, 14, 5), MakeBatchPacketRecord(rst, 1, 15, 6),
+                                        MakeBatchPacketRecord(replacement, 1, 16, 7),
+                                        MakeBatchPacketRecord(new_data, 1, 17, 8)});
+        assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(alpha.data == beta.data && alpha.data.size() == 4);
+        assert(std::get<0>(alpha.data[0]) == 77 && std::get<3>(alpha.data[0]) == "ABC");
+        assert(std::get<0>(alpha.data[1]) == 78 && std::get<3>(alpha.data[1]) == "Q");
+        assert(std::get<0>(alpha.data[2]) == 77 && std::get<3>(alpha.data[2]) == "Z");
+        assert(std::get<3>(alpha.data[3]) == "XY");
+        assert(std::get<1>(alpha.data[0]) != std::get<1>(alpha.data[1]));
+        assert(std::get<1>(alpha.data[0]) != std::get<1>(alpha.data[3]));
+        assert(alpha.stream_ends == 2 && beta.stream_ends == 2);
+        assert(alpha.module_ends == 1 && beta.module_ends == 1);
+        const auto first_end = std::find(alpha.calls.begin(), alpha.calls.end(), "stream_end");
+        assert(first_end != alpha.calls.end());
+        assert(std::find(first_end, alpha.calls.end(), "module_end") != alpha.calls.end());
+        const auto before_fin = alpha.calls.size();
+        input = MakeEncodedPacketBatch({MakeBatchPacketRecord(half_close, 1, 18, 9)});
+        assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(alpha.stream_ends == 3 && beta.stream_ends == 3);
+        assert(alpha.module_ends == 1 && beta.module_ends == 1);
+        const auto fin_packet = std::find(alpha.calls.begin() + before_fin, alpha.calls.end(), "packet");
+        assert(fin_packet != alpha.calls.end() &&
+               std::find(fin_packet, alpha.calls.end(), "stream_end") != alpha.calls.end());
+        assert(std::find(alpha.calls.begin() + before_fin, alpha.calls.end(), "module_end") == alpha.calls.end());
+        assert(runtime->FlushOffline(19, &output).error == npm::NpmEofFlushError::kNone);
+        assert(alpha.stream_ends == 4 && beta.stream_ends == 4);
+        assert(alpha.module_ends == 3 && beta.module_ends == 3);
+        assert(alpha.finishes == 1 && beta.finishes == 1);
+        assert(alpha.calls.back() == "finish" && beta.calls.back() == "finish");
+        assert(alpha.aborts == 0 && beta.aborts == 0);
+        assert(budget->Usage().module_state_bytes == 0);
+        assert(matcher_stats.classify_calls >= 1 && matcher_stats.facts.size() == 4 &&
+               matcher_stats.release_calls == 1);
+    }
+}
+
+void TestTcpStreamRuntimeDeadlineAndCancel() {
+    StreamRuntimeTrace trace{"alpha"};
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    catalog.push_back(StreamRuntimeRegistration("alpha", &trace));
+    npm::NpmBasicTaskConfig config;
+    assert(
+        npm::ParseNpmBasicTaskConfig(
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,alpha","parameters":"{\"schema_version\":1,\"core\":{\"tcp_stream\":{\"gap_timeout_ns\":5}}}"})",
+            &config, true, catalog)
+            .error == npm::NpmBasicTaskConfigError::kNone);
+    config.analysis.out_of_order_tolerance_ns = 0;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    LabelingMatcherStats matcher_stats;
+    auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+    std::shared_ptr<arrow::Schema> schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                            budget, new ProtocolLabelMatcher(&matcher_stats), catalog)
+               .error == npm::NpmBasicTaskRuntimeError::kNone);
+    auto a = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {'A', 'B', 'C'}, kTcpAck, 100);
+    auto b = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {'F', 'G'}, kTcpAck, 105);
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(a, 1, 1, 1), MakeBatchPacketRecord(b, 1, 2, 2)});
+    std::shared_ptr<arrow::RecordBatch> output;
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(trace.stream_gaps == 0 && runtime->MaintenancePlan().event_deadline_ns == 7);
+    auto tick = MakeIpv4TcpPacket("192.0.2.1", 50001, "198.51.100.1", 80, {}, kTcpAck, 1);
+    input = MakeEncodedPacketBatch({MakeBatchPacketRecord(tick, 1, 7, 3)});
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(trace.stream_gaps == 1);
+    const auto gap = std::find(trace.calls.begin(), trace.calls.end(), "gap");
+    assert(gap != trace.calls.end() && std::find(gap, trace.calls.end(), "time") != trace.calls.end());
+    runtime->Cancel();
+    assert(trace.stream_ends == 0 && trace.finishes == 0 && trace.aborts == 1);
+    assert(budget->Usage().module_state_bytes == 0);
+    assert(runtime->State() == npm::NpmEofFlushState::kCancelled);
+}
+
+void TestTcpStreamRuntimeFailureDiagnostics() {
+    StreamRuntimeTrace trace{"alpha"};
+    trace.hold_stream = true;
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    catalog.push_back(StreamRuntimeRegistration("alpha", &trace));
+    npm::NpmBasicTaskConfig config;
+    assert(npm::ParseNpmBasicTaskConfig(
+               R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,alpha"})", &config,
+               true, catalog)
+               .error == npm::NpmBasicTaskConfigError::kNone);
+    config.tcp_stream.max_buffered_bytes_per_direction = 65536;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    LabelingMatcherStats matcher_stats;
+    auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+    std::shared_ptr<arrow::Schema> schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                            budget, new ProtocolLabelMatcher(&matcher_stats), catalog)
+               .error == npm::NpmBasicTaskRuntimeError::kNone);
+    auto first =
+        MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, std::vector<uint8_t>(40000, 'a'), kTcpAck, 100);
+    auto second =
+        MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, std::vector<uint8_t>(30000, 'b'), kTcpAck, 40100);
+    std::shared_ptr<arrow::RecordBatch> output;
+    assert(
+        runtime->ProcessOfflineBatch(MakeEncodedPacketBatch({MakeBatchPacketRecord(first, 1, 1, 1)}), &output).error ==
+        npm::NpmBasicOfflineBatchError::kNone);
+    const auto status =
+        runtime->ProcessOfflineBatch(MakeEncodedPacketBatch({MakeBatchPacketRecord(second, 1, 2, 2)}), &output);
+    assert(status.error == npm::NpmBasicOfflineBatchError::kBatchProcessError);
+    assert(runtime->State() == npm::NpmEofFlushState::kFailed);
+    assert(runtime->LastError().find("direction limit exceeded") != std::string::npos);
+    assert(runtime->LastError().find("session_id=") != std::string::npos);
+    assert(runtime->LastError().find("retaining=alpha") != std::string::npos);
+    assert(trace.stream_ends == 0 && trace.finishes == 0 && trace.aborts == 1);
+    assert(budget->Usage().module_state_bytes == 0);
+}
+
+void TestTcpStreamRuntimeCancelInsideCallback() {
+    StreamRuntimeTrace alpha{"alpha"}, beta{"beta"};
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    catalog.push_back(StreamRuntimeRegistration("alpha", &alpha));
+    catalog.push_back(StreamRuntimeRegistration("beta", &beta));
+    npm::NpmBasicTaskConfig config;
+    assert(npm::ParseNpmBasicTaskConfig(
+               R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,alpha,beta"})",
+               &config, true, catalog)
+               .error == npm::NpmBasicTaskConfigError::kNone);
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    LabelingMatcherStats matcher_stats;
+    auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+    std::shared_ptr<arrow::Schema> schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                            budget, new ProtocolLabelMatcher(&matcher_stats), catalog)
+               .error == npm::NpmBasicTaskRuntimeError::kNone);
+    alpha.cancel_during_stream = runtime.get();
+    auto packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {'A'}, kTcpAck, 100);
+    std::shared_ptr<arrow::RecordBatch> output;
+    const auto result =
+        runtime->ProcessOfflineBatch(MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 1, 1, 1)}), &output);
+    assert(result.error == npm::NpmBasicOfflineBatchError::kCancelled);
+    assert(runtime->State() == npm::NpmEofFlushState::kCancelled);
+    assert(std::find(alpha.calls.begin(), alpha.calls.end(), "cancel_stream") != alpha.calls.end());
+    assert(std::find(beta.calls.begin(), beta.calls.end(), "cancel_stream") == beta.calls.end());
+    assert(alpha.stream_ends == 0 && beta.stream_ends == 0);
+    assert(alpha.aborts == 1 && beta.aborts == 1);
+    assert(budget->Usage().module_state_bytes == 0);
+}
+
+using StreamEventRow = std::tuple<uint8_t, uint8_t, uint64_t, uint64_t, std::string, std::optional<int64_t>>;
+
+std::shared_ptr<arrow::Schema> StreamEventSchema() {
+    static auto schema = arrow::schema({
+        arrow::field("entity_instance_id", arrow::uint64(), false),
+        arrow::field("revision", arrow::uint64(), false),
+        arrow::field("observed_at", arrow::int64(), false),
+        arrow::field("is_final", arrow::boolean(), false),
+        arrow::field("session_id", arrow::uint64(), false),
+        arrow::field("direction", arrow::uint8(), false),
+        arrow::field("kind", arrow::uint8(), false),
+        arrow::field("begin", arrow::uint64(), false),
+        arrow::field("end", arrow::uint64(), false),
+        arrow::field("bytes", arrow::binary(), false),
+        arrow::field("captured_at", arrow::int64()),
+    });
+    return schema;
+}
+
+void AppendStreamEventRows(const arrow::RecordBatch& batch, std::vector<StreamEventRow>* output) {
+    assert(batch.schema()->Equals(*StreamEventSchema(), true));
+    const auto& ids = static_cast<const arrow::UInt64Array&>(*batch.GetColumnByName("entity_instance_id"));
+    const auto& revisions = static_cast<const arrow::UInt64Array&>(*batch.GetColumnByName("revision"));
+    const auto& finals = static_cast<const arrow::BooleanArray&>(*batch.GetColumnByName("is_final"));
+    const auto& sessions = static_cast<const arrow::UInt64Array&>(*batch.GetColumnByName("session_id"));
+    const auto& directions = static_cast<const arrow::UInt8Array&>(*batch.GetColumnByName("direction"));
+    const auto& kinds = static_cast<const arrow::UInt8Array&>(*batch.GetColumnByName("kind"));
+    const auto& begins = static_cast<const arrow::UInt64Array&>(*batch.GetColumnByName("begin"));
+    const auto& ends = static_cast<const arrow::UInt64Array&>(*batch.GetColumnByName("end"));
+    const auto& bytes = static_cast<const arrow::BinaryArray&>(*batch.GetColumnByName("bytes"));
+    const auto& captured = static_cast<const arrow::Int64Array&>(*batch.GetColumnByName("captured_at"));
+    for (int64_t row = 0; row < batch.num_rows(); ++row) {
+        assert(ids.Value(row) > 0 && revisions.Value(row) == 1 && finals.Value(row) && sessions.Value(row) > 0);
+        output->emplace_back(directions.Value(row), kinds.Value(row), begins.Value(row), ends.Value(row),
+                             bytes.GetString(row),
+                             captured.IsNull(row) ? std::nullopt : std::optional<int64_t>(captured.Value(row)));
+    }
+}
+
+struct StreamResultTrace {
+    std::vector<StreamEventRow> rows;
+    std::vector<std::string> entities;
+    std::string run_id;
+    int basic_rows = 0;
+    int session_rows = 0;
+    int finishes = 0;
+    int cancels = 0;
+    int module_finishes = 0;
+    int module_aborts = 0;
+};
+
+class StreamResultConsumer final : public npm::INpmResultConsumerV1 {
+ public:
+    explicit StreamResultConsumer(StreamResultTrace* trace) : trace_(trace) {}
+    int Consume(const npm::NpmResultContextV1& context, const npm::NpmEntityDescriptorV1& entity,
+                const arrow::RecordBatch& rows) override {
+        assert(!context.run_id.empty());
+        if (trace_->run_id.empty()) trace_->run_id = context.run_id;
+        assert(trace_->run_id == context.run_id);
+        trace_->entities.push_back(entity.entity_id);
+        if (entity.entity_id == "stream_event") AppendStreamEventRows(rows, &trace_->rows);
+        if (entity.entity_id == "basic") trace_->basic_rows += rows.num_rows();
+        if (entity.entity_id == "session") trace_->session_rows += rows.num_rows();
+        return 0;
+    }
+    int Finish() override {
+        ++trace_->finishes;
+        return 0;
+    }
+    void Cancel() noexcept override { ++trace_->cancels; }
+
+ private:
+    StreamResultTrace* trace_;
+};
+
+class StreamResultModule final : public npm::INpmProtocolModuleV1, public npm::INpmTcpStreamConsumerV1 {
+ public:
+    explicit StreamResultModule(StreamResultTrace* trace) : trace_(trace) {}
+    int OnInput(const npm::NpmInputEventV1&, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
+                     npm::INpmResultEmitterV1&) override {
+        return 0;
+    }
+    std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
+    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+        ++trace_->module_finishes;
+        return 0;
+    }
+    void Abort() noexcept override { ++trace_->module_aborts; }
+    int OnTcpStreamReadable(const npm::NpmTcpStreamContextV1& context, npm::INpmTcpStreamCursorV1& cursor,
+                            npm::INpmResultEmitterV1& emitter) override {
+        npm::NpmTcpStreamEventV1 event;
+        while (cursor.Peek(&event)) {
+            assert(context.session && context.session->session_id > 0);
+            std::vector<uint8_t> payload;
+            if (event.kind == npm::NpmTcpStreamEventKindV1::kData)
+                payload.assign(event.bytes.data, event.bytes.data + event.bytes.size);
+            auto batch = arrow::RecordBatch::Make(
+                StreamEventSchema(), 1,
+                {MakeOneValueArray<arrow::UInt64Builder>(next_id_++),
+                 MakeOneValueArray<arrow::UInt64Builder>(uint64_t{1}),
+                 MakeOneValueArray<arrow::Int64Builder>(context.observed_at_ns),
+                 MakeOneValueArray<arrow::BooleanBuilder>(true),
+                 MakeOneValueArray<arrow::UInt64Builder>(context.session->session_id),
+                 MakeOneValueArray<arrow::UInt8Builder>(static_cast<uint8_t>(context.direction)),
+                 MakeOneValueArray<arrow::UInt8Builder>(static_cast<uint8_t>(event.kind)),
+                 MakeOneValueArray<arrow::UInt64Builder>(event.begin),
+                 MakeOneValueArray<arrow::UInt64Builder>(event.end), MakeOneBinaryArray(payload),
+                 event.captured_at_ns ? MakeOneValueArray<arrow::Int64Builder>(*event.captured_at_ns)
+                                      : MakeOneNullArray<arrow::Int64Builder>()});
+            const int error = emitter.Emit("stream_event", *batch);
+            if (error) return error;
+            if (cursor.Consume(event.kind == npm::NpmTcpStreamEventKindV1::kData ? event.bytes.size : 0)) return EINVAL;
+        }
+        return 0;
+    }
+
+ private:
+    StreamResultTrace* trace_;
+    uint64_t next_id_ = 1;
+};
+
+npm::NpmModuleCatalogV1 StreamResultCatalog(StreamResultTrace* trace) {
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    npm::NpmModuleRegistrationV1 registration;
+    registration.module_id = "stream_probe";
+    registration.entity_ids = {"stream_event"};
+    registration.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view, npm::NpmPreparedModuleV1* out) {
+        out->plan.module_id = "stream_probe";
+        out->plan.input_mask = static_cast<uint8_t>(npm::NpmInputKindV1::kTcpPacket);
+        out->plan.requires_labeling = true;
+        out->plan.requires_tcp_stream = true;
+        out->plan.primary_label_ids = std::vector<uint32_t>{1001};
+        npm::NpmEntityDescriptorV1 entity;
+        entity.entity_id = "stream_event";
+        entity.module_id = "stream_probe";
+        entity.schema = StreamEventSchema();
+        entity.revision_semantics = npm::NpmRevisionSemanticsV1::kEvent;
+        out->plan.entities = {entity};
+        out->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
+            npm::NpmModuleInstanceV1 instance;
+            auto module = std::make_unique<StreamResultModule>(trace);
+            instance.tcp_stream_consumer = module.get();
+            instance.protocol = std::move(module);
+            return instance;
+        };
+        return npm::NpmProtocolContractStatusV1{};
+    };
+    catalog.push_back(std::move(registration));
+    return catalog;
+}
+
+struct StreamResultOutcome {
+    std::vector<StreamEventRow> consumed;
+    std::vector<StreamEventRow> foreground;
+    int basic_rows = 0;
+    int session_rows = 0;
+};
+
+StreamResultOutcome RunStreamResultBatches(bool split_batches, bool observe_stream) {
+    StreamResultTrace trace;
+    auto catalog = StreamResultCatalog(&trace);
+    npm::NpmBasicTaskConfig config;
+    const std::string json = std::string(R"({"input_namespace":"capture","source_domains":"1:77",)") +
+                             R"("features":"basic,session,labeling,stream_probe","observing":")" +
+                             (observe_stream ? "stream_event" : "session") + R"("})";
+    assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config, true, catalog).error ==
+           npm::NpmBasicTaskConfigError::kNone);
+    config.analysis.out_of_order_tolerance_ns = 0;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    LabelingMatcherStats labels;
+    auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+    std::shared_ptr<arrow::Schema> schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    auto consumer = std::make_unique<StreamResultConsumer>(&trace);
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                            budget, new ProtocolLabelMatcher(&labels), catalog, std::move(consumer))
+               .error == npm::NpmBasicTaskRuntimeError::kNone);
+    assert(schema->Equals(*(observe_stream ? StreamEventSchema() : npm::NpmSessionResultSchema(true)), true));
+    auto first = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {'A', 'B', 'C'}, kTcpAck, 100);
+    auto late = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {'F', 'G'}, kTcpAck, 105);
+    auto reset = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {}, kTcpRst, 107);
+    StreamResultOutcome outcome;
+    auto process = [&](std::shared_ptr<arrow::RecordBatch> input, bool live_direction) {
+        std::weak_ptr<arrow::RecordBatch> owner = input;
+        std::shared_ptr<arrow::RecordBatch> output;
+        assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(output && output->schema()->Equals(*schema, true));
+        if (observe_stream) AppendStreamEventRows(*output, &outcome.foreground);
+        output.reset();
+        input.reset();
+        assert(owner.expired());
+        if (live_direction) assert(budget->Usage().module_state_bytes > 0);
+    };
+    if (split_batches) {
+        process(MakeEncodedPacketBatch({MakeBatchPacketRecord(first, 1, 10, 1)}), true);
+        process(MakeEncodedPacketBatch({MakeBatchPacketRecord(late, 1, 11, 2)}), true);
+        process(MakeEncodedPacketBatch({MakeBatchPacketRecord(reset, 1, 12, 3)}), false);
+    } else {
+        process(MakeEncodedPacketBatch({MakeBatchPacketRecord(first, 1, 10, 1), MakeBatchPacketRecord(late, 1, 11, 2),
+                                        MakeBatchPacketRecord(reset, 1, 12, 3)}),
+                false);
+    }
+    std::shared_ptr<arrow::RecordBatch> eof;
+    assert(runtime->FlushOffline(20, &eof).error == npm::NpmEofFlushError::kNone);
+    assert(eof && eof->schema()->Equals(*schema, true));
+    if (observe_stream) AppendStreamEventRows(*eof, &outcome.foreground);
+    eof.reset();
+    assert(trace.finishes == 1 && trace.cancels == 0 && trace.module_finishes == 1 && trace.module_aborts == 0);
+    assert(trace.basic_rows > 0 && trace.session_rows > 0 && !trace.run_id.empty());
+    assert(labels.release_calls == 1);
+    outcome.consumed = trace.rows;
+    outcome.basic_rows = trace.basic_rows;
+    outcome.session_rows = trace.session_rows;
+    runtime.reset();
+    assert(labels.release_calls == 1 && npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+    return outcome;
+}
+
+void TestTcpStreamRecordBatchTypedResultRouting() {
+    const auto one_batch = RunStreamResultBatches(false, true);
+    const auto split = RunStreamResultBatches(true, true);
+    const auto session_observed = RunStreamResultBatches(true, false);
+    assert(one_batch.consumed == split.consumed && split.consumed == session_observed.consumed);
+    assert(one_batch.foreground == one_batch.consumed && split.foreground == split.consumed);
+    assert(session_observed.foreground.empty());
+    assert(one_batch.basic_rows == split.basic_rows && split.basic_rows == session_observed.basic_rows);
+    assert(one_batch.session_rows == split.session_rows && split.session_rows == session_observed.session_rows);
+    const auto& events = split.consumed;
+    assert(events.size() == 4);
+    assert(std::get<1>(events[0]) == static_cast<uint8_t>(npm::NpmTcpStreamEventKindV1::kData));
+    assert(std::get<2>(events[0]) == 0 && std::get<3>(events[0]) == 3 && std::get<4>(events[0]) == "ABC");
+    assert(std::get<5>(events[0]) == 10);
+    assert(std::get<1>(events[1]) == static_cast<uint8_t>(npm::NpmTcpStreamEventKindV1::kGap));
+    assert(std::get<2>(events[1]) == 3 && std::get<3>(events[1]) == 5 && std::get<4>(events[1]).empty());
+    assert(std::get<1>(events[2]) == static_cast<uint8_t>(npm::NpmTcpStreamEventKindV1::kData));
+    assert(std::get<2>(events[2]) == 5 && std::get<3>(events[2]) == 7 && std::get<4>(events[2]) == "FG");
+    assert(std::get<5>(events[2]) == 11);
+    assert(std::get<1>(events[3]) == static_cast<uint8_t>(npm::NpmTcpStreamEventKindV1::kEnd));
+    assert(std::get<2>(events[3]) == 7 && std::get<3>(events[3]) == 7);
+    assert(std::get<0>(events[0]) == static_cast<uint8_t>(npm::NpmPacketDirection::kAToB));
+}
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--tcp-stream-only") {
+        TestTcpStreamRecordBatchTypedResultRouting();
+        TestTcpStreamRuntimeAdmissionAndLifecycle();
+        TestTcpStreamRuntimeDeadlineAndCancel();
+        TestTcpStreamRuntimeFailureDiagnostics();
+        TestTcpStreamRuntimeCancelInsideCallback();
+        TestNpmTcpStreamOpenGatesAndFrozenConfig();
+        return 0;
+    }
+    assert(argc == 1);
+    TestTcpStreamRecordBatchTypedResultRouting();
+    TestTcpStreamRuntimeAdmissionAndLifecycle();
+    TestTcpStreamRuntimeDeadlineAndCancel();
+    TestTcpStreamRuntimeFailureDiagnostics();
+    TestTcpStreamRuntimeCancelInsideCallback();
     TestNpmTcpStreamParameters();
     TestNpmTcpStreamModuleInstanceContract();
     TestNpmTcpStreamOpenGatesAndFrozenConfig();
