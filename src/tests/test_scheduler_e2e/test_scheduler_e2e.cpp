@@ -40,6 +40,7 @@
 #include <framework/interfaces/idatabase_factory.h>
 #include <framework/interfaces/idataframe_channel.h>
 #include <framework/interfaces/ifilter_domain_resolver.h>
+#include <framework/interfaces/iflow_labeling.h>
 #include <framework/interfaces/ioperator.h>
 #include <framework/interfaces/ioperator_registry.h>
 #include <framework/interfaces/irouter_handle.h>
@@ -47,6 +48,7 @@
 #include <framework/interfaces/istream_factory.h>
 #include <framework/interfaces/istream_operator.h>
 #include <operators/npm_basic/modules/dns/npm_dns_contract.h>
+#include <operators/npm_basic/modules/http1/npm_http1_contract.h>
 #include <operators/npm_basic/npm_basic_result_consumer.h>
 #include <plugins/npi/iprotocol.h>
 #include <common/loader.hpp>
@@ -108,6 +110,60 @@ class SchedulerE2eProtocol final : public IProtocol {
 
  private:
     IProtocol* delegate_ = nullptr;
+};
+
+class SchedulerHttp1Matcher final : public IFlowLabelMatcherV1 {
+ public:
+    int ClassifyBatch(const FlowLabelFactsV1* facts, uint32_t count, uint32_t* labels) const override {
+        if (facts == nullptr || labels == nullptr) return EINVAL;
+        for (uint32_t index = 0; index < count; ++index) {
+            labels[index] = facts[index].destination.port == 80 ? 1001 : 0;
+        }
+        return 0;
+    }
+    bool FindLabel(uint32_t id, FlowPrimaryLabelViewV1* view) const override {
+        if (id != 1001) return false;
+        if (view != nullptr) {
+            view->label_id = 1001;
+            view->name = "http1-e2e";
+        }
+        return true;
+    }
+    void Release() noexcept override { delete this; }
+};
+
+class SchedulerHttp1Labeling final : public IFlowLabelingProviderV1, public IConfigChannelRegistryV1 {
+ public:
+    FlowLabelingErrorV1 RuntimeStatus(FlowLabelingDiagnosticV1* diagnostic) const override {
+        if (diagnostic != nullptr) *diagnostic = {};
+        return FlowLabelingErrorV1::kNone;
+    }
+    FlowLabelingErrorV1 CreateMatcher(const FlowLabelingCompileRequestV1& request, IFlowLabelMatcherV1** output,
+                                      FlowLabelingDiagnosticV1* diagnostic) override {
+        if (request.snapshot == nullptr || request.snapshot->channel_name != "http1-e2e" ||
+            request.snapshot->revision != 1 || output == nullptr) {
+            return FlowLabelingErrorV1::kInvalidSnapshot;
+        }
+        *output = new SchedulerHttp1Matcher();
+        if (diagnostic != nullptr) *diagnostic = {};
+        return FlowLabelingErrorV1::kNone;
+    }
+    int Resolve(const char* exact_reference, ConfigChannelSnapshot* snapshot, std::string* error) override {
+        if (exact_reference == nullptr || std::string(exact_reference) != "config.http1-e2e@1" || snapshot == nullptr) {
+            if (error != nullptr) *error = "unknown test snapshot";
+            return ENOENT;
+        }
+        ConfigChannelSnapshot next{};
+        next.channel_name = "http1-e2e";
+        next.revision = 1;
+        next.format = "yaml";
+        next.schema_id = "flowsql.io/flow-labeling/v1alpha1";
+        next.content = std::make_shared<const std::string>("labels: []");
+        next.content_bytes = next.content->size();
+        *snapshot = std::move(next);
+        if (error != nullptr) error->clear();
+        return 0;
+    }
 };
 
 class SchedulerE2eBlockOperator final : public IBlockStreamOperator {
@@ -565,6 +621,41 @@ static std::vector<uint8_t> MakeSchedulerE2eTcpRstPacket() {
         0x02, 0x01, 0xc6, 0x33, 0x64, 0x02, 0xa0, 0x28, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x68,
         0x00, 0x00, 0x00, 0x00, 0x50, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
+}
+
+static std::vector<uint8_t> MakeSchedulerE2eHttp1Packet(bool from_server, uint8_t flags, uint32_t sequence,
+                                                        uint32_t acknowledgement, const std::string& payload) {
+    std::vector<uint8_t> packet = {
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0x08, 0x00, 0x45, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x40, 0x06, 0x00, 0x00, 0xc0, 0x00, 0x02, 0x01, 0xc6, 0x33, 0x64, 0x02, 0xaf, 0xc8,
+        0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    const uint16_t ip_length = static_cast<uint16_t>(40 + payload.size());
+    packet[16] = static_cast<uint8_t>(ip_length >> 8);
+    packet[17] = static_cast<uint8_t>(ip_length);
+    if (from_server) {
+        for (size_t index = 0; index < 4; ++index) std::swap(packet[26 + index], packet[30 + index]);
+        std::swap(packet[34], packet[36]);
+        std::swap(packet[35], packet[37]);
+    }
+    for (int index = 0; index < 4; ++index) {
+        packet[38 + index] = static_cast<uint8_t>(sequence >> (24 - 8 * index));
+        packet[42 + index] = static_cast<uint8_t>(acknowledgement >> (24 - 8 * index));
+    }
+    packet[47] = flags;
+    packet.insert(packet.end(), payload.begin(), payload.end());
+    return packet;
+}
+
+static std::vector<uint8_t> MakeSchedulerE2eHttp1Capture() {
+    const std::string request = "GET /health HTTP/1.1\r\nHost: example.test\r\n\r\n";
+    const std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    return MakeSchedulerE2eClassicCapture(
+        false, {{1, 0, MakeSchedulerE2eHttp1Packet(false, 0x02, 100, 0, "")},
+                {1, 100, MakeSchedulerE2eHttp1Packet(true, 0x12, 200, 101, "")},
+                {1, 200, MakeSchedulerE2eHttp1Packet(false, 0x10, 101, 201, "")},
+                {1, 300, MakeSchedulerE2eHttp1Packet(false, 0x18, 101, 201, request)},
+                {1, 400, MakeSchedulerE2eHttp1Packet(true, 0x18, 201, 101 + request.size(), response)}});
 }
 
 static void AssertSchedulerE2eNpmBasicSchema(const std::shared_ptr<arrow::Schema>& schema) {
@@ -1333,6 +1424,8 @@ int main() {
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_pcapng_offset_" + suffix + ".pcapng");
     const std::filesystem::path pcap_npm_basic =
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_npm_basic_" + suffix + ".pcap");
+    const std::filesystem::path pcap_npm_http1 =
+        std::filesystem::temp_directory_path() / ("flowsql_scheduler_npm_http1_" + suffix + ".pcap");
     std::filesystem::remove(db_path);
     std::filesystem::remove(stream_cfg);
     std::filesystem::remove(stream_meta_db);
@@ -1342,6 +1435,7 @@ int main() {
     std::filesystem::remove(pcap_nano);
     std::filesystem::remove(pcapng_offset);
     std::filesystem::remove(pcap_npm_basic);
+    std::filesystem::remove(pcap_npm_http1);
     std::filesystem::remove_all(operator_db_dir);
     std::filesystem::remove_all(binaddon_upload_dir);
     std::filesystem::create_directories(data_dir);
@@ -1373,6 +1467,7 @@ int main() {
     WriteSchedulerE2eBinary(
         pcap_npm_basic,
         MakeSchedulerE2eClassicCapture(false, {{1, 0, MakeSchedulerE2eTcpRstPacket()}}));
+    WriteSchedulerE2eBinary(pcap_npm_http1, MakeSchedulerE2eHttp1Capture());
 
     {
         std::ofstream out(stream_cfg);
@@ -1419,12 +1514,15 @@ int main() {
                                                               SchedulerE2eTransformKind::kAnyPassthrough);
     SchedulerE2eManagedTrace managed_trace;
     SchedulerE2eManagedProvider managed_transform(&managed_trace);
+    SchedulerHttp1Labeling http1_labeling;
     loader->Regist(IID_PROTOCOL, &pcap_protocol);
     loader->Regist(IID_BLOCK_STREAM_OPERATOR, &block_operator);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &packet_transform);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &passthrough_transform);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &parameter_capture_transform);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &managed_transform);
+    loader->Regist(IID_FLOW_LABELING_PROVIDER_V1, static_cast<IFlowLabelingProviderV1*>(&http1_labeling));
+    loader->Regist(IID_CONFIG_CHANNEL_REGISTRY_V1, static_cast<IConfigChannelRegistryV1*>(&http1_labeling));
     const char* libs[] = {
         "libflowsql_database.so", "libflowsql_builtin.so",   "libflowsql_catalog.so",  "libflowsql_npi.so",
         "libflowsql_pcapfile.so", "libflowsql_scheduler.so", "libflowsql_binaddon.so", "libflowsql_stream.so",
@@ -2144,6 +2242,100 @@ int main() {
         ASSERT_EQ(
             QueryCount(db, "SELECT * FROM npm_dns_transaction_final_v1 WHERE __npm_run_id='" + managed_run_id + "'"),
             0);
+
+        const std::string http1_channel = "scheduler_npm_http1";
+        ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(http1_channel, pcap_npm_http1), rsp),
+                  error::OK);
+        const std::string http1_source = "pcapfile." + http1_channel;
+        const std::string http1_with =
+            " WITH input_namespace='" + http1_source +
+            "',source_domains='0:77',features='http1,labeling',observing='http1_transaction',parameters='" +
+            R"({"schema_version":1,"core":{"labeling":"config.http1-e2e@1"},"http1":{"primary_label_ids":[1001]}})" +
+            "'";
+        const std::string http1_dataframe_name = "scheduler_npm_http1_front";
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq("SELECT * FROM " + http1_source + " USING npm.basic" + http1_with + " INTO dataframe." +
+                               http1_dataframe_name),
+                       rsp),
+                  error::OK);
+        auto http1_output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(http1_dataframe_name.c_str()));
+        ASSERT_TRUE(http1_output != nullptr);
+        DataFrame http1_result;
+        ASSERT_EQ(http1_output->Read(&http1_result), 0);
+        const auto http1_batch = http1_result.ToArrow();
+        const auto http1_entity = npm::NpmHttp1TransactionEntityDescriptorV1();
+        ASSERT_TRUE(http1_batch != nullptr && http1_batch->num_rows() == 1);
+        ASSERT_TRUE(http1_batch->schema()->Equals(*http1_entity.schema, true));
+        const auto http1_outcome =
+            std::dynamic_pointer_cast<arrow::StringArray>(http1_batch->GetColumnByName("outcome"));
+        const auto http1_status =
+            std::dynamic_pointer_cast<arrow::UInt16Array>(http1_batch->GetColumnByName("status_code"));
+        const auto http1_latency =
+            std::dynamic_pointer_cast<arrow::Int64Array>(http1_batch->GetColumnByName("latency_ns"));
+        const auto http1_domain =
+            std::dynamic_pointer_cast<arrow::UInt64Array>(http1_batch->GetColumnByName("observation_domain_id"));
+        ASSERT_TRUE(http1_outcome && http1_status && http1_latency && http1_domain);
+        ASSERT_EQ(http1_outcome->GetString(0), "matched");
+        ASSERT_EQ(http1_status->Value(0), 200);
+        ASSERT_EQ(http1_latency->Value(0), 100000);
+        ASSERT_EQ(http1_domain->Value(0), 77ULL);
+        ASSERT_EQ(registry->Unregister(http1_dataframe_name.c_str()), 0);
+
+        std::vector<std::string> http1_run_ids;
+        for (int run = 0; run < 2; ++run) {
+            ASSERT_EQ(
+                exec("/scheduler/batch/execute",
+                     MakeReq("SELECT * FROM " + http1_source + " USING npm.basic" + http1_with + " INTO sqlite.local"),
+                     rsp),
+                error::OK);
+            rapidjson::Document completed;
+            completed.Parse(rsp.c_str());
+            ASSERT_TRUE(!completed.HasParseError() && completed.IsObject());
+            ASSERT_EQ(std::string(completed["status"].GetString()), "completed");
+            const auto& result = completed["result"];
+            ASSERT_EQ(std::string(result["run_status"].GetString()), "completed");
+            ASSERT_EQ(result["rows_written"].GetInt64(), 1);
+            ASSERT_TRUE(result["entities"].IsArray() && result["entities"].Size() == 1);
+            const auto& entity = result["entities"][0];
+            ASSERT_EQ(std::string(entity["entity_id"].GetString()), "http1_transaction");
+            ASSERT_EQ(entity["schema_version"].GetUint(), 1U);
+            http1_run_ids.emplace_back(result["run_id"].GetString());
+            ASSERT_TRUE(!http1_run_ids.back().empty());
+        }
+        ASSERT_TRUE(http1_run_ids[0] != http1_run_ids[1]);
+        for (const char* relation : {"history", "latest", "final"}) {
+            const std::string name = "npm_http1_transaction_" + std::string(relation) + "_v1";
+            for (size_t run = 0; run < http1_run_ids.size(); ++run) {
+                const std::string destination = "scheduler_http1_" + std::string(relation) + std::to_string(run);
+                ASSERT_EQ(exec("/scheduler/batch/execute",
+                               MakeReq("SELECT * FROM sqlite.local." + name + " WHERE __npm_run_id='" +
+                                       http1_run_ids[run] + "' INTO dataframe." + destination),
+                               rsp),
+                          error::OK);
+                auto output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(destination.c_str()));
+                ASSERT_TRUE(output != nullptr);
+                DataFrame frame;
+                ASSERT_EQ(output->Read(&frame), 0);
+                auto batch = frame.ToArrow();
+                ASSERT_TRUE(batch != nullptr && batch->num_rows() == 1);
+                for (const auto& field : http1_entity.schema->fields()) {
+                    ASSERT_TRUE(batch->GetColumnByName(field->name()) != nullptr);
+                }
+                const auto ids = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("__npm_run_id"));
+                const auto statuses =
+                    std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("__npm_run_status"));
+                const auto outcomes = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("outcome"));
+                ASSERT_TRUE(ids && statuses && outcomes);
+                ASSERT_EQ(ids->GetString(0), http1_run_ids[run]);
+                ASSERT_EQ(statuses->GetString(0), "completed");
+                ASSERT_EQ(outcomes->GetString(0), "matched");
+                ASSERT_EQ(registry->Unregister(destination.c_str()), 0);
+                ASSERT_EQ(QueryCount(db, "SELECT * FROM " + name + " WHERE __npm_run_id='" + http1_run_ids[run] + "'"),
+                          1);
+            }
+            ASSERT_EQ(QueryCount(db, "SELECT * FROM " + name + " WHERE __npm_run_id='" + managed_run_id + "'"), 0);
+        }
+        ASSERT_EQ(stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest(http1_channel), rsp), error::OK);
 
         const std::string metadata_dataframe = "scheduler_npm_run_source";
         ASSERT_EQ(exec("/scheduler/batch/execute",
@@ -5690,6 +5882,7 @@ int main() {
     std::filesystem::remove(pcap_nano);
     std::filesystem::remove(pcapng_offset);
     std::filesystem::remove(pcap_npm_basic);
+    std::filesystem::remove(pcap_npm_http1);
     std::filesystem::remove_all(data_dir);
     std::filesystem::remove_all(operator_db_dir);
     std::filesystem::remove_all(binaddon_upload_dir);

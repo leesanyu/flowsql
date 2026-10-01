@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <operators/npm_basic/modules/dns/npm_dns_contract.h>
+#include <operators/npm_basic/modules/http1/npm_http1_contract.h>
 #include <operators/npm_basic/npm_basic_result_consumer.h>
 #include <services/database/database_plugin.h>
 
@@ -376,6 +377,27 @@ int main() {
     assert(probe.Text("SELECT entity_instance_id FROM npm_dns_transaction_final_v1 WHERE "
                       "__npm_run_id='run-dns-1'") == "9001");
     assert(probe.Int64("SELECT schema_version FROM npm_result_entities WHERE entity_id='dns_transaction'") == 1);
+
+    const auto http1 = flowsql::npm::NpmHttp1TransactionEntityDescriptorV1();
+    auto http_first =
+        CreateConsumer(factory.get(), {"task-http1", "run-http1-1"}, {http1}, std::make_shared<BoundedBudget>());
+    assert(http_first->Consume({"task-http1", "run-http1-1"}, http1, *MakeRows(http1, 7001, 1)) == 0);
+    assert(http_first->Finish() == 0);
+    AssertSummary(http_first->ResultJson(), "run-http1-1", "completed", 1, 1);
+    auto http_second =
+        CreateConsumer(factory.get(), {"task-http1", "run-http1-2"}, {http1}, std::make_shared<BoundedBudget>());
+    assert(http_second->Consume({"task-http1", "run-http1-2"}, http1, *MakeRows(http1, 7001, 1)) == 0);
+    assert(http_second->Finish() == 0);
+    for (const char* relation : {"history", "latest", "final"}) {
+        const std::string name = std::string("npm_http1_transaction_") + relation + "_v1";
+        assert(probe.Text("SELECT type FROM sqlite_master WHERE name='" + name + "'") == "view");
+        assert(probe.Int64("SELECT COUNT(*) FROM " + name + " WHERE __npm_run_id='run-http1-1'") == 1);
+        assert(probe.Int64("SELECT COUNT(*) FROM " + name + " WHERE __npm_run_id='run-http1-2'") == 1);
+        assert(probe.Int64("SELECT COUNT(*) FROM " + name + " WHERE __npm_run_id='run-1'") == 0);
+    }
+    assert(probe.Text("SELECT entity_instance_id FROM npm_http1_transaction_final_v1 WHERE "
+                      "__npm_run_id='run-http1-1'") == "7001");
+    assert(probe.Int64("SELECT schema_version FROM npm_result_entities WHERE entity_id='http1_transaction'") == 1);
 
     auto second_budget = std::make_shared<BoundedBudget>();
     auto second = CreateConsumer(factory.get(), {"task-repeat", "run-2"}, entities, second_budget);

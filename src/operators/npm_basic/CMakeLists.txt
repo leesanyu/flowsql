@@ -25,6 +25,11 @@ add_library(${PROJECT_NAME} SHARED
     modules/dns/npm_dns_result_encoder.cpp
     modules/dns/npm_dns_tcp.cpp
     modules/dns/npm_dns_udp.cpp
+    modules/http1/npm_http1_contract.cpp
+    modules/http1/npm_http1_framer.cpp
+    modules/http1/npm_http1_transactions.cpp
+    modules/http1/npm_http1_result_encoder.cpp
+    modules/http1/npm_http1_module.cpp
     modules/session/npm_session_analysis_module.cpp
     modules/session/npm_tcp_performance_tracker.cpp
     output/npm_result_router.cpp

@@ -30,6 +30,11 @@ target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/m
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_result_encoder.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_tcp.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_udp.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_contract.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_framer.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_transactions.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_result_encoder.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_module.cpp)
 target_sources(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/session/npm_session_analysis_module.cpp)
 target_sources(${PROJECT_NAME} PRIVATE
@@ -77,6 +82,81 @@ set_target_properties(test_npm_protocol_contract PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
 add_test(NAME test_npm_protocol_contract COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_protocol_contract)
+
+add_executable(test_npm_http1_contract
+    test_npm_http1_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+)
+target_include_directories(test_npm_http1_contract PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_http1_contract PRIVATE -UNDEBUG)
+add_thirddepen(test_npm_http1_contract arrow rapidjson)
+add_dependencies(test_npm_http1_contract flowsql_npm_basic)
+target_link_libraries(test_npm_http1_contract flowsql_common)
+set_target_properties(test_npm_http1_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_http1_contract COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_http1_contract)
+
+add_executable(test_npm_http1_framer
+    test_npm_http1_framer.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_framer.cpp
+)
+target_include_directories(test_npm_http1_framer PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_http1_framer PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move)
+set_target_properties(test_npm_http1_framer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_http1_framer COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_http1_framer)
+
+add_executable(test_npm_http1_transactions
+    test_npm_http1_transactions.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_transactions.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_framer.cpp
+)
+target_include_directories(test_npm_http1_transactions PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_http1_transactions PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move)
+set_target_properties(test_npm_http1_transactions PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_http1_transactions COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_http1_transactions)
+
+add_executable(test_npm_http1_result_encoder
+    test_npm_http1_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_transactions.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_framer.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+)
+target_include_directories(test_npm_http1_result_encoder PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_http1_result_encoder PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move -Wno-unused-parameter)
+add_thirddepen(test_npm_http1_result_encoder arrow rapidjson)
+target_link_libraries(test_npm_http1_result_encoder flowsql_common)
+set_target_properties(test_npm_http1_result_encoder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_http1_result_encoder COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_http1_result_encoder)
+
+add_executable(test_npm_http1_module
+    test_npm_http1_module.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_module.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_transactions.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_framer.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+)
+target_include_directories(test_npm_http1_module PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_http1_module PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move -Wno-unused-parameter)
+add_thirddepen(test_npm_http1_module arrow rapidjson)
+target_link_libraries(test_npm_http1_module flowsql_common)
+set_target_properties(test_npm_http1_module PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_http1_module COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_http1_module)
+
+option(FLOWSQL_NPM_HTTP1_SANITIZERS "Sanitize isolated NPM HTTP/1 tests" OFF)
+if(FLOWSQL_NPM_HTTP1_SANITIZERS)
+    foreach(http1_target IN ITEMS test_npm_http1_framer test_npm_http1_transactions
+                                  test_npm_http1_result_encoder test_npm_http1_module)
+        target_compile_options(${http1_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${http1_target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
 
 add_executable(test_npm_dns_udp
     test_npm_dns_udp.cpp
@@ -181,6 +261,7 @@ target_sources(test_npm_result_sqlite PRIVATE
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_contract.cpp
 )
 add_thirddepen(test_npm_result_sqlite arrow rapidjson sqlite)
 target_link_libraries(test_npm_result_sqlite flowsql_common flowsql_npm_basic flowsql_database)

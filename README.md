@@ -562,7 +562,7 @@ INTO dataframe.basic_metrics
 
 | 参数 | 默认值 | 含义 |
 | --- | --- | --- |
-| `features` | `'basic'` | 启用的结果模块，当前支持 `basic`、`session`、`dns`；DNS 需同时启用能力项 `labeling`。 |
+| `features` | `'basic'` | 启用的结果模块，当前支持 `basic`、`session`、`dns`、`http1`；DNS/HTTP/1 需同时启用能力项 `labeling`。 |
 | `observing` | `'basic'` | 普通 DataFrame 目标接收的结果实体，必须已在 `features` 中启用。 |
 | `input_namespace` | `FROM` 通道名 | 本次输入的逻辑来源名称，可用非空值覆盖。 |
 | `source_domains` | `'all'` | 采集来源到观测域的映射，语法见下文。 |
@@ -621,6 +621,40 @@ INTO dataframe.dns_final
 
 同一实体还有 `npm_dns_transaction_history_v1` 和 `npm_dns_transaction_latest_v1`。每次运行的
 `__npm_run_id` 相互隔离；查询时按本次响应的关系名和运行 ID 过滤。
+
+#### HTTP/1 事务分析
+
+HTTP/1 仅处理明文 TCP 流。先按 [Flow Labeling 指引](docs/flow-labeling.md)提供可用的 provider 和精确配置快照，
+确保目标会话的主标签命中 `primary_label_ids`。下面的快照引用和标签 ID 是示例，需替换为当前环境中的值。
+离线捕获应包含 TCP SYN，使共享流能从消息首字节对齐；中途开始的流不会扫描正文寻找 HTTP 起始行。
+
+```sql
+SELECT *
+FROM pcapfile.capture
+USING npm.basic
+WITH features='http1,labeling',
+     observing='http1_transaction',
+     parameters='{"schema_version":1,"core":{"labeling":"config.http-labels@7"},"http1":{"primary_label_ids":[1001],"response_timeout_ns":5000000000}}'
+INTO dataframe.http1_transactions
+```
+
+`observing` 只决定前台 DataFrame 的实体。若要托管全部已启用实体，将目标改为单个可写数据库通道，
+例如 `INTO sqlite.local`，从完成响应取得本次 `run_id`，再查询：
+
+```sql
+SELECT *
+FROM sqlite.local.npm_http1_transaction_final_v1
+WHERE __npm_run_id='替换为本次响应中的run_id'
+INTO dataframe.http1_final
+```
+
+Schema v1 共 22 列；同一实体还有 `npm_http1_transaction_history_v1` 和
+`npm_http1_transaction_latest_v1`，三个关系均按 `__npm_run_id` 隔离。
+`matched` 仅表示请求头和最终响应头均被完整观察，不表示响应正文完整；`latency_ns` 是两个头部完成捕获时间之差，
+时间缺失或倒序时为 null。`request_only` 与 `response_only` 的 `incomplete_reason` 描述捕获视图中的缺口、
+定界、期限或未配对事实，不能据此推断服务端故障。默认响应期限为 5 秒，仅随合法捕获水位推进；
+`max_pending_per_session` 默认 128，`max_header_bytes` 默认 65536，达到 pending 或任务预算限额会使任务失败。
+HTTP/2、HTTP/3、HTTPS、CONNECT 隧道及 WebSocket 帧不在此实体的分析范围内。
 
 `input_namespace` 和 `source_domains` 均为选填。SQL 省略 `input_namespace` 时默认使用 `FROM` 的通道名，
 例如 `pcapfile.capture`；显式指定非空值可覆盖默认名称。不同 namespace 或观测域的相同五元组不会合并。

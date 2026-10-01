@@ -7,6 +7,8 @@
 #include <operators/npm_basic/config/npm_basic_task_config.h>
 #include <operators/npm_basic/modules/dns/npm_dns_contract.h>
 #include <operators/npm_basic/modules/dns/npm_dns_module.h>
+#include <operators/npm_basic/modules/http1/npm_http1_contract.h>
+#include <operators/npm_basic/modules/http1/npm_http1_module.h>
 #include <operators/npm_basic/modules/session/npm_session_analysis_module.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -78,6 +80,26 @@ const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1() {
              out->create = [config = std::move(config)](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget> budget) {
                  NpmModuleInstanceV1 result;
                  auto module = std::make_unique<NpmDnsProtocolModuleV1>(config, std::move(budget));
+                 result.tcp_stream_consumer = module.get();
+                 result.protocol = std::move(module);
+                 return result;
+             };
+             return NpmProtocolContractStatusV1{};
+         }},
+        {"http1",
+         true,
+         {"http1_transaction"},
+         [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
+             NpmHttp1ConfigV1 config;
+             const auto parsed = ParseNpmHttp1ConfigV1(json, &config);
+             if (parsed.error != NpmHttp1ConfigErrorV1::kNone) {
+                 const std::string prefix = "/http1/";
+                 return Invalid(parsed.path == "/http1" ? "config" : parsed.path.substr(prefix.size()));
+             }
+             out->plan = NpmHttp1ModulePlanV1(config);
+             out->create = [config = std::move(config)](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget> budget) {
+                 NpmModuleInstanceV1 result;
+                 auto module = std::make_unique<NpmHttp1ProtocolModuleV1>(config, std::move(budget));
                  result.tcp_stream_consumer = module.get();
                  result.protocol = std::move(module);
                  return result;
