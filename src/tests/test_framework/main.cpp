@@ -73,6 +73,7 @@ void test_offline_filter_public_contracts();
 void test_config_channel_public_contract();
 void test_flow_labeling_public_contract();
 void test_offline_filter_reader_factory_contracts();
+void test_capture_contract_description();
 void test_stage_filter_interfaces();
 void test_filter_task_session_isolation();
 void test_sql_text_splitter();
@@ -4631,6 +4632,7 @@ int main(int argc, char* argv[]) {
     test_filter_pushdown_negotiation();
     test_statement_stage_filters();
     test_offline_filter_public_contracts();
+    test_capture_contract_description();
     test_config_channel_public_contract();
     test_flow_labeling_public_contract();
     test_offline_filter_reader_factory_contracts();
