@@ -10,6 +10,8 @@
 #include <operators/npm_basic/modules/http1/npm_http1_contract.h>
 #include <operators/npm_basic/modules/http1/npm_http1_module.h>
 #include <operators/npm_basic/modules/session/npm_session_analysis_module.h>
+#include <operators/npm_basic/modules/tls/npm_tls_contract.h>
+#include <operators/npm_basic/modules/tls/npm_tls_module.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -100,6 +102,26 @@ const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1() {
              out->create = [config = std::move(config)](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget> budget) {
                  NpmModuleInstanceV1 result;
                  auto module = std::make_unique<NpmHttp1ProtocolModuleV1>(config, std::move(budget));
+                 result.tcp_stream_consumer = module.get();
+                 result.protocol = std::move(module);
+                 return result;
+             };
+             return NpmProtocolContractStatusV1{};
+         }},
+        {"tls",
+         true,
+         {"tls_handshake"},
+         [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
+             NpmTlsConfigV1 config;
+             const auto parsed = ParseNpmTlsConfigV1(json, &config);
+             if (parsed.error != NpmTlsConfigErrorV1::kNone) {
+                 const std::string prefix = "/tls/";
+                 return Invalid(parsed.path == "/tls" ? "config" : parsed.path.substr(prefix.size()));
+             }
+             out->plan = NpmTlsModulePlanV1(config);
+             out->create = [config = std::move(config)](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget> budget) {
+                 NpmModuleInstanceV1 result;
+                 auto module = std::make_unique<NpmTlsProtocolModuleV1>(config, std::move(budget));
                  result.tcp_stream_consumer = module.get();
                  result.protocol = std::move(module);
                  return result;

@@ -23,6 +23,10 @@
 #include <operators/npm_basic/modules/http1/npm_http1_module.h>
 #include <operators/npm_basic/modules/session/npm_session_analysis_module.h>
 #include <operators/npm_basic/modules/session/npm_tcp_performance_tracker.h>
+#include <operators/npm_basic/modules/tls/npm_tls_contract.h>
+#include <operators/npm_basic/modules/tls/npm_tls_framer.h>
+#include <operators/npm_basic/modules/tls/npm_tls_handshake.h>
+#include <operators/npm_basic/modules/tls/npm_tls_module.h>
 #include <operators/npm_basic/npm_analysis_contract.h>
 #include <operators/npm_basic/npm_basic_operator.h>
 #include <operators/npm_basic/output/npm_basic_result_collector.h>
@@ -45,6 +49,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -11540,7 +11545,7 @@ PacketFixture MakeControlPacket(bool ipv6 = false) {
 void TestProtocolCatalogOpenAndDispatch() {
     ProtocolInputTrace first, second, control;
     auto catalog = npm::ProductionNpmModuleCatalogV1();
-    assert(catalog.size() == 4);
+    assert(catalog.size() == 5);
     catalog.push_back(CountingRegistration("probe", 3, &first));
     catalog.push_back(CountingRegistration("mirror", 3, &second));
     catalog.push_back(CountingRegistration("control", 4, &control));
@@ -11864,8 +11869,8 @@ void TestDnsT0OpenContract() {
     using Error = npm::NpmBasicTaskRuntimeError;
     using ContractError = npm::NpmProtocolContractErrorV1;
     const auto& production = npm::ProductionNpmModuleCatalogV1();
-    assert(production.size() == 4 && production[0].module_id == "basic" && production[1].module_id == "session" &&
-           production[2].module_id == "dns" && production[3].module_id == "http1");
+    assert(production.size() == 5 && production[0].module_id == "basic" && production[1].module_id == "session" &&
+           production[2].module_id == "dns" && production[3].module_id == "http1" && production[4].module_id == "tls");
     ContextDictionary dictionary;
     ContextProtocol protocol(&dictionary);
     ContextPool pool(&protocol);
@@ -11987,8 +11992,8 @@ void TestHttp1T0OpenContract() {
     using Error = npm::NpmBasicTaskRuntimeError;
     using ContractError = npm::NpmProtocolContractErrorV1;
     const auto& production = npm::ProductionNpmModuleCatalogV1();
-    assert(production.size() == 4 && production[0].module_id == "basic" && production[1].module_id == "session" &&
-           production[2].module_id == "dns" && production[3].module_id == "http1");
+    assert(production.size() == 5 && production[0].module_id == "basic" && production[1].module_id == "session" &&
+           production[2].module_id == "dns" && production[3].module_id == "http1" && production[4].module_id == "tls");
     ContextDictionary dictionary;
     ContextProtocol protocol(&dictionary);
     ContextPool pool(&protocol);
@@ -12104,6 +12109,127 @@ void TestHttp1T0OpenContract() {
     assert(schema->Equals(*npm::NpmHttp1TransactionEntityDescriptorV1().schema, true));
     runtime->Cancel();
     runtime.reset();
+}
+
+void TestTlsT0OpenContract() {
+    using Error = npm::NpmBasicTaskRuntimeError;
+    using ContractError = npm::NpmProtocolContractErrorV1;
+    const auto& production = npm::ProductionNpmModuleCatalogV1();
+    assert(production.size() == 5 && production.back().module_id == "tls");
+
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    LabelingMatcherStats matcher_stats;
+    int aborts = 0;
+    StreamContractModule unrelated(&aborts);
+    int consumer_mode = 0;  // 0: same object; 1: absent; 2: unrelated object.
+    auto catalog = production;
+    catalog.pop_back();  // Replace production TLS with the controllable Open contract module.
+    npm::NpmModuleRegistrationV1 registration;
+    registration.module_id = "tls";
+    registration.entity_ids = {"tls_handshake"};
+    registration.prepare = [&aborts, &consumer_mode, &unrelated](const npm::NpmBasicTaskConfig&, std::string_view json,
+                                                                 npm::NpmPreparedModuleV1* output) {
+        npm::NpmTlsConfigV1 tls;
+        const auto parsed = npm::ParseNpmTlsConfigV1(json, &tls);
+        if (parsed.error != npm::NpmTlsConfigErrorV1::kNone) {
+            const std::string prefix = "/tls/";
+            return npm::NpmProtocolContractStatusV1{
+                ContractError::kInvalidPlan, parsed.path == "/tls" ? "config" : parsed.path.substr(prefix.size())};
+        }
+        output->plan = npm::NpmTlsModulePlanV1(tls);
+        output->create = [&aborts, &consumer_mode, &unrelated](npm::NpmProtocolContext&,
+                                                               std::shared_ptr<npm::INpmTaskBudget>) {
+            npm::NpmModuleInstanceV1 instance;
+            auto module = std::make_unique<StreamContractModule>(&aborts);
+            instance.tcp_stream_consumer = consumer_mode == 1   ? nullptr
+                                           : consumer_mode == 2 ? &unrelated
+                                                                : module.get();
+            instance.protocol = std::move(module);
+            return instance;
+        };
+        return npm::NpmProtocolContractStatusV1{};
+    };
+    catalog.push_back(std::move(registration));
+
+    const auto parse = [&](const char* json, bool labeling = true) {
+        npm::NpmBasicTaskConfig config;
+        assert(npm::ParseNpmBasicTaskConfig(json, &config, labeling, catalog).error ==
+               npm::NpmBasicTaskConfigError::kNone);
+        return config;
+    };
+    const auto open = [&](const npm::NpmBasicTaskConfig& config, bool matcher_available,
+                          std::shared_ptr<arrow::Schema>* schema, std::unique_ptr<npm::NpmBasicTaskRuntime>* runtime) {
+        return npm::NpmBasicTaskRuntime::Create(
+            config, &querier, flowsql::packet::PacketSchema(), schema, runtime, {},
+            matcher_available ? static_cast<flowsql::IFlowLabelMatcherV1*>(new ProtocolLabelMatcher(&matcher_stats))
+                              : nullptr,
+            catalog);
+    };
+    const char* valid =
+        R"({"features":"tls,labeling","observing":"tls_handshake","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[1001]}}"})";
+    npm::NpmBasicTaskConfig production_rejected;
+    assert(npm::ParseNpmBasicTaskConfig(valid, &production_rejected, true, production).error ==
+           npm::NpmBasicTaskConfigError::kNone);
+
+    auto sentinel = arrow::schema({arrow::field("sentinel", arrow::int8())});
+    auto schema = sentinel;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    auto config = parse(valid);
+    auto status = open(config, false, &schema, &runtime);
+    assert(status.error == Error::kLabelingMatcherMissing && schema == sentinel && !runtime);
+    config = parse(
+        R"({"features":"tls","observing":"tls_handshake","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[1001]}}"})");
+    status = open(config, false, &schema, &runtime);
+    assert(status.error == Error::kModulePlanError &&
+           status.module_status.error == ContractError::kUnavailableCapability && schema == sentinel && !runtime);
+    config = parse(
+        R"({"features":"tls,labeling","observing":"tls_handshake","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[999]}}"})");
+    status = open(config, true, &schema, &runtime);
+    assert(status.error == Error::kModulePlanError &&
+           status.module_status.error == ContractError::kInvalidLabelSelection && schema == sentinel && !runtime);
+
+    for (const char* node :
+         {"{}", "null", R"({"primary_label_ids":[]})", R"({"primary_label_ids":[1001,1001]})",
+          R"({"primary_label_ids":[1001],"bad":1})", R"({"primary_label_ids":[1001],"max_hello_bytes":4095})",
+          R"({"primary_label_ids":[1001],"primary_label_ids":[1001]})"}) {
+        npm::NpmBasicTaskConfig invalid = parse(valid);
+        invalid.parameters_json = std::string(R"({"schema_version":1,"tls":)") + node + "}";
+        status = open(invalid, true, &schema, &runtime);
+        assert(status.error == Error::kModulePlanError && status.module_status.error == ContractError::kInvalidPlan &&
+               schema == sentinel && !runtime);
+    }
+    config = parse(R"({"features":"tls,labeling","observing":"tls_handshake","parameters":"{\"schema_version\":1}"})");
+    status = open(config, true, &schema, &runtime);
+    assert(status.error == Error::kModulePlanError && status.module_status.field == "tls/primary_label_ids" &&
+           schema == sentinel && !runtime);
+
+    config = parse(valid);
+    for (consumer_mode = 1; consumer_mode <= 2; ++consumer_mode) {
+        const int previous_aborts = aborts;
+        status = open(config, true, &schema, &runtime);
+        assert(status.error == Error::kModuleCreateError && status.module_status.field == "tls/tcp_stream_consumer");
+        assert(aborts == previous_aborts + 1 && schema == sentinel && !runtime);
+    }
+    consumer_mode = 0;
+    status = open(config, true, &schema, &runtime);
+    assert(status.error == Error::kNone && runtime);
+    assert(schema->Equals(*npm::NpmTlsHandshakeEntityDescriptorV1().schema, true));
+    runtime->Cancel();
+    runtime.reset();
+
+    config = parse(
+        R"({"features":"basic","observing":"basic","parameters":"{\"schema_version\":1,\"tls\":{\"unknown\":null}}"})");
+    status = open(config, false, &schema, &runtime);
+    assert(status.error == Error::kNone && runtime);
+    assert(schema->Equals(*npm::NpmBasicResultSchema(), true) && runtime->Modules().empty());
+    runtime->Cancel();
+    runtime.reset();
+    assert(pool.acquire_calls == pool.release_calls);
+    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"tls_handshake"})", &config, true, catalog)
+               .error == npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
 }
 
 struct ProtocolLifecycleTrace {
@@ -12500,13 +12626,13 @@ void TestProtocolLabelIsolationAndAtomicFactoryFailure() {
     runtime.reset();
 
     auto bad_catalog = catalog;
-    bad_catalog[4] = CountingRegistration("selected", 1, &selected, false, std::vector<uint32_t>{999});
+    bad_catalog[catalog.size() - 3] = CountingRegistration("selected", 1, &selected, false, std::vector<uint32_t>{999});
     const auto previous_schema = schema;
     assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                             new ProtocolLabelMatcher(&labels), bad_catalog)
                .error == npm::NpmBasicTaskRuntimeError::kModulePlanError);
     assert(!runtime && schema == previous_schema);
-    bad_catalog[4] = CountingRegistration("selected", 1, &selected, true, std::vector<uint32_t>{1001});
+    bad_catalog[catalog.size() - 3] = CountingRegistration("selected", 1, &selected, true, std::vector<uint32_t>{1001});
     const auto stream_error =
         npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                          new ProtocolLabelMatcher(&labels), bad_catalog);
@@ -12544,6 +12670,9 @@ struct ResultConsumerTrace {
     std::vector<uint64_t> http_domains;
     std::vector<std::string> http_outcomes;
     std::vector<uint16_t> http_statuses;
+    std::vector<uint64_t> tls_domains;
+    std::vector<uint64_t> tls_ids;
+    std::vector<std::string> tls_outcomes;
     int attempts = 0;
     int fail_at = 0;
     int finishes = 0;
@@ -12586,6 +12715,15 @@ class RecordingResultConsumer final : public npm::INpmResultConsumerV1 {
                     std::static_pointer_cast<arrow::StringArray>(rows.GetColumnByName("outcome"))->GetString(i));
                 auto status = std::static_pointer_cast<arrow::UInt16Array>(rows.GetColumnByName("status_code"));
                 trace_->http_statuses.push_back(status->IsNull(i) ? 0 : status->Value(i));
+            }
+            if (entity.entity_id == "tls_handshake") {
+                trace_->tls_domains.push_back(
+                    std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("observation_domain_id"))
+                        ->Value(i));
+                trace_->tls_ids.push_back(
+                    std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("entity_instance_id"))->Value(i));
+                trace_->tls_outcomes.push_back(
+                    std::static_pointer_cast<arrow::StringArray>(rows.GetColumnByName("outcome"))->GetString(i));
             }
         }
         return 0;
@@ -12963,19 +13101,20 @@ npm::NpmModuleCatalogV1 DualEntityCatalog(DualEntityProtocolTrace* trace, uint64
 
 void TestProtocolProductionCatalogAndConcurrentDualEntityControlRuntime() {
     const auto& production = npm::ProductionNpmModuleCatalogV1();
-    assert(production.size() == 4);
+    assert(production.size() == 5);
     assert(production[0].module_id == "basic" && production[0].entity_ids == std::vector<std::string>{"basic"});
     assert(production[1].module_id == "session" && production[1].entity_ids == std::vector<std::string>{"session"});
     assert(production[2].module_id == "dns" && production[2].entity_ids == std::vector<std::string>{"dns_transaction"});
     assert(production[3].module_id == "http1" &&
            production[3].entity_ids == std::vector<std::string>{"http1_transaction"});
+    assert(production[4].module_id == "tls" && production[4].entity_ids == std::vector<std::string>{"tls_handshake"});
 
     ContextDictionary first_dictionary, second_dictionary;
     ContextProtocol first_protocol(&first_dictionary), second_protocol(&second_dictionary);
     ContextPool first_pool(&first_protocol), second_pool(&second_protocol);
     SinglePoolQuerier first_querier(&first_pool), second_querier(&second_pool);
 
-    for (const char* unavailable : {"tls", "icmp"}) {
+    for (const char* unavailable : {"icmp"}) {
         auto config = MakeRuntimeTaskConfig();
         config.features.module_ids = {unavailable};
         config.features.basic_enabled = false;
@@ -13606,6 +13745,355 @@ void TestTcpStreamRecordBatchTypedResultRouting() {
     assert(std::get<0>(events[0]) == static_cast<uint8_t>(npm::NpmPacketDirection::kAToB));
 }
 
+struct TlsStreamTrace {
+    std::vector<npm::NpmTlsFramedEventV1> hellos;
+    int packets = 0;
+    int finishes = 0;
+    int aborts = 0;
+};
+
+class TlsStreamProbe final : public npm::INpmProtocolModuleV1, public npm::INpmTcpStreamConsumerV1 {
+ public:
+    explicit TlsStreamProbe(TlsStreamTrace* trace) : trace_(trace) {}
+    int OnInput(const npm::NpmInputEventV1& input, npm::INpmResultEmitterV1&) override {
+        assert(input.kind == npm::NpmInputKindV1::kTcpPacket);
+        ++trace_->packets;
+        return 0;
+    }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnSessionEnd(const npm::NpmSessionView& session, npm::NpmSessionEndReason, int64_t,
+                     npm::INpmResultEmitterV1&) override {
+        framers_.erase(session.session_id);
+        return 0;
+    }
+    std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
+    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+        assert(framers_.empty());
+        ++trace_->finishes;
+        return 0;
+    }
+    void Abort() noexcept override { ++trace_->aborts; }
+    int OnTcpStreamReadable(const npm::NpmTcpStreamContextV1& context, npm::INpmTcpStreamCursorV1& cursor,
+                            npm::INpmResultEmitterV1&) override {
+        assert(context.session);
+        auto [entry, inserted] = framers_.try_emplace(context.session->session_id, 4096);
+        (void)inserted;
+        npm::NpmTcpStreamEventV1 event;
+        while (cursor.Peek(&event)) {
+            std::vector<npm::NpmTlsFramedEventV1> parsed;
+            const auto error = entry->second.Consume(context, event, &parsed);
+            if (error != npm::NpmTlsFramerErrorV1::kNone) return EINVAL;
+            if (cursor.Consume(event.kind == npm::NpmTcpStreamEventKindV1::kData ? event.bytes.size : 0)) return EINVAL;
+            for (auto& fact : parsed) {
+                if (fact.hello) trace_->hellos.push_back(std::move(fact));
+            }
+        }
+        return 0;
+    }
+
+ private:
+    TlsStreamTrace* trace_;
+    std::map<uint64_t, npm::NpmTlsFramerV1> framers_;
+};
+
+struct TlsTrackerTrace {
+    std::vector<npm::NpmTlsHandshakeResultV1> results;
+    std::vector<std::string> calls;
+    int aborts = 0;
+};
+
+class TlsTrackerProbe final : public npm::INpmProtocolModuleV1, public npm::INpmTcpStreamConsumerV1 {
+ public:
+    explicit TlsTrackerProbe(TlsTrackerTrace* trace) : trace_(trace) {}
+    int OnInput(const npm::NpmInputEventV1& input, npm::INpmResultEmitterV1&) override {
+        assert(input.kind == npm::NpmInputKindV1::kTcpPacket);
+        return 0;
+    }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnSessionEnd(const npm::NpmSessionView& session, npm::NpmSessionEndReason reason, int64_t observed,
+                     npm::INpmResultEmitterV1&) override {
+        trace_->calls.push_back("session_end");
+        auto found = trackers_.find(session.session_id);
+        if (found == trackers_.end()) return 0;
+        std::optional<npm::NpmTlsHandshakeResultV1> result;
+        if (found->second.OnSessionEnd(reason, observed, &result) != npm::NpmTlsTrackerErrorV1::kNone) return EINVAL;
+        if (result) trace_->results.push_back(std::move(*result));
+        trackers_.erase(found);
+        return 0;
+    }
+    std::optional<int64_t> NextEventDeadlineNs() const override {
+        std::optional<int64_t> minimum;
+        for (const auto& item : trackers_) {
+            const auto deadline = item.second.NextEventDeadlineNs();
+            if (deadline && (!minimum || *deadline < *minimum)) minimum = *deadline;
+        }
+        return minimum;
+    }
+    int OnTime(const npm::NpmModuleTimeV1& time, npm::INpmResultEmitterV1&) override {
+        trace_->calls.push_back("time");
+        if (!time.watermark_ns) return 0;
+        for (auto& item : trackers_) {
+            std::optional<npm::NpmTlsHandshakeResultV1> result;
+            if (item.second.OnCaptureWatermark(*time.watermark_ns, &result) != npm::NpmTlsTrackerErrorV1::kNone)
+                return EINVAL;
+            if (result) trace_->results.push_back(std::move(*result));
+        }
+        return 0;
+    }
+    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+        assert(trackers_.empty());
+        trace_->calls.push_back("finish");
+        return 0;
+    }
+    void Abort() noexcept override {
+        for (auto& item : trackers_) item.second.Abort();
+        trackers_.clear();
+        ++trace_->aborts;
+    }
+    int OnTcpStreamReadable(const npm::NpmTcpStreamContextV1& context, npm::INpmTcpStreamCursorV1& cursor,
+                            npm::INpmResultEmitterV1&) override {
+        assert(context.session);
+        auto [found, inserted] =
+            trackers_.try_emplace(context.session->session_id, context.session->session_id, npm::NpmTlsConfigV1{});
+        (void)inserted;
+        npm::NpmTcpStreamEventV1 event;
+        while (cursor.Peek(&event)) {
+            trace_->calls.push_back(event.kind == npm::NpmTcpStreamEventKindV1::kEnd ? "stream_end" : "data");
+            std::optional<npm::NpmTlsHandshakeResultV1> result;
+            if (found->second.Consume(context, event, &result) != npm::NpmTlsTrackerErrorV1::kNone) return EINVAL;
+            if (cursor.Consume(event.kind == npm::NpmTcpStreamEventKindV1::kData ? event.bytes.size : 0)) return EINVAL;
+            if (result) trace_->results.push_back(std::move(*result));
+        }
+        return 0;
+    }
+
+ private:
+    TlsTrackerTrace* trace_;
+    std::map<uint64_t, npm::NpmTlsHandshakeTrackerV1> trackers_;
+};
+
+npm::NpmModuleCatalogV1 TlsTrackerCatalog(TlsTrackerTrace* trace) {
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    catalog.pop_back();
+    npm::NpmModuleRegistrationV1 registration;
+    registration.module_id = "tls";
+    registration.entity_ids = {"tls_handshake"};
+    registration.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view json,
+                                   npm::NpmPreparedModuleV1* output) {
+        npm::NpmTlsConfigV1 config;
+        if (npm::ParseNpmTlsConfigV1(json, &config).error != npm::NpmTlsConfigErrorV1::kNone)
+            return npm::NpmProtocolContractStatusV1{npm::NpmProtocolContractErrorV1::kInvalidPlan, "tls"};
+        output->plan = npm::NpmTlsModulePlanV1(config);
+        output->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
+            npm::NpmModuleInstanceV1 instance;
+            auto module = std::make_unique<TlsTrackerProbe>(trace);
+            instance.tcp_stream_consumer = module.get();
+            instance.protocol = std::move(module);
+            return instance;
+        };
+        return npm::NpmProtocolContractStatusV1{};
+    };
+    catalog.push_back(std::move(registration));
+    return catalog;
+}
+
+npm::NpmModuleCatalogV1 TlsStreamCatalog(TlsStreamTrace* trace) {
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    catalog.pop_back();
+    npm::NpmModuleRegistrationV1 registration;
+    registration.module_id = "tls";
+    registration.entity_ids = {"tls_handshake"};
+    registration.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view json,
+                                   npm::NpmPreparedModuleV1* output) {
+        npm::NpmTlsConfigV1 tls;
+        if (npm::ParseNpmTlsConfigV1(json, &tls).error != npm::NpmTlsConfigErrorV1::kNone) {
+            return npm::NpmProtocolContractStatusV1{npm::NpmProtocolContractErrorV1::kInvalidPlan, "tls"};
+        }
+        output->plan = npm::NpmTlsModulePlanV1(tls);
+        output->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
+            npm::NpmModuleInstanceV1 instance;
+            auto module = std::make_unique<TlsStreamProbe>(trace);
+            instance.tcp_stream_consumer = module.get();
+            instance.protocol = std::move(module);
+            return instance;
+        };
+        return npm::NpmProtocolContractStatusV1{};
+    };
+    catalog.push_back(std::move(registration));
+    return catalog;
+}
+
+npm::NpmModuleCatalogV1 TlsResultCatalog() { return npm::ProductionNpmModuleCatalogV1(); }
+
+void TlsAppendU16(std::string* bytes, uint16_t value) {
+    bytes->push_back(static_cast<char>(value >> 8));
+    bytes->push_back(static_cast<char>(value));
+}
+
+std::string TlsTestMessage(uint8_t type, std::string body) {
+    std::string message(1, static_cast<char>(type));
+    message.push_back(0);
+    TlsAppendU16(&message, static_cast<uint16_t>(body.size()));
+    return message + body;
+}
+
+std::string TlsTestRecord(std::string message) {
+    std::string record("\x16\x03\x03", 3);
+    TlsAppendU16(&record, static_cast<uint16_t>(message.size()));
+    return record + message;
+}
+
+std::string TlsTestHello(bool server) {
+    std::string body("\x03\x03", 2);
+    body += std::string(32, server ? 's' : 'c');
+    body.push_back(0);
+    if (server) {
+        TlsAppendU16(&body, 0x1301);
+        body.push_back(0);
+        body += std::string("\x00\x06\x00\x2b\x00\x02\x03\x04", 8);
+        return TlsTestRecord(TlsTestMessage(2, body));
+    }
+    TlsAppendU16(&body, 2);
+    TlsAppendU16(&body, 0x1301);
+    body += std::string("\x01\x00", 2);
+    std::string extensions("\x00\x00\x00\x10\x00\x0e\x00\x00\x0b", 9);
+    extensions += "example.com";
+    extensions += std::string("\x00\x10\x00\x05\x00\x03\x02h2", 9);
+    extensions += std::string("\x00\x2b\x00\x03\x02\x03\x04", 7);
+    TlsAppendU16(&body, static_cast<uint16_t>(extensions.size()));
+    return TlsTestRecord(TlsTestMessage(1, body + extensions));
+}
+
+std::vector<npm::NpmTlsFramedEventV1> RunTlsStreamBatches(bool split_batches) {
+    TlsStreamTrace trace;
+    auto catalog = TlsStreamCatalog(&trace);
+    npm::NpmBasicTaskConfig config;
+    assert(
+        npm::ParseNpmBasicTaskConfig(
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,tls","observing":"basic","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[1001]}}"})",
+            &config, true, catalog)
+            .error == npm::NpmBasicTaskConfigError::kNone);
+    config.analysis.out_of_order_tolerance_ns = 0;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    LabelingMatcherStats labels;
+    auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+    std::shared_ptr<arrow::Schema> schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                            budget, new ProtocolLabelMatcher(&labels), catalog)
+               .error == npm::NpmBasicTaskRuntimeError::kNone);
+    const auto client = TlsTestHello(false);
+    const auto server = TlsTestHello(true);
+    const size_t client_split = 29;
+    const size_t server_split = 21;
+    auto packet = [&](bool reverse, const std::string& bytes, uint8_t flags, uint32_t sequence) {
+        return reverse ? MakeIpv4TcpPacket("198.51.100.1", 443, "192.0.2.1", 50000,
+                                           std::vector<uint8_t>(bytes.begin(), bytes.end()), flags, sequence)
+                       : MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443,
+                                           std::vector<uint8_t>(bytes.begin(), bytes.end()), flags, sequence);
+    };
+    std::vector<flowsql::packet::PacketRecord> records = {
+        MakeBatchPacketRecord(packet(false, "", kTcpSyn, 100), 1, 10, 1),
+        MakeBatchPacketRecord(packet(true, "", kTcpSyn | kTcpAck, 500), 1, 11, 2),
+        MakeBatchPacketRecord(packet(false, client.substr(0, client_split), kTcpAck, 101), 1, 12, 3),
+        MakeBatchPacketRecord(packet(false, client.substr(client_split), kTcpAck, 101 + client_split), 1, 13, 4),
+        MakeBatchPacketRecord(packet(true, server.substr(0, server_split), kTcpAck, 501), 1, 14, 5),
+        MakeBatchPacketRecord(packet(true, server.substr(server_split), kTcpAck, 501 + server_split), 1, 15, 6)};
+    auto process = [&](std::shared_ptr<arrow::RecordBatch> input) {
+        std::weak_ptr<arrow::RecordBatch> owner = input;
+        std::shared_ptr<arrow::RecordBatch> output;
+        assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(output && output->schema()->Equals(*schema, true));
+        output.reset();
+        input.reset();
+        assert(owner.expired());
+    };
+    if (split_batches) {
+        for (const auto& record : records) process(MakeEncodedPacketBatch({record}));
+    } else {
+        process(MakeEncodedPacketBatch(records));
+    }
+    assert(trace.hellos.size() == 2 && trace.packets == 6);
+    assert(trace.hellos[0].hello->sni == "example.com" && trace.hellos[0].hello->complete_at_ns == 13);
+    assert(trace.hellos[0].hello->offered_alpn == std::vector<std::string>{"h2"});
+    assert(trace.hellos[0].hello->offered_versions == std::vector<uint16_t>{0x0304});
+    assert(trace.hellos[1].hello->selected_version == 0x0304 && trace.hellos[1].hello->cipher_suite == 0x1301);
+    assert(trace.hellos[1].hello->complete_at_ns == 15);
+    std::shared_ptr<arrow::RecordBatch> eof;
+    assert(runtime->FlushOffline(20, &eof).error == npm::NpmEofFlushError::kNone);
+    eof.reset();
+    assert(trace.finishes == 1 && trace.aborts == 0 && labels.release_calls == 1);
+    auto facts = std::move(trace.hellos);
+    runtime.reset();
+    assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+    return facts;
+}
+
+void TestTlsT1RecordBatchIntegration() {
+    const auto one_batch = RunTlsStreamBatches(false);
+    const auto split = RunTlsStreamBatches(true);
+    assert(one_batch.size() == 2 && split.size() == 2);
+    for (size_t index = 0; index < one_batch.size(); ++index) {
+        assert(one_batch[index].direction == split[index].direction);
+        assert(one_batch[index].kind == split[index].kind);
+        assert(one_batch[index].hello->legacy_version == split[index].hello->legacy_version);
+        assert(one_batch[index].hello->sni == split[index].hello->sni);
+        assert(one_batch[index].hello->offered_alpn == split[index].hello->offered_alpn);
+        assert(one_batch[index].hello->selected_version == split[index].hello->selected_version);
+        assert(one_batch[index].hello->cipher_suite == split[index].hello->cipher_suite);
+        assert(one_batch[index].hello->complete_at_ns == split[index].hello->complete_at_ns);
+    }
+}
+
+void TestTlsT2RuntimeFinalDrain() {
+    TlsTrackerTrace trace;
+    auto catalog = TlsTrackerCatalog(&trace);
+    npm::NpmBasicTaskConfig config;
+    assert(
+        npm::ParseNpmBasicTaskConfig(
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,tls","observing":"basic","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[1001]}}"})",
+            &config, true, catalog)
+            .error == npm::NpmBasicTaskConfigError::kNone);
+    config.analysis.out_of_order_tolerance_ns = 0;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    LabelingMatcherStats labels;
+    auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+    std::shared_ptr<arrow::Schema> schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                            budget, new ProtocolLabelMatcher(&labels), catalog)
+               .error == npm::NpmBasicTaskRuntimeError::kNone);
+    const auto client = TlsTestHello(false);
+    const auto syn = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {}, kTcpSyn, 100);
+    const auto hello = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443,
+                                         std::vector<uint8_t>(client.begin(), client.end()), kTcpAck, 101);
+    const auto reset = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {}, kTcpRst, 101 + client.size());
+    auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(syn, 1, 10, 1), MakeBatchPacketRecord(hello, 1, 11, 2),
+                                         MakeBatchPacketRecord(reset, 1, 12, 3)});
+    std::shared_ptr<arrow::RecordBatch> output;
+    assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+    input.reset();
+    output.reset();
+    assert(trace.results.size() == 1 && trace.results[0].outcome == npm::NpmTlsOutcomeV1::kIncomplete);
+    assert(trace.results[0].incomplete_reason == npm::NpmTlsIncompleteReasonV1::kSessionEnd);
+    const auto stream_end = std::find(trace.calls.begin(), trace.calls.end(), "stream_end");
+    const auto session_end = std::find(trace.calls.begin(), trace.calls.end(), "session_end");
+    assert(stream_end != trace.calls.end() && session_end != trace.calls.end() && stream_end < session_end);
+    std::shared_ptr<arrow::RecordBatch> eof;
+    assert(runtime->FlushOffline(20, &eof).error == npm::NpmEofFlushError::kNone);
+    eof.reset();
+    assert(trace.results.size() == 1 && trace.calls.back() == "finish" && trace.aborts == 0);
+    runtime.reset();
+    assert(labels.release_calls == 1 && npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+}
+
 void TestDnsT3RuntimeRouting() {
     const auto& catalog = npm::ProductionNpmModuleCatalogV1();
 
@@ -13817,6 +14305,135 @@ void TestHttp1T3RuntimeRouting() {
     }
 }
 
+void TestTlsT3RuntimeRouting() {
+    const auto catalog = TlsResultCatalog();
+    std::vector<flowsql::packet::PacketRecord> packets;
+    uint64_t packet_id = 1;
+    const auto client = TlsTestHello(false);
+    const auto server = TlsTestHello(true);
+    for (uint32_t source : {1U, 2U}) {
+        const int64_t start = source == 1 ? 100 : 300;
+        const auto syn = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpSyn, 100);
+        const auto synack = MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 50000, {}, kTcpSyn | kTcpAck, 500, 101);
+        const auto request = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443,
+                                               std::vector<uint8_t>(client.begin(), client.end()), kTcpAck, 101, 501);
+        const auto response =
+            MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 50000,
+                              std::vector<uint8_t>(server.begin(), server.end()), kTcpAck, 501, 101 + client.size());
+        packets.push_back(MakeBatchPacketRecord(syn, source, start, packet_id++));
+        packets.push_back(MakeBatchPacketRecord(synack, source, start + 1, packet_id++));
+        packets.push_back(MakeBatchPacketRecord(request, source, start + 2, packet_id++));
+        packets.push_back(MakeBatchPacketRecord(response, source, start + 3, packet_id++));
+    }
+    const auto http_request = std::string("GET /a HTTP/1.1\r\nHost: example.test\r\n\r\n");
+    const auto http_response = std::string("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    packets.push_back(MakeBatchPacketRecord(
+        MakeIpv4TcpPacket("192.0.2.1", 51000, "198.51.100.2", 443, {}, kTcpSyn, 1000), 1, 500, packet_id++));
+    packets.push_back(MakeBatchPacketRecord(
+        MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 51000, {}, kTcpSyn | kTcpAck, 2000, 1001), 1, 501,
+        packet_id++));
+    packets.push_back(MakeBatchPacketRecord(
+        MakeIpv4TcpPacket("192.0.2.1", 51000, "198.51.100.2", 443,
+                          std::vector<uint8_t>(http_request.begin(), http_request.end()), kTcpAck, 1001, 2001),
+        1, 502, packet_id++));
+    packets.push_back(
+        MakeBatchPacketRecord(MakeIpv4TcpPacket("198.51.100.2", 443, "192.0.2.1", 51000,
+                                                std::vector<uint8_t>(http_response.begin(), http_response.end()),
+                                                kTcpAck, 2001, 1001 + http_request.size()),
+                              1, 503, packet_id++));
+    const std::vector<uint8_t> dns_query = {0, 9, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 'a', 0, 0, 1, 0, 1};
+    auto dns_answer = dns_query;
+    dns_answer[2] = 0x80;
+    packets.push_back(MakeBatchPacketRecord(MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 443, dns_query), 1,
+                                            600, packet_id++));
+    packets.push_back(MakeBatchPacketRecord(MakeIpv6UdpPacket("2001:db8::2", 443, "2001:db8::1", 53000, dns_answer), 1,
+                                            700, packet_id++));
+    const auto batch = MakeEncodedPacketBatch(packets);
+    struct Scenario {
+        const char* features;
+        const char* observing;
+    };
+    for (const auto scenario : {Scenario{"tls,labeling", "tls_handshake"}, Scenario{"labeling,tls,basic", "basic"},
+                                Scenario{"basic,session,dns,http1,tls,labeling", "session"},
+                                Scenario{"labeling,http1,tls,dns,basic", "dns_transaction"},
+                                Scenario{"http1,labeling,tls", "http1_transaction"}}) {
+        ContextDictionary dictionary;
+        ContextProtocol protocol(&dictionary);
+        ContextPool pool(&protocol);
+        SinglePoolQuerier querier(&pool);
+        LabelingMatcherStats labels;
+        ResultConsumerTrace trace;
+        npm::NpmBasicTaskConfig config;
+        const std::string json =
+            std::string(R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":")") +
+            scenario.features + R"(","observing":")" + scenario.observing + R"("})";
+        assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config, true, catalog).error ==
+               npm::NpmBasicTaskConfigError::kNone);
+        config.parameters_json =
+            R"({"schema_version":1,"tls":{"primary_label_ids":[1001]},"http1":{"primary_label_ids":[1001]},"dns":{"primary_label_ids":[1001]}})";
+        auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+        std::shared_ptr<arrow::Schema> schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+        assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                                budget, new ProtocolLabelMatcher(&labels), catalog,
+                                                std::make_unique<RecordingResultConsumer>(&trace))
+                   .error == npm::NpmBasicTaskRuntimeError::kNone);
+        std::shared_ptr<arrow::RecordBatch> output;
+        assert(runtime->ProcessOfflineBatch(batch, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(output && output->schema()->Equals(*schema, true));
+        int64_t foreground_tls = std::string_view(scenario.observing) == "tls_handshake" ? output->num_rows() : 0;
+        output.reset();
+        assert(runtime->FlushOffline(800, &output).error == npm::NpmEofFlushError::kNone);
+        if (std::string_view(scenario.observing) == "tls_handshake") foreground_tls += output->num_rows();
+        assert(trace.tls_domains == (std::vector<uint64_t>{77, 78}));
+        assert(trace.tls_outcomes == (std::vector<std::string>{"server_hello_observed", "server_hello_observed"}));
+        assert(trace.tls_ids.size() == 2 && trace.tls_ids[0] != 0 && trace.tls_ids[0] != trace.tls_ids[1]);
+        assert(foreground_tls == (std::string_view(scenario.observing) == "tls_handshake" ? 2 : 0));
+        if (std::string_view(scenario.features).find("basic") != std::string_view::npos)
+            assert(std::find(trace.entities.begin(), trace.entities.end(), "basic") != trace.entities.end());
+        if (std::string_view(scenario.features).find("session") != std::string_view::npos)
+            assert(std::find(trace.entities.begin(), trace.entities.end(), "session") != trace.entities.end());
+        if (std::string_view(scenario.features).find("dns") != std::string_view::npos)
+            assert(trace.dns_domains == (std::vector<uint64_t>{77}));
+        if (std::string_view(scenario.features).find("http1") != std::string_view::npos)
+            assert(trace.http_domains == (std::vector<uint64_t>{77}));
+        assert(trace.finishes == 1);
+        output.reset();
+        runtime.reset();
+        assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0 && labels.release_calls == 1);
+    }
+    {
+        ContextDictionary dictionary;
+        ContextProtocol protocol(&dictionary);
+        ContextPool pool(&protocol);
+        SinglePoolQuerier querier(&pool);
+        LabelingMatcherStats labels;
+        ResultConsumerTrace trace;
+        trace.fail_at = 2;
+        npm::NpmBasicTaskConfig config;
+        assert(
+            npm::ParseNpmBasicTaskConfig(
+                R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":"tls,labeling","observing":"tls_handshake"})",
+                &config, true, catalog)
+                .error == npm::NpmBasicTaskConfigError::kNone);
+        config.parameters_json = R"({"schema_version":1,"tls":{"primary_label_ids":[1001]}})";
+        auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+        std::shared_ptr<arrow::Schema> schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+        assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                                budget, new ProtocolLabelMatcher(&labels), catalog,
+                                                std::make_unique<RecordingResultConsumer>(&trace))
+                   .error == npm::NpmBasicTaskRuntimeError::kNone);
+        std::shared_ptr<arrow::RecordBatch> output;
+        assert(runtime->ProcessOfflineBatch(batch, &output).error ==
+               npm::NpmBasicOfflineBatchError::kBatchProcessError);
+        assert(!output && trace.attempts == 2 && trace.tls_domains == (std::vector<uint64_t>{77}));
+        assert(trace.cancels == 1 && trace.finishes == 0);
+        runtime.reset();
+        assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--tcp-stream-only") {
         TestTcpStreamRecordBatchTypedResultRouting();
@@ -13838,8 +14455,12 @@ int main(int argc, char** argv) {
     TestNpmTcpStreamOpenGatesAndFrozenConfig();
     TestDnsT0OpenContract();
     TestHttp1T0OpenContract();
+    TestTlsT0OpenContract();
+    TestTlsT1RecordBatchIntegration();
+    TestTlsT2RuntimeFinalDrain();
     TestDnsT3RuntimeRouting();
     TestHttp1T3RuntimeRouting();
+    TestTlsT3RuntimeRouting();
     TestProtocolProductionCatalogAndConcurrentDualEntityControlRuntime();
     TestResultRouterValidationBudgetAndUnobservedRelease();
     TestUnifiedConsumerBasicSessionSnapshotsFinalsAndRunIdentity();

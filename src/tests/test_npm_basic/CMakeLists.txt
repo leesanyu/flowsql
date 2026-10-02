@@ -35,6 +35,12 @@ target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/m
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_transactions.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_result_encoder.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_module.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_contract.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_hello.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_framer.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_handshake.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_result_encoder.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_module.cpp)
 target_sources(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/session/npm_session_analysis_module.cpp)
 target_sources(${PROJECT_NAME} PRIVATE
@@ -96,6 +102,93 @@ add_dependencies(test_npm_http1_contract flowsql_npm_basic)
 target_link_libraries(test_npm_http1_contract flowsql_common)
 set_target_properties(test_npm_http1_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_npm_http1_contract COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_http1_contract)
+
+add_executable(test_npm_tls_contract
+    test_npm_tls_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+)
+target_include_directories(test_npm_tls_contract PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_tls_contract PRIVATE -UNDEBUG)
+add_thirddepen(test_npm_tls_contract arrow rapidjson)
+target_link_libraries(test_npm_tls_contract flowsql_common)
+set_target_properties(test_npm_tls_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_tls_contract COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_tls_contract)
+
+add_executable(test_npm_tls_hello
+    test_npm_tls_hello.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_hello.cpp
+)
+target_include_directories(test_npm_tls_hello PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_tls_hello PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move)
+set_target_properties(test_npm_tls_hello PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_tls_hello COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_tls_hello)
+
+add_executable(test_npm_tls_framer
+    test_npm_tls_framer.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_framer.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_hello.cpp
+)
+target_include_directories(test_npm_tls_framer PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_tls_framer PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move)
+set_target_properties(test_npm_tls_framer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_tls_framer COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_tls_framer)
+
+add_executable(test_npm_tls_handshake
+    test_npm_tls_handshake.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_handshake.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_framer.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_hello.cpp
+)
+target_include_directories(test_npm_tls_handshake PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_tls_handshake PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move)
+set_target_properties(test_npm_tls_handshake PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_tls_handshake COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_tls_handshake)
+
+add_executable(test_npm_tls_result_encoder
+    test_npm_tls_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_handshake.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_framer.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_hello.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+)
+target_include_directories(test_npm_tls_result_encoder PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_tls_result_encoder PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move -Wno-unused-parameter)
+add_thirddepen(test_npm_tls_result_encoder arrow rapidjson)
+target_link_libraries(test_npm_tls_result_encoder flowsql_common)
+set_target_properties(test_npm_tls_result_encoder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_tls_result_encoder COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_tls_result_encoder)
+
+add_executable(test_npm_tls_module
+    test_npm_tls_module.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_module.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_handshake.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_framer.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_hello.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+)
+target_include_directories(test_npm_tls_module PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_tls_module PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move -Wno-unused-parameter)
+add_thirddepen(test_npm_tls_module arrow rapidjson)
+target_link_libraries(test_npm_tls_module flowsql_common)
+set_target_properties(test_npm_tls_module PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_tls_module COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_tls_module)
+
+option(FLOWSQL_NPM_TLS_SANITIZERS "Sanitize isolated NPM TLS tests" OFF)
+if(FLOWSQL_NPM_TLS_SANITIZERS)
+    foreach(tls_target IN ITEMS test_npm_tls_framer test_npm_tls_handshake
+                                test_npm_tls_result_encoder test_npm_tls_module)
+        target_compile_options(${tls_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${tls_target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
 
 add_executable(test_npm_http1_framer
     test_npm_http1_framer.cpp

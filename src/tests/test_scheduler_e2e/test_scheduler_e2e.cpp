@@ -49,30 +49,31 @@
 #include <framework/interfaces/istream_operator.h>
 #include <operators/npm_basic/modules/dns/npm_dns_contract.h>
 #include <operators/npm_basic/modules/http1/npm_http1_contract.h>
+#include <operators/npm_basic/modules/tls/npm_tls_contract.h>
 #include <operators/npm_basic/npm_basic_result_consumer.h>
 #include <plugins/npi/iprotocol.h>
 #include <common/loader.hpp>
 
 using namespace flowsql;
 
-#define ASSERT_TRUE(expr)                                                                   \
-    do {                                                                                    \
-        if (!(expr)) {                                                                      \
-            std::printf("[FAIL] %s:%d %s\n", __FILE__, __LINE__, #expr);                   \
-            std::fflush(stdout);                                                            \
-            assert(false);                                                                  \
-        }                                                                                   \
+#define ASSERT_TRUE(expr)                                                \
+    do {                                                                 \
+        if (!(expr)) {                                                   \
+            std::printf("[FAIL] %s:%d %s\n", __FILE__, __LINE__, #expr); \
+            std::fflush(stdout);                                         \
+            assert(false);                                               \
+        }                                                                \
     } while (0)
 
-#define ASSERT_EQ(a, b)                                                                     \
-    do {                                                                                    \
-        auto _a = (a);                                                                      \
-        auto _b = (b);                                                                      \
-        if (!(_a == _b)) {                                                                  \
-            std::printf("[FAIL] %s:%d %s != %s\n", __FILE__, __LINE__, #a, #b);            \
-            std::fflush(stdout);                                                            \
-            assert(false);                                                                  \
-        }                                                                                   \
+#define ASSERT_EQ(a, b)                                                         \
+    do {                                                                        \
+        auto _a = (a);                                                          \
+        auto _b = (b);                                                          \
+        if (!(_a == _b)) {                                                      \
+            std::printf("[FAIL] %s:%d %s != %s\n", __FILE__, __LINE__, #a, #b); \
+            std::fflush(stdout);                                                \
+            assert(false);                                                      \
+        }                                                                       \
     } while (0)
 
 class SchedulerE2eProtocol final : public IProtocol {
@@ -80,9 +81,7 @@ class SchedulerE2eProtocol final : public IProtocol {
     void Concurrency(int32_t number) override {
         if (delegate_) delegate_->Concurrency(number);
     }
-    protocol::Protocol Identify(int32_t pipeno,
-                                const uint8_t* data,
-                                int32_t size,
+    protocol::Protocol Identify(int32_t pipeno, const uint8_t* data, int32_t size,
                                 const protocol::Layers* layers) override {
         ++identify_calls;
         return delegate_ ? delegate_->Identify(pipeno, data, size, layers) : protocol::Protocol{};
@@ -94,9 +93,7 @@ class SchedulerE2eProtocol final : public IProtocol {
         *layers = {};
         return 0;
     }
-    protocol::IDictionary* Dictionary() override {
-        return delegate_ ? delegate_->Dictionary() : nullptr;
-    }
+    protocol::IDictionary* Dictionary() override { return delegate_ ? delegate_->Dictionary() : nullptr; }
 
     void SetDelegate(IProtocol* delegate) { delegate_ = delegate; }
 
@@ -117,7 +114,7 @@ class SchedulerHttp1Matcher final : public IFlowLabelMatcherV1 {
     int ClassifyBatch(const FlowLabelFactsV1* facts, uint32_t count, uint32_t* labels) const override {
         if (facts == nullptr || labels == nullptr) return EINVAL;
         for (uint32_t index = 0; index < count; ++index) {
-            labels[index] = facts[index].destination.port == 80 ? 1001 : 0;
+            labels[index] = facts[index].destination.port == 80 || facts[index].destination.port == 443 ? 1001 : 0;
         }
         return 0;
     }
@@ -251,24 +248,20 @@ class SchedulerE2eTransformTask final : public IBlockTransformTaskV1 {
  public:
     explicit SchedulerE2eTransformTask(SchedulerE2eTransformKind kind) : kind_(kind) {}
 
-    int Open(std::shared_ptr<arrow::Schema> input_schema,
-             std::shared_ptr<arrow::Schema>* output_schema) override {
+    int Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema>* output_schema) override {
         ++open_calls;
         if (!input_schema || !output_schema || open_calls != 1) return EINVAL;
-        const auto expected = kind_ == SchedulerE2eTransformKind::kPacketToProtocol
-                                  ? packet::PacketSchema()
-                                  : SchedulerE2eTransformSchema();
-        input_schema_matched = kind_ == SchedulerE2eTransformKind::kAnyPassthrough ||
-                               input_schema->Equals(*expected, true);
+        const auto expected = kind_ == SchedulerE2eTransformKind::kPacketToProtocol ? packet::PacketSchema()
+                                                                                    : SchedulerE2eTransformSchema();
+        input_schema_matched =
+            kind_ == SchedulerE2eTransformKind::kAnyPassthrough || input_schema->Equals(*expected, true);
         if (!input_schema_matched) return EINVAL;
-        *output_schema = kind_ == SchedulerE2eTransformKind::kAnyPassthrough
-                             ? std::move(input_schema)
-                             : SchedulerE2eTransformSchema();
+        *output_schema = kind_ == SchedulerE2eTransformKind::kAnyPassthrough ? std::move(input_schema)
+                                                                             : SchedulerE2eTransformSchema();
         return 0;
     }
 
-    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
-                     int64_t ts_ms,
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
                      std::vector<BlockTransformOutputV1>* outputs) override {
         ++process_calls;
         if (!input || !outputs || !outputs->empty()) return -EINVAL;
@@ -278,10 +271,8 @@ class SchedulerE2eTransformTask final : public IBlockTransformTaskV1 {
             return static_cast<int>(BlockTransformStatusV1::kContinue);
         }
 
-        auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(
-            input->GetColumnByName("sequence"));
-        auto captured_len = std::dynamic_pointer_cast<arrow::UInt32Array>(
-            input->GetColumnByName("captured_len"));
+        auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(input->GetColumnByName("sequence"));
+        auto captured_len = std::dynamic_pointer_cast<arrow::UInt32Array>(input->GetColumnByName("captured_len"));
         if (!sequence || !captured_len || sequence->length() != input->num_rows() ||
             captured_len->length() != input->num_rows()) {
             last_error_ = "packet columns do not match the transform contract";
@@ -308,10 +299,8 @@ class SchedulerE2eTransformTask final : public IBlockTransformTaskV1 {
             last_error_ = "failed to finish transform output";
             return -EIO;
         }
-        outputs->push_back({arrow::RecordBatch::Make(
-                                SchedulerE2eTransformSchema(),
-                                input->num_rows(),
-                                {output_sequence, output_captured_len, output_protocol}),
+        outputs->push_back({arrow::RecordBatch::Make(SchedulerE2eTransformSchema(), input->num_rows(),
+                                                     {output_sequence, output_captured_len, output_protocol}),
                             ts_ms});
         return static_cast<int>(BlockTransformStatusV1::kContinue);
     }
@@ -345,11 +334,9 @@ class SchedulerE2eTransformProvider final : public IBlockTransformOperatorV1 {
     std::string Name() const override { return name_; }
     std::string Description() const override { return "scheduler cross-module E2E transform"; }
 
-    int CreateTask(const BlockTransformTaskConfigV1& config,
-                   IBlockTransformTaskV1** task) override {
+    int CreateTask(const BlockTransformTaskConfigV1& config, IBlockTransformTaskV1** task) override {
         ++create_calls;
-        if (!task || !config.task_id || !config.with_params_json ||
-            !config.pushed_filter_plan_json ||
+        if (!task || !config.task_id || !config.with_params_json || !config.pushed_filter_plan_json ||
             config.contract_version != kBlockTransformContractVersionV1) {
             return EINVAL;
         }
@@ -516,12 +503,10 @@ struct SchedulerE2eCaptureRecord {
     std::vector<uint8_t> packet;
 };
 
-static std::vector<uint8_t> MakeSchedulerE2eClassicCapture(
-    bool nanosecond,
-    const std::vector<SchedulerE2eCaptureRecord>& records) {
-    std::vector<uint8_t> bytes = nanosecond
-                                     ? std::vector<uint8_t>{0x4d, 0x3c, 0xb2, 0xa1}
-                                     : std::vector<uint8_t>{0xd4, 0xc3, 0xb2, 0xa1};
+static std::vector<uint8_t> MakeSchedulerE2eClassicCapture(bool nanosecond,
+                                                           const std::vector<SchedulerE2eCaptureRecord>& records) {
+    std::vector<uint8_t> bytes =
+        nanosecond ? std::vector<uint8_t>{0x4d, 0x3c, 0xb2, 0xa1} : std::vector<uint8_t>{0xd4, 0xc3, 0xb2, 0xa1};
     AppendPcapLe16(&bytes, 2);
     AppendPcapLe16(&bytes, 4);
     AppendPcapLe32(&bytes, 0);
@@ -538,8 +523,7 @@ static std::vector<uint8_t> MakeSchedulerE2eClassicCapture(
     return bytes;
 }
 
-static void AppendSchedulerE2ePcapngBlock(std::vector<uint8_t>* bytes,
-                                          uint32_t type,
+static void AppendSchedulerE2ePcapngBlock(std::vector<uint8_t>* bytes, uint32_t type,
                                           const std::vector<uint8_t>& body) {
     const uint32_t total = static_cast<uint32_t>(body.size() + 12);
     AppendPcapLe32(bytes, type);
@@ -549,8 +533,7 @@ static void AppendSchedulerE2ePcapngBlock(std::vector<uint8_t>* bytes,
 }
 
 static std::vector<uint8_t> MakeSchedulerE2ePcapngCapture(
-    uint8_t decimal_resolution,
-    int64_t timestamp_offset_seconds,
+    uint8_t decimal_resolution, int64_t timestamp_offset_seconds,
     const std::vector<std::pair<uint64_t, std::vector<uint8_t>>>& records) {
     std::vector<uint8_t> bytes;
     std::vector<uint8_t> section;
@@ -570,8 +553,7 @@ static std::vector<uint8_t> MakeSchedulerE2ePcapngCapture(
     interface_body.insert(interface_body.end(), 3, 0);
     AppendPcapLe16(&interface_body, 14);
     AppendPcapLe16(&interface_body, 8);
-    AppendPcapLe64(
-        &interface_body, static_cast<uint64_t>(timestamp_offset_seconds));
+    AppendPcapLe64(&interface_body, static_cast<uint64_t>(timestamp_offset_seconds));
     AppendPcapLe16(&interface_body, 0);
     AppendPcapLe16(&interface_body, 0);
     AppendSchedulerE2ePcapngBlock(&bytes, 1, interface_body);
@@ -583,8 +565,7 @@ static std::vector<uint8_t> MakeSchedulerE2ePcapngCapture(
         AppendPcapLe32(&enhanced_packet, static_cast<uint32_t>(record.first));
         AppendPcapLe32(&enhanced_packet, static_cast<uint32_t>(record.second.size()));
         AppendPcapLe32(&enhanced_packet, static_cast<uint32_t>(record.second.size()));
-        enhanced_packet.insert(
-            enhanced_packet.end(), record.second.begin(), record.second.end());
+        enhanced_packet.insert(enhanced_packet.end(), record.second.begin(), record.second.end());
         while ((enhanced_packet.size() & 3u) != 0) enhanced_packet.push_back(0);
         AppendSchedulerE2ePcapngBlock(&bytes, 6, enhanced_packet);
     }
@@ -599,8 +580,7 @@ static std::vector<uint8_t> MakeSchedulerE2ePcap(bool truncate_last_packet) {
     AppendPcapLe32(&bytes, 0);
     AppendPcapLe32(&bytes, 65535);
     AppendPcapLe32(&bytes, 1);
-    const auto append_record = [&](uint32_t seconds,
-                                   const std::vector<uint8_t>& packet) {
+    const auto append_record = [&](uint32_t seconds, const std::vector<uint8_t>& packet) {
         AppendPcapLe32(&bytes, seconds);
         AppendPcapLe32(&bytes, 0);
         AppendPcapLe32(&bytes, 4);
@@ -608,23 +588,21 @@ static std::vector<uint8_t> MakeSchedulerE2ePcap(bool truncate_last_packet) {
         bytes.insert(bytes.end(), packet.begin(), packet.end());
     };
     append_record(1, {1, 2, 3, 4});
-    append_record(
-        2, truncate_last_packet ? std::vector<uint8_t>{5}
-                                : std::vector<uint8_t>{5, 6, 7, 8});
+    append_record(2, truncate_last_packet ? std::vector<uint8_t>{5} : std::vector<uint8_t>{5, 6, 7, 8});
     return bytes;
 }
 
 static std::vector<uint8_t> MakeSchedulerE2eTcpRstPacket() {
     return {
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0x08, 0x00,
-        0x45, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x40, 0x06, 0x00, 0x00, 0xc0, 0x00,
-        0x02, 0x01, 0xc6, 0x33, 0x64, 0x02, 0xa0, 0x28, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x68,
-        0x00, 0x00, 0x00, 0x00, 0x50, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0x08, 0x00, 0x45, 0x00, 0x00, 0x28,
+        0x00, 0x00, 0x00, 0x00, 0x40, 0x06, 0x00, 0x00, 0xc0, 0x00, 0x02, 0x01, 0xc6, 0x33, 0x64, 0x02, 0xa0, 0x28,
+        0x01, 0xbb, 0x00, 0x00, 0x00, 0x68, 0x00, 0x00, 0x00, 0x00, 0x50, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
 }
 
 static std::vector<uint8_t> MakeSchedulerE2eHttp1Packet(bool from_server, uint8_t flags, uint32_t sequence,
-                                                        uint32_t acknowledgement, const std::string& payload) {
+                                                        uint32_t acknowledgement, const std::string& payload,
+                                                        uint16_t server_port = 80) {
     std::vector<uint8_t> packet = {
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0x08, 0x00, 0x45, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x40, 0x06, 0x00, 0x00, 0xc0, 0x00, 0x02, 0x01, 0xc6, 0x33, 0x64, 0x02, 0xaf, 0xc8,
@@ -633,6 +611,8 @@ static std::vector<uint8_t> MakeSchedulerE2eHttp1Packet(bool from_server, uint8_
     const uint16_t ip_length = static_cast<uint16_t>(40 + payload.size());
     packet[16] = static_cast<uint8_t>(ip_length >> 8);
     packet[17] = static_cast<uint8_t>(ip_length);
+    packet[36] = static_cast<uint8_t>(server_port >> 8);
+    packet[37] = static_cast<uint8_t>(server_port);
     if (from_server) {
         for (size_t index = 0; index < 4; ++index) std::swap(packet[26 + index], packet[30 + index]);
         std::swap(packet[34], packet[36]);
@@ -656,6 +636,47 @@ static std::vector<uint8_t> MakeSchedulerE2eHttp1Capture() {
                 {1, 200, MakeSchedulerE2eHttp1Packet(false, 0x10, 101, 201, "")},
                 {1, 300, MakeSchedulerE2eHttp1Packet(false, 0x18, 101, 201, request)},
                 {1, 400, MakeSchedulerE2eHttp1Packet(true, 0x18, 201, 101 + request.size(), response)}});
+}
+
+static void AppendSchedulerTlsU16(std::string* bytes, uint16_t value) {
+    bytes->push_back(static_cast<char>(value >> 8));
+    bytes->push_back(static_cast<char>(value));
+}
+
+static std::string MakeSchedulerE2eTlsHello(bool server) {
+    std::string body("\x03\x03", 2);
+    body.append(32, server ? 's' : 'c');
+    body.push_back(0);  // session_id length
+    if (server) {
+        AppendSchedulerTlsU16(&body, 0x1301);
+        body.push_back(0);  // compression
+        body.append("\x00\x06\x00\x2b\x00\x02\x03\x04", 8);
+    } else {
+        AppendSchedulerTlsU16(&body, 2);
+        AppendSchedulerTlsU16(&body, 0x1301);
+        body.append("\x01\x00", 2);  // compression vector
+        body.append("\x00\x07\x00\x2b\x00\x03\x02\x03\x04", 9);
+    }
+    std::string message;
+    message.push_back(server ? 2 : 1);
+    message.push_back(0);
+    AppendSchedulerTlsU16(&message, static_cast<uint16_t>(body.size()));
+    message += body;
+    std::string record("\x16\x03\x03", 3);
+    AppendSchedulerTlsU16(&record, static_cast<uint16_t>(message.size()));
+    record += message;
+    return record;
+}
+
+static std::vector<uint8_t> MakeSchedulerE2eTlsCapture() {
+    const auto client = MakeSchedulerE2eTlsHello(false);
+    const auto server = MakeSchedulerE2eTlsHello(true);
+    return MakeSchedulerE2eClassicCapture(
+        false, {{1, 0, MakeSchedulerE2eHttp1Packet(false, 0x02, 100, 0, "", 443)},
+                {1, 100, MakeSchedulerE2eHttp1Packet(true, 0x12, 200, 101, "", 443)},
+                {1, 200, MakeSchedulerE2eHttp1Packet(false, 0x10, 101, 201, "", 443)},
+                {1, 300, MakeSchedulerE2eHttp1Packet(false, 0x18, 101, 201, client, 443)},
+                {1, 400, MakeSchedulerE2eHttp1Packet(true, 0x18, 201, 101 + client.size(), server, 443)}});
 }
 
 static void AssertSchedulerE2eNpmBasicSchema(const std::shared_ptr<arrow::Schema>& schema) {
@@ -772,20 +793,17 @@ static void AssertSchedulerE2eNpmSessionSchema(const std::shared_ptr<arrow::Sche
     ASSERT_EQ(schema->metadata()->Get("flowsql.schema_version").ValueOrDie(), "1");
     ASSERT_EQ(schema->metadata()->Get("flowsql.timestamp_unit").ValueOrDie(), "ns");
     ASSERT_EQ(schema->metadata()->Get("flowsql.revision_semantics").ValueOrDie(), "cumulative");
-    ASSERT_EQ(schema->metadata()->Get("flowsql.measurement_scope").ValueOrDie(),
-              "single_capture_observed_packets");
+    ASSERT_EQ(schema->metadata()->Get("flowsql.measurement_scope").ValueOrDie(), "single_capture_observed_packets");
 }
 
-static void WriteSchedulerE2eBinary(const std::filesystem::path& path,
-                                    const std::vector<uint8_t>& bytes) {
+static void WriteSchedulerE2eBinary(const std::filesystem::path& path, const std::vector<uint8_t>& bytes) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     ASSERT_TRUE(out.is_open());
     out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     ASSERT_TRUE(out.good());
 }
 
-static std::string MakePcapSourceAddRequest(const std::string& name,
-                                            const std::filesystem::path& path,
+static std::string MakePcapSourceAddRequest(const std::string& name, const std::filesystem::path& path,
                                             const char* format = "pcap") {
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
@@ -829,17 +847,13 @@ struct CaptureFilterSnapshot {
 
 static std::string MakeReq(const std::string& sql);
 
-static CaptureFilterSnapshot ExecuteCaptureFilter(
-    const fnRouterHandler& exec,
-    IChannelRegistry* registry,
-    const std::string& channel_name,
-    const std::string& dataframe_name,
-    const std::string& filter) {
+static CaptureFilterSnapshot ExecuteCaptureFilter(const fnRouterHandler& exec, IChannelRegistry* registry,
+                                                  const std::string& channel_name, const std::string& dataframe_name,
+                                                  const std::string& filter) {
     ASSERT_TRUE(exec != nullptr && registry != nullptr);
     std::string response;
     const std::string sql =
-        "SELECT * FROM pcapfile." + channel_name + " WHERE " + filter +
-        " INTO dataframe." + dataframe_name;
+        "SELECT * FROM pcapfile." + channel_name + " WHERE " + filter + " INTO dataframe." + dataframe_name;
     ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), response), error::OK);
     rapidjson::Document completed;
     completed.Parse(response.c_str());
@@ -847,19 +861,15 @@ static CaptureFilterSnapshot ExecuteCaptureFilter(
     ASSERT_TRUE(completed.HasMember("status") && completed["status"].IsString());
     ASSERT_EQ(std::string(completed["status"].GetString()), "completed");
 
-    auto output = std::dynamic_pointer_cast<IDataFrameChannel>(
-        registry->Get(dataframe_name.c_str()));
+    auto output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(dataframe_name.c_str()));
     ASSERT_TRUE(output != nullptr);
     DataFrame frame;
     ASSERT_EQ(output->Read(&frame), 0);
     const auto batch = frame.ToArrow();
     ASSERT_TRUE(batch != nullptr && batch->schema()->Equals(packet::PacketSchema(), true));
-    auto timestamp = std::dynamic_pointer_cast<arrow::Int64Array>(
-        batch->GetColumnByName("timestamp_ns"));
-    auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(
-        batch->GetColumnByName("sequence"));
-    auto raw_data = std::dynamic_pointer_cast<arrow::BinaryArray>(
-        batch->GetColumnByName("raw_data"));
+    auto timestamp = std::dynamic_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("timestamp_ns"));
+    auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(batch->GetColumnByName("sequence"));
+    auto raw_data = std::dynamic_pointer_cast<arrow::BinaryArray>(batch->GetColumnByName("raw_data"));
     ASSERT_TRUE(timestamp && sequence && raw_data);
 
     CaptureFilterSnapshot snapshot;
@@ -873,8 +883,7 @@ static CaptureFilterSnapshot ExecuteCaptureFilter(
     return snapshot;
 }
 
-static void AssertCaptureFilterSnapshotEqual(const CaptureFilterSnapshot& left,
-                                             const CaptureFilterSnapshot& right) {
+static void AssertCaptureFilterSnapshotEqual(const CaptureFilterSnapshot& left, const CaptureFilterSnapshot& right) {
     ASSERT_EQ(left.timestamps_ns, right.timestamps_ns);
     ASSERT_EQ(left.sequences, right.sequences);
     ASSERT_EQ(left.raw_packets, right.raw_packets);
@@ -890,7 +899,8 @@ static std::shared_ptr<arrow::Buffer> SerializeBatch(const std::shared_ptr<arrow
 
 static int64_t CountRowsInIpc(const uint8_t* data, size_t len) {
     auto buf = std::make_shared<arrow::Buffer>(data, len);
-    auto reader = arrow::ipc::RecordBatchStreamReader::Open(std::make_shared<arrow::io::BufferReader>(buf)).ValueOrDie();
+    auto reader =
+        arrow::ipc::RecordBatchStreamReader::Open(std::make_shared<arrow::io::BufferReader>(buf)).ValueOrDie();
     int64_t rows = 0;
     while (true) {
         auto batch = reader->Next().ValueOrDie();
@@ -1016,8 +1026,7 @@ class ParallelPassthroughStreamOperator final : public IOperator, public IStream
                 return -1;
             }
             output_ = StreamChannelAdapter::MakeDataFrameAppend(
-                "stream_adapter",
-                sink_ctx.into_raw,
+                "stream_adapter", sink_ctx.into_raw,
                 std::shared_ptr<IAppendableDataFrameChannel>(appendable, [](IAppendableDataFrameChannel*) {}));
             return output_ ? 0 : -1;
         }
@@ -1032,9 +1041,7 @@ class ParallelPassthroughStreamOperator final : public IOperator, public IStream
                 return -1;
             }
             output_ = StreamChannelAdapter::MakeDatabaseWriter(
-                "stream_adapter",
-                sink_ctx.into_raw,
-                std::shared_ptr<IDatabaseChannel>(db, [](IDatabaseChannel*) {}),
+                "stream_adapter", sink_ctx.into_raw, std::shared_ptr<IDatabaseChannel>(db, [](IDatabaseChannel*) {}),
                 sink_ctx.table_name);
             return output_ ? 0 : -1;
         }
@@ -1054,12 +1061,8 @@ class ParallelPassthroughStreamOperator final : public IOperator, public IStream
     std::string GetStats() override { return "{}"; }
     std::string LastError() override { return last_error_; }
 
-    ParallelStrategy GetParallelStrategy() const override {
-        return ParallelStrategy::STATELESS;
-    }
-    int GetParallelism() const override {
-        return 4;
-    }
+    ParallelStrategy GetParallelStrategy() const override { return ParallelStrategy::STATELESS; }
+    int GetParallelism() const override { return 4; }
 
  private:
     std::shared_ptr<IStreamChannel> output_;
@@ -1269,14 +1272,21 @@ static void SeedSourceTable(IDatabaseChannel* db, const char* table) {
     arrow::Int64Builder id_b;
     arrow::StringBuilder name_b;
     arrow::DoubleBuilder score_b;
-    (void)id_b.Append(1); (void)id_b.Append(2); (void)id_b.Append(3);
-    (void)name_b.Append("a"); (void)name_b.Append("b"); (void)name_b.Append("c");
-    (void)score_b.Append(10.0); (void)score_b.Append(20.0); (void)score_b.Append(30.0);
-    auto batch = arrow::RecordBatch::Make(schema, 3, {
-        id_b.Finish().ValueOrDie(),
-        name_b.Finish().ValueOrDie(),
-        score_b.Finish().ValueOrDie(),
-    });
+    (void)id_b.Append(1);
+    (void)id_b.Append(2);
+    (void)id_b.Append(3);
+    (void)name_b.Append("a");
+    (void)name_b.Append("b");
+    (void)name_b.Append("c");
+    (void)score_b.Append(10.0);
+    (void)score_b.Append(20.0);
+    (void)score_b.Append(30.0);
+    auto batch = arrow::RecordBatch::Make(schema, 3,
+                                          {
+                                              id_b.Finish().ValueOrDie(),
+                                              name_b.Finish().ValueOrDie(),
+                                              score_b.Finish().ValueOrDie(),
+                                          });
 
     IBatchWriter* writer = nullptr;
     ASSERT_EQ(db->CreateWriter(table, &writer), 0);
@@ -1289,8 +1299,7 @@ static void SeedSourceTable(IDatabaseChannel* db, const char* table) {
     ASSERT_EQ(stats.rows_written, 3);
 }
 
-static bool DrainStreamInt64Columns(IStreamChannel* ch,
-                                    std::vector<int64_t>* col0,
+static bool DrainStreamInt64Columns(IStreamChannel* ch, std::vector<int64_t>* col0,
                                     std::vector<int64_t>* col1 = nullptr) {
     if (!ch || !col0) return false;
     col0->clear();
@@ -1406,12 +1415,15 @@ int main() {
     const std::string suffix = std::to_string(::getpid());
     const std::filesystem::path db_path = std::filesystem::temp_directory_path() / ("flowsql_s9_3_" + suffix + ".db");
     const std::filesystem::path data_dir = std::filesystem::temp_directory_path() / ("flowsql_s9_3_df_" + suffix);
-    const std::filesystem::path operator_db_dir = std::filesystem::temp_directory_path() / ("flowsql_s9_3_catalog_" + suffix);
+    const std::filesystem::path operator_db_dir =
+        std::filesystem::temp_directory_path() / ("flowsql_s9_3_catalog_" + suffix);
     const std::filesystem::path operator_db_path = operator_db_dir / "operator_catalog.db";
     const std::filesystem::path binaddon_upload_dir =
         std::filesystem::temp_directory_path() / ("flowsql_s9_3_binaddon_" + suffix);
-    const std::filesystem::path stream_cfg = std::filesystem::temp_directory_path() / ("flowsql_s9_3_stream_" + suffix + ".yml");
-    const std::filesystem::path stream_meta_db = std::filesystem::temp_directory_path() / ("flowsql_s9_3_stream_meta_" + suffix + ".db");
+    const std::filesystem::path stream_cfg =
+        std::filesystem::temp_directory_path() / ("flowsql_s9_3_stream_" + suffix + ".yml");
+    const std::filesystem::path stream_meta_db =
+        std::filesystem::temp_directory_path() / ("flowsql_s9_3_stream_meta_" + suffix + ".db");
     const std::filesystem::path pcap_ok =
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_pcap_ok_" + suffix + ".pcap");
     const std::filesystem::path pcap_error =
@@ -1426,6 +1438,8 @@ int main() {
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_npm_basic_" + suffix + ".pcap");
     const std::filesystem::path pcap_npm_http1 =
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_npm_http1_" + suffix + ".pcap");
+    const std::filesystem::path pcap_npm_tls =
+        std::filesystem::temp_directory_path() / ("flowsql_scheduler_npm_tls_" + suffix + ".pcap");
     std::filesystem::remove(db_path);
     std::filesystem::remove(stream_cfg);
     std::filesystem::remove(stream_meta_db);
@@ -1436,38 +1450,28 @@ int main() {
     std::filesystem::remove(pcapng_offset);
     std::filesystem::remove(pcap_npm_basic);
     std::filesystem::remove(pcap_npm_http1);
+    std::filesystem::remove(pcap_npm_tls);
     std::filesystem::remove_all(operator_db_dir);
     std::filesystem::remove_all(binaddon_upload_dir);
     std::filesystem::create_directories(data_dir);
     std::filesystem::create_directories(operator_db_dir);
     WriteSchedulerE2eBinary(pcap_ok, MakeSchedulerE2ePcap(false));
     WriteSchedulerE2eBinary(pcap_error, MakeSchedulerE2ePcap(true));
-    WriteSchedulerE2eBinary(
-        pcap_micro,
-        MakeSchedulerE2eClassicCapture(
-            false,
-            {{3, 750000, {0x31, 0x31, 0x31, 0x31}},
-             {1, 250000, {0x32, 0x32, 0x32, 0x32}},
-             {2, 500000, {0x33, 0x33, 0x33, 0x33}}}));
-    WriteSchedulerE2eBinary(
-        pcap_nano,
-        MakeSchedulerE2eClassicCapture(
-            true,
-            {{1, 100, {0x41, 0x41, 0x41, 0x41}},
-             {1, 123456789, {0x42, 0x42, 0x42, 0x42}},
-             {1, 200000000, {0x43, 0x43, 0x43, 0x43}}}));
-    WriteSchedulerE2eBinary(
-        pcapng_offset,
-        MakeSchedulerE2ePcapngCapture(
-            9,
-            -2,
-            {{3500000000ULL, {0x51, 0x51, 0x51, 0x51}},
-             {3123456789ULL, {0x52, 0x52, 0x52, 0x52}},
-             {4500000000ULL, {0x53, 0x53, 0x53, 0x53}}}));
-    WriteSchedulerE2eBinary(
-        pcap_npm_basic,
-        MakeSchedulerE2eClassicCapture(false, {{1, 0, MakeSchedulerE2eTcpRstPacket()}}));
+    WriteSchedulerE2eBinary(pcap_micro, MakeSchedulerE2eClassicCapture(false, {{3, 750000, {0x31, 0x31, 0x31, 0x31}},
+                                                                               {1, 250000, {0x32, 0x32, 0x32, 0x32}},
+                                                                               {2, 500000, {0x33, 0x33, 0x33, 0x33}}}));
+    WriteSchedulerE2eBinary(pcap_nano,
+                            MakeSchedulerE2eClassicCapture(true, {{1, 100, {0x41, 0x41, 0x41, 0x41}},
+                                                                  {1, 123456789, {0x42, 0x42, 0x42, 0x42}},
+                                                                  {1, 200000000, {0x43, 0x43, 0x43, 0x43}}}));
+    WriteSchedulerE2eBinary(pcapng_offset, MakeSchedulerE2ePcapngCapture(9, -2,
+                                                                         {{3500000000ULL, {0x51, 0x51, 0x51, 0x51}},
+                                                                          {3123456789ULL, {0x52, 0x52, 0x52, 0x52}},
+                                                                          {4500000000ULL, {0x53, 0x53, 0x53, 0x53}}}));
+    WriteSchedulerE2eBinary(pcap_npm_basic,
+                            MakeSchedulerE2eClassicCapture(false, {{1, 0, MakeSchedulerE2eTcpRstPacket()}}));
     WriteSchedulerE2eBinary(pcap_npm_http1, MakeSchedulerE2eHttp1Capture());
+    WriteSchedulerE2eBinary(pcap_npm_tls, MakeSchedulerE2eTlsCapture());
 
     {
         std::ofstream out(stream_cfg);
@@ -1560,8 +1564,7 @@ int main() {
         static_cast<ICppOperatorPluginRegistryV1*>(loader->First(IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1));
     auto* binaddon_host = static_cast<IBinAddonHost*>(loader->First(IID_BINADDON_HOST));
     auto* binaddon_plugin = dynamic_cast<IPlugin*>(binaddon_host);
-    auto* filter_domain_resolver = static_cast<IFilterDomainResolverV1*>(
-        loader->First(IID_FILTER_DOMAIN_RESOLVER_V1));
+    auto* filter_domain_resolver = static_cast<IFilterDomainResolverV1*>(loader->First(IID_FILTER_DOMAIN_RESOLVER_V1));
     ASSERT_TRUE(factory != nullptr);
     ASSERT_TRUE(registry != nullptr);
     ASSERT_TRUE(stream_factory != nullptr);
@@ -1645,15 +1648,11 @@ int main() {
     {
         const std::string channel_name = "scheduler_pcap_ok";
         std::string rsp;
-        ASSERT_EQ(stream_add("/channels/stream/add",
-                             MakePcapSourceAddRequest(channel_name, pcap_ok),
-                             rsp),
-                  error::OK);
+        ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(channel_name, pcap_ok), rsp), error::OK);
 
         pcap_protocol.Reset();
         block_operator.Reset();
-        const std::string sql =
-            "SELECT * FROM pcapfile." + channel_name + " USING test.packet_counter";
+        const std::string sql = "SELECT * FROM pcapfile." + channel_name + " USING test.packet_counter";
         ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
         ASSERT_TRUE(rsp.find("BLOCK_STREAM_NOT_IMPLEMENTED") == std::string::npos);
         rapidjson::Document completed;
@@ -1674,8 +1673,7 @@ int main() {
         ASSERT_EQ(block_operator.rows_seen, 2);
         ASSERT_EQ(block_operator.sequences, std::vector<uint64_t>({0, 1}));
         ASSERT_EQ(block_operator.raw_packets,
-                  std::vector<std::string>({std::string("\x01\x02\x03\x04", 4),
-                                            std::string("\x05\x06\x07\x08", 4)}));
+                  std::vector<std::string>({std::string("\x01\x02\x03\x04", 4), std::string("\x05\x06\x07\x08", 4)}));
 
         // npm-basic-parameters T0.2: direct SQL decodes the literal once and Scheduler
         // wraps the exact decoded value as a JSON string for the operator task.
@@ -1704,28 +1702,20 @@ int main() {
         }
 
         const int create_calls_before_duplicate = parameter_capture_transform.create_calls;
-        const std::string duplicate_sql =
-            "SELECT * FROM pcapfile." + channel_name +
-            " USING test.parameter_capture WITH parameters='first',parameters='second'";
-        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(duplicate_sql), rsp),
-                  error::BAD_REQUEST);
+        const std::string duplicate_sql = "SELECT * FROM pcapfile." + channel_name +
+                                          " USING test.parameter_capture WITH parameters='first',parameters='second'";
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(duplicate_sql), rsp), error::BAD_REQUEST);
         ASSERT_EQ(parameter_capture_transform.create_calls, create_calls_before_duplicate);
         ASSERT_EQ(registry->Unregister(parameter_dataframe.c_str()), 0);
 
-        ASSERT_EQ(stream_remove("/channels/stream/remove",
-                                MakePcapSourceRemoveRequest(channel_name),
-                                rsp),
-                  error::OK);
+        ASSERT_EQ(stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest(channel_name), rsp), error::OK);
     }
     {
         // The sql_text entry uses SplitSqlText before the same parser/JSON transport path.
         const auto state = std::make_shared<ParameterCaptureStreamState>();
         std::string rsp;
-        ASSERT_EQ(op_registry->Register(
-                      "custom.parameter_capture_stream",
-                      [state]() -> IOperator* {
-                          return new ParameterCaptureStreamOperator(state);
-                      }),
+        ASSERT_EQ(op_registry->Register("custom.parameter_capture_stream",
+                                        [state]() -> IOperator* { return new ParameterCaptureStreamOperator(state); }),
                   0);
         ASSERT_EQ(upsert_batch("/operators/upsert_batch", R"JSON({
             "operators":[{
@@ -1775,36 +1765,27 @@ int main() {
         const std::string duplicate_stream_sql =
             "SELECT * FROM ring.npm_parameter_in USING custom.parameter_capture_stream "
             "WITH parameters='first',parameters='second' INTO stream.npm_parameter_out;";
-        ASSERT_EQ(stream_exec("/scheduler/stream/execute",
-                              MakeStreamReq(duplicate_stream_sql), rsp),
+        ASSERT_EQ(stream_exec("/scheduler/stream/execute", MakeStreamReq(duplicate_stream_sql), rsp),
                   error::BAD_REQUEST);
         ASSERT_TRUE(state->Snapshot().empty());
-        ASSERT_EQ(stream_remove(
-                      "/channels/stream/remove",
-                      R"JSON({"type":"ring","name":"npm_parameter_in"})JSON",
-                      rsp),
+        ASSERT_EQ(stream_remove("/channels/stream/remove", R"JSON({"type":"ring","name":"npm_parameter_in"})JSON", rsp),
                   error::OK);
-        ASSERT_EQ(stream_remove(
-                      "/channels/stream/remove",
-                      R"JSON({"type":"ring","name":"npm_parameter_out"})JSON",
-                      rsp),
-                  error::OK);
+        ASSERT_EQ(
+            stream_remove("/channels/stream/remove", R"JSON({"type":"ring","name":"npm_parameter_out"})JSON", rsp),
+            error::OK);
     }
     std::puts("[PASS] npm-basic-parameters SQL transport contract");
     {
         const std::string channel_name = "scheduler_pcap_dataframe";
         const std::string dataframe_name = "scheduler_pcap_dataframe";
         std::string rsp;
-        ASSERT_EQ(stream_add("/channels/stream/add",
-                             MakePcapSourceAddRequest(channel_name, pcap_ok),
-                             rsp),
-                  error::OK);
+        ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(channel_name, pcap_ok), rsp), error::OK);
 
         pcap_protocol.Reset();
-        const std::string sql =
-            "SELECT * FROM pcapfile." + channel_name +
-            " WHERE timestamp_ns >= TIMESTAMP '1970-01-01T00:00:02Z'"
-            " INTO dataframe." + dataframe_name;
+        const std::string sql = "SELECT * FROM pcapfile." + channel_name +
+                                " WHERE timestamp_ns >= TIMESTAMP '1970-01-01T00:00:02Z'"
+                                " INTO dataframe." +
+                                dataframe_name;
         ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
         rapidjson::Document completed;
         completed.Parse(rsp.c_str());
@@ -1829,75 +1810,57 @@ int main() {
         ASSERT_TRUE(packet_batch != nullptr);
         ASSERT_EQ(packet_batch->num_rows(), 1);
         ASSERT_TRUE(packet_batch->schema()->Equals(packet::PacketSchema(), true));
-        auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(
-            packet_batch->GetColumnByName("sequence"));
-        auto raw_data = std::dynamic_pointer_cast<arrow::BinaryArray>(
-            packet_batch->GetColumnByName("raw_data"));
+        auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(packet_batch->GetColumnByName("sequence"));
+        auto raw_data = std::dynamic_pointer_cast<arrow::BinaryArray>(packet_batch->GetColumnByName("raw_data"));
         ASSERT_TRUE(sequence != nullptr && raw_data != nullptr);
         ASSERT_EQ(sequence->Value(0), 1);
         ASSERT_EQ(std::string(raw_data->GetView(0)), std::string("\x05\x06\x07\x08", 4));
 
-        ASSERT_EQ(stream_remove("/channels/stream/remove",
-                                MakePcapSourceRemoveRequest(channel_name),
-                                rsp),
-                  error::OK);
+        ASSERT_EQ(stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest(channel_name), rsp), error::OK);
         ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
     }
     // npm-offline-filter T5.1: real capture pushed/residual equivalence.
     {
-        const auto verify_capture = [&](const std::string& channel_name,
-                                        const std::filesystem::path& capture_path,
-                                        const char* format,
-                                        const std::string& timestamp_filter,
-                                        int64_t expected_timestamp_ns,
-                                        const std::string& expected_raw) {
+        const auto verify_capture = [&](const std::string& channel_name, const std::filesystem::path& capture_path,
+                                        const char* format, const std::string& timestamp_filter,
+                                        int64_t expected_timestamp_ns, const std::string& expected_raw) {
             std::string response;
-            ASSERT_EQ(stream_add("/channels/stream/add",
-                                 MakePcapSourceAddRequest(
-                                     channel_name, capture_path, format),
+            ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(channel_name, capture_path, format),
                                  response),
                       error::OK);
 
-            const std::string partial_filter =
-                timestamp_filter + " AND raw_data IS NOT NULL";
+            const std::string partial_filter = timestamp_filter + " AND raw_data IS NOT NULL";
             pcap_protocol.Reset();
-            const auto pushed = ExecuteCaptureFilter(
-                exec, registry, channel_name, channel_name + "_pushed", partial_filter);
+            const auto pushed =
+                ExecuteCaptureFilter(exec, registry, channel_name, channel_name + "_pushed", partial_filter);
             ASSERT_EQ(pcap_protocol.layer_calls, 1);
             ASSERT_EQ(pcap_protocol.identify_calls, 0);
 
             pcap_protocol.Reset();
-            const auto residual = ExecuteCaptureFilter(
-                exec, registry, channel_name, channel_name + "_residual",
-                "NOT (NOT (" + partial_filter + "))");
+            const auto residual = ExecuteCaptureFilter(exec, registry, channel_name, channel_name + "_residual",
+                                                       "NOT (NOT (" + partial_filter + "))");
             ASSERT_EQ(pcap_protocol.layer_calls, 3);
             ASSERT_EQ(pcap_protocol.identify_calls, 0);
 
             AssertCaptureFilterSnapshotEqual(pushed, residual);
-            ASSERT_EQ(pushed.timestamps_ns,
-                      std::vector<int64_t>({expected_timestamp_ns}));
+            ASSERT_EQ(pushed.timestamps_ns, std::vector<int64_t>({expected_timestamp_ns}));
             ASSERT_EQ(pushed.sequences, std::vector<uint64_t>({1}));
             ASSERT_EQ(pushed.raw_packets, std::vector<std::string>({expected_raw}));
 
-            ASSERT_EQ(stream_remove("/channels/stream/remove",
-                                    MakePcapSourceRemoveRequest(channel_name),
-                                    response),
+            ASSERT_EQ(stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest(channel_name), response),
                       error::OK);
         };
 
-        verify_capture(
-            "scheduler_filter_micro", pcap_micro, "pcap",
-            "timestamp_ns >= TIMESTAMP '1970-01-01T00:00:01.250000Z' AND "
-            "timestamp_ns < TIMESTAMP '1970-01-01T00:00:01.250001Z'",
-            1250000000LL, std::string("\x32\x32\x32\x32", 4));
-        verify_capture(
-            "scheduler_filter_nano", pcap_nano, "pcap",
-            "timestamp_ns = TIMESTAMP '1970-01-01T00:00:01.123456789Z'",
-            1123456789LL, std::string("\x42\x42\x42\x42", 4));
-        verify_capture(
-            "scheduler_filter_pcapng", pcapng_offset, "pcapng",
-            "timestamp_ns = TIMESTAMP '1970-01-01T00:00:01.123456789Z'",
-            1123456789LL, std::string("\x52\x52\x52\x52", 4));
+        verify_capture("scheduler_filter_micro", pcap_micro, "pcap",
+                       "timestamp_ns >= TIMESTAMP '1970-01-01T00:00:01.250000Z' AND "
+                       "timestamp_ns < TIMESTAMP '1970-01-01T00:00:01.250001Z'",
+                       1250000000LL, std::string("\x32\x32\x32\x32", 4));
+        verify_capture("scheduler_filter_nano", pcap_nano, "pcap",
+                       "timestamp_ns = TIMESTAMP '1970-01-01T00:00:01.123456789Z'", 1123456789LL,
+                       std::string("\x42\x42\x42\x42", 4));
+        verify_capture("scheduler_filter_pcapng", pcapng_offset, "pcapng",
+                       "timestamp_ns = TIMESTAMP '1970-01-01T00:00:01.123456789Z'", 1123456789LL,
+                       std::string("\x52\x52\x52\x52", 4));
     }
     std::puts("[PASS] npm-offline-filter real capture pushed/residual E2E");
 
@@ -1905,57 +1868,44 @@ int main() {
         const std::string channel_name = "scheduler_pcap_transform";
         const std::string dataframe_name = "scheduler_pcap_transform";
         std::string rsp;
-        ASSERT_EQ(stream_add("/channels/stream/add",
-                             MakePcapSourceAddRequest(channel_name, pcap_ok),
-                             rsp),
-                  error::OK);
+        ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(channel_name, pcap_ok), rsp), error::OK);
 
         pcap_protocol.Reset();
         packet_transform.Reset();
         passthrough_transform.Reset();
-        const std::string invalid_domain_filter_sql =
-            "SELECT * FROM pcapfile." + channel_name +
-            " WHERE port(70000)"
-            " USING test.packet_to_protocol";
-        ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq(invalid_domain_filter_sql), rsp),
-                  error::BAD_REQUEST);
-        ASSERT_TRUE(rsp.find("source-stage filter domain resolution failed") !=
-                    std::string::npos);
+        const std::string invalid_domain_filter_sql = "SELECT * FROM pcapfile." + channel_name +
+                                                      " WHERE port(70000)"
+                                                      " USING test.packet_to_protocol";
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(invalid_domain_filter_sql), rsp), error::BAD_REQUEST);
+        ASSERT_TRUE(rsp.find("source-stage filter domain resolution failed") != std::string::npos);
         ASSERT_EQ(packet_transform.create_calls, 0);
 
-        const std::string malformed_source_filter_sql =
-            "SELECT * FROM pcapfile." + channel_name +
-            " WHERE ipv4 & tcp"
-            " USING test.packet_to_protocol"
-            " THEN test.protocol_passthrough";
-        ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq(malformed_source_filter_sql), rsp),
-                  error::BAD_REQUEST);
+        const std::string malformed_source_filter_sql = "SELECT * FROM pcapfile." + channel_name +
+                                                        " WHERE ipv4 & tcp"
+                                                        " USING test.packet_to_protocol"
+                                                        " THEN test.protocol_passthrough";
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(malformed_source_filter_sql), rsp), error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("source-stage filter syntax failed") != std::string::npos);
         ASSERT_EQ(packet_transform.create_calls, 0);
         ASSERT_EQ(passthrough_transform.create_calls, 0);
 
-        const std::string malformed_operator_filter_sql =
-            "SELECT * FROM pcapfile." + channel_name +
-            " WHERE captured_len >= 4"
-            " USING test.packet_to_protocol WHERE protocol == 'HTTP'"
-            " THEN test.protocol_passthrough";
-        ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq(malformed_operator_filter_sql), rsp),
-                  error::BAD_REQUEST);
+        const std::string malformed_operator_filter_sql = "SELECT * FROM pcapfile." + channel_name +
+                                                          " WHERE captured_len >= 4"
+                                                          " USING test.packet_to_protocol WHERE protocol == 'HTTP'"
+                                                          " THEN test.protocol_passthrough";
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(malformed_operator_filter_sql), rsp), error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("operator-stage filter syntax failed") != std::string::npos);
         ASSERT_EQ(packet_transform.create_calls, 0);
         ASSERT_EQ(passthrough_transform.create_calls, 0);
 
-        const std::string sql =
-            "SELECT * FROM pcapfile." + channel_name +
-            " WHERE captured_len >= 4"
-            " USING test.packet_to_protocol WITH mode=decode"
-            " WHERE sequence >= 1 AND protocol != 'DROP'"
-            " THEN test.protocol_passthrough WITH mode=pass"
-            " WHERE protocol = 'HTTP'"
-            " INTO dataframe." + dataframe_name;
+        const std::string sql = "SELECT * FROM pcapfile." + channel_name +
+                                " WHERE captured_len >= 4"
+                                " USING test.packet_to_protocol WITH mode=decode"
+                                " WHERE sequence >= 1 AND protocol != 'DROP'"
+                                " THEN test.protocol_passthrough WITH mode=pass"
+                                " WHERE protocol = 'HTTP'"
+                                " INTO dataframe." +
+                                dataframe_name;
         ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
 
         rapidjson::Document completed;
@@ -1967,17 +1917,13 @@ int main() {
         ASSERT_EQ(std::string(completed["status"].GetString()), "completed");
         ASSERT_TRUE(completed.HasMember("rows") && completed["rows"].IsInt64());
         ASSERT_EQ(completed["rows"].GetInt64(), 1);
-        ASSERT_TRUE(completed.HasMember("result_row_count") &&
-                    completed["result_row_count"].IsInt64());
+        ASSERT_TRUE(completed.HasMember("result_row_count") && completed["result_row_count"].IsInt64());
         ASSERT_EQ(completed["result_row_count"].GetInt64(), 1);
-        ASSERT_TRUE(completed.HasMember("result_target") &&
-                    completed["result_target"].IsString());
-        ASSERT_EQ(std::string(completed["result_target"].GetString()),
-                  "dataframe." + dataframe_name);
+        ASSERT_TRUE(completed.HasMember("result_target") && completed["result_target"].IsString());
+        ASSERT_EQ(std::string(completed["result_target"].GetString()), "dataframe." + dataframe_name);
         ASSERT_EQ(pcap_protocol.layer_calls, 2);
 
-        auto output = std::dynamic_pointer_cast<IDataFrameChannel>(
-            registry->Get(dataframe_name.c_str()));
+        auto output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(dataframe_name.c_str()));
         ASSERT_TRUE(output != nullptr);
         DataFrame result;
         ASSERT_EQ(output->Read(&result), 0);
@@ -1985,19 +1931,16 @@ int main() {
         ASSERT_TRUE(result_batch != nullptr);
         ASSERT_EQ(result_batch->num_rows(), 1);
         ASSERT_TRUE(result_batch->schema()->Equals(*SchedulerE2eTransformSchema(), true));
-        auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(
-            result_batch->GetColumnByName("sequence"));
-        auto captured_len = std::dynamic_pointer_cast<arrow::UInt32Array>(
-            result_batch->GetColumnByName("captured_len"));
-        auto protocol = std::dynamic_pointer_cast<arrow::StringArray>(
-            result_batch->GetColumnByName("protocol"));
+        auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(result_batch->GetColumnByName("sequence"));
+        auto captured_len =
+            std::dynamic_pointer_cast<arrow::UInt32Array>(result_batch->GetColumnByName("captured_len"));
+        auto protocol = std::dynamic_pointer_cast<arrow::StringArray>(result_batch->GetColumnByName("protocol"));
         ASSERT_TRUE(sequence != nullptr && captured_len != nullptr && protocol != nullptr);
         ASSERT_EQ(sequence->Value(0), 1);
         ASSERT_EQ(captured_len->Value(0), 4);
         ASSERT_EQ(protocol->GetString(0), "HTTP");
 
-        const auto verify_provider = [](const SchedulerE2eTransformProvider& provider,
-                                        const std::string& expected_mode,
+        const auto verify_provider = [](const SchedulerE2eTransformProvider& provider, const std::string& expected_mode,
                                         const std::vector<int64_t>& execution_input_rows) {
             ASSERT_EQ(provider.create_calls, 2);
             ASSERT_EQ(provider.release_calls, 2);
@@ -2008,8 +1951,7 @@ int main() {
             ASSERT_TRUE(provider.with_params[0].find(expected_mode) != std::string::npos);
             ASSERT_TRUE(provider.with_params[1].find(expected_mode) != std::string::npos);
             ASSERT_EQ(provider.pushed_plans,
-                      std::vector<std::string>({kEmptyCanonicalFilterPlanV1,
-                                                kEmptyCanonicalFilterPlanV1}));
+                      std::vector<std::string>({kEmptyCanonicalFilterPlanV1, kEmptyCanonicalFilterPlanV1}));
             ASSERT_EQ(provider.released.size(), 2u);
             ASSERT_EQ(provider.released[0].open_calls, 1);
             ASSERT_EQ(provider.released[0].process_calls, 0);
@@ -2026,10 +1968,7 @@ int main() {
         verify_provider(packet_transform, "decode", {1, 1});
         verify_provider(passthrough_transform, "pass", {0, 1});
 
-        ASSERT_EQ(stream_remove("/channels/stream/remove",
-                                MakePcapSourceRemoveRequest(channel_name),
-                                rsp),
-                  error::OK);
+        ASSERT_EQ(stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest(channel_name), rsp), error::OK);
         ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
     }
     // npm-basic-operator-plugin-lifecycle T4.4: API lifecycle and real SQL.
@@ -2038,9 +1977,7 @@ int main() {
         const std::string dataframe_name = "scheduler_npm_basic";
         const std::string plugin_filename = "libflowsql_npm_basic.so";
         std::string rsp;
-        ASSERT_EQ(stream_add("/channels/stream/add",
-                             MakePcapSourceAddRequest(channel_name, pcap_npm_basic),
-                             rsp),
+        ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(channel_name, pcap_npm_basic), rsp),
                   error::OK);
 
         const std::string input_namespace = "pcapfile." + channel_name;
@@ -2049,25 +1986,20 @@ int main() {
                    "',source_domains='0:77' INTO dataframe." + destination;
         };
         const auto make_npm_session_sql = [&](const std::string& destination) {
-            return "SELECT * FROM " + input_namespace +
-                   " USING npm.basic WITH input_namespace='" + input_namespace +
+            return "SELECT * FROM " + input_namespace + " USING npm.basic WITH input_namespace='" + input_namespace +
                    "',source_domains='0:77',features='basic,session',observing='session'"
                    " WHERE rate_status = 'insufficient_span' INTO dataframe." +
                    destination;
         };
-        const auto make_npm_parameters_sql = [&](const std::string& destination,
-                                                 const std::string& parameters) {
-            return "SELECT * FROM " + input_namespace +
-                   " USING npm.basic WITH input_namespace='" + input_namespace +
-                   "',source_domains='0:77',parameters='" + parameters +
-                   "' INTO dataframe." + destination;
+        const auto make_npm_parameters_sql = [&](const std::string& destination, const std::string& parameters) {
+            return "SELECT * FROM " + input_namespace + " USING npm.basic WITH input_namespace='" + input_namespace +
+                   "',source_domains='0:77',parameters='" + parameters + "' INTO dataframe." + destination;
         };
         const auto make_npm_session_parameters_sql = [&](const std::string& destination,
                                                          const std::string& parameters) {
-            return "SELECT * FROM " + input_namespace +
-                   " USING npm.basic WITH input_namespace='" + input_namespace +
-                   "',source_domains='0:77',features='basic,session',observing='session',parameters='" +
-                   parameters + "' WHERE rate_status = 'insufficient_span' INTO dataframe." + destination;
+            return "SELECT * FROM " + input_namespace + " USING npm.basic WITH input_namespace='" + input_namespace +
+                   "',source_domains='0:77',features='basic,session',observing='session',parameters='" + parameters +
+                   "' WHERE rate_status = 'insufficient_span' INTO dataframe." + destination;
         };
         const auto assert_npm_unavailable = [&](const std::string& destination) {
             const int rc = exec("/scheduler/batch/execute", MakeReq(make_npm_sql(destination)), rsp);
@@ -2337,6 +2269,100 @@ int main() {
         }
         ASSERT_EQ(stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest(http1_channel), rsp), error::OK);
 
+        const std::string tls_channel = "scheduler_npm_tls";
+        ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(tls_channel, pcap_npm_tls), rsp),
+                  error::OK);
+        const std::string tls_source = "pcapfile." + tls_channel;
+        const std::string tls_with =
+            " WITH input_namespace='" + tls_source +
+            "',source_domains='0:77',features='tls,labeling',observing='tls_handshake',parameters='" +
+            R"({"schema_version":1,"core":{"labeling":"config.http1-e2e@1"},"tls":{"primary_label_ids":[1001]}})" + "'";
+        const std::string tls_dataframe_name = "scheduler_npm_tls_front";
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq("SELECT * FROM " + tls_source + " USING npm.basic" + tls_with + " INTO dataframe." +
+                               tls_dataframe_name),
+                       rsp),
+                  error::OK);
+        auto tls_output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(tls_dataframe_name.c_str()));
+        ASSERT_TRUE(tls_output != nullptr);
+        DataFrame tls_result;
+        ASSERT_EQ(tls_output->Read(&tls_result), 0);
+        const auto tls_batch = tls_result.ToArrow();
+        const auto tls_entity = npm::NpmTlsHandshakeEntityDescriptorV1();
+        ASSERT_TRUE(tls_batch != nullptr && tls_batch->num_rows() == 1);
+        ASSERT_TRUE(tls_batch->schema()->Equals(*tls_entity.schema, true));
+        const auto tls_outcome = std::dynamic_pointer_cast<arrow::StringArray>(tls_batch->GetColumnByName("outcome"));
+        const auto tls_reason =
+            std::dynamic_pointer_cast<arrow::StringArray>(tls_batch->GetColumnByName("incomplete_reason"));
+        const auto tls_version =
+            std::dynamic_pointer_cast<arrow::UInt16Array>(tls_batch->GetColumnByName("selected_version"));
+        const auto tls_latency =
+            std::dynamic_pointer_cast<arrow::Int64Array>(tls_batch->GetColumnByName("server_hello_latency_ns"));
+        const auto tls_domain =
+            std::dynamic_pointer_cast<arrow::UInt64Array>(tls_batch->GetColumnByName("observation_domain_id"));
+        ASSERT_TRUE(tls_outcome && tls_reason && tls_version && tls_latency && tls_domain);
+        ASSERT_EQ(tls_outcome->GetString(0), "server_hello_observed");
+        ASSERT_EQ(tls_reason->GetString(0), "encrypted_after_server_hello");
+        ASSERT_EQ(tls_version->Value(0), 0x0304);
+        ASSERT_EQ(tls_latency->Value(0), 100000);
+        ASSERT_EQ(tls_domain->Value(0), 77ULL);
+        ASSERT_EQ(registry->Unregister(tls_dataframe_name.c_str()), 0);
+
+        std::vector<std::string> tls_run_ids;
+        for (int run = 0; run < 2; ++run) {
+            ASSERT_EQ(
+                exec("/scheduler/batch/execute",
+                     MakeReq("SELECT * FROM " + tls_source + " USING npm.basic" + tls_with + " INTO sqlite.local"),
+                     rsp),
+                error::OK);
+            rapidjson::Document completed;
+            completed.Parse(rsp.c_str());
+            ASSERT_TRUE(!completed.HasParseError() && completed.IsObject());
+            ASSERT_EQ(std::string(completed["status"].GetString()), "completed");
+            const auto& result = completed["result"];
+            ASSERT_EQ(std::string(result["run_status"].GetString()), "completed");
+            ASSERT_EQ(result["rows_written"].GetInt64(), 1);
+            ASSERT_TRUE(result["entities"].IsArray() && result["entities"].Size() == 1);
+            ASSERT_EQ(std::string(result["entities"][0]["entity_id"].GetString()), "tls_handshake");
+            ASSERT_EQ(result["entities"][0]["schema_version"].GetUint(), 1U);
+            tls_run_ids.emplace_back(result["run_id"].GetString());
+            ASSERT_TRUE(!tls_run_ids.back().empty());
+        }
+        ASSERT_TRUE(tls_run_ids[0] != tls_run_ids[1]);
+        for (const char* relation : {"history", "latest", "final"}) {
+            const std::string name = "npm_tls_handshake_" + std::string(relation) + "_v1";
+            for (size_t run = 0; run < tls_run_ids.size(); ++run) {
+                const std::string destination = "scheduler_tls_" + std::string(relation) + std::to_string(run);
+                ASSERT_EQ(exec("/scheduler/batch/execute",
+                               MakeReq("SELECT * FROM sqlite.local." + name + " WHERE __npm_run_id='" +
+                                       tls_run_ids[run] + "' INTO dataframe." + destination),
+                               rsp),
+                          error::OK);
+                auto output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(destination.c_str()));
+                ASSERT_TRUE(output != nullptr);
+                DataFrame frame;
+                ASSERT_EQ(output->Read(&frame), 0);
+                auto batch = frame.ToArrow();
+                ASSERT_TRUE(batch != nullptr && batch->num_rows() == 1);
+                for (const auto& field : tls_entity.schema->fields()) {
+                    ASSERT_TRUE(batch->GetColumnByName(field->name()) != nullptr);
+                }
+                const auto ids = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("__npm_run_id"));
+                const auto statuses =
+                    std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("__npm_run_status"));
+                const auto outcomes = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("outcome"));
+                ASSERT_TRUE(ids && statuses && outcomes);
+                ASSERT_EQ(ids->GetString(0), tls_run_ids[run]);
+                ASSERT_EQ(statuses->GetString(0), "completed");
+                ASSERT_EQ(outcomes->GetString(0), "server_hello_observed");
+                ASSERT_EQ(registry->Unregister(destination.c_str()), 0);
+                ASSERT_EQ(QueryCount(db, "SELECT * FROM " + name + " WHERE __npm_run_id='" + tls_run_ids[run] + "'"),
+                          1);
+            }
+            ASSERT_EQ(QueryCount(db, "SELECT * FROM " + name + " WHERE __npm_run_id='" + managed_run_id + "'"), 0);
+        }
+        ASSERT_EQ(stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest(tls_channel), rsp), error::OK);
+
         const std::string metadata_dataframe = "scheduler_npm_run_source";
         ASSERT_EQ(exec("/scheduler/batch/execute",
                        MakeReq("SELECT input_namespace FROM sqlite.local.npm_result_runs WHERE run_id='" +
@@ -2442,17 +2468,13 @@ int main() {
         ASSERT_EQ(std::string(completed["status"].GetString()), "completed");
         ASSERT_TRUE(completed.HasMember("rows") && completed["rows"].IsInt64());
         ASSERT_EQ(completed["rows"].GetInt64(), 1);
-        ASSERT_TRUE(completed.HasMember("result_row_count") &&
-                    completed["result_row_count"].IsInt64());
+        ASSERT_TRUE(completed.HasMember("result_row_count") && completed["result_row_count"].IsInt64());
         ASSERT_EQ(completed["result_row_count"].GetInt64(), 1);
-        ASSERT_TRUE(completed.HasMember("result_target") &&
-                    completed["result_target"].IsString());
-        ASSERT_EQ(std::string(completed["result_target"].GetString()),
-                  "dataframe." + dataframe_name);
+        ASSERT_TRUE(completed.HasMember("result_target") && completed["result_target"].IsString());
+        ASSERT_EQ(std::string(completed["result_target"].GetString()), "dataframe." + dataframe_name);
         ASSERT_EQ(pcap_protocol.layer_calls, 1);
 
-        auto output = std::dynamic_pointer_cast<IDataFrameChannel>(
-            registry->Get(dataframe_name.c_str()));
+        auto output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(dataframe_name.c_str()));
         ASSERT_TRUE(output != nullptr);
         DataFrame result;
         ASSERT_EQ(output->Read(&result), 0);
@@ -2461,20 +2483,15 @@ int main() {
         ASSERT_EQ(batch->num_rows(), 1);
         AssertSchedulerE2eNpmBasicSchema(batch->schema());
 
-        const auto session_id = std::dynamic_pointer_cast<arrow::UInt64Array>(
-            batch->GetColumnByName("session_id"));
-        const auto domain = std::dynamic_pointer_cast<arrow::UInt64Array>(
-            batch->GetColumnByName("observation_domain_id"));
-        const auto revision = std::dynamic_pointer_cast<arrow::UInt64Array>(
-            batch->GetColumnByName("revision"));
-        const auto observed_at = std::dynamic_pointer_cast<arrow::Int64Array>(
-            batch->GetColumnByName("observed_at"));
-        const auto is_final = std::dynamic_pointer_cast<arrow::BooleanArray>(
-            batch->GetColumnByName("is_final"));
-        const auto ip_family = std::dynamic_pointer_cast<arrow::UInt8Array>(
-            batch->GetColumnByName("ip_family"));
-        const auto transport = std::dynamic_pointer_cast<arrow::UInt8Array>(
-            batch->GetColumnByName("transport_protocol"));
+        const auto session_id = std::dynamic_pointer_cast<arrow::UInt64Array>(batch->GetColumnByName("session_id"));
+        const auto domain =
+            std::dynamic_pointer_cast<arrow::UInt64Array>(batch->GetColumnByName("observation_domain_id"));
+        const auto revision = std::dynamic_pointer_cast<arrow::UInt64Array>(batch->GetColumnByName("revision"));
+        const auto observed_at = std::dynamic_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("observed_at"));
+        const auto is_final = std::dynamic_pointer_cast<arrow::BooleanArray>(batch->GetColumnByName("is_final"));
+        const auto ip_family = std::dynamic_pointer_cast<arrow::UInt8Array>(batch->GetColumnByName("ip_family"));
+        const auto transport =
+            std::dynamic_pointer_cast<arrow::UInt8Array>(batch->GetColumnByName("transport_protocol"));
         ASSERT_TRUE(session_id && domain && revision && observed_at && is_final && ip_family && transport);
         ASSERT_EQ(session_id->Value(0), 1);
         ASSERT_EQ(domain->Value(0), 77);
@@ -2484,18 +2501,12 @@ int main() {
         ASSERT_EQ(ip_family->Value(0), 4);
         ASSERT_EQ(transport->Value(0), 6);
 
-        const auto a_ip = std::dynamic_pointer_cast<arrow::StringArray>(
-            batch->GetColumnByName("a_ip"));
-        const auto b_ip = std::dynamic_pointer_cast<arrow::StringArray>(
-            batch->GetColumnByName("b_ip"));
-        const auto a_port = std::dynamic_pointer_cast<arrow::UInt16Array>(
-            batch->GetColumnByName("a_port"));
-        const auto b_port = std::dynamic_pointer_cast<arrow::UInt16Array>(
-            batch->GetColumnByName("b_port"));
-        const auto first_ns = std::dynamic_pointer_cast<arrow::Int64Array>(
-            batch->GetColumnByName("first_ns"));
-        const auto last_ns = std::dynamic_pointer_cast<arrow::Int64Array>(
-            batch->GetColumnByName("last_ns"));
+        const auto a_ip = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("a_ip"));
+        const auto b_ip = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("b_ip"));
+        const auto a_port = std::dynamic_pointer_cast<arrow::UInt16Array>(batch->GetColumnByName("a_port"));
+        const auto b_port = std::dynamic_pointer_cast<arrow::UInt16Array>(batch->GetColumnByName("b_port"));
+        const auto first_ns = std::dynamic_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("first_ns"));
+        const auto last_ns = std::dynamic_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("last_ns"));
         ASSERT_TRUE(a_ip && b_ip && a_port && b_port && first_ns && last_ns);
         ASSERT_EQ(a_ip->GetString(0), "192.0.2.1");
         ASSERT_EQ(b_ip->GetString(0), "198.51.100.2");
@@ -2504,26 +2515,21 @@ int main() {
         ASSERT_EQ(first_ns->Value(0), 1'000'000'000);
         ASSERT_EQ(last_ns->Value(0), 1'000'000'000);
 
-        const auto packets_ab = std::dynamic_pointer_cast<arrow::UInt64Array>(
-            batch->GetColumnByName("packets_ab"));
-        const auto packets_ba = std::dynamic_pointer_cast<arrow::UInt64Array>(
-            batch->GetColumnByName("packets_ba"));
-        const auto wire_bytes_ab = std::dynamic_pointer_cast<arrow::UInt64Array>(
-            batch->GetColumnByName("wire_bytes_ab"));
-        const auto wire_bytes_ba = std::dynamic_pointer_cast<arrow::UInt64Array>(
-            batch->GetColumnByName("wire_bytes_ba"));
-        const auto protocol_status = std::dynamic_pointer_cast<arrow::StringArray>(
-            batch->GetColumnByName("protocol_status"));
-        const auto protocol_id = std::dynamic_pointer_cast<arrow::UInt16Array>(
-            batch->GetColumnByName("protocol_id"));
-        const auto protocol_sub_id = std::dynamic_pointer_cast<arrow::UInt16Array>(
-            batch->GetColumnByName("protocol_sub_id"));
-        const auto protocol_name = std::dynamic_pointer_cast<arrow::StringArray>(
-            batch->GetColumnByName("protocol"));
-        const auto end_reason = std::dynamic_pointer_cast<arrow::StringArray>(
-            batch->GetColumnByName("end_reason"));
-        ASSERT_TRUE(packets_ab && packets_ba && wire_bytes_ab && wire_bytes_ba && protocol_status &&
-                    protocol_id && protocol_sub_id && protocol_name && end_reason);
+        const auto packets_ab = std::dynamic_pointer_cast<arrow::UInt64Array>(batch->GetColumnByName("packets_ab"));
+        const auto packets_ba = std::dynamic_pointer_cast<arrow::UInt64Array>(batch->GetColumnByName("packets_ba"));
+        const auto wire_bytes_ab =
+            std::dynamic_pointer_cast<arrow::UInt64Array>(batch->GetColumnByName("wire_bytes_ab"));
+        const auto wire_bytes_ba =
+            std::dynamic_pointer_cast<arrow::UInt64Array>(batch->GetColumnByName("wire_bytes_ba"));
+        const auto protocol_status =
+            std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("protocol_status"));
+        const auto protocol_id = std::dynamic_pointer_cast<arrow::UInt16Array>(batch->GetColumnByName("protocol_id"));
+        const auto protocol_sub_id =
+            std::dynamic_pointer_cast<arrow::UInt16Array>(batch->GetColumnByName("protocol_sub_id"));
+        const auto protocol_name = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("protocol"));
+        const auto end_reason = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("end_reason"));
+        ASSERT_TRUE(packets_ab && packets_ba && wire_bytes_ab && wire_bytes_ba && protocol_status && protocol_id &&
+                    protocol_sub_id && protocol_name && end_reason);
         ASSERT_EQ(packets_ab->Value(0), 1);
         ASSERT_EQ(packets_ba->Value(0), 0);
         ASSERT_EQ(wire_bytes_ab->Value(0), MakeSchedulerE2eTcpRstPacket().size());
@@ -2553,19 +2559,16 @@ int main() {
         ASSERT_EQ(default_domains->Value(0), 0);
         ASSERT_EQ(registry->Unregister(default_dataframe.c_str()), 0);
 
-        const std::string parameters_basic_dataframe_name =
-            "scheduler_npm_basic_parameters";
+        const std::string parameters_basic_dataframe_name = "scheduler_npm_basic_parameters";
         const std::string parameters_basic =
             R"({"schema_version":1,"core":{"labeling":"@latest"},)"
             R"("session":{"max_tcp_ranges_per_direction":"ignored"},"http1":{"future":null}})";
         pcap_protocol.Reset();
         ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq(make_npm_parameters_sql(parameters_basic_dataframe_name,
-                                                       parameters_basic)),
-                       rsp),
+                       MakeReq(make_npm_parameters_sql(parameters_basic_dataframe_name, parameters_basic)), rsp),
                   error::OK);
-        auto parameters_basic_output = std::dynamic_pointer_cast<IDataFrameChannel>(
-            registry->Get(parameters_basic_dataframe_name.c_str()));
+        auto parameters_basic_output =
+            std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(parameters_basic_dataframe_name.c_str()));
         ASSERT_TRUE(parameters_basic_output != nullptr);
         DataFrame parameters_basic_result;
         ASSERT_EQ(parameters_basic_output->Read(&parameters_basic_result), 0);
@@ -2578,9 +2581,7 @@ int main() {
 
         const std::string session_dataframe_name = "scheduler_npm_session";
         pcap_protocol.Reset();
-        ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq(make_npm_session_sql(session_dataframe_name)),
-                       rsp),
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(make_npm_session_sql(session_dataframe_name)), rsp),
                   error::OK);
 
         rapidjson::Document session_completed;
@@ -2590,17 +2591,14 @@ int main() {
         ASSERT_EQ(std::string(session_completed["status"].GetString()), "completed");
         ASSERT_TRUE(session_completed.HasMember("rows") && session_completed["rows"].IsInt64());
         ASSERT_EQ(session_completed["rows"].GetInt64(), 1);
-        ASSERT_TRUE(session_completed.HasMember("result_row_count") &&
-                    session_completed["result_row_count"].IsInt64());
+        ASSERT_TRUE(session_completed.HasMember("result_row_count") && session_completed["result_row_count"].IsInt64());
         ASSERT_EQ(session_completed["result_row_count"].GetInt64(), 1);
-        ASSERT_TRUE(session_completed.HasMember("result_target") &&
-                    session_completed["result_target"].IsString());
-        ASSERT_EQ(std::string(session_completed["result_target"].GetString()),
-                  "dataframe." + session_dataframe_name);
+        ASSERT_TRUE(session_completed.HasMember("result_target") && session_completed["result_target"].IsString());
+        ASSERT_EQ(std::string(session_completed["result_target"].GetString()), "dataframe." + session_dataframe_name);
         ASSERT_EQ(pcap_protocol.layer_calls, 1);
 
-        auto session_output = std::dynamic_pointer_cast<IDataFrameChannel>(
-            registry->Get(session_dataframe_name.c_str()));
+        auto session_output =
+            std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(session_dataframe_name.c_str()));
         ASSERT_TRUE(session_output != nullptr);
         DataFrame session_result;
         ASSERT_EQ(session_output->Read(&session_result), 0);
@@ -2609,27 +2607,26 @@ int main() {
         ASSERT_EQ(session_batch->num_rows(), 1);
         AssertSchedulerE2eNpmSessionSchema(session_batch->schema());
 
-        const auto session_revision = std::dynamic_pointer_cast<arrow::UInt64Array>(
-            session_batch->GetColumnByName("revision"));
-        const auto session_final = std::dynamic_pointer_cast<arrow::BooleanArray>(
-            session_batch->GetColumnByName("is_final"));
-        const auto duration_ns = std::dynamic_pointer_cast<arrow::Int64Array>(
-            session_batch->GetColumnByName("duration_ns"));
-        const auto rate_status = std::dynamic_pointer_cast<arrow::StringArray>(
-            session_batch->GetColumnByName("rate_status"));
-        const auto handshake_status = std::dynamic_pointer_cast<arrow::StringArray>(
-            session_batch->GetColumnByName("tcp_handshake_status"));
-        const auto rtt_status = std::dynamic_pointer_cast<arrow::StringArray>(
-            session_batch->GetColumnByName("tcp_rtt_status"));
-        const auto retransmission_status = std::dynamic_pointer_cast<arrow::StringArray>(
-            session_batch->GetColumnByName("tcp_retransmission_status"));
-        const auto measurement_flags = std::dynamic_pointer_cast<arrow::UInt32Array>(
-            session_batch->GetColumnByName("measurement_flags"));
-        const auto session_end_reason = std::dynamic_pointer_cast<arrow::StringArray>(
-            session_batch->GetColumnByName("end_reason"));
-        ASSERT_TRUE(session_revision && session_final && duration_ns && rate_status &&
-                    handshake_status && rtt_status && retransmission_status &&
-                    measurement_flags && session_end_reason);
+        const auto session_revision =
+            std::dynamic_pointer_cast<arrow::UInt64Array>(session_batch->GetColumnByName("revision"));
+        const auto session_final =
+            std::dynamic_pointer_cast<arrow::BooleanArray>(session_batch->GetColumnByName("is_final"));
+        const auto duration_ns =
+            std::dynamic_pointer_cast<arrow::Int64Array>(session_batch->GetColumnByName("duration_ns"));
+        const auto rate_status =
+            std::dynamic_pointer_cast<arrow::StringArray>(session_batch->GetColumnByName("rate_status"));
+        const auto handshake_status =
+            std::dynamic_pointer_cast<arrow::StringArray>(session_batch->GetColumnByName("tcp_handshake_status"));
+        const auto rtt_status =
+            std::dynamic_pointer_cast<arrow::StringArray>(session_batch->GetColumnByName("tcp_rtt_status"));
+        const auto retransmission_status =
+            std::dynamic_pointer_cast<arrow::StringArray>(session_batch->GetColumnByName("tcp_retransmission_status"));
+        const auto measurement_flags =
+            std::dynamic_pointer_cast<arrow::UInt32Array>(session_batch->GetColumnByName("measurement_flags"));
+        const auto session_end_reason =
+            std::dynamic_pointer_cast<arrow::StringArray>(session_batch->GetColumnByName("end_reason"));
+        ASSERT_TRUE(session_revision && session_final && duration_ns && rate_status && handshake_status && rtt_status &&
+                    retransmission_status && measurement_flags && session_end_reason);
         ASSERT_EQ(session_revision->Value(0), 1);
         ASSERT_TRUE(session_final->Value(0));
         ASSERT_EQ(duration_ns->Value(0), 0);
@@ -2640,19 +2637,16 @@ int main() {
         ASSERT_EQ(measurement_flags->Value(0), 1);
         ASSERT_EQ(session_end_reason->GetString(0), "closed");
 
-        const std::string parameters_session_dataframe_name =
-            "scheduler_npm_session_parameters";
-        const std::string parameters_session =
-            R"({"schema_version":1,"session":{"max_tcp_ranges_per_direction":1024},)"
-            R"("future_protocol":{"setting":null}})";
+        const std::string parameters_session_dataframe_name = "scheduler_npm_session_parameters";
+        const std::string parameters_session = R"({"schema_version":1,"session":{"max_tcp_ranges_per_direction":1024},)"
+                                               R"("future_protocol":{"setting":null}})";
         pcap_protocol.Reset();
-        ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq(make_npm_session_parameters_sql(
-                           parameters_session_dataframe_name, parameters_session)),
-                       rsp),
-                  error::OK);
-        auto parameters_session_output = std::dynamic_pointer_cast<IDataFrameChannel>(
-            registry->Get(parameters_session_dataframe_name.c_str()));
+        ASSERT_EQ(
+            exec("/scheduler/batch/execute",
+                 MakeReq(make_npm_session_parameters_sql(parameters_session_dataframe_name, parameters_session)), rsp),
+            error::OK);
+        auto parameters_session_output =
+            std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(parameters_session_dataframe_name.c_str()));
         ASSERT_TRUE(parameters_session_output != nullptr);
         DataFrame parameters_session_result;
         ASSERT_EQ(parameters_session_output->Read(&parameters_session_result), 0);
@@ -2663,8 +2657,7 @@ int main() {
         ASSERT_EQ(pcap_protocol.layer_calls, 1);
         ASSERT_EQ(registry->Unregister(parameters_session_dataframe_name.c_str()), 0);
 
-        const auto assert_npm_config_failure = [&](const std::string& destination,
-                                                   const std::string& invalid_sql,
+        const auto assert_npm_config_failure = [&](const std::string& destination, const std::string& invalid_sql,
                                                    const std::vector<std::string>& fragments) {
             pcap_protocol.Reset();
             ASSERT_TRUE(exec("/scheduler/batch/execute", MakeReq(invalid_sql), rsp) != error::OK);
@@ -2674,31 +2667,23 @@ int main() {
             ASSERT_TRUE(registry->Get(destination.c_str()) == nullptr);
             ASSERT_EQ(pcap_protocol.layer_calls, 0);
         };
-        const std::string invalid_core_destination =
-            "scheduler_npm_invalid_core";
-        assert_npm_config_failure(
-            invalid_core_destination,
-            make_npm_parameters_sql(
-                invalid_core_destination,
-                R"({"schema_version":1,"core":{"max_active_sessions":"1"}})"),
-            {"invalid parameters", "/core/max_active_sessions"});
-        const std::string invalid_session_destination =
-            "scheduler_npm_invalid_session";
+        const std::string invalid_core_destination = "scheduler_npm_invalid_core";
+        assert_npm_config_failure(invalid_core_destination,
+                                  make_npm_parameters_sql(invalid_core_destination,
+                                                          R"({"schema_version":1,"core":{"max_active_sessions":"1"}})"),
+                                  {"invalid parameters", "/core/max_active_sessions"});
+        const std::string invalid_session_destination = "scheduler_npm_invalid_session";
         assert_npm_config_failure(
             invalid_session_destination,
-            make_npm_session_parameters_sql(
-                invalid_session_destination,
-                R"({"schema_version":1,"session":{"max_tcp_ranges_per_direction":7}})"),
+            make_npm_session_parameters_sql(invalid_session_destination,
+                                            R"({"schema_version":1,"session":{"max_tcp_ranges_per_direction":7}})"),
             {"invalid parameters", "/session/max_tcp_ranges_per_direction"});
         const std::string conflict_destination = "scheduler_npm_parameter_conflict";
-        const std::string conflict_sql =
-            "SELECT * FROM " + input_namespace +
-            " USING npm.basic WITH input_namespace='" + input_namespace +
-            "',source_domains='0:77',run_mode='offline',parameters='" +
-            R"({"schema_version":1})" + "' INTO dataframe." + conflict_destination;
-        assert_npm_config_failure(
-            conflict_destination, conflict_sql,
-            {"configuration source conflict", "/run_mode"});
+        const std::string conflict_sql = "SELECT * FROM " + input_namespace +
+                                         " USING npm.basic WITH input_namespace='" + input_namespace +
+                                         "',source_domains='0:77',run_mode='offline',parameters='" +
+                                         R"({"schema_version":1})" + "' INTO dataframe." + conflict_destination;
+        assert_npm_config_failure(conflict_destination, conflict_sql, {"configuration source conflict", "/run_mode"});
         ASSERT_EQ(registry->Unregister(session_dataframe_name.c_str()), 0);
 
         ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
@@ -2737,24 +2722,18 @@ int main() {
         ASSERT_EQ(delete_operator("/operators/delete", plugin_request, rsp), error::OK);
         ASSERT_EQ(detail("/operators/detail", plugin_request, rsp), error::NOT_FOUND);
 
-        ASSERT_EQ(stream_remove("/channels/stream/remove",
-                                MakePcapSourceRemoveRequest(channel_name),
-                                rsp),
-                  error::OK);
+        ASSERT_EQ(stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest(channel_name), rsp), error::OK);
     }
     std::puts("[PASS] npm.basic dynamic plugin lifecycle and offline SQL E2E");
     {
         const std::string channel_name = "scheduler_pcap_error";
         std::string rsp;
-        ASSERT_EQ(stream_add("/channels/stream/add",
-                             MakePcapSourceAddRequest(channel_name, pcap_error),
-                             rsp),
+        ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(channel_name, pcap_error), rsp),
                   error::OK);
 
         pcap_protocol.Reset();
         block_operator.Reset();
-        const std::string sql =
-            "SELECT * FROM pcapfile." + channel_name + " USING test.packet_counter";
+        const std::string sql = "SELECT * FROM pcapfile." + channel_name + " USING test.packet_counter";
         ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::INTERNAL_ERROR);
         ASSERT_TRUE(rsp.find("\"status\":\"completed\"") == std::string::npos);
         rapidjson::Document failed;
@@ -2772,13 +2751,9 @@ int main() {
         ASSERT_EQ(block_operator.flush_calls, 0);
         ASSERT_EQ(block_operator.rows_seen, 1);
         ASSERT_EQ(block_operator.sequences, std::vector<uint64_t>({0}));
-        ASSERT_EQ(block_operator.raw_packets,
-                  std::vector<std::string>({std::string("\x01\x02\x03\x04", 4)}));
+        ASSERT_EQ(block_operator.raw_packets, std::vector<std::string>({std::string("\x01\x02\x03\x04", 4)}));
 
-        ASSERT_EQ(stream_remove("/channels/stream/remove",
-                                MakePcapSourceRemoveRequest(channel_name),
-                                rsp),
-                  error::OK);
+        ASSERT_EQ(stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest(channel_name), rsp), error::OK);
     }
     std::puts("[PASS] npm-offline-import Scheduler pcapfile E2E");
 
@@ -2786,8 +2761,7 @@ int main() {
     {
         std::string rsp;
         ASSERT_EQ(sql_classify("/scheduler/sql/classify",
-                               MakeReq("SELECT * FROM sqlite.local.src INTO dataframe.classify_batch"),
-                               rsp),
+                               MakeReq("SELECT * FROM sqlite.local.src INTO dataframe.classify_batch"), rsp),
                   error::OK);
         rapidjson::Document batch_doc;
         batch_doc.Parse(rsp.c_str());
@@ -2837,8 +2811,8 @@ int main() {
     // T18: INTO dataframe.result 后可通过 Registry 读取
     {
         std::string rsp;
-        int32_t rc = exec("/scheduler/batch/execute",
-                          MakeReq("SELECT * FROM sqlite.local.src INTO dataframe.result"), rsp);
+        int32_t rc =
+            exec("/scheduler/batch/execute", MakeReq("SELECT * FROM sqlite.local.src INTO dataframe.result"), rsp);
         ASSERT_EQ(rc, error::OK);
         auto ch = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("result"));
         ASSERT_TRUE(ch != nullptr);
@@ -2849,8 +2823,8 @@ int main() {
     // T19: FROM dataframe.result INTO sqlite.local.t2
     {
         std::string rsp;
-        int32_t rc = exec("/scheduler/batch/execute",
-                          MakeReq("SELECT * FROM dataframe.result INTO sqlite.local.t2"), rsp);
+        int32_t rc =
+            exec("/scheduler/batch/execute", MakeReq("SELECT * FROM dataframe.result INTO sqlite.local.t2"), rsp);
         ASSERT_EQ(rc, error::OK);
         ASSERT_EQ(QueryCount(db, "SELECT * FROM t2"), 3);
     }
@@ -2859,8 +2833,8 @@ int main() {
     // T20: FROM dataframe.<不存在> 返回 NOT_FOUND
     {
         std::string rsp;
-        int32_t rc = exec("/scheduler/batch/execute",
-                          MakeReq("SELECT * FROM dataframe.not_exists INTO sqlite.local.t3"), rsp);
+        int32_t rc =
+            exec("/scheduler/batch/execute", MakeReq("SELECT * FROM dataframe.not_exists INTO sqlite.local.t3"), rsp);
         ASSERT_EQ(rc, error::NOT_FOUND);
     }
     std::puts("[PASS] T20");
@@ -3021,8 +2995,7 @@ int main() {
     {
         std::string rsp;
         int32_t rc = exec("/scheduler/batch/execute",
-                          MakeReq("SELECT * FROM dataframe.result,dataframe.out INTO dataframe.multi_no_op"),
-                          rsp);
+                          MakeReq("SELECT * FROM dataframe.result,dataframe.out INTO dataframe.multi_no_op"), rsp);
         ASSERT_EQ(rc, error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("multi-source FROM requires USING operator") != std::string::npos);
     }
@@ -3048,17 +3021,14 @@ int main() {
                                   "WHERE id > 1 USING builtin.passthrough INTO dataframe.multi_where"),
                           rsp);
         ASSERT_EQ(rc, error::BAD_REQUEST);
-        ASSERT_TRUE(rsp.find("source-stage WHERE does not support multiple sources") !=
-                    std::string::npos);
+        ASSERT_TRUE(rsp.find("source-stage WHERE does not support multiple sources") != std::string::npos);
     }
     std::puts("[PASS] T30");
 
     // T31: INTO 非法目标（未限定名）应报 BAD_REQUEST
     {
         std::string rsp;
-        int32_t rc = exec("/scheduler/batch/execute",
-                          MakeReq("SELECT * FROM sqlite.local.src INTO t2"),
-                          rsp);
+        int32_t rc = exec("/scheduler/batch/execute", MakeReq("SELECT * FROM sqlite.local.src INTO t2"), rsp);
         ASSERT_EQ(rc, error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("invalid INTO destination") != std::string::npos);
     }
@@ -3093,10 +3063,9 @@ int main() {
     // T34: concat schema 不兼容应失败
     {
         std::string rsp;
-        ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq("SELECT id FROM sqlite.local.src INTO dataframe.only_id"),
-                       rsp),
-                  error::OK);
+        ASSERT_EQ(
+            exec("/scheduler/batch/execute", MakeReq("SELECT id FROM sqlite.local.src INTO dataframe.only_id"), rsp),
+            error::OK);
 
         int32_t rc = exec("/scheduler/batch/execute",
                           MakeReq("SELECT * FROM dataframe.out,dataframe.only_id "
@@ -3152,8 +3121,10 @@ int main() {
                 {"c_str", DataType::STRING, 0, ""},
                 {"c_bool", DataType::BOOLEAN, 0, ""},
             });
-            df.AppendRow({base + 1, int64_t(base + 1000), float(base + 0.5f), double(base + 0.25), std::string("n") + std::to_string(base + 1), true});
-            df.AppendRow({base + 2, int64_t(base + 2000), float(base + 1.5f), double(base + 1.25), std::string("n") + std::to_string(base + 2), false});
+            df.AppendRow({base + 1, int64_t(base + 1000), float(base + 0.5f), double(base + 0.25),
+                          std::string("n") + std::to_string(base + 1), true});
+            df.AppendRow({base + 2, int64_t(base + 2000), float(base + 1.5f), double(base + 1.25),
+                          std::string("n") + std::to_string(base + 2), false});
             ASSERT_EQ(ch->Write(&df), 0);
 
             (void)registry->Unregister(name);
@@ -3257,8 +3228,7 @@ int main() {
     {
         std::string rsp;
         ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq("SELECT * FROM sqlite.local.src INTO dataframe.df2stream_src"),
-                       rsp),
+                       MakeReq("SELECT * FROM sqlite.local.src INTO dataframe.df2stream_src"), rsp),
                   error::OK);
 
         auto* df_out = stream_factory->Get("ring", "df_out");
@@ -3269,10 +3239,9 @@ int main() {
             if (ev.kind != PollEventKind::kData) break;
         }
 
-        ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq("SELECT * FROM dataframe.df2stream_src INTO ring.df_out"),
-                       rsp),
-                  error::OK);
+        ASSERT_EQ(
+            exec("/scheduler/batch/execute", MakeReq("SELECT * FROM dataframe.df2stream_src INTO ring.df_out"), rsp),
+            error::OK);
         ASSERT_TRUE(rsp.find("\"status\":\"completed\"") != std::string::npos);
 
         int rows = 0;
@@ -3446,12 +3415,14 @@ int main() {
     {
         std::string rsp;
         const std::string seed_name = "dispatch_seed_" + suffix;
-        ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq("SELECT * FROM dataframe." + seed_name +
-                               " USING builtin.dataframe_dispatch_stream WITH range_rows=100 INTO stream_hub.dispatch_hub_auto_" +
-                               suffix),
-                       rsp),
-                  error::INTERNAL_ERROR);
+        ASSERT_EQ(
+            exec("/scheduler/batch/execute",
+                 MakeReq(
+                     "SELECT * FROM dataframe." + seed_name +
+                     " USING builtin.dataframe_dispatch_stream WITH range_rows=100 INTO stream_hub.dispatch_hub_auto_" +
+                     suffix),
+                 rsp),
+            error::INTERNAL_ERROR);
         ASSERT_TRUE(rsp.find("DATAFRAME_DISPATCH_STRATEGY_REQUIRED") != std::string::npos);
     }
     std::puts("[PASS] T38D");
@@ -3472,10 +3443,10 @@ int main() {
             if (ev.kind != PollEventKind::kData) break;
         }
 
-        ASSERT_EQ(stream_exec("/scheduler/stream/execute",
-                              MakeStreamReq("SELECT * FROM ring.in USING builtin.passthrough_stream INTO stream.out"),
-                              rsp),
-                  error::OK);
+        ASSERT_EQ(
+            stream_exec("/scheduler/stream/execute",
+                        MakeStreamReq("SELECT * FROM ring.in USING builtin.passthrough_stream INTO stream.out"), rsp),
+            error::OK);
         const std::string task_id = ParseTaskId(rsp);
         ASSERT_TRUE(!task_id.empty());
 
@@ -3527,10 +3498,11 @@ int main() {
             if (ev.kind != PollEventKind::kData) break;
         }
 
-        ASSERT_EQ(stream_exec("/scheduler/stream/execute",
-                              MakeStreamReq("SELECT * FROM ring.stop_in USING builtin.passthrough_stream INTO stream.stop_out"),
-                              rsp),
-                  error::OK);
+        ASSERT_EQ(
+            stream_exec(
+                "/scheduler/stream/execute",
+                MakeStreamReq("SELECT * FROM ring.stop_in USING builtin.passthrough_stream INTO stream.stop_out"), rsp),
+            error::OK);
         const std::string task_id = ParseTaskId(rsp);
         ASSERT_TRUE(!task_id.empty());
 
@@ -3580,7 +3552,7 @@ int main() {
 
         ASSERT_EQ(stream_exec("/scheduler/stream/execute",
                               MakeStreamReq("SELECT * FROM tcp_session_mock.tcp_src "
-                                      "USING builtin.tcp_service_merge_stream INTO stream.svc_out"),
+                                            "USING builtin.tcp_service_merge_stream INTO stream.svc_out"),
                               rsp),
                   error::OK);
         const std::string task_id = ParseTaskId(rsp);
@@ -3626,9 +3598,9 @@ int main() {
     // T42: 非 stream sink 在并行写能力不足时直接失败（无隐式降级）
     {
         std::string rsp;
-        ASSERT_EQ(op_registry->Register("custom.parallel_passthrough_stream", []() -> IOperator* {
-            return new ParallelPassthroughStreamOperator();
-        }), 0);
+        ASSERT_EQ(op_registry->Register("custom.parallel_passthrough_stream",
+                                        []() -> IOperator* { return new ParallelPassthroughStreamOperator(); }),
+                  0);
         ASSERT_EQ(upsert_batch("/operators/upsert_batch", R"({
             "operators":[
                 {
@@ -3659,9 +3631,9 @@ int main() {
     {
         std::string rsp;
         ASSERT_EQ(activate("/operators/activate", R"({"name":"builtin.passthrough_stream"})", rsp), error::OK);
-        ASSERT_EQ(op_registry->Register("custom.db_direct_writer_stream", []() -> IOperator* {
-            return new DbDirectWriterStreamOperator();
-        }), 0);
+        ASSERT_EQ(op_registry->Register("custom.db_direct_writer_stream",
+                                        []() -> IOperator* { return new DbDirectWriterStreamOperator(); }),
+                  0);
         ASSERT_EQ(upsert_batch("/operators/upsert_batch", R"({
             "operators":[
                 {
@@ -3699,8 +3671,8 @@ int main() {
         ASSERT_EQ(src_rows_before, 3);
         ASSERT_EQ(stream_exec("/scheduler/stream/execute",
                               MakeStreamReq("SELECT * FROM tcp_session_mock.tcp_src "
-                                      "USING builtin.passthrough_stream "
-                                      "INTO sqlite.local.t44_into"),
+                                            "USING builtin.passthrough_stream "
+                                            "INTO sqlite.local.t44_into"),
                               rsp),
                   error::OK);
         std::string task_id = ParseTaskId(rsp);
@@ -3714,8 +3686,8 @@ int main() {
         // case 2: WITH sink_table 不再作为框架兜底语义
         ASSERT_EQ(stream_exec("/scheduler/stream/execute",
                               MakeStreamReq("SELECT * FROM tcp_session_mock.tcp_src "
-                                      "USING builtin.passthrough_stream WITH sink_table=t44_with "
-                                      "INTO sqlite.local"),
+                                            "USING builtin.passthrough_stream WITH sink_table=t44_with "
+                                            "INTO sqlite.local"),
                               rsp),
                   error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("sink_table") != std::string::npos);
@@ -3723,7 +3695,7 @@ int main() {
         // case 3: builtin + 两段式 DB 目标失败（要求显式三段式）
         ASSERT_EQ(stream_exec("/scheduler/stream/execute",
                               MakeStreamReq("SELECT * FROM tcp_session_mock.tcp_src "
-                                      "USING builtin.passthrough_stream INTO sqlite.local"),
+                                            "USING builtin.passthrough_stream INTO sqlite.local"),
                               rsp),
                   error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("requires explicit table") != std::string::npos);
@@ -3731,7 +3703,7 @@ int main() {
         // case 4: 普通算子可接收两段式 DB 通道并自行写入
         ASSERT_EQ(stream_exec("/scheduler/stream/execute",
                               MakeStreamReq("SELECT * FROM tcp_session_mock.tcp_src "
-                                      "USING custom.db_direct_writer_stream INTO sqlite.local"),
+                                            "USING custom.db_direct_writer_stream INTO sqlite.local"),
                               rsp),
                   error::OK);
         task_id = ParseTaskId(rsp);
@@ -3746,28 +3718,33 @@ int main() {
     // T44: Story 14.11 T5 回归（缺失注册/非法配置/重复创建）
     {
         std::string rsp;
-        ASSERT_EQ(stream_add("/channels/stream/add",
-                             R"({"type":"no_such_stream_type","name":"x_missing","option":""})",
-                             rsp),
-                  error::BAD_REQUEST);
+        ASSERT_EQ(
+            stream_add("/channels/stream/add", R"({"type":"no_such_stream_type","name":"x_missing","option":""})", rsp),
+            error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("add stream channel failed") != std::string::npos ||
                     rsp.find("unsupported stream channel type") != std::string::npos);
 
-        ASSERT_EQ(stream_add("/channels/stream/add",
-                             R"({"type":"ring","name":"x_invalid","option":"ring_mode=spsc;ring_size=3;overflow=drop;finite=false"})",
-                             rsp),
-                  error::BAD_REQUEST);
+        ASSERT_EQ(
+            stream_add(
+                "/channels/stream/add",
+                R"({"type":"ring","name":"x_invalid","option":"ring_mode=spsc;ring_size=3;overflow=drop;finite=false"})",
+                rsp),
+            error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("add stream channel failed") != std::string::npos ||
                     rsp.find("invalid option") != std::string::npos);
 
-        ASSERT_EQ(stream_add("/channels/stream/add",
-                             R"({"type":"ring","name":"x_dup","option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false;batch_rows=64"})",
-                             rsp),
-                  error::OK);
-        ASSERT_EQ(stream_add("/channels/stream/add",
-                             R"({"type":"ring","name":"x_dup","option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false;batch_rows=64"})",
-                             rsp),
-                  error::CONFLICT);
+        ASSERT_EQ(
+            stream_add(
+                "/channels/stream/add",
+                R"({"type":"ring","name":"x_dup","option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false;batch_rows=64"})",
+                rsp),
+            error::OK);
+        ASSERT_EQ(
+            stream_add(
+                "/channels/stream/add",
+                R"({"type":"ring","name":"x_dup","option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false;batch_rows=64"})",
+                rsp),
+            error::CONFLICT);
     }
     std::puts("[PASS] T44");
 
@@ -3888,7 +3865,7 @@ int main() {
 
         ASSERT_EQ(stream_exec("/scheduler/stream/execute",
                               MakeStreamReq("SELECT * FROM stream.npm_hub "
-                                      "USING builtin.passthrough_stream INTO dataframe.npm_auto"),
+                                            "USING builtin.passthrough_stream INTO dataframe.npm_auto"),
                               rsp),
                   error::OK);
 
@@ -4032,8 +4009,9 @@ int main() {
         rapidjson::Writer<rapidjson::StringBuffer> exec_w(exec_buf);
         exec_w.StartObject();
         exec_w.Key("sql_text");
-        exec_w.String(("SELECT * FROM ring." + busy_name +
-                       " USING builtin.passthrough_stream INTO dataframe.reset_busy_out").c_str());
+        exec_w.String(
+            ("SELECT * FROM ring." + busy_name + " USING builtin.passthrough_stream INTO dataframe.reset_busy_out")
+                .c_str());
         exec_w.EndObject();
         ASSERT_EQ(stream_exec("/scheduler/stream/execute", exec_buf.GetString(), rsp), error::OK);
         const std::string busy_task_id = ParseTaskId(rsp);
@@ -4051,22 +4029,19 @@ int main() {
 
         ASSERT_EQ(stream_stop("/scheduler/stream/stop", MakeTaskReq(busy_task_id), rsp), error::OK);
 
-        ASSERT_EQ(stream_reset("/channels/stream/reset",
-                               R"({"type":"ring","name":"reset_not_exists"})",
-                               rsp),
+        ASSERT_EQ(stream_reset("/channels/stream/reset", R"({"type":"ring","name":"reset_not_exists"})", rsp),
                   error::NOT_FOUND);
     }
     std::puts("[PASS] T46c");
 
     // T47: Web 代理流式通道查询接口（严格语义：上游不可达时返回 UNAVAILABLE）
     {
-        const std::filesystem::path web_db_path = std::filesystem::temp_directory_path() /
-                                                  ("flowsql_s9_3_web_" + suffix + ".db");
+        const std::filesystem::path web_db_path =
+            std::filesystem::temp_directory_path() / ("flowsql_s9_3_web_" + suffix + ".db");
         std::filesystem::remove(web_db_path);
 
         // 当前 e2e 用例未加载 Gateway/Router 网络服务，Web 代理请求应返回 UNAVAILABLE。
-        std::string web_opt = "host=127.0.0.1;port=18081;db_path=" + web_db_path.string() +
-                              ";gateway=127.0.0.1:59883";
+        std::string web_opt = "host=127.0.0.1;port=18081;db_path=" + web_db_path.string() + ";gateway=127.0.0.1:59883";
         const char* web_libs[] = {"libflowsql_web.so"};
         const char* web_opts[] = {web_opt.c_str()};
         ASSERT_EQ(loader->Load(get_absolute_process_path(), web_libs, web_opts, 1), 0);
@@ -4084,9 +4059,11 @@ int main() {
         std::string rsp;
         ASSERT_EQ(web_stream_query("/api/channels/stream/query", "{}", rsp), error::UNAVAILABLE);
         ASSERT_TRUE(rsp.find("service unreachable") != std::string::npos);
-        ASSERT_EQ(web_stream_definitions_query("/api/channels/stream/definitions/query", "{}", rsp), error::UNAVAILABLE);
+        ASSERT_EQ(web_stream_definitions_query("/api/channels/stream/definitions/query", "{}", rsp),
+                  error::UNAVAILABLE);
         ASSERT_TRUE(rsp.find("service unreachable") != std::string::npos);
-        ASSERT_EQ(web_stream_reset("/api/channels/stream/reset", R"({"type":"ring","name":"x"})", rsp), error::UNAVAILABLE);
+        ASSERT_EQ(web_stream_reset("/api/channels/stream/reset", R"({"type":"ring","name":"x"})", rsp),
+                  error::UNAVAILABLE);
         ASSERT_TRUE(rsp.find("service unreachable") != std::string::npos);
         std::filesystem::remove(web_db_path);
     }
@@ -4141,11 +4118,9 @@ int main() {
         }
 
         const std::string sql1 =
-            "SELECT * FROM ring." + group_src_name +
-            " USING builtin.passthrough_stream INTO stream." + group_mid_name;
-        const std::string sql2 =
-            "SELECT * FROM stream." + group_mid_name +
-            " USING builtin.passthrough_stream INTO stream." + group_out_name;
+            "SELECT * FROM ring." + group_src_name + " USING builtin.passthrough_stream INTO stream." + group_mid_name;
+        const std::string sql2 = "SELECT * FROM stream." + group_mid_name +
+                                 " USING builtin.passthrough_stream INTO stream." + group_out_name;
 
         const std::string group_sql_text = sql1 + ";\n" + sql2 + ";";
 
@@ -4294,11 +4269,9 @@ int main() {
         }
 
         const std::string sql1 =
-            "SELECT * FROM ring." + src_name +
-            " USING builtin.passthrough_stream INTO stream." + out1_name;
+            "SELECT * FROM ring." + src_name + " USING builtin.passthrough_stream INTO stream." + out1_name;
         const std::string sql2 =
-            "SELECT * FROM ring." + src_name +
-            " USING builtin.passthrough_stream INTO stream." + out2_name;
+            "SELECT * FROM ring." + src_name + " USING builtin.passthrough_stream INTO stream." + out2_name;
 
         const std::string group_sql_text = sql1 + ";\n" + sql2 + ";";
 
@@ -4375,9 +4348,9 @@ int main() {
     // T49.1: source_share_set 高压下 coordinated drop 指标一致性
     {
         std::string rsp;
-        ASSERT_EQ(op_registry->Register("custom.slow_passthrough_stream_late", []() -> IOperator* {
-            return new SlowPassthroughStreamOperator();
-        }), 0);
+        ASSERT_EQ(op_registry->Register("custom.slow_passthrough_stream_late",
+                                        []() -> IOperator* { return new SlowPassthroughStreamOperator(); }),
+                  0);
         ASSERT_EQ(upsert_batch("/operators/upsert_batch", R"({
             "operators":[
                 {
@@ -4445,11 +4418,9 @@ int main() {
         }
 
         const std::string sql_fast =
-            "SELECT * FROM ring." + src_name +
-            " USING builtin.passthrough_stream INTO stream." + out_fast_name;
-        const std::string sql_slow =
-            "SELECT * FROM ring." + src_name +
-            " USING custom.slow_passthrough_stream_late INTO stream." + out_slow_name;
+            "SELECT * FROM ring." + src_name + " USING builtin.passthrough_stream INTO stream." + out_fast_name;
+        const std::string sql_slow = "SELECT * FROM ring." + src_name +
+                                     " USING custom.slow_passthrough_stream_late INTO stream." + out_slow_name;
         const std::string group_sql_text = sql_fast + ";\n" + sql_slow + ";";
 
         rapidjson::StringBuffer req_buf;
@@ -4599,11 +4570,9 @@ int main() {
         ASSERT_EQ(stream_add("/channels/stream/add", make_add_ring_req(mpsc_sink_name, "mpsc"), rsp), error::OK);
 
         const std::string sql1 =
-            "SELECT * FROM ring." + src1_name +
-            " USING builtin.passthrough_stream INTO stream." + spsc_sink_name;
+            "SELECT * FROM ring." + src1_name + " USING builtin.passthrough_stream INTO stream." + spsc_sink_name;
         const std::string sql2 =
-            "SELECT * FROM ring." + src2_name +
-            " USING builtin.passthrough_stream INTO stream." + spsc_sink_name;
+            "SELECT * FROM ring." + src2_name + " USING builtin.passthrough_stream INTO stream." + spsc_sink_name;
 
         const std::string invalid_sql_text = sql1 + ";\n" + sql2 + ";";
         rapidjson::StringBuffer req_buf;
@@ -4631,11 +4600,9 @@ int main() {
         ASSERT_EQ(std::string(invalid_doc["actual"]["put_mode"].GetString()), "SINGLE");
 
         const std::string sql3 =
-            "SELECT * FROM ring." + src1_name +
-            " USING builtin.passthrough_stream INTO stream." + mpsc_sink_name;
+            "SELECT * FROM ring." + src1_name + " USING builtin.passthrough_stream INTO stream." + mpsc_sink_name;
         const std::string sql4 =
-            "SELECT * FROM ring." + src2_name +
-            " USING builtin.passthrough_stream INTO stream." + mpsc_sink_name;
+            "SELECT * FROM ring." + src2_name + " USING builtin.passthrough_stream INTO stream." + mpsc_sink_name;
 
         const std::string valid_sql_text = sql3 + ";\n" + sql4 + ";";
         rapidjson::StringBuffer req_ok_buf;
@@ -4733,11 +4700,9 @@ int main() {
         ASSERT_EQ(stream_add("/channels/stream/add", make_add_ring_req(src2_name), rsp), error::OK);
 
         const std::string sql1 =
-            "SELECT * FROM ring." + src1_name +
-            " USING builtin.passthrough_stream INTO dataframe." + sink_df_name;
+            "SELECT * FROM ring." + src1_name + " USING builtin.passthrough_stream INTO dataframe." + sink_df_name;
         const std::string sql2 =
-            "SELECT * FROM ring." + src2_name +
-            " USING builtin.passthrough_stream INTO dataframe." + sink_df_name;
+            "SELECT * FROM ring." + src2_name + " USING builtin.passthrough_stream INTO dataframe." + sink_df_name;
         const std::string sql_text = sql1 + ";\n" + sql2 + ";";
 
         rapidjson::StringBuffer req_buf;
@@ -4795,12 +4760,10 @@ int main() {
         auto* timeout_src = stream_factory->Get("ring", timeout_src_name.c_str());
         ASSERT_TRUE(timeout_src != nullptr);
 
-        const std::string sql1 =
-            "SELECT * FROM ring." + timeout_src_name +
-            " USING builtin.passthrough_stream INTO stream." + timeout_mid_name;
-        const std::string sql2 =
-            "SELECT * FROM stream." + timeout_mid_name +
-            " USING builtin.passthrough_stream INTO stream." + timeout_out_name;
+        const std::string sql1 = "SELECT * FROM ring." + timeout_src_name +
+                                 " USING builtin.passthrough_stream INTO stream." + timeout_mid_name;
+        const std::string sql2 = "SELECT * FROM stream." + timeout_mid_name +
+                                 " USING builtin.passthrough_stream INTO stream." + timeout_out_name;
         const std::string group_sql_text = sql1 + ";\n" + sql2 + ";";
 
         rapidjson::StringBuffer req_buf;
@@ -4993,11 +4956,8 @@ int main() {
         ASSERT_TRUE(src != nullptr);
 
         const std::string sql1 =
-            "SELECT * FROM ring." + src_name +
-            " USING builtin.passthrough_stream INTO dataframe." + mid_df_name;
-        const std::string sql2 =
-            "SELECT * FROM dataframe." + mid_df_name +
-            " INTO dataframe." + out_df_name;
+            "SELECT * FROM ring." + src_name + " USING builtin.passthrough_stream INTO dataframe." + mid_df_name;
+        const std::string sql2 = "SELECT * FROM dataframe." + mid_df_name + " INTO dataframe." + out_df_name;
         const std::string group_sql_text = sql1 + ";\n" + sql2 + ";";
 
         rapidjson::StringBuffer req_buf;
@@ -5096,19 +5056,13 @@ int main() {
         }
 
         ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq("SELECT * FROM sqlite.local.src INTO dataframe." + seed_df_name),
-                       rsp),
+                       MakeReq("SELECT * FROM sqlite.local.src INTO dataframe." + seed_df_name), rsp),
                   error::OK);
 
-        const std::string sql1 =
-            "SELECT * FROM dataframe." + seed_df_name +
-            " INTO ring." + stage_stream_name;
-        const std::string sql2 =
-            "SELECT * FROM ring." + stage_stream_name +
-            " USING builtin.passthrough_stream INTO dataframe." + stage_df_name;
-        const std::string sql3 =
-            "SELECT * FROM dataframe." + stage_df_name +
-            " INTO dataframe." + out_df_name;
+        const std::string sql1 = "SELECT * FROM dataframe." + seed_df_name + " INTO ring." + stage_stream_name;
+        const std::string sql2 = "SELECT * FROM ring." + stage_stream_name +
+                                 " USING builtin.passthrough_stream INTO dataframe." + stage_df_name;
+        const std::string sql3 = "SELECT * FROM dataframe." + stage_df_name + " INTO dataframe." + out_df_name;
         const std::string group_sql_text = sql1 + ";\n" + sql2 + ";\n" + sql3 + ";";
 
         rapidjson::StringBuffer req_buf;
@@ -5208,22 +5162,15 @@ int main() {
 
         ASSERT_EQ(stream_add("/channels/stream/add", make_add_hub_req(hub_name), rsp), error::OK);
         ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq("SELECT * FROM sqlite.local.src INTO dataframe." + seed_df_name),
-                       rsp),
+                       MakeReq("SELECT * FROM sqlite.local.src INTO dataframe." + seed_df_name), rsp),
                   error::OK);
 
-        const std::string sql1 =
-            "SELECT * FROM dataframe." + seed_df_name + " INTO stream_hub." + hub_name;
-        const std::string sql2 =
-            "SELECT * FROM stream_hub." + hub_name + "[0] INTO dataframe." + out0_name;
-        const std::string sql3 =
-            "SELECT * FROM stream_hub." + hub_name + "[1] INTO dataframe." + out1_name;
-        const std::string sql4 =
-            "SELECT * FROM stream_hub." + hub_name + "[2] INTO dataframe." + out2_name;
-        const std::string sql5 =
-            "SELECT * FROM stream_hub." + hub_name + "[3] INTO dataframe." + out3_name;
-        const std::string group_sql_text =
-            sql1 + ";\n" + sql2 + ";\n" + sql3 + ";\n" + sql4 + ";\n" + sql5 + ";";
+        const std::string sql1 = "SELECT * FROM dataframe." + seed_df_name + " INTO stream_hub." + hub_name;
+        const std::string sql2 = "SELECT * FROM stream_hub." + hub_name + "[0] INTO dataframe." + out0_name;
+        const std::string sql3 = "SELECT * FROM stream_hub." + hub_name + "[1] INTO dataframe." + out1_name;
+        const std::string sql4 = "SELECT * FROM stream_hub." + hub_name + "[2] INTO dataframe." + out2_name;
+        const std::string sql5 = "SELECT * FROM stream_hub." + hub_name + "[3] INTO dataframe." + out3_name;
+        const std::string group_sql_text = sql1 + ";\n" + sql2 + ";\n" + sql3 + ";\n" + sql4 + ";\n" + sql5 + ";";
 
         rapidjson::StringBuffer req_buf;
         rapidjson::Writer<rapidjson::StringBuffer> w(req_buf);
@@ -5327,14 +5274,11 @@ int main() {
         }
 
         const std::string sql1 =
-            "SELECT * FROM ring." + src_name +
-            " USING builtin.passthrough_stream INTO stream." + mid_name;
+            "SELECT * FROM ring." + src_name + " USING builtin.passthrough_stream INTO stream." + mid_name;
         const std::string sql2 =
-            "SELECT * FROM stream." + mid_name +
-            " USING builtin.passthrough_stream INTO stream." + out1_name;
+            "SELECT * FROM stream." + mid_name + " USING builtin.passthrough_stream INTO stream." + out1_name;
         const std::string sql3 =
-            "SELECT * FROM stream." + mid_name +
-            " USING builtin.passthrough_stream INTO stream." + out2_name;
+            "SELECT * FROM stream." + mid_name + " USING builtin.passthrough_stream INTO stream." + out2_name;
         const std::string group_sql_text = sql1 + ";\n" + sql2 + ";\n" + sql3 + ";";
 
         rapidjson::StringBuffer req_buf;
@@ -5372,8 +5316,8 @@ int main() {
             ASSERT_TRUE(status_doc.HasMember("share_sets") && status_doc["share_sets"].IsArray());
             ASSERT_EQ(status_doc["share_sets"].Size(), 1u);
             const std::string st = ParseStatus(status_rsp);
-            if (st == "running" || st == "preparing" || st == "stopping" ||
-                st == "stopped" || st == "failed" || st == "cancelled") {
+            if (st == "running" || st == "preparing" || st == "stopping" || st == "stopped" || st == "failed" ||
+                st == "cancelled") {
                 status_observed = true;
                 break;
             }
@@ -5458,11 +5402,9 @@ int main() {
         drain_channel(out2);
 
         const std::string sql1 =
-            "SELECT * FROM ring." + src_name +
-            " USING builtin.passthrough_stream INTO stream." + out1_name;
+            "SELECT * FROM ring." + src_name + " USING builtin.passthrough_stream INTO stream." + out1_name;
         const std::string sql2 =
-            "SELECT * FROM ring." + src_name +
-            " USING builtin.passthrough_stream INTO stream." + out2_name;
+            "SELECT * FROM ring." + src_name + " USING builtin.passthrough_stream INTO stream." + out2_name;
 
         ASSERT_EQ(stream_exec("/scheduler/stream/execute", MakeStreamReq(sql1), rsp), error::OK);
         const std::string task1 = ParseTaskId(rsp);
@@ -5624,9 +5566,9 @@ int main() {
     // T68: 跨任务共享 source 慢消费者背压可观测（drop + lag）
     {
         std::string rsp;
-        ASSERT_EQ(op_registry->Register("custom.slow_passthrough_stream", []() -> IOperator* {
-            return new SlowPassthroughStreamOperator();
-        }), 0);
+        ASSERT_EQ(op_registry->Register("custom.slow_passthrough_stream",
+                                        []() -> IOperator* { return new SlowPassthroughStreamOperator(); }),
+                  0);
         ASSERT_EQ(upsert_batch("/operators/upsert_batch", R"({
             "operators":[
                 {
@@ -5681,11 +5623,9 @@ int main() {
         ASSERT_TRUE(src != nullptr);
 
         const std::string sql_fast =
-            "SELECT * FROM ring." + src_name +
-            " USING builtin.passthrough_stream INTO stream." + out_fast_name;
+            "SELECT * FROM ring." + src_name + " USING builtin.passthrough_stream INTO stream." + out_fast_name;
         const std::string sql_slow =
-            "SELECT * FROM ring." + src_name +
-            " USING custom.slow_passthrough_stream INTO stream." + out_slow_name;
+            "SELECT * FROM ring." + src_name + " USING custom.slow_passthrough_stream INTO stream." + out_slow_name;
 
         ASSERT_EQ(stream_exec("/scheduler/stream/execute", MakeStreamReq(sql_fast), rsp), error::OK);
         const std::string fast_task_id = ParseTaskId(rsp);
@@ -5824,15 +5764,12 @@ int main() {
         auto* src = stream_factory->Get("ring", src_name.c_str());
         ASSERT_TRUE(src != nullptr);
 
-        const std::string where_sql_1 =
-            "SELECT * FROM ring." + src_name +
-            " WHERE v >= 0 USING builtin.passthrough_stream INTO stream." + out1_name;
-        const std::string where_sql_2 =
-            "SELECT * FROM ring." + src_name +
-            " WHERE v >= 0 USING builtin.passthrough_stream INTO stream." + out2_name;
-        const std::string where_sql_3 =
-            "SELECT * FROM ring." + src_name +
-            " WHERE v >= 1 USING builtin.passthrough_stream INTO stream." + out3_name;
+        const std::string where_sql_1 = "SELECT * FROM ring." + src_name +
+                                        " WHERE v >= 0 USING builtin.passthrough_stream INTO stream." + out1_name;
+        const std::string where_sql_2 = "SELECT * FROM ring." + src_name +
+                                        " WHERE v >= 0 USING builtin.passthrough_stream INTO stream." + out2_name;
+        const std::string where_sql_3 = "SELECT * FROM ring." + src_name +
+                                        " WHERE v >= 1 USING builtin.passthrough_stream INTO stream." + out3_name;
 
         ASSERT_EQ(stream_exec("/scheduler/stream/execute", MakeStreamReq(where_sql_1), rsp), error::OK);
         const std::string task_same_1 = ParseTaskId(rsp);
@@ -5883,6 +5820,7 @@ int main() {
     std::filesystem::remove(pcapng_offset);
     std::filesystem::remove(pcap_npm_basic);
     std::filesystem::remove(pcap_npm_http1);
+    std::filesystem::remove(pcap_npm_tls);
     std::filesystem::remove_all(data_dir);
     std::filesystem::remove_all(operator_db_dir);
     std::filesystem::remove_all(binaddon_upload_dir);

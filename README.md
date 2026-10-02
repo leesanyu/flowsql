@@ -562,7 +562,7 @@ INTO dataframe.basic_metrics
 
 | 参数 | 默认值 | 含义 |
 | --- | --- | --- |
-| `features` | `'basic'` | 启用的结果模块，当前支持 `basic`、`session`、`dns`、`http1`；DNS/HTTP/1 需同时启用能力项 `labeling`。 |
+| `features` | `'basic'` | 启用的结果模块，当前支持 `basic`、`session`、`dns`、`http1`、`tls`；DNS/HTTP/1/TLS 需同时启用能力项 `labeling`。 |
 | `observing` | `'basic'` | 普通 DataFrame 目标接收的结果实体，必须已在 `features` 中启用。 |
 | `input_namespace` | `FROM` 通道名 | 本次输入的逻辑来源名称，可用非空值覆盖。 |
 | `source_domains` | `'all'` | 采集来源到观测域的映射，语法见下文。 |
@@ -655,6 +655,42 @@ Schema v1 共 22 列；同一实体还有 `npm_http1_transaction_history_v1` 和
 定界、期限或未配对事实，不能据此推断服务端故障。默认响应期限为 5 秒，仅随合法捕获水位推进；
 `max_pending_per_session` 默认 128，`max_header_bytes` 默认 65536，达到 pending 或任务预算限额会使任务失败。
 HTTP/2、HTTP/3、HTTPS、CONNECT 隧道及 WebSocket 帧不在此实体的分析范围内。
+
+#### TLS 握手分析
+
+TLS 仅分析 TCP 初始握手中捕获点可见的明文事实。离线捕获需包含 TCP SYN，且首条 TLS record 从方向偏移 0
+开始；中途流、STARTTLS 和代理隧道内 TLS 不会被扫描重同步。先按 [Flow Labeling 指引](docs/flow-labeling.md)
+提供可用 provider，并让目标会话的主标签命中 `primary_label_ids`。下面的精确快照引用和标签 ID 仅是示例，
+需要替换为当前环境实际存在的值。
+
+```sql
+SELECT *
+FROM pcapfile.capture
+USING npm.basic
+WITH features='tls,labeling',
+     observing='tls_handshake',
+     parameters='{"schema_version":1,"core":{"labeling":"config.tls-labels@7"},"tls":{"primary_label_ids":[1001],"handshake_timeout_ns":5000000000}}'
+INTO dataframe.tls_handshakes
+```
+
+`observing` 仅选择前台 DataFrame；要留存所有已启用实体，使用一个数据库目标，例如把上例的目标改为
+`INTO sqlite.local`，从任务完成响应取得 `run_id`，再查询本次运行的最终事件：
+
+```sql
+SELECT *
+FROM sqlite.local.npm_tls_handshake_final_v1
+WHERE __npm_run_id='替换为本次响应中的run_id'
+INTO dataframe.tls_final
+```
+
+`tls_handshake` 固定为 25 列 Schema v1；另有 `npm_tls_handshake_history_v1` 和
+`npm_tls_handshake_latest_v1`，三个关系都按 `__npm_run_id` 隔离。每个候选最多一条终态事件；
+`server_hello_observed` 仅表示最终 ServerHello 可见，不表示 Finished、证书验证或连接成功。
+`fatal_alert_observed` 只在明文窗口实际看到 fatal alert 时产生；其余 `incomplete` 和
+`incomplete_reason` 描述缺口、期限、终结或定界等捕获视图事实。TLS 1.3 的 ALPN 选择位于加密部分，
+因此 `selected_alpn` 为 null；`server_hello_latency_ns` 只在两条完整 Hello 的字节捕获时间可比较时填写。
+默认握手期限为 5 秒，仅随合法捕获水位推进；`max_hello_bytes` 默认 65536，协议上限产生
+`hello_limit_exceeded` 不完整原因，任务预算不足则使任务失败。未启用 `tls` 的旧 SQL 不会启动该模块。
 
 `input_namespace` 和 `source_domains` 均为选填。SQL 省略 `input_namespace` 时默认使用 `FROM` 的通道名，
 例如 `pcapfile.capture`；显式指定非空值可覆盖默认名称。不同 namespace 或观测域的相同五元组不会合并。
@@ -1029,6 +1065,7 @@ flowSQL/
 - [NPM 协议模块运行时](tasks/archive/feat-npm-protocol-analysis.md)
 - [NPM 多实体结果存储与查询](tasks/archive/feat-npm-result-query.md)
 - [NPM 共享有界 TCP 字节流接入说明](docs/npm-tcp-stream.md)
+- [NPM TLS 握手分析规格](tasks/archive/feat-npm-tls-handshake-analysis.md)
 - [Baseline 插件说明](src/plugins/baseline/README.md)
 - [C++ 算子插件 Sample](samples/cpp_operator/README.md)
 - [产品需求与当前进度](tasks/product_backlog.md)

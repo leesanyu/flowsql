@@ -30,6 +30,12 @@ add_library(${PROJECT_NAME} SHARED
     modules/http1/npm_http1_transactions.cpp
     modules/http1/npm_http1_result_encoder.cpp
     modules/http1/npm_http1_module.cpp
+    modules/tls/npm_tls_contract.cpp
+    modules/tls/npm_tls_hello.cpp
+    modules/tls/npm_tls_framer.cpp
+    modules/tls/npm_tls_handshake.cpp
+    modules/tls/npm_tls_result_encoder.cpp
+    modules/tls/npm_tls_module.cpp
     modules/session/npm_session_analysis_module.cpp
     modules/session/npm_tcp_performance_tracker.cpp
     output/npm_result_router.cpp
