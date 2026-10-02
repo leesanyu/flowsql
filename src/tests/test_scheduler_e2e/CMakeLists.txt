@@ -5,6 +5,7 @@ target_sources(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/icmp/npm_icmp_contract.cpp
 )
 
 add_executable(test_scheduler_mutation_guard

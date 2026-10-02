@@ -25,6 +25,11 @@ add_library(${PROJECT_NAME} SHARED
     modules/dns/npm_dns_result_encoder.cpp
     modules/dns/npm_dns_tcp.cpp
     modules/dns/npm_dns_udp.cpp
+    modules/icmp/npm_icmp_contract.cpp
+    modules/icmp/npm_icmp_parser.cpp
+    modules/icmp/npm_icmp_echo.cpp
+    modules/icmp/npm_icmp_result_encoder.cpp
+    modules/icmp/npm_icmp_module.cpp
     modules/http1/npm_http1_contract.cpp
     modules/http1/npm_http1_framer.cpp
     modules/http1/npm_http1_transactions.cpp

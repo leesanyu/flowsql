@@ -26,6 +26,12 @@ target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/c
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_tcp_stream_provider.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/basic/npm_basic_result_projector.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_contract.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/icmp/npm_icmp_contract.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/icmp/npm_icmp_parser.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/icmp/npm_icmp_echo.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/icmp/npm_icmp_result_encoder.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/icmp/npm_icmp_module.cpp)
+target_sources(${PROJECT_NAME} PRIVATE test_npm_icmp_module.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_module.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_result_encoder.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_tcp.cpp)
@@ -115,6 +121,51 @@ add_thirddepen(test_npm_tls_contract arrow rapidjson)
 target_link_libraries(test_npm_tls_contract flowsql_common)
 set_target_properties(test_npm_tls_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_npm_tls_contract COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_tls_contract)
+
+add_executable(test_npm_icmp_contract
+    test_npm_icmp_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/icmp/npm_icmp_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+)
+target_include_directories(test_npm_icmp_contract PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_icmp_contract PRIVATE -UNDEBUG)
+add_thirddepen(test_npm_icmp_contract arrow rapidjson)
+target_link_libraries(test_npm_icmp_contract flowsql_common)
+set_target_properties(test_npm_icmp_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_icmp_contract COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_icmp_contract)
+
+add_executable(test_npm_icmp_parser
+    test_npm_icmp_parser.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/icmp/npm_icmp_parser.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+)
+target_include_directories(test_npm_icmp_parser PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_icmp_parser PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move
+    -Wno-unused-parameter)
+add_thirddepen(test_npm_icmp_parser arrow)
+target_link_libraries(test_npm_icmp_parser flowsql_common)
+set_target_properties(test_npm_icmp_parser PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_icmp_parser COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_icmp_parser)
+
+add_executable(test_npm_icmp_echo
+    test_npm_icmp_echo.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/icmp/npm_icmp_echo.cpp
+)
+target_include_directories(test_npm_icmp_echo PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_icmp_echo PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move)
+target_link_libraries(test_npm_icmp_echo flowsql_common)
+set_target_properties(test_npm_icmp_echo PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_icmp_echo COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_icmp_echo)
+
+option(FLOWSQL_NPM_ICMP_SANITIZERS "Sanitize NPM ICMP parsing, echo tracking, and runtime tests" OFF)
+if(FLOWSQL_NPM_ICMP_SANITIZERS)
+    foreach(icmp_target IN ITEMS test_npm_icmp_parser test_npm_icmp_echo test_npm_basic)
+        target_compile_options(${icmp_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${icmp_target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
 
 add_executable(test_npm_tls_hello
     test_npm_tls_hello.cpp

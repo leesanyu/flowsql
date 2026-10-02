@@ -49,6 +49,7 @@
 #include <framework/interfaces/istream_operator.h>
 #include <operators/npm_basic/modules/dns/npm_dns_contract.h>
 #include <operators/npm_basic/modules/http1/npm_http1_contract.h>
+#include <operators/npm_basic/modules/icmp/npm_icmp_contract.h>
 #include <operators/npm_basic/modules/tls/npm_tls_contract.h>
 #include <operators/npm_basic/npm_basic_result_consumer.h>
 #include <plugins/npi/iprotocol.h>
@@ -677,6 +678,24 @@ static std::vector<uint8_t> MakeSchedulerE2eTlsCapture() {
                 {1, 200, MakeSchedulerE2eHttp1Packet(false, 0x10, 101, 201, "", 443)},
                 {1, 300, MakeSchedulerE2eHttp1Packet(false, 0x18, 101, 201, client, 443)},
                 {1, 400, MakeSchedulerE2eHttp1Packet(true, 0x18, 201, 101 + client.size(), server, 443)}});
+}
+
+static std::vector<uint8_t> MakeSchedulerE2eIcmpPacket(bool reply) {
+    std::vector<uint8_t> packet = {
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0x08, 0x00,
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x40, 0x01, 0x00, 0x00, 0xc0, 0x00,
+        0x02, 0x01, 0xc6, 0x33, 0x64, 0x02, 0x08, 0x00, 0x00, 0x00, 0x12, 0x34, 0x00, 0x09,
+    };
+    if (reply) {
+        packet[34] = 0;
+        for (size_t index = 0; index < 4; ++index) std::swap(packet[26 + index], packet[30 + index]);
+    }
+    return packet;
+}
+
+static std::vector<uint8_t> MakeSchedulerE2eIcmpCapture() {
+    return MakeSchedulerE2eClassicCapture(
+        false, {{1, 100, MakeSchedulerE2eIcmpPacket(false)}, {1, 200, MakeSchedulerE2eIcmpPacket(true)}});
 }
 
 static void AssertSchedulerE2eNpmBasicSchema(const std::shared_ptr<arrow::Schema>& schema) {
@@ -1440,6 +1459,8 @@ int main() {
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_npm_http1_" + suffix + ".pcap");
     const std::filesystem::path pcap_npm_tls =
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_npm_tls_" + suffix + ".pcap");
+    const std::filesystem::path pcap_npm_icmp =
+        std::filesystem::temp_directory_path() / ("flowsql_scheduler_npm_icmp_" + suffix + ".pcap");
     std::filesystem::remove(db_path);
     std::filesystem::remove(stream_cfg);
     std::filesystem::remove(stream_meta_db);
@@ -1451,6 +1472,7 @@ int main() {
     std::filesystem::remove(pcap_npm_basic);
     std::filesystem::remove(pcap_npm_http1);
     std::filesystem::remove(pcap_npm_tls);
+    std::filesystem::remove(pcap_npm_icmp);
     std::filesystem::remove_all(operator_db_dir);
     std::filesystem::remove_all(binaddon_upload_dir);
     std::filesystem::create_directories(data_dir);
@@ -1472,6 +1494,7 @@ int main() {
                             MakeSchedulerE2eClassicCapture(false, {{1, 0, MakeSchedulerE2eTcpRstPacket()}}));
     WriteSchedulerE2eBinary(pcap_npm_http1, MakeSchedulerE2eHttp1Capture());
     WriteSchedulerE2eBinary(pcap_npm_tls, MakeSchedulerE2eTlsCapture());
+    WriteSchedulerE2eBinary(pcap_npm_icmp, MakeSchedulerE2eIcmpCapture());
 
     {
         std::ofstream out(stream_cfg);
@@ -2362,6 +2385,87 @@ int main() {
             ASSERT_EQ(QueryCount(db, "SELECT * FROM " + name + " WHERE __npm_run_id='" + managed_run_id + "'"), 0);
         }
         ASSERT_EQ(stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest(tls_channel), rsp), error::OK);
+
+        const std::string icmp_channel = "scheduler_npm_icmp";
+        ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(icmp_channel, pcap_npm_icmp), rsp),
+                  error::OK);
+        const std::string icmp_source = "pcapfile." + icmp_channel;
+        const std::string icmp_with = " WITH input_namespace='" + icmp_source +
+                                      "',source_domains='0:77',features='icmp',observing='icmp_event',parameters='" +
+                                      R"({"schema_version":1,"icmp":{"echo_timeout_ns":5000000000}})" + "'";
+        const std::string icmp_dataframe_name = "scheduler_npm_icmp_front";
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq("SELECT * FROM " + icmp_source + " USING npm.basic" + icmp_with + " INTO dataframe." +
+                               icmp_dataframe_name),
+                       rsp),
+                  error::OK);
+        auto icmp_output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(icmp_dataframe_name.c_str()));
+        ASSERT_TRUE(icmp_output != nullptr);
+        DataFrame icmp_result;
+        ASSERT_EQ(icmp_output->Read(&icmp_result), 0);
+        const auto icmp_batch = icmp_result.ToArrow();
+        const auto icmp_entity = npm::NpmIcmpEventEntityDescriptorV1();
+        ASSERT_TRUE(icmp_batch != nullptr && icmp_batch->num_rows() == 1);
+        ASSERT_TRUE(icmp_batch->schema()->Equals(*icmp_entity.schema, true));
+        const auto icmp_outcome = std::dynamic_pointer_cast<arrow::StringArray>(icmp_batch->GetColumnByName("outcome"));
+        const auto icmp_latency =
+            std::dynamic_pointer_cast<arrow::Int64Array>(icmp_batch->GetColumnByName("latency_ns"));
+        const auto icmp_domain =
+            std::dynamic_pointer_cast<arrow::UInt64Array>(icmp_batch->GetColumnByName("observation_domain_id"));
+        ASSERT_TRUE(icmp_outcome && icmp_latency && icmp_domain);
+        ASSERT_EQ(icmp_outcome->GetString(0), "echo_matched");
+        ASSERT_EQ(icmp_latency->Value(0), 100000);
+        ASSERT_EQ(icmp_domain->Value(0), 77ULL);
+        ASSERT_EQ(registry->Unregister(icmp_dataframe_name.c_str()), 0);
+
+        std::vector<std::string> icmp_run_ids;
+        for (int run = 0; run < 2; ++run) {
+            ASSERT_EQ(
+                exec("/scheduler/batch/execute",
+                     MakeReq("SELECT * FROM " + icmp_source + " USING npm.basic" + icmp_with + " INTO sqlite.local"),
+                     rsp),
+                error::OK);
+            rapidjson::Document completed;
+            completed.Parse(rsp.c_str());
+            ASSERT_TRUE(!completed.HasParseError() && completed.IsObject());
+            ASSERT_EQ(std::string(completed["status"].GetString()), "completed");
+            const auto& result = completed["result"];
+            ASSERT_EQ(std::string(result["run_status"].GetString()), "completed");
+            ASSERT_EQ(result["rows_written"].GetInt64(), 1);
+            ASSERT_TRUE(result["entities"].IsArray() && result["entities"].Size() == 1);
+            ASSERT_EQ(std::string(result["entities"][0]["entity_id"].GetString()), "icmp_event");
+            ASSERT_EQ(result["entities"][0]["schema_version"].GetUint(), 1U);
+            icmp_run_ids.emplace_back(result["run_id"].GetString());
+        }
+        ASSERT_TRUE(icmp_run_ids[0] != icmp_run_ids[1]);
+        for (const char* relation : {"history", "latest", "final"}) {
+            const std::string name = "npm_icmp_event_" + std::string(relation) + "_v1";
+            for (size_t run = 0; run < icmp_run_ids.size(); ++run) {
+                const std::string destination = "scheduler_icmp_" + std::string(relation) + std::to_string(run);
+                ASSERT_EQ(exec("/scheduler/batch/execute",
+                               MakeReq("SELECT * FROM sqlite.local." + name + " WHERE __npm_run_id='" +
+                                       icmp_run_ids[run] + "' INTO dataframe." + destination),
+                               rsp),
+                          error::OK);
+                auto output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(destination.c_str()));
+                ASSERT_TRUE(output != nullptr);
+                DataFrame frame;
+                ASSERT_EQ(output->Read(&frame), 0);
+                auto batch = frame.ToArrow();
+                ASSERT_TRUE(batch != nullptr && batch->num_rows() == 1);
+                for (const auto& field : icmp_entity.schema->fields())
+                    ASSERT_TRUE(batch->GetColumnByName(field->name()) != nullptr);
+                const auto ids = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("__npm_run_id"));
+                const auto outcomes = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("outcome"));
+                ASSERT_TRUE(ids && outcomes);
+                ASSERT_EQ(ids->GetString(0), icmp_run_ids[run]);
+                ASSERT_EQ(outcomes->GetString(0), "echo_matched");
+                ASSERT_EQ(registry->Unregister(destination.c_str()), 0);
+                ASSERT_EQ(QueryCount(db, "SELECT * FROM " + name + " WHERE __npm_run_id='" + icmp_run_ids[run] + "'"),
+                          1);
+            }
+        }
+        ASSERT_EQ(stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest(icmp_channel), rsp), error::OK);
 
         const std::string metadata_dataframe = "scheduler_npm_run_source";
         ASSERT_EQ(exec("/scheduler/batch/execute",
@@ -5821,6 +5925,7 @@ int main() {
     std::filesystem::remove(pcap_npm_basic);
     std::filesystem::remove(pcap_npm_http1);
     std::filesystem::remove(pcap_npm_tls);
+    std::filesystem::remove(pcap_npm_icmp);
     std::filesystem::remove_all(data_dir);
     std::filesystem::remove_all(operator_db_dir);
     std::filesystem::remove_all(binaddon_upload_dir);

@@ -21,6 +21,7 @@
 #include <operators/npm_basic/modules/dns/npm_dns_module.h>
 #include <operators/npm_basic/modules/http1/npm_http1_contract.h>
 #include <operators/npm_basic/modules/http1/npm_http1_module.h>
+#include <operators/npm_basic/modules/icmp/npm_icmp_contract.h>
 #include <operators/npm_basic/modules/session/npm_session_analysis_module.h>
 #include <operators/npm_basic/modules/session/npm_tcp_performance_tracker.h>
 #include <operators/npm_basic/modules/tls/npm_tls_contract.h>
@@ -58,6 +59,8 @@
 #include <vector>
 
 namespace npm = flowsql::npm;
+
+void TestIcmpModuleAndBudget();
 
 extern "C" flowsql::IPlugin* pluginregist(flowsql::IRegister* registry, const char* option);
 
@@ -11545,7 +11548,7 @@ PacketFixture MakeControlPacket(bool ipv6 = false) {
 void TestProtocolCatalogOpenAndDispatch() {
     ProtocolInputTrace first, second, control;
     auto catalog = npm::ProductionNpmModuleCatalogV1();
-    assert(catalog.size() == 5);
+    assert(catalog.size() == 6);
     catalog.push_back(CountingRegistration("probe", 3, &first));
     catalog.push_back(CountingRegistration("mirror", 3, &second));
     catalog.push_back(CountingRegistration("control", 4, &control));
@@ -11869,7 +11872,7 @@ void TestDnsT0OpenContract() {
     using Error = npm::NpmBasicTaskRuntimeError;
     using ContractError = npm::NpmProtocolContractErrorV1;
     const auto& production = npm::ProductionNpmModuleCatalogV1();
-    assert(production.size() == 5 && production[0].module_id == "basic" && production[1].module_id == "session" &&
+    assert(production.size() == 6 && production[0].module_id == "basic" && production[1].module_id == "session" &&
            production[2].module_id == "dns" && production[3].module_id == "http1" && production[4].module_id == "tls");
     ContextDictionary dictionary;
     ContextProtocol protocol(&dictionary);
@@ -11880,7 +11883,7 @@ void TestDnsT0OpenContract() {
     StreamContractModule unrelated(&aborts);
     int consumer_mode = 0;  // 0: valid; 1: missing; 2: wrong object.
     auto catalog = production;
-    catalog.pop_back();  // Replace production DNS with the controllable test module.
+    catalog.erase(catalog.begin() + 2);  // Replace production DNS with the controllable test module.
     npm::NpmModuleRegistrationV1 registration;
     registration.module_id = "dns";
     registration.entity_ids = {"dns_transaction"};
@@ -11992,7 +11995,7 @@ void TestHttp1T0OpenContract() {
     using Error = npm::NpmBasicTaskRuntimeError;
     using ContractError = npm::NpmProtocolContractErrorV1;
     const auto& production = npm::ProductionNpmModuleCatalogV1();
-    assert(production.size() == 5 && production[0].module_id == "basic" && production[1].module_id == "session" &&
+    assert(production.size() == 6 && production[0].module_id == "basic" && production[1].module_id == "session" &&
            production[2].module_id == "dns" && production[3].module_id == "http1" && production[4].module_id == "tls");
     ContextDictionary dictionary;
     ContextProtocol protocol(&dictionary);
@@ -12111,11 +12114,162 @@ void TestHttp1T0OpenContract() {
     runtime.reset();
 }
 
+class IcmpContractModule final : public npm::INpmProtocolModuleV1 {
+ public:
+    int OnInput(const npm::NpmInputEventV1&, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return EINVAL; }
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
+                     npm::INpmResultEmitterV1&) override {
+        return EINVAL;
+    }
+    std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
+    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    void Abort() noexcept override {}
+};
+
+void TestIcmpT0OpenContract() {
+    using Error = npm::NpmBasicTaskRuntimeError;
+    using ContractError = npm::NpmProtocolContractErrorV1;
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    catalog.pop_back();  // Replace production ICMP with the controllable Open contract module.
+    npm::NpmModuleRegistrationV1 registration;
+    registration.module_id = "icmp";
+    registration.entity_ids = {"icmp_event"};
+    registration.prepare = [](const npm::NpmBasicTaskConfig&, std::string_view json, npm::NpmPreparedModuleV1* out) {
+        npm::NpmIcmpConfigV1 config;
+        const auto parsed = npm::ParseNpmIcmpConfigV1(json, &config);
+        if (parsed.error != npm::NpmIcmpConfigErrorV1::kNone) {
+            return npm::NpmProtocolContractStatusV1{ContractError::kInvalidPlan,
+                                                    parsed.path == "/icmp" ? "config" : parsed.path.substr(6)};
+        }
+        out->plan = npm::NpmIcmpModulePlanV1();
+        out->create = [](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
+            npm::NpmModuleInstanceV1 instance;
+            instance.protocol = std::make_unique<IcmpContractModule>();
+            return instance;
+        };
+        return npm::NpmProtocolContractStatusV1{};
+    };
+    catalog.push_back(std::move(registration));
+
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    const auto parse = [&](const char* json) {
+        npm::NpmBasicTaskConfig config;
+        assert(npm::ParseNpmBasicTaskConfig(json, &config, false, catalog).error ==
+               npm::NpmBasicTaskConfigError::kNone);
+        return config;
+    };
+    auto config = parse(R"({"features":"icmp","observing":"icmp_event"})");
+    auto sentinel = arrow::schema({arrow::field("sentinel", arrow::int8())});
+    auto schema = sentinel;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    auto status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                                   {}, nullptr, npm::ProductionNpmModuleCatalogV1());
+    assert(status.error == Error::kNone && runtime);
+    assert(schema->Equals(*npm::NpmIcmpEventEntityDescriptorV1().schema, true));
+    runtime->Cancel();
+    runtime.reset();
+    schema = sentinel;
+
+    for (const char* node : {"null", R"({"unknown":1})", R"({"echo_timeout_ns":999999})", R"({"max_pending_echo":0})",
+                             R"({"max_pending_echo":1,"max_pending_echo":2})"}) {
+        auto invalid = config;
+        invalid.parameters_json = std::string(R"({"schema_version":1,"icmp":)") + node + "}";
+        status = npm::NpmBasicTaskRuntime::Create(invalid, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                                  {}, nullptr, catalog);
+        assert(status.error == Error::kModulePlanError && status.module_status.error == ContractError::kInvalidPlan &&
+               !runtime && schema == sentinel);
+    }
+    status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
+                                              nullptr, catalog);
+    assert(status.error == Error::kNone && runtime);
+    assert(schema->Equals(*npm::NpmIcmpEventEntityDescriptorV1().schema, true));
+    runtime->Cancel();
+    runtime.reset();
+
+    config = parse(
+        R"({"features":"basic","observing":"basic","parameters":"{\"schema_version\":1,\"icmp\":{\"unknown\":null}}"})");
+    status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
+                                              nullptr, catalog);
+    assert(status.error == Error::kNone && runtime && schema->Equals(*npm::NpmBasicResultSchema(), true));
+    runtime->Cancel();
+    runtime.reset();
+    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"icmp_event"})", &config, false, catalog)
+               .error == npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
+    assert(pool.acquire_calls == pool.release_calls);
+}
+
+void TestIcmpMixedBatchAndSplitEquivalence() {
+    auto request = MakeControlPacket();
+    request.bytes[20] = 8;
+    request.bytes[21] = 0;
+    request.bytes[24] = 0x12;
+    request.bytes[25] = 0x34;
+    request.bytes[26] = 0;
+    request.bytes[27] = 9;
+    auto reply = request;
+    reply.bytes[20] = 0;
+    auto* reply_ip = reinterpret_cast<flowsql::Ipv4Header*>(reply.bytes.data());
+    std::swap(reply_ip->src_addr, reply_ip->dst_addr);
+    std::swap(reply.layer.src_ip, reply.layer.dst_ip);
+    const auto tcp = MakeIpv4TcpPacket("192.0.2.10", 40000, "198.51.100.10", 443, {});
+    const auto udp = MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, {1, 2});
+    const std::vector<flowsql::packet::PacketRecord> records = {
+        MakeBatchPacketRecord(tcp, 1, 10, 1), MakeBatchPacketRecord(request, 1, 20, 2),
+        MakeBatchPacketRecord(udp, 1, 30, 3), MakeBatchPacketRecord(reply, 1, 50, 4)};
+
+    const auto run = [&](bool split) {
+        npm::NpmBasicTaskConfig config;
+        assert(
+            npm::ParseNpmBasicTaskConfig(
+                R"({"input_namespace":"capture","source_domains":"1:77","features":"icmp","observing":"icmp_event"})",
+                &config, false, npm::ProductionNpmModuleCatalogV1())
+                .error == npm::NpmBasicTaskConfigError::kNone);
+        ContextDictionary dictionary;
+        ContextProtocol protocol(&dictionary);
+        ContextPool pool(&protocol);
+        SinglePoolQuerier querier(&pool);
+        std::shared_ptr<arrow::Schema> schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+        assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime)
+                   .error == npm::NpmBasicTaskRuntimeError::kNone);
+        std::shared_ptr<arrow::RecordBatch> output;
+        if (split) {
+            auto first = MakeEncodedPacketBatch(
+                std::vector<flowsql::packet::PacketRecord>(records.begin(), records.begin() + 3));
+            assert(runtime->ProcessOfflineBatch(first, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+            assert(output && output->num_rows() == 0);
+            first.reset();
+            auto second = MakeEncodedPacketBatch({records.back()});
+            assert(runtime->ProcessOfflineBatch(second, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+            second.reset();
+        } else {
+            auto input = MakeEncodedPacketBatch(records);
+            assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
+            input.reset();
+        }
+        assert(output && output->num_rows() == 1 && output->schema()->Equals(*schema, true));
+        assert(BasicResultColumn<arrow::StringArray>(output, 8)->GetString(0) == "echo_matched");
+        assert(BasicResultColumn<arrow::UInt64Array>(output, 4)->Value(0) == 77);
+        assert(BasicResultColumn<arrow::Int64Array>(output, 18)->Value(0) == 30);
+        assert(runtime->Sessions().size() == 2);
+        std::shared_ptr<arrow::RecordBatch> tail;
+        assert(runtime->FlushOffline(60, &tail).error == npm::NpmEofFlushError::kNone);
+        assert(tail && tail->num_rows() == 0);
+        return output;
+    };
+    assert(run(false)->Equals(*run(true), true));
+}
+
 void TestTlsT0OpenContract() {
     using Error = npm::NpmBasicTaskRuntimeError;
     using ContractError = npm::NpmProtocolContractErrorV1;
     const auto& production = npm::ProductionNpmModuleCatalogV1();
-    assert(production.size() == 5 && production.back().module_id == "tls");
+    assert(production.size() == 6 && production[4].module_id == "tls");
 
     ContextDictionary dictionary;
     ContextProtocol protocol(&dictionary);
@@ -12126,7 +12280,7 @@ void TestTlsT0OpenContract() {
     StreamContractModule unrelated(&aborts);
     int consumer_mode = 0;  // 0: same object; 1: absent; 2: unrelated object.
     auto catalog = production;
-    catalog.pop_back();  // Replace production TLS with the controllable Open contract module.
+    catalog.erase(catalog.begin() + 4);  // Replace production TLS with the controllable Open contract module.
     npm::NpmModuleRegistrationV1 registration;
     registration.module_id = "tls";
     registration.entity_ids = {"tls_handshake"};
@@ -13101,20 +13255,21 @@ npm::NpmModuleCatalogV1 DualEntityCatalog(DualEntityProtocolTrace* trace, uint64
 
 void TestProtocolProductionCatalogAndConcurrentDualEntityControlRuntime() {
     const auto& production = npm::ProductionNpmModuleCatalogV1();
-    assert(production.size() == 5);
+    assert(production.size() == 6);
     assert(production[0].module_id == "basic" && production[0].entity_ids == std::vector<std::string>{"basic"});
     assert(production[1].module_id == "session" && production[1].entity_ids == std::vector<std::string>{"session"});
     assert(production[2].module_id == "dns" && production[2].entity_ids == std::vector<std::string>{"dns_transaction"});
     assert(production[3].module_id == "http1" &&
            production[3].entity_ids == std::vector<std::string>{"http1_transaction"});
     assert(production[4].module_id == "tls" && production[4].entity_ids == std::vector<std::string>{"tls_handshake"});
+    assert(production[5].module_id == "icmp" && production[5].entity_ids == std::vector<std::string>{"icmp_event"});
 
     ContextDictionary first_dictionary, second_dictionary;
     ContextProtocol first_protocol(&first_dictionary), second_protocol(&second_dictionary);
     ContextPool first_pool(&first_protocol), second_pool(&second_protocol);
     SinglePoolQuerier first_querier(&first_pool), second_querier(&second_pool);
 
-    for (const char* unavailable : {"icmp"}) {
+    for (const char* unavailable : {"unavailable_protocol"}) {
         auto config = MakeRuntimeTaskConfig();
         config.features.module_ids = {unavailable};
         config.features.basic_enabled = false;
@@ -13875,7 +14030,7 @@ class TlsTrackerProbe final : public npm::INpmProtocolModuleV1, public npm::INpm
 
 npm::NpmModuleCatalogV1 TlsTrackerCatalog(TlsTrackerTrace* trace) {
     auto catalog = npm::ProductionNpmModuleCatalogV1();
-    catalog.pop_back();
+    catalog.erase(catalog.begin() + 4);
     npm::NpmModuleRegistrationV1 registration;
     registration.module_id = "tls";
     registration.entity_ids = {"tls_handshake"};
@@ -13900,7 +14055,7 @@ npm::NpmModuleCatalogV1 TlsTrackerCatalog(TlsTrackerTrace* trace) {
 
 npm::NpmModuleCatalogV1 TlsStreamCatalog(TlsStreamTrace* trace) {
     auto catalog = npm::ProductionNpmModuleCatalogV1();
-    catalog.pop_back();
+    catalog.erase(catalog.begin() + 4);
     npm::NpmModuleRegistrationV1 registration;
     registration.module_id = "tls";
     registration.entity_ids = {"tls_handshake"};
@@ -14456,6 +14611,9 @@ int main(int argc, char** argv) {
     TestDnsT0OpenContract();
     TestHttp1T0OpenContract();
     TestTlsT0OpenContract();
+    TestIcmpT0OpenContract();
+    TestIcmpModuleAndBudget();
+    TestIcmpMixedBatchAndSplitEquivalence();
     TestTlsT1RecordBatchIntegration();
     TestTlsT2RuntimeFinalDrain();
     TestDnsT3RuntimeRouting();

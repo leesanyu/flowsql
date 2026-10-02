@@ -536,7 +536,7 @@ tcpdump 语法，也不代表 TCP stream、重组、会话或客户端/服务端
 采样识别；可同时启用 Basic 基础结果与 Session 性能结果，复用一次解码、会话化和协议识别。
 Session 提供当前捕获点可观察的速率、TCP RTT/重传等指标，以状态和 nullable 值表达证据不足；结果不保留
 `raw_data`。任务内部已提供按主标签准入的共享有界 TCP 字节流，供 DNS 等协议模块复用；生产目录支持
-Basic、Session、DNS，HTTP、TLS、ICMP 专用结果模块尚未交付。不能区分隧道上下文的封装流量会明确报错。
+Basic、Session、DNS、HTTP/1、TLS、ICMP 结果模块。不能区分隧道上下文的封装流量会明确报错。
 共享流的消费、资源和缺口语义见 [NPM 共享有界 TCP 字节流接入说明](docs/npm-tcp-stream.md)。
 
 需要按 observation domain、MAC、VLAN、IP/CIDR、传输协议和端口为双向会话绑定唯一主标签时，参见
@@ -562,7 +562,7 @@ INTO dataframe.basic_metrics
 
 | 参数 | 默认值 | 含义 |
 | --- | --- | --- |
-| `features` | `'basic'` | 启用的结果模块，当前支持 `basic`、`session`、`dns`、`http1`、`tls`；DNS/HTTP/1/TLS 需同时启用能力项 `labeling`。 |
+| `features` | `'basic'` | 启用的结果模块，当前支持 `basic`、`session`、`dns`、`http1`、`tls`、`icmp`；DNS/HTTP/1/TLS 需同时启用能力项 `labeling`。 |
 | `observing` | `'basic'` | 普通 DataFrame 目标接收的结果实体，必须已在 `features` 中启用。 |
 | `input_namespace` | `FROM` 通道名 | 本次输入的逻辑来源名称，可用非空值覆盖。 |
 | `source_domains` | `'all'` | 采集来源到观测域的映射，语法见下文。 |
@@ -655,6 +655,30 @@ Schema v1 共 22 列；同一实体还有 `npm_http1_transaction_history_v1` 和
 定界、期限或未配对事实，不能据此推断服务端故障。默认响应期限为 5 秒，仅随合法捕获水位推进；
 `max_pending_per_session` 默认 128，`max_header_bytes` 默认 65536，达到 pending 或任务预算限额会使任务失败。
 HTTP/2、HTTP/3、HTTPS、CONNECT 隧道及 WebSocket 帧不在此实体的分析范围内。
+
+#### ICMP 控制消息分析
+
+ICMP/ICMPv6 使用独立 control packet 路径，无须启用 `labeling` 或共享 TCP 流。
+回显仅关联捕获点可见的完整请求与反向应答；差错消息独立成行，引用五元组只能
+在同一观测域内提供当前活动 TCP/UDP 会话候选，不能证明原包归属。示例：
+
+```sql
+SELECT *
+FROM pcapfile.capture
+USING npm.basic
+WITH features='icmp',
+     observing='icmp_event',
+     parameters='{"schema_version":1,"icmp":{"echo_timeout_ns":5000000000,"max_pending_echo":4096}}'
+INTO dataframe.icmp_events
+```
+
+`icmp_event` 是 28 列 Schema v1 的终态事件；`outcome` 区分
+`echo_matched`、`echo_request_only`、`echo_reply_only` 和 `icmp_error`。
+`latency_ns` 只计算可见请求与应答的非负时间差；未见应答只表示观测期限或 EOF
+之前未捕获到匹配包，不说明网络确实超时。引用不足时 `quote_status` 标记可见范围，
+`active_quoted_session_id` 为空。托管结果沿用一个数据库目标，提供
+`npm_icmp_event_history_v1`、`npm_icmp_event_latest_v1` 和
+`npm_icmp_event_final_v1`，按 `__npm_run_id` 查询。
 
 #### TLS 握手分析
 

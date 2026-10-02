@@ -4,6 +4,7 @@
 #include "npm_basic_task_runtime.h"
 
 #include <framework/core/packet_codec.h>
+#include <operators/npm_basic/modules/icmp/npm_icmp_module.h>
 
 #include <arrow/api.h>
 #include <arrow/util/byte_size.h>
@@ -205,6 +206,11 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         } protocol_instance_guard{instances};
         for (const auto& entry : prepared) {
             auto instance = entry.create(*runtime->protocol_context_, runtime->budget_);
+            if (entry.plan.module_id == "icmp" && instance.protocol) {
+                if (auto* icmp = dynamic_cast<NpmIcmpProtocolModuleV1*>(instance.protocol.get())) {
+                    icmp->BindSessions(runtime->sessions_.get(), runtime->config_.domains.input_namespace);
+                }
+            }
             status.module_status = ValidateNpmModuleInstanceV1(entry.plan, instance);
             if (status.module_status.error != NpmProtocolContractErrorV1::kNone) {
                 if (instance.protocol) instance.protocol->Abort();

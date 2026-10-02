@@ -9,6 +9,8 @@
 #include <operators/npm_basic/modules/dns/npm_dns_module.h>
 #include <operators/npm_basic/modules/http1/npm_http1_contract.h>
 #include <operators/npm_basic/modules/http1/npm_http1_module.h>
+#include <operators/npm_basic/modules/icmp/npm_icmp_contract.h>
+#include <operators/npm_basic/modules/icmp/npm_icmp_module.h>
 #include <operators/npm_basic/modules/session/npm_session_analysis_module.h>
 #include <operators/npm_basic/modules/tls/npm_tls_contract.h>
 #include <operators/npm_basic/modules/tls/npm_tls_module.h>
@@ -124,6 +126,21 @@ const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1() {
                  auto module = std::make_unique<NpmTlsProtocolModuleV1>(config, std::move(budget));
                  result.tcp_stream_consumer = module.get();
                  result.protocol = std::move(module);
+                 return result;
+             };
+             return NpmProtocolContractStatusV1{};
+         }},
+        {"icmp", true, {"icmp_event"}, [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
+             NpmIcmpConfigV1 config;
+             const auto parsed = ParseNpmIcmpConfigV1(json, &config);
+             if (parsed.error != NpmIcmpConfigErrorV1::kNone) {
+                 const std::string prefix = "/icmp/";
+                 return Invalid(parsed.path == "/icmp" ? "config" : parsed.path.substr(prefix.size()));
+             }
+             out->plan = NpmIcmpModulePlanV1();
+             out->create = [config](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget> budget) {
+                 NpmModuleInstanceV1 result;
+                 result.protocol = std::make_unique<NpmIcmpProtocolModuleV1>(config, std::move(budget));
                  return result;
              };
              return NpmProtocolContractStatusV1{};
