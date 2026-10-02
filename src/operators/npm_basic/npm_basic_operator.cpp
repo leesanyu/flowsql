@@ -107,12 +107,14 @@ bool MaxPacketTimestampNs(const std::shared_ptr<arrow::RecordBatch>& input, int6
 
 }  // namespace
 
-NpmBasicTask::NpmBasicTask(const BlockTransformTaskConfigV1& config, IQuerier* querier, const NpmBasicOperator* owner)
+NpmBasicTask::NpmBasicTask(const BlockTransformTaskConfigV1& config, IQuerier* querier, const NpmBasicOperator* owner,
+                           bool v2)
     : task_id_(config.task_id),
       with_params_json_(config.with_params_json),
       pushed_filter_plan_json_(config.pushed_filter_plan_json),
       querier_(querier),
-      owner_(owner) {}
+      owner_(owner),
+      v2_(v2) {}
 
 NpmBasicTask::~NpmBasicTask() = default;
 
@@ -125,6 +127,123 @@ int NpmBasicTask::BindInputSource(const char* source) {
     } catch (const std::bad_alloc&) {
         return ENOMEM;
     }
+}
+
+int NpmBasicTask::BindCaptureSource(const CaptureQueueIdentityV1& identity) {
+    if (!v2_) return ENOTSUP;
+    if (state_.load(std::memory_order_acquire) != State::kCreated || capture_bound_) return EALREADY;
+    if (identity.struct_size < sizeof(CaptureQueueIdentityV1) ||
+        identity.contract_version != kCaptureBlockStreamContractVersionV1 || !identity.source_name ||
+        identity.source_name[0] == '\0' || identity.generation == 0) {
+        return EINVAL;
+    }
+    try {
+        capture_source_name_ = identity.source_name;
+        capture_identity_ = identity;
+        capture_identity_.source_name = capture_source_name_.c_str();
+        capture_bound_ = true;
+        return 0;
+    } catch (const std::bad_alloc&) {
+        return ENOMEM;
+    }
+}
+
+int NpmBasicTask::AcceptCaptureFact(const CaptureProgressV1& fact) {
+    if (state_.load(std::memory_order_acquire) != State::kOpened || !v2_ || !capture_bound_) return EPIPE;
+    if (fact.struct_size < sizeof(CaptureProgressV1) || fact.contract_version != kCaptureBlockStreamContractVersionV1 ||
+        fact.source_id != capture_identity_.source_id || fact.queue_id != capture_identity_.queue_id ||
+        fact.generation != capture_identity_.generation || fact.fact_sequence == 0 ||
+        fact.fact_sequence <= last_capture_fact_sequence_ || fact.capture_time_ns < 0 ||
+        (fact.packet_observed && fact.source_idle_confirmed) ||
+        (fact.backlog != CaptureBacklogV1::kUnknown && fact.backlog != CaptureBacklogV1::kEmpty &&
+         fact.backlog != CaptureBacklogV1::kPresent)) {
+        return EINVAL;
+    }
+    try {
+        pending_capture_facts_.push_back(fact);
+        last_capture_fact_sequence_ = fact.fact_sequence;
+        return 0;
+    } catch (const std::bad_alloc&) {
+        return ENOMEM;
+    }
+}
+
+int NpmBasicTask::GetTimeDriveState(BlockTransformTimeDriveStateV1* state) {
+    if (!state || state->struct_size < kBlockTransformTimeDriveStateV1Size ||
+        state->contract_version != kBlockTransformTimeDriveVersionV1) {
+        return EINVAL;
+    }
+    *state = BlockTransformTimeDriveStateV1{};
+    state->struct_size = kBlockTransformTimeDriveStateV1Size;
+    state->contract_version = kBlockTransformTimeDriveVersionV1;
+    const auto runtime = Runtime();
+    if (state_.load(std::memory_order_acquire) != State::kOpened || !runtime) return EPIPE;
+    if (runtime->Config().analysis.run_mode != NpmRunMode::kRealtime) return 0;
+    if (!realtime_origin_initialized_ || !pending_capture_facts_.empty()) {
+        state->armed = 1;
+        state->deadline_ns = 0;
+        return 0;
+    }
+    const auto plan = runtime->MaintenancePlan();
+    if (plan.snapshot_deadline_monotonic_ns) {
+        state->armed = 1;
+        state->deadline_ns = *plan.snapshot_deadline_monotonic_ns;
+    }
+    return 0;
+}
+
+int NpmBasicTask::OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) {
+    if (!outputs || !outputs->empty() || event.struct_size < kBlockTransformTimeEventV1Size ||
+        event.contract_version != kBlockTransformTimeDriveVersionV1 || event.monotonic_now_ns < 0) {
+        return -EINVAL;
+    }
+    const auto runtime = Runtime();
+    if (state_.load(std::memory_order_acquire) != State::kOpened || !runtime ||
+        runtime->Config().analysis.run_mode != NpmRunMode::kRealtime) {
+        return -EPIPE;
+    }
+    std::vector<BlockTransformOutputV1> next_outputs;
+    const auto drive = [&](const CaptureProgressV1* fact) {
+        NpmBasicRealtimeMaintenanceInput input;
+        input.monotonic_now_ns = event.monotonic_now_ns;
+        input.observed_at_ns = event.wall_now_ns;
+        if (fact) {
+            input.capture_progress.capture_time_ns = fact->capture_time_ns;
+            input.capture_progress.packet_observed = fact->packet_observed;
+            input.capture_progress.source_idle_confirmed = fact->source_idle_confirmed;
+            input.capture_progress.source_backlog_known = fact->backlog != CaptureBacklogV1::kUnknown;
+            input.capture_progress.source_has_backlog = fact->backlog == CaptureBacklogV1::kPresent;
+        }
+        std::shared_ptr<arrow::RecordBatch> batch;
+        const auto status = runtime->DriveRealtimeMaintenance(input, &batch);
+        if (status.error != NpmBasicRealtimeMaintenanceError::kNone) return false;
+        if (batch) next_outputs.push_back({std::move(batch), event.wall_now_ns / 1'000'000});
+        return true;
+    };
+    const auto fail_maintenance = [&](int code, const char* message) {
+        State expected = State::kOpened;
+        Fail(expected, message);
+        return expected == State::kCancelled ? -ECANCELED : code;
+    };
+    try {
+        if (pending_capture_facts_.empty() && !drive(nullptr)) {
+            return fail_maintenance(-EIO, "npm.basic realtime maintenance failed");
+        }
+        while (!pending_capture_facts_.empty()) {
+            if (!drive(&pending_capture_facts_.front())) {
+                return fail_maintenance(-EIO, "npm.basic realtime maintenance failed");
+            }
+            pending_capture_facts_.pop_front();
+        }
+    } catch (const std::bad_alloc&) {
+        return fail_maintenance(-ENOMEM, kAllocationError);
+    }
+    realtime_origin_initialized_ = true;
+    last_observed_at_ns_ = event.wall_now_ns;
+    has_observed_at_ = true;
+    last_output_ts_ms_ = event.wall_now_ns / 1'000'000;
+    *outputs = std::move(next_outputs);
+    return static_cast<int>(BlockTransformStatusV1::kContinue);
 }
 
 int NpmBasicTask::BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) {
@@ -210,6 +329,26 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
         expected = State::kOpening;
         expected = Fail(expected, error);
         return expected == State::kCancelled ? ECANCELED : EINVAL;
+    }
+    NpmTimeCapabilities time_capabilities;
+    if (v2_ && parsed.analysis.run_mode == NpmRunMode::kRealtime) {
+        const bool schema_probe = task_id_.size() >= 7 && task_id_.compare(task_id_.size() - 7, 7, ".schema") == 0;
+        if (!capture_bound_ && !schema_probe) {
+            expected = State::kOpening;
+            expected = Fail(expected, "npm.basic realtime capture source is not bound");
+            return expected == State::kCancelled ? ECANCELED : EINVAL;
+        }
+        if (capture_bound_) {
+            uint64_t observation_domain_id = 0;
+            if (ResolveNpmObservationDomain(parsed.domains, capture_identity_.source_id, &observation_domain_id) !=
+                    NpmObservationDomainError::kNone ||
+                observation_domain_id != capture_identity_.observation_domain_id) {
+                expected = State::kOpening;
+                expected = Fail(expected, "npm.basic realtime source domain conflicts with capture identity");
+                return expected == State::kCancelled ? ECANCELED : EINVAL;
+            }
+        }
+        time_capabilities = {true, true, true, true};
     }
     if (parsed.result_retention_days.has_value() && managed_channel_ == nullptr) {
         expected = State::kOpening;
@@ -297,9 +436,9 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
         }
     }
 
-    const auto runtime_status = NpmBasicTaskRuntime::Create(
-        parsed, querier_, input_schema, &next_schema, &next_runtime, std::move(labeling_budget), matcher,
-        ProductionNpmModuleCatalogV1(), {}, task_id_, managed_consumer_factory.get());
+    const auto runtime_status = NpmBasicTaskRuntime::CreateWithTimeCapabilities(
+        parsed, querier_, input_schema, time_capabilities, &next_schema, &next_runtime, std::move(labeling_budget),
+        matcher, ProductionNpmModuleCatalogV1(), {}, task_id_, managed_consumer_factory.get());
     if (runtime_status.error != NpmBasicTaskRuntimeError::kNone) {
         expected = State::kOpening;
         if (!runtime_status.consumer_error.empty()) config_error_ = runtime_status.consumer_error;
@@ -561,7 +700,7 @@ int NpmBasicOperator::CreateTask(const BlockTransformTaskConfigV1& config, IBloc
     }
 
     try {
-        auto* next = new NpmBasicTask(config, querier_, this);
+        auto* next = new NpmBasicTask(config, querier_, this, false);
         *task = next;
         return 0;
     } catch (const std::bad_alloc&) {
@@ -573,6 +712,30 @@ void NpmBasicOperator::ReleaseTask(IBlockTransformTaskV1* task) {
     auto* owned = dynamic_cast<NpmBasicTask*>(task);
     if (owned == nullptr || owned->owner_ != this) return;
     delete owned;
+}
+
+int NpmBasicOperator::CreateTask(const BlockTransformTaskConfigV2& config, IBlockTransformTaskV2** task) {
+    if (!started_) return EPIPE;
+    if (!task || config.struct_size < kBlockTransformTaskConfigV2Size ||
+        config.contract_version != kBlockTransformContractVersionV2 || !config.task_id || !config.task_id[0] ||
+        !config.with_params_json || !config.with_params_json[0] || !config.pushed_filter_plan_json ||
+        !config.pushed_filter_plan_json[0]) {
+        return EINVAL;
+    }
+    try {
+        BlockTransformTaskConfigV1 v1;
+        v1.task_id = config.task_id;
+        v1.with_params_json = config.with_params_json;
+        v1.pushed_filter_plan_json = config.pushed_filter_plan_json;
+        *task = new NpmBasicTask(v1, querier_, this, true);
+        return 0;
+    } catch (const std::bad_alloc&) {
+        return ENOMEM;
+    }
+}
+
+void NpmBasicOperator::ReleaseTask(IBlockTransformTaskV2* task) {
+    ReleaseTask(static_cast<IBlockTransformTaskV1*>(task));
 }
 
 }  // namespace flowsql::npm

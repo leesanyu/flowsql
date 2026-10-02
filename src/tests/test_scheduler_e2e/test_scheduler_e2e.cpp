@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -33,7 +34,10 @@
 #include <framework/core/stream_channel_adapter.h>
 #include <framework/interfaces/ibinaddon_host.h>
 #include <framework/interfaces/iblock_stream_operator.h>
+#include <framework/interfaces/iblock_stream_factory.h>
+#include <framework/interfaces/iblock_stream_reader.h>
 #include <framework/interfaces/iblock_transform_operator.h>
+#include <framework/interfaces/icapture_block_stream_reader.h>
 #include <framework/interfaces/ichannel_registry.h>
 #include <framework/interfaces/icpp_operator_plugin_registry.h>
 #include <framework/interfaces/idatabase_channel.h>
@@ -234,6 +238,7 @@ enum class SchedulerE2eTransformKind {
     kPacketToProtocol,
     kPassthrough,
     kAnyPassthrough,
+    kStopOnFirst,
 };
 
 struct SchedulerE2eTransformSnapshot {
@@ -254,11 +259,14 @@ class SchedulerE2eTransformTask final : public IBlockTransformTaskV1 {
         if (!input_schema || !output_schema || open_calls != 1) return EINVAL;
         const auto expected = kind_ == SchedulerE2eTransformKind::kPacketToProtocol ? packet::PacketSchema()
                                                                                     : SchedulerE2eTransformSchema();
-        input_schema_matched =
-            kind_ == SchedulerE2eTransformKind::kAnyPassthrough || input_schema->Equals(*expected, true);
+        input_schema_matched = kind_ == SchedulerE2eTransformKind::kAnyPassthrough ||
+                               kind_ == SchedulerE2eTransformKind::kStopOnFirst ||
+                               input_schema->Equals(*expected, true);
         if (!input_schema_matched) return EINVAL;
-        *output_schema = kind_ == SchedulerE2eTransformKind::kAnyPassthrough ? std::move(input_schema)
-                                                                             : SchedulerE2eTransformSchema();
+        *output_schema =
+            kind_ == SchedulerE2eTransformKind::kAnyPassthrough || kind_ == SchedulerE2eTransformKind::kStopOnFirst
+                ? std::move(input_schema)
+                : SchedulerE2eTransformSchema();
         return 0;
     }
 
@@ -268,8 +276,10 @@ class SchedulerE2eTransformTask final : public IBlockTransformTaskV1 {
         if (!input || !outputs || !outputs->empty()) return -EINVAL;
         input_rows.push_back(input->num_rows());
         if (kind_ != SchedulerE2eTransformKind::kPacketToProtocol) {
-            outputs->push_back({input, ts_ms});
-            return static_cast<int>(BlockTransformStatusV1::kContinue);
+            if (kind_ != SchedulerE2eTransformKind::kStopOnFirst) outputs->push_back({input, ts_ms});
+            return static_cast<int>(kind_ == SchedulerE2eTransformKind::kStopOnFirst
+                                        ? BlockTransformStatusV1::kStop
+                                        : BlockTransformStatusV1::kContinue);
         }
 
         auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(input->GetColumnByName("sequence"));
@@ -697,6 +707,177 @@ static std::vector<uint8_t> MakeSchedulerE2eIcmpCapture() {
     return MakeSchedulerE2eClassicCapture(
         false, {{1, 100, MakeSchedulerE2eIcmpPacket(false)}, {1, 200, MakeSchedulerE2eIcmpPacket(true)}});
 }
+
+class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockStreamReaderFactoryV1 {
+ public:
+    enum class Mode { kNormal, kSourceError, kCancelled, kReleaseError, kInvalidPacket };
+    class Source final : public IBlockStreamChannel {
+     public:
+        const char* Category() override { return "capturetest"; }
+        const char* Name() override { return "live"; }
+        const char* Type() override { return ChannelType::kBlockStream; }
+        const char* Schema() override { return "packet"; }
+        int Open() override { return 0; }
+        int Close() override { return 0; }
+        bool IsOpened() const override { return true; }
+        int Flush() override { return 0; }
+        BlockPollEvent PollBlock(int) override { return {BlockPollEvent::kError, nullptr, EINVAL}; }
+        int ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>&) override { return EINVAL; }
+        void Cancel() override {}
+        bool IsFinished() const override { return false; }
+    };
+
+    class Reader final : public ICaptureBlockStreamReaderV1 {
+     public:
+        Reader(SchedulerCaptureFixture* fixture, uint64_t generation) : fixture_(fixture), generation_(generation) {
+            auto bytes = std::make_shared<std::vector<uint8_t>>(MakeSchedulerE2eHttp1Packet(false, 0x10, 100, 0, ""));
+            packet::PacketRecord record;
+            record.meta.timestamp_ns = 1'000'000'000;
+            record.meta.captured_len = static_cast<uint32_t>(bytes->size());
+            record.meta.wire_len = record.meta.captured_len;
+            record.meta.link_type = 1;
+            record.meta.source_id = 7;
+            record.meta.sequence = 1;
+            record.raw_data.owner = bytes;
+            record.raw_data.data = bytes->data();
+            record.raw_data.size = record.meta.captured_len;
+            record.layer.status = packet::LayerStatus::kDecoded;
+            record.layer.layer_count = 2;
+            record.layer.layers[0] = {static_cast<uint16_t>(eLayer::IPv4), 14};
+            record.layer.layers[1] = {static_cast<uint16_t>(eLayer::TCP), 34};
+            record.layer.network_layer_index = 0;
+            record.layer.transport_layer_index = 1;
+            record.layer.payload_offset = 54;
+            packet::IPv4Address src;
+            packet::IPv4Address dst;
+            std::memcpy(src.bytes, bytes->data() + 26, 4);
+            std::memcpy(dst.bytes, bytes->data() + 30, 4);
+            record.layer.src_ip = src;
+            record.layer.dst_ip = dst;
+            record.layer.transport_protocol = 6;
+            record.layer.src_port = 45000;
+            record.layer.dst_port = 80;
+            record.layer.ports_valid = 1;
+            if (fixture_->mode == Mode::kInvalidPacket) record.layer.status = packet::LayerStatus::kNotDecoded;
+            ASSERT_EQ(packet::EncodePacketBatch({record}, &batch_), packet::PacketBatchError::kNone);
+        }
+        const char* Category() override { return "capturetest"; }
+        const char* Name() override { return "live"; }
+        const char* Type() override { return ChannelType::kBlockStream; }
+        const char* Schema() override { return "packet"; }
+        int Open() override { return 0; }
+        int Close() override { return 0; }
+        bool IsOpened() const override { return true; }
+        int Flush() override { return 0; }
+        BlockPollEvent PollBlock(int) override { return {BlockPollEvent::kError, nullptr, EINVAL}; }
+        int ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>& block) override {
+            if (block != batch_ || released_) return EINVAL;
+            released_ = true;
+            ++fixture_->release_blocks;
+            return fixture_->mode == Mode::kReleaseError ? EIO : 0;
+        }
+        void Cancel() override { cancelled_ = true; }
+        bool IsFinished() const override { return step_ >= 3; }
+        int Describe(CaptureQueueIdentityV1* identity, CaptureReaderLimitsV1* limits) const override {
+            if (!identity || !limits) return EINVAL;
+            *identity = {};
+            identity->source_name = "capturetest.live";
+            identity->source_id = 7;
+            identity->observation_domain_id = 77;
+            identity->generation = generation_;
+            identity->link_type = 1;
+            *limits = {};
+            limits->max_packets_per_batch = 1;
+            limits->max_bytes_per_batch = 4096;
+            limits->max_wait_ms = 100;
+            limits->max_outstanding_batches = 1;
+            return 0;
+        }
+        CapturePollEventV1 PollCapture(int) override {
+            ++fixture_->poll_capture_calls;
+            CapturePollEventV1 event;
+            if (cancelled_) {
+                event.block.kind = BlockPollEvent::kCancelled;
+            } else if (step_ == 0 && fixture_->mode == Mode::kSourceError) {
+                event.block = {BlockPollEvent::kError, nullptr, EIO};
+            } else if (step_ == 0 && fixture_->mode == Mode::kCancelled) {
+                event.block.kind = BlockPollEvent::kCancelled;
+            } else if (step_ == 0) {
+                event.block = {BlockPollEvent::kData, batch_, 0};
+                event.has_progress = true;
+                event.progress = MakeFact(1, true, false);
+            } else if (step_ == 1) {
+                event.block.kind = BlockPollEvent::kTimeout;
+                event.has_progress = true;
+                event.progress = MakeFact(2, false, true);
+            } else if (step_ == 2) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(15));
+                event.block.kind = BlockPollEvent::kTimeout;
+            } else {
+                event.block.kind = BlockPollEvent::kEof;
+            }
+            ++step_;
+            return event;
+        }
+        int ReadCounters(CaptureCountersV1* counters) const override {
+            if (!counters) return EINVAL;
+            *counters = {};
+            counters->generation = generation_;
+            return 0;
+        }
+
+     private:
+        CaptureProgressV1 MakeFact(uint64_t sequence, bool packet_seen, bool idle) const {
+            CaptureProgressV1 fact;
+            fact.source_id = 7;
+            fact.generation = generation_;
+            fact.fact_sequence = sequence;
+            fact.capture_time_ns = 1'000'000'000 + static_cast<int64_t>(sequence - 1);
+            fact.packet_observed = packet_seen;
+            fact.source_idle_confirmed = idle;
+            fact.backlog = CaptureBacklogV1::kEmpty;
+            return fact;
+        }
+        SchedulerCaptureFixture* fixture_;
+        uint64_t generation_;
+        std::shared_ptr<arrow::RecordBatch> batch_;
+        int step_ = 0;
+        bool released_ = false;
+        bool cancelled_ = false;
+    };
+
+    IBlockStreamChannel* Get(const char* category, const char* name) override {
+        return category && name && std::string(category) == "capturetest" && name == std::string("live") ? &source_
+                                                                                                         : nullptr;
+    }
+    void List(std::function<void(const char*, const char*, IBlockStreamChannel*)> callback) override {
+        callback("capturetest", "live", &source_);
+    }
+    int CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** reader) override {
+        if (!reader) return EINVAL;
+        *reader = nullptr;
+        if (!config.source_category || !config.source_name || std::string(config.source_category) != "capturetest" ||
+            std::string(config.source_name) != "live")
+            return ENOTSUP;
+        *reader = new Reader(this, ++generation);
+        ++create_calls;
+        return 0;
+    }
+    void ReleaseReader(IBlockStreamChannel* reader) override {
+        delete static_cast<Reader*>(reader);
+        ++release_calls;
+    }
+
+    int create_calls = 0;
+    int release_calls = 0;
+    int release_blocks = 0;
+    int poll_capture_calls = 0;
+    uint64_t generation = 0;
+    Mode mode = Mode::kNormal;
+
+ private:
+    Source source_;
+};
 
 static void AssertSchedulerE2eNpmBasicSchema(const std::shared_ptr<arrow::Schema>& schema) {
     struct ExpectedField {
@@ -1539,15 +1720,21 @@ int main() {
                                                         SchedulerE2eTransformKind::kPassthrough);
     SchedulerE2eTransformProvider parameter_capture_transform("parameter_capture",
                                                               SchedulerE2eTransformKind::kAnyPassthrough);
+    SchedulerE2eTransformProvider stop_capture_transform("stop_capture", SchedulerE2eTransformKind::kStopOnFirst);
     SchedulerE2eManagedTrace managed_trace;
     SchedulerE2eManagedProvider managed_transform(&managed_trace);
+    SchedulerCaptureFixture capture_fixture;
     SchedulerHttp1Labeling http1_labeling;
     loader->Regist(IID_PROTOCOL, &pcap_protocol);
     loader->Regist(IID_BLOCK_STREAM_OPERATOR, &block_operator);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &packet_transform);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &passthrough_transform);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &parameter_capture_transform);
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &stop_capture_transform);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &managed_transform);
+    loader->Regist(IID_BLOCK_STREAM_FACTORY, static_cast<IBlockStreamFactory*>(&capture_fixture));
+    loader->Regist(IID_BLOCK_STREAM_READER_FACTORY_V1,
+                   static_cast<IBlockStreamReaderFactoryV1*>(&capture_fixture));
     loader->Regist(IID_FLOW_LABELING_PROVIDER_V1, static_cast<IFlowLabelingProviderV1*>(&http1_labeling));
     loader->Regist(IID_CONFIG_CHANNEL_REGISTRY_V1, static_cast<IConfigChannelRegistryV1*>(&http1_labeling));
     const char* libs[] = {
@@ -2087,7 +2274,7 @@ int main() {
         activated.Parse(rsp.c_str());
         ASSERT_TRUE(!activated.HasParseError() && activated.IsObject());
         ASSERT_EQ(activated["abi_version"].GetInt(), 2);
-        ASSERT_EQ(activated["operator_count"].GetInt(), 1);
+        ASSERT_EQ(activated["operator_count"].GetInt(), 2);
         ASSERT_TRUE(activated["operators"].IsArray());
         ASSERT_EQ(activated["operators"].Size(), rapidjson::SizeType(1));
         ASSERT_EQ(std::string(activated["operators"][0].GetString()), "npm.basic");
@@ -2098,14 +2285,167 @@ int main() {
         ASSERT_TRUE(!activated_detail.HasParseError() && activated_detail.IsObject());
         const auto& plugin_detail = activated_detail["plugin"];
         ASSERT_EQ(std::string(plugin_detail["status"].GetString()), "activated");
-        ASSERT_EQ(plugin_detail["operator_count"].GetInt(), 1);
+        ASSERT_EQ(plugin_detail["operator_count"].GetInt(), 2);
         ASSERT_TRUE(plugin_detail["operators"].IsArray());
         ASSERT_EQ(std::string(plugin_detail["operators"][0].GetString()), "npm.basic");
         ASSERT_TRUE(plugin_detail["operator_details"].IsArray());
-        ASSERT_EQ(plugin_detail["operator_details"].Size(), rapidjson::SizeType(1));
+        ASSERT_EQ(plugin_detail["operator_details"].Size(), rapidjson::SizeType(2));
         const auto& npm_detail = plugin_detail["operator_details"][0];
         ASSERT_EQ(std::string(npm_detail["name"].GetString()), "npm.basic");
         ASSERT_EQ(std::string(npm_detail["contract"].GetString()), "block_transform_v1");
+        ASSERT_EQ(std::string(plugin_detail["operator_details"][1]["contract"].GetString()), "block_transform_v2");
+
+        const std::string realtime_without_capture =
+            "SELECT * FROM " + input_namespace +
+            " USING npm.basic WITH run_mode='realtime',source_domains='0:77' INTO dataframe.npm_realtime_no_capture";
+        ASSERT_TRUE(exec("/scheduler/batch/execute", MakeReq(realtime_without_capture), rsp) != error::OK);
+        ASSERT_TRUE(rsp.find("realtime capture source is not bound") != std::string::npos);
+
+        const std::string live_sql =
+            "SELECT * FROM capturetest.live USING npm.basic WITH input_namespace='capturetest.live',"
+            "source_domains='7:77',run_mode='realtime',result_mode='periodic_snapshot',"
+            "output_interval_ns='10000000' INTO dataframe.npm_live_capture";
+        const int live_rc = exec("/scheduler/batch/execute", MakeReq(live_sql), rsp);
+        if (live_rc != error::OK) std::printf("[INFO] live SQL rc=%d response=%s\n", live_rc, rsp.c_str());
+        ASSERT_EQ(live_rc, error::OK);
+        auto live_channel = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("npm_live_capture"));
+        ASSERT_TRUE(live_channel != nullptr);
+        DataFrame live_frame;
+        ASSERT_EQ(live_channel->Read(&live_frame), 0);
+        auto live_batch = live_frame.ToArrow();
+        ASSERT_TRUE(live_batch != nullptr);
+        AssertSchedulerE2eNpmBasicSchema(live_batch->schema());
+        const auto live_final = std::dynamic_pointer_cast<arrow::BooleanArray>(live_batch->GetColumnByName("is_final"));
+        ASSERT_TRUE(live_final != nullptr && live_batch->num_rows() >= 2);
+        ASSERT_TRUE(!live_final->Value(0) && live_final->Value(live_batch->num_rows() - 1));
+        ASSERT_EQ(capture_fixture.create_calls, 1);
+        ASSERT_EQ(capture_fixture.release_calls, 1);
+        ASSERT_EQ(capture_fixture.release_blocks, 1);
+        ASSERT_TRUE(capture_fixture.poll_capture_calls >= 4);
+        ASSERT_EQ(registry->Unregister("npm_live_capture"), 0);
+
+        parameter_capture_transform.Reset();
+        const std::string live_chain_sql =
+            "SELECT * FROM capturetest.live USING npm.basic WITH input_namespace='capturetest.live',"
+            "source_domains='7:77',run_mode='realtime',result_mode='periodic_snapshot',"
+            "output_interval_ns='10000000' THEN test.parameter_capture INTO dataframe.npm_live_chain";
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(live_chain_sql), rsp), error::OK);
+        auto chain_channel = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("npm_live_chain"));
+        ASSERT_TRUE(chain_channel != nullptr);
+        DataFrame chain_frame;
+        ASSERT_EQ(chain_channel->Read(&chain_frame), 0);
+        auto chain_batch = chain_frame.ToArrow();
+        ASSERT_TRUE(chain_batch != nullptr);
+        AssertSchedulerE2eNpmBasicSchema(chain_batch->schema());
+        const auto chain_final =
+            std::dynamic_pointer_cast<arrow::BooleanArray>(chain_batch->GetColumnByName("is_final"));
+        ASSERT_TRUE(chain_final != nullptr && chain_batch->num_rows() >= 2);
+        ASSERT_TRUE(!chain_final->Value(0) && chain_final->Value(chain_batch->num_rows() - 1));
+        ASSERT_EQ(parameter_capture_transform.live_tasks, 0);
+        ASSERT_TRUE(parameter_capture_transform.released.size() >= 2);
+        ASSERT_TRUE(parameter_capture_transform.released.back().process_calls >= 3);
+        ASSERT_EQ(capture_fixture.create_calls, 2);
+        ASSERT_EQ(capture_fixture.release_calls, 2);
+        ASSERT_EQ(capture_fixture.release_blocks, 2);
+        ASSERT_EQ(registry->Unregister("npm_live_chain"), 0);
+
+        const std::string session_sql =
+            "SELECT * FROM capturetest.live USING npm.basic WITH input_namespace='capturetest.live',"
+            "source_domains='7:77',run_mode='realtime',features='session',observing='session' "
+            "INTO dataframe.npm_live_session";
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(session_sql), rsp), error::OK);
+        auto session_channel = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("npm_live_session"));
+        ASSERT_TRUE(session_channel != nullptr);
+        DataFrame session_frame;
+        ASSERT_EQ(session_channel->Read(&session_frame), 0);
+        auto live_session_batch = session_frame.ToArrow();
+        ASSERT_TRUE(live_session_batch != nullptr && live_session_batch->num_rows() >= 1);
+        ASSERT_TRUE(live_session_batch->schema()->metadata()->Get("flowsql.entity").ValueOrDie() ==
+                    "npm_session_result");
+        ASSERT_EQ(registry->Unregister("npm_live_session"), 0);
+
+        const std::string filtered_sql =
+            "SELECT * FROM capturetest.live WHERE captured_len > 1000 USING npm.basic WITH "
+            "input_namespace='capturetest.live',source_domains='7:77',run_mode='realtime',"
+            "result_mode='periodic_snapshot',output_interval_ns='10000000' "
+            "WHERE is_final = true INTO dataframe.npm_live_filtered";
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(filtered_sql), rsp), error::OK);
+        auto filtered_channel = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("npm_live_filtered"));
+        ASSERT_TRUE(filtered_channel != nullptr);
+        DataFrame filtered_frame;
+        ASSERT_EQ(filtered_channel->Read(&filtered_frame), 0);
+        auto filtered_batch = filtered_frame.ToArrow();
+        ASSERT_TRUE(filtered_batch != nullptr && filtered_batch->num_rows() == 0);
+        AssertSchedulerE2eNpmBasicSchema(filtered_batch->schema());
+        ASSERT_EQ(registry->Unregister("npm_live_filtered"), 0);
+
+        const std::string final_only_sql =
+            "SELECT * FROM capturetest.live USING npm.basic WITH input_namespace='capturetest.live',"
+            "source_domains='7:77',run_mode='realtime',result_mode='periodic_snapshot',"
+            "output_interval_ns='10000000' WHERE is_final = true INTO dataframe.npm_live_final_only";
+        ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(final_only_sql), rsp), error::OK);
+        auto final_channel = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("npm_live_final_only"));
+        ASSERT_TRUE(final_channel != nullptr);
+        DataFrame final_frame;
+        ASSERT_EQ(final_channel->Read(&final_frame), 0);
+        auto final_batch = final_frame.ToArrow();
+        ASSERT_TRUE(final_batch != nullptr && final_batch->num_rows() == 1);
+        ASSERT_EQ(registry->Unregister("npm_live_final_only"), 0);
+
+        const auto assert_capture_failure = [&](SchedulerCaptureFixture::Mode mode, const std::string& suffix,
+                                                int expected_releases) {
+            capture_fixture.mode = mode;
+            const int created_before = capture_fixture.create_calls;
+            const int released_before = capture_fixture.release_calls;
+            const int blocks_before = capture_fixture.release_blocks;
+            const std::string destination = "npm_live_" + suffix;
+            const std::string sql =
+                "SELECT * FROM capturetest.live USING npm.basic WITH input_namespace='capturetest.live',"
+                "source_domains='7:77',run_mode='realtime' INTO dataframe." +
+                destination;
+            const int fault_rc = exec("/scheduler/batch/execute", MakeReq(sql), rsp);
+            if (mode == SchedulerCaptureFixture::Mode::kCancelled) {
+                ASSERT_EQ(fault_rc, error::OK);
+                ASSERT_TRUE(rsp.find("\"status\":\"cancelled\"") != std::string::npos);
+            } else {
+                ASSERT_TRUE(fault_rc != error::OK);
+            }
+            auto failed_channel = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(destination.c_str()));
+            if (failed_channel) {
+                DataFrame failed_frame;
+                ASSERT_EQ(failed_channel->Read(&failed_frame), 0);
+                auto failed_batch = failed_frame.ToArrow();
+                ASSERT_TRUE(failed_batch == nullptr || failed_batch->num_rows() == 0);
+                ASSERT_EQ(registry->Unregister(destination.c_str()), 0);
+            }
+            ASSERT_EQ(capture_fixture.create_calls, created_before + 1);
+            ASSERT_EQ(capture_fixture.release_calls, released_before + 1);
+            ASSERT_EQ(capture_fixture.release_blocks, blocks_before + expected_releases);
+            capture_fixture.mode = SchedulerCaptureFixture::Mode::kNormal;
+        };
+        assert_capture_failure(SchedulerCaptureFixture::Mode::kSourceError, "source_error", 0);
+        assert_capture_failure(SchedulerCaptureFixture::Mode::kCancelled, "cancelled", 0);
+        assert_capture_failure(SchedulerCaptureFixture::Mode::kReleaseError, "release_error", 1);
+        assert_capture_failure(SchedulerCaptureFixture::Mode::kInvalidPacket, "transform_error", 1);
+
+        const std::string stop_sql =
+            "SELECT * FROM capturetest.live USING npm.basic WITH input_namespace='capturetest.live',"
+            "source_domains='7:77',run_mode='realtime' THEN test.stop_capture "
+            "INTO dataframe.npm_live_stopped";
+        const int stop_rc = exec("/scheduler/batch/execute", MakeReq(stop_sql), rsp);
+        if (stop_rc != error::OK) std::printf("[INFO] live stop rc=%d response=%s\n", stop_rc, rsp.c_str());
+        ASSERT_EQ(stop_rc, error::OK);
+        ASSERT_TRUE(rsp.find("\"status\":\"stopped\"") != std::string::npos);
+        ASSERT_TRUE(!stop_capture_transform.released.empty());
+        ASSERT_EQ(stop_capture_transform.released.back().flush_calls, 1);
+        auto stopped_channel = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("npm_live_stopped"));
+        if (stopped_channel) {
+            DataFrame stopped_frame;
+            ASSERT_EQ(stopped_channel->Read(&stopped_frame), 0);
+            auto stopped_batch = stopped_frame.ToArrow();
+            ASSERT_TRUE(stopped_batch == nullptr || stopped_batch->num_rows() == 0);
+            ASSERT_EQ(registry->Unregister("npm_live_stopped"), 0);
+        }
 
         const std::string managed_sql = "SELECT * FROM " + input_namespace +
                                         " USING npm.basic WITH features='basic,session',observing='session' INTO "
@@ -2165,6 +2505,18 @@ int main() {
         ASSERT_TRUE(queried_domains != nullptr);
         ASSERT_EQ(queried_domains->GetString(0), "0");
         ASSERT_EQ(registry->Unregister(managed_query_dataframe.c_str()), 0);
+
+        ASSERT_EQ(db->ExecuteSql("CREATE TRIGGER npm_live_consumer_fail BEFORE INSERT ON npm_basic_v1_data "
+                                 "BEGIN SELECT RAISE(FAIL, 'fixture consumer failure'); END"),
+                  0);
+        const int consumer_releases_before = capture_fixture.release_calls;
+        const std::string consumer_fail_sql =
+            "SELECT * FROM capturetest.live USING npm.basic WITH input_namespace='capturetest.live',"
+            "source_domains='7:77',run_mode='realtime' INTO sqlite.local";
+        const int consumer_fail_rc = exec("/scheduler/batch/execute", MakeReq(consumer_fail_sql), rsp);
+        ASSERT_TRUE(consumer_fail_rc != error::OK);
+        ASSERT_EQ(capture_fixture.release_calls, consumer_releases_before + 1);
+        ASSERT_EQ(db->ExecuteSql("DROP TRIGGER npm_live_consumer_fail"), 0);
 
         const auto dns_entity = npm::NpmDnsTransactionEntityDescriptorV1();
         auto dns_factory = npm::MakeNpmDatabaseResultConsumerFactory(db, input_namespace);

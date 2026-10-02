@@ -13,6 +13,7 @@
 namespace {
 
 bool CaseDuplicateEnabled() { return std::getenv("FLOWSQL_FIXTURE_CPP_OPERATOR_V2_CASE_DUPLICATE") != nullptr; }
+bool VersionPairEnabled() { return std::getenv("FLOWSQL_FIXTURE_CPP_OPERATOR_V2_VERSION_PAIR") != nullptr; }
 
 class FixtureEchoOperator final : public flowsql::IOperator {
  public:
@@ -158,7 +159,7 @@ class FixtureTimeDrivenTransformOperator final : public flowsql::IBlockTransform
     explicit FixtureTimeDrivenTransformOperator(flowsql::IQuerier* querier) : querier_(querier) {}
 
     std::string Category() const override { return "fixture"; }
-    std::string Name() const override { return "time_transform"; }
+    std::string Name() const override { return VersionPairEnabled() ? "transform" : "time_transform"; }
     std::string Description() const override { return "V2 fixture time-driven block transform operator"; }
 
     int CreateTask(const flowsql::BlockTransformTaskConfigV2& config,
@@ -211,7 +212,7 @@ int flowsql_describe_operator(int index, flowsql::CppOperatorDescriptorV2* descr
             return 0;
         case 2:
             descriptor->category = "fixture";
-            descriptor->name = "time_transform";
+            descriptor->name = VersionPairEnabled() ? "transform" : "time_transform";
             descriptor->description = "V2 fixture time-driven block transform operator";
             descriptor->contract_iid = flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V2;
             return 0;

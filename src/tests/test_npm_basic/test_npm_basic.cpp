@@ -3966,6 +3966,19 @@ void TestProcessNpmOfflinePacketBatchErrorsAndAtomicOutput() {
     assert(ended_events.size() == 1 && ended_events[0].snapshot.session_id == 998);
     assert((events == std::vector<uint64_t>{2011, 2012}));
 
+    npm::NpmSessionTable live_table(realtime_config);
+    std::vector<npm::NpmSessionEndEvent> live_ended;
+    status = npm::ProcessNpmOfflinePacketBatch(domain_map, *realtime_batch, live_table, identifier, {}, writer,
+                                               &live_ended, nullptr, {}, nullptr, false);
+    assert(status.error == npm::NpmPacketBatchProcessError::kNone);
+    assert(status.progress_disposition == npm::NpmCaptureProgressDisposition::kUnchanged);
+    assert(live_table.size() == 1 && live_ended.empty());
+    npm::NpmCaptureProgressUpdate released_fact;
+    released_fact.capture_time_ns = 40;
+    released_fact.packet_observed = true;
+    released_fact.source_backlog_known = true;
+    assert(live_table.AdvanceCaptureProgress(released_fact).disposition == npm::NpmCaptureProgressDisposition::kAdvanced);
+
     constexpr int64_t second = npm::kNpmNanosecondsPerSecond;
     auto idle_config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     idle_config.tcp_idle_timeout_ns = second;
@@ -10672,7 +10685,7 @@ void TestNpmBasicOperatorCopiesConfigAndOwnsTasks() {
     assert(second != nullptr && second != first);
     assert(dynamic_cast<npm::NpmBasicTask*>(second)->TaskId() == "task-owned-two");
 
-    provider.ReleaseTask(nullptr);
+    provider.ReleaseTask(static_cast<flowsql::IBlockTransformTaskV1*>(nullptr));
     provider.ReleaseTask(first);
     provider.ReleaseTask(second);
 
@@ -11385,7 +11398,7 @@ void TestNpmBasicV2PluginExports() {
     assert(dlsym(handle, flowsql::kCppOperatorPluginCreateV1Symbol) == nullptr);
     assert(dlsym(handle, flowsql::kCppOperatorPluginDestroyV1Symbol) == nullptr);
     assert(abi_version() == flowsql::kCppOperatorPluginAbiVersionV2);
-    assert(operator_count() == 1);
+    assert(operator_count() == 2);
 
     flowsql::CppOperatorDescriptorV2 descriptor{};
     descriptor.struct_size = flowsql::kCppOperatorDescriptorV2Size;
@@ -11403,10 +11416,13 @@ void TestNpmBasicV2PluginExports() {
     assert(rejected.struct_size == flowsql::kCppOperatorDescriptorV2Size - 1);
     assert(std::string(rejected.category) == "sentinel");
     assert(describe(-1, &descriptor) == EINVAL);
-    assert(describe(1, &descriptor) == EINVAL);
+    assert(describe(1, &descriptor) == 0);
+    assert(std::string(descriptor.category) == "npm" && std::string(descriptor.name) == "basic");
+    assert(SameGuid(descriptor.contract_iid, flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V2));
+    assert(describe(2, &descriptor) == EINVAL);
     assert(describe(0, nullptr) == EINVAL);
     assert(create(-1, nullptr) == nullptr);
-    assert(create(1, nullptr) == nullptr);
+    assert(create(2, nullptr) == nullptr);
 
     SinglePoolQuerier missing_dependency(nullptr);
     assert(create(0, nullptr) == nullptr);
@@ -11444,6 +11460,103 @@ void TestNpmBasicV2PluginExports() {
     provider->ReleaseTask(task);
     outputs.clear();
     output_schema.reset();
+
+    void* v2_capability = create(1, &querier);
+    assert(v2_capability != nullptr);
+    auto* v2_provider = static_cast<flowsql::IBlockTransformOperatorV2*>(v2_capability);
+    flowsql::BlockTransformTaskConfigV2 v2_config{};
+    v2_config.struct_size = flowsql::kBlockTransformTaskConfigV2Size;
+    v2_config.contract_version = flowsql::kBlockTransformContractVersionV2;
+    v2_config.task_id = "v2-realtime";
+    v2_config.with_params_json =
+        R"({"input_namespace":"live","source_domains":"7:77","run_mode":"realtime"})";
+    v2_config.pushed_filter_plan_json = filter_plan.c_str();
+    flowsql::IBlockTransformTaskV2* v2_task = nullptr;
+    assert(v2_provider->CreateTask(v2_config, &v2_task) == 0 && v2_task != nullptr);
+    auto* capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV1*>(v2_task);
+    assert(capture_task != nullptr);
+    std::shared_ptr<arrow::Schema> v2_schema;
+    assert(v2_task->Open(flowsql::packet::PacketSchema(), &v2_schema) != 0);
+    v2_provider->ReleaseTask(v2_task);
+
+    assert(v2_provider->CreateTask(v2_config, &v2_task) == 0 && v2_task != nullptr);
+    capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV1*>(v2_task);
+    flowsql::CaptureQueueIdentityV1 identity;
+    identity.source_name = "live.capture";
+    identity.source_id = 7;
+    identity.observation_domain_id = 77;
+    identity.generation = 1;
+    assert(capture_task->BindCaptureSource(identity) == 0);
+    assert(capture_task->BindCaptureSource(identity) == EALREADY);
+    assert(v2_task->Open(flowsql::packet::PacketSchema(), &v2_schema) == 0);
+    assert(v2_schema != nullptr && v2_schema->Equals(*npm::NpmBasicResultSchema(), true));
+    flowsql::BlockTransformTimeDriveStateV1 time_state{};
+    time_state.struct_size = flowsql::kBlockTransformTimeDriveStateV1Size;
+    time_state.contract_version = flowsql::kBlockTransformTimeDriveVersionV1;
+    assert(v2_task->GetTimeDriveState(&time_state) == 0);
+    assert(time_state.armed == 1 && time_state.deadline_ns == 0);
+    flowsql::BlockTransformTimeEventV1 time_event{};
+    time_event.struct_size = flowsql::kBlockTransformTimeEventV1Size;
+    time_event.contract_version = flowsql::kBlockTransformTimeDriveVersionV1;
+    time_event.monotonic_now_ns = 100;
+    time_event.wall_now_ns = 1'000'000'000;
+    std::vector<flowsql::BlockTransformOutputV1> time_outputs;
+    assert(v2_task->OnTime(time_event, &time_outputs) == 0 && time_outputs.empty());
+    assert(v2_task->GetTimeDriveState(&time_state) == 0);
+    assert(time_state.armed == 1 && time_state.deadline_ns > 100);
+    const int64_t first_snapshot_deadline = time_state.deadline_ns;
+    const auto live_packet = MakeIpv4TcpPacket("192.0.2.10", 44000, "198.51.100.10", 443, {0x10}, kTcpAck, 100);
+    auto live_batch = MakeEncodedPacketBatch({MakeBatchPacketRecord(live_packet, 7, 100, 1)});
+    std::vector<flowsql::BlockTransformOutputV1> packet_outputs;
+    assert(v2_task->ProcessBlock(live_batch, 1, &packet_outputs) == 0);
+    assert(packet_outputs.size() == 1 && packet_outputs[0].batch != nullptr);
+    packet_outputs.clear();
+    flowsql::CaptureProgressV1 fact;
+    fact.source_id = 7;
+    fact.generation = 1;
+    fact.fact_sequence = 1;
+    fact.capture_time_ns = 100;
+    fact.packet_observed = true;
+    fact.backlog = flowsql::CaptureBacklogV1::kEmpty;
+    assert(capture_task->AcceptCaptureFact(fact) == 0);
+    assert(v2_task->GetTimeDriveState(&time_state) == 0 && time_state.deadline_ns == 0);
+    time_event.monotonic_now_ns = 101;
+    time_event.wall_now_ns = 500'000'000;
+    assert(v2_task->OnTime(time_event, &time_outputs) == 0 && time_outputs.empty());
+    assert(v2_task->GetTimeDriveState(&time_state) == 0);
+    assert(time_state.deadline_ns == first_snapshot_deadline);
+    assert(capture_task->AcceptCaptureFact(fact) == EINVAL);
+    fact.fact_sequence = 2;
+    fact.generation = 2;
+    assert(capture_task->AcceptCaptureFact(fact) == EINVAL);
+    fact.generation = 1;
+    fact.queue_id = 1;
+    assert(capture_task->AcceptCaptureFact(fact) == EINVAL);
+    fact.queue_id = 0;
+    fact.capture_time_ns = 200;
+    fact.packet_observed = false;
+    fact.backlog = flowsql::CaptureBacklogV1::kPresent;
+    assert(capture_task->AcceptCaptureFact(fact) == 0);
+    time_event.monotonic_now_ns = 102;
+    assert(v2_task->OnTime(time_event, &time_outputs) == 0 && time_outputs.empty());
+    fact.fact_sequence = 3;
+    fact.capture_time_ns = 300;
+    fact.backlog = flowsql::CaptureBacklogV1::kUnknown;
+    assert(capture_task->AcceptCaptureFact(fact) == 0);
+    time_event.monotonic_now_ns = 103;
+    assert(v2_task->OnTime(time_event, &time_outputs) == 0 && time_outputs.empty());
+    time_event.monotonic_now_ns = first_snapshot_deadline;
+    time_event.wall_now_ns = 100'000'000;
+    assert(v2_task->OnTime(time_event, &time_outputs) == 0);
+    assert(time_outputs.size() == 1 && time_outputs[0].batch->num_rows() == 1);
+    assert(time_outputs[0].batch->schema()->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(v2_task->GetTimeDriveState(&time_state) == 0);
+    assert(time_state.deadline_ns > first_snapshot_deadline);
+    time_outputs.clear();
+    v2_schema.reset();
+    v2_task->Cancel();
+    v2_provider->ReleaseTask(v2_task);
+    destroy(1, v2_capability);
 
     destroy(0, capability);
     destroy(0, nullptr);

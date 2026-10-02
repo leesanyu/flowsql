@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "icapture_block_stream_reader.h"
+
 namespace arrow {
 class RecordBatch;
 class Schema;
@@ -136,6 +138,15 @@ interface IBlockTransformTimeDrivenTaskV1 {
 /** V2 task combines the unchanged V1 data lifecycle with the optional time capability. */
 interface IBlockTransformTaskV2 : public IBlockTransformTaskV1,
                                   public IBlockTransformTimeDrivenTaskV1 {};
+
+/** Optional task-private capture binding. Runner serializes facts with data and time calls. */
+interface IBlockTransformCaptureFactTaskV1 {
+    virtual ~IBlockTransformCaptureFactTaskV1() = default;
+    /** Bind before Open. The task copies borrowed identity text. */
+    virtual int BindCaptureSource(const CaptureQueueIdentityV1& identity) = 0;
+    /** Deliver an ordered fact only after the corresponding batch has been released. */
+    virtual int AcceptCaptureFact(const CaptureProgressV1& fact) = 0;
+};
 
 constexpr uint32_t kBlockTransformManagedSinkContractVersionV1 = 1;
 

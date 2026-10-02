@@ -52,6 +52,7 @@
 #include "framework/interfaces/istream_factory.h"
 #include "framework/interfaces/istream_manager.h"
 #include "framework/interfaces/iblock_stream_channel.h"
+#include "framework/interfaces/icapture_block_stream_reader.h"
 #include "framework/interfaces/iblock_stream_factory.h"
 #include "framework/interfaces/ifilter_domain_resolver.h"
 #include "scheduler_json_codec.h"
@@ -1049,6 +1050,23 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
                              ? stmt.operator_with_params.front()
                              : stmt.with_params;
     const std::string with_params_json = MakeWithParamsJson(params);
+    auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV1*>(source);
+    CaptureQueueIdentityV1 capture_identity;
+    if (capture_reader) {
+        CaptureReaderLimitsV1 capture_limits;
+        int describe_rc = 0;
+        try {
+            describe_rc = capture_reader->Describe(&capture_identity, &capture_limits);
+        } catch (...) {
+            if (error) *error = "capture reader Describe threw";
+            return EFAULT;
+        }
+        if (describe_rc != 0 || ValidateCaptureReaderDescriptionV1(capture_identity, capture_limits) !=
+                                    CaptureDescriptionErrorV1::kNone) {
+            if (error) *error = "capture reader returned an invalid identity or limits";
+            return describe_rc != 0 ? describe_rc : EINVAL;
+        }
+    }
     const std::string task_id = NextStreamTaskId();
     FilterTaskSessionPlan transform_filter_plan;
     transform_filter_plan.pushed_filter_plan_json = kEmptyCanonicalFilterPlanV1;
@@ -1230,6 +1248,13 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
     auto execution = make_task_holder(execution_raw);
     const int input_bind_rc = BindBlockTransformInputSource(execution.get(), stmt.source, error);
     if (input_bind_rc != 0) return input_bind_rc;
+    if (capture_reader) {
+        auto* capture_task = dynamic_cast<IBlockTransformCaptureFactTaskV1*>(execution.get());
+        if (capture_task && capture_task->BindCaptureSource(capture_identity) != 0) {
+            if (error) *error = "capture source binding failed";
+            return EINVAL;
+        }
+    }
     auto* managed_task = dynamic_cast<IBlockTransformManagedSinkTaskV1*>(execution.get());
     if (managed_sink) {
         if (!managed_task) {
@@ -1253,6 +1278,7 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
     config.source_schema = source_schema;
     config.transform = runner_task;
     config.time_transform = execution_time;
+    config.capture_fact_task = capture_reader ? dynamic_cast<IBlockTransformCaptureFactTaskV1*>(execution.get()) : nullptr;
     config.source_residual = source_residual;
     config.transform_residual = transform_filter_plan.residual_expression;
     config.output_consumer = [appendable_sink, managed_sink](const BlockTransformOutputV1& output) {
@@ -1319,6 +1345,23 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     if (!appendable_sink) {
         if (error) *error = "multi block transform pipeline requires an appendable DataFrame sink";
         return EINVAL;
+    }
+    auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV1*>(source);
+    CaptureQueueIdentityV1 capture_identity;
+    if (capture_reader) {
+        CaptureReaderLimitsV1 capture_limits;
+        int describe_rc = 0;
+        try {
+            describe_rc = capture_reader->Describe(&capture_identity, &capture_limits);
+        } catch (...) {
+            if (error) *error = "capture reader Describe threw";
+            return EFAULT;
+        }
+        if (describe_rc != 0 ||
+            ValidateCaptureReaderDescriptionV1(capture_identity, capture_limits) != CaptureDescriptionErrorV1::kNone) {
+            if (error) *error = "capture reader returned an invalid identity or limits";
+            return describe_rc != 0 ? describe_rc : EINVAL;
+        }
     }
 
     std::vector<const std::string*> stage_filter_texts(providers.size() + 1);
@@ -1592,6 +1635,13 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         auto execution = make_task_holder(plan.provider, execution_raw);
         const int input_bind_rc = BindBlockTransformInputSource(execution.get(), stmt.source, error);
         if (input_bind_rc != 0) return input_bind_rc;
+        if (i == 0 && capture_reader) {
+            auto* capture_task = dynamic_cast<IBlockTransformCaptureFactTaskV1*>(execution.get());
+            if (capture_task && capture_task->BindCaptureSource(capture_identity) != 0) {
+                if (error) *error = "capture source binding failed";
+                return EINVAL;
+            }
+        }
         execution_tasks.push_back(execution_raw);
         time_tasks.push_back(execution_time);
         execution_holders.push_back(std::move(execution));
@@ -1618,6 +1668,9 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     config.source_schema = source_schema;
     config.transform = &chain_task;
     config.time_transform = has_time_tasks ? &chain_task : nullptr;
+    config.capture_fact_task = capture_reader && !execution_tasks.empty()
+                                   ? dynamic_cast<IBlockTransformCaptureFactTaskV1*>(execution_tasks.front())
+                                   : nullptr;
     config.source_residual = source_residual;
     config.output_consumer = [appendable_sink](const BlockTransformOutputV1& output) {
         if (!output.batch) return EINVAL;

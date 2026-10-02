@@ -943,6 +943,24 @@ static void TestCppPluginLifecycle() {
     }
     ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete", v2_req, rsp), error::OK);
 
+    v2_tmp = CopyToTmp(fixture_v2_so, upload, v2_filename);
+    ASSERT_TRUE(!v2_tmp.empty());
+    req = "{\"type\":\"cpp\",\"filename\":\"" + v2_filename + "\",\"tmp_path\":\"" + v2_tmp + "\"}";
+    ASSERT_EQ(routes["POST:/operators/upload"]("/operators/upload", req, rsp), error::OK);
+    ASSERT_EQ(::setenv("FLOWSQL_FIXTURE_CPP_OPERATOR_V2_VERSION_PAIR", "1", 1), 0);
+    ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", v2_req, rsp), error::OK);
+    ASSERT_EQ(p.QueryStatus("fixture", "transform"), OperatorStatus::kActive);
+    CppOperatorCapabilityLeaseV1 pair_v1;
+    CppOperatorCapabilityLeaseV1 pair_v2;
+    ASSERT_EQ(capability_registry->Acquire("fixture", "transform", IID_BLOCK_TRANSFORM_OPERATOR_V1, &pair_v1), 0);
+    ASSERT_EQ(capability_registry->Acquire("fixture", "transform", IID_BLOCK_TRANSFORM_OPERATOR_V2, &pair_v2), 0);
+    ASSERT_TRUE(pair_v1.capability != nullptr && pair_v2.capability != nullptr);
+    pair_v1 = {};
+    pair_v2 = {};
+    ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", v2_req, rsp), error::OK);
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete", v2_req, rsp), error::OK);
+    ASSERT_EQ(::unsetenv("FLOWSQL_FIXTURE_CPP_OPERATOR_V2_VERSION_PAIR"), 0);
+
     ASSERT_EQ(p.Register("fixture.transform", []() -> IOperator* { return new PassthroughOperator(); }), 0);
     v2_tmp = CopyToTmp(fixture_v2_so, upload, v2_filename);
     ASSERT_TRUE(!v2_tmp.empty());

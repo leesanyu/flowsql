@@ -220,7 +220,8 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
     const NpmObservationDomainMap& domain_map, const NpmPacketBatchView& batch, NpmSessionTable& sessions,
     packet::IPacketProtocolIdentifier& identifier, const std::vector<INpmAnalysisModule*>& modules,
     INpmResultWriter& writer, std::vector<NpmSessionEndEvent>* ended_events, const IFlowLabelMatcherV1* matcher,
-    const std::vector<NpmProtocolModuleAdapter*>& protocol_modules, NpmTcpStreamProvider* streams) {
+    const std::vector<NpmProtocolModuleAdapter*>& protocol_modules, NpmTcpStreamProvider* streams,
+    bool advance_offline_progress) {
     NpmPacketBatchProcessStatus status;
     if (ended_events == nullptr) {
         status.error = NpmPacketBatchProcessError::kNullOutput;
@@ -283,6 +284,7 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
                     return status;
                 }
                 AppendSessionEndEvents(&observed_sessions, packet.meta.timestamp_ns, &next_events);
+                if (!advance_offline_progress) continue;
 
                 NpmCaptureProgressUpdate update;
                 update.capture_time_ns = packet.meta.timestamp_ns;
@@ -452,6 +454,7 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
                 return status;
             }
             AppendSessionEndEvents(&observed_sessions, packet.meta.timestamp_ns, &next_events);
+            if (!advance_offline_progress) continue;
 
             NpmCaptureProgressUpdate update;
             update.capture_time_ns = packet.meta.timestamp_ns;

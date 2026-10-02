@@ -11,6 +11,7 @@
 #include <common/log.h>
 #include <exception>
 #include <iterator>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -530,6 +531,11 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         }
         return BlockTransformPipelineError::kInvalidArgument;
     }
+    auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV1*>(config_.source);
+    if (config_.capture_fact_task && !capture_reader) {
+        if (error) *error = "capture fact task requires a capture reader";
+        return BlockTransformPipelineError::kInvalidArgument;
+    }
 
     bool expected = false;
     if (!run_started_.compare_exchange_strong(expected, true)) {
@@ -824,8 +830,20 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         if (time_fired) continue;
 
         BlockPollEvent event;
+        std::optional<CaptureProgressV1> capture_fact;
         try {
-            event = config_.source->PollBlock(poll_timeout_ms);
+            if (config_.capture_fact_task) {
+                const auto capture_event = capture_reader->PollCapture(poll_timeout_ms);
+                if (capture_event.struct_size < sizeof(CapturePollEventV1) ||
+                    capture_event.contract_version != kCaptureBlockStreamContractVersionV1) {
+                    return fail(BlockTransformPipelineError::kSourcePollFailed,
+                                "capture poll contract version is invalid");
+                }
+                event = capture_event.block;
+                if (capture_event.has_progress) capture_fact = capture_event.progress;
+            } else {
+                event = config_.source->PollBlock(poll_timeout_ms);
+            }
         } catch (const std::exception& ex) {
             return fail(BlockTransformPipelineError::kSourcePollFailed,
                         std::string("block source PollBlock threw: ") + ex.what());
@@ -834,7 +852,28 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
                         "block source PollBlock threw an unknown exception");
         }
 
-        if (event.kind == BlockPollEvent::kTimeout) continue;
+        if (event.kind == BlockPollEvent::kTimeout) {
+            if (capture_fact) {
+                if (capture_fact->packet_observed) {
+                    return fail(BlockTransformPipelineError::kSourcePollFailed, "empty capture poll claimed a packet");
+                }
+                int fact_rc = 0;
+                try {
+                    fact_rc = config_.capture_fact_task->AcceptCaptureFact(*capture_fact);
+                } catch (...) {
+                    return fail(BlockTransformPipelineError::kTransformFailed, "capture fact delivery threw");
+                }
+                if (fact_rc != 0) {
+                    return fail(BlockTransformPipelineError::kTransformFailed,
+                                "capture fact delivery failed with code " + std::to_string(fact_rc));
+                }
+            }
+            continue;
+        }
+        if (capture_fact && event.kind != BlockPollEvent::kData) {
+            return fail(BlockTransformPipelineError::kSourcePollFailed,
+                        "capture terminal event carried an unexpected progress fact");
+        }
         if (event.kind == BlockPollEvent::kEof) break;
         if (event.kind == BlockPollEvent::kCancelled) {
             result->terminal = BlockTransformPipelineTerminal::kCancelled;
@@ -855,6 +894,26 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         if (event.kind != BlockPollEvent::kData || !event.batch) {
             return fail(BlockTransformPipelineError::kSourcePollFailed,
                         "block source returned an invalid data event");
+        }
+        std::string capture_contract_error;
+        if (config_.capture_fact_task) {
+            if (!capture_fact || !capture_fact->packet_observed || event.batch->num_rows() <= 0 ||
+                event.batch->num_columns() == 0) {
+                capture_contract_error = "capture data is missing packet progress";
+            } else {
+                auto timestamps = std::dynamic_pointer_cast<arrow::Int64Array>(event.batch->column(0));
+                if (!timestamps || timestamps->null_count() != 0) {
+                    capture_contract_error = "capture packet time column is invalid";
+                } else {
+                    int64_t max_time = timestamps->Value(0);
+                    for (int64_t row = 1; row < timestamps->length(); ++row) {
+                        max_time = std::max(max_time, timestamps->Value(row));
+                    }
+                    if (capture_fact->capture_time_ns > max_time) {
+                        capture_contract_error = "capture fact time exceeds processed packet time";
+                    }
+                }
+            }
         }
 
         ++result->input_blocks;
@@ -938,6 +997,21 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         }
         if (block_error != BlockTransformPipelineError::kNone) {
             return fail(block_error, std::move(block_error_message));
+        }
+        if (!capture_contract_error.empty()) {
+            return fail(BlockTransformPipelineError::kSourcePollFailed, std::move(capture_contract_error));
+        }
+        if (capture_fact) {
+            int fact_rc = 0;
+            try {
+                fact_rc = config_.capture_fact_task->AcceptCaptureFact(*capture_fact);
+            } catch (...) {
+                return fail(BlockTransformPipelineError::kTransformFailed, "capture fact delivery threw");
+            }
+            if (fact_rc != 0) {
+                return fail(BlockTransformPipelineError::kTransformFailed,
+                            "capture fact delivery failed with code " + std::to_string(fact_rc));
+            }
         }
         if (transform_rc == static_cast<int>(BlockTransformStatusV1::kStop)) {
             stopped = true;

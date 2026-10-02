@@ -375,7 +375,7 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::s
         std::vector<NpmSessionEndEvent> ended_events;
         status.process_status = ProcessNpmOfflinePacketBatch(
             config_.domains, *batch, *sessions_, *protocol_context_->Identifier(), modules_, *collector_, &ended_events,
-            matcher_.get(), protocol_modules_, streams_.get());
+            matcher_.get(), protocol_modules_, streams_.get(), config_.analysis.run_mode == NpmRunMode::kOffline);
         if (status.process_status.error != NpmPacketBatchProcessError::kNone) {
             RememberStreamFailure();
             return fail(NpmBasicOfflineBatchError::kBatchProcessError, "npm.basic offline batch processing failed");

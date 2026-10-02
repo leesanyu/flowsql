@@ -3,6 +3,7 @@
 
 #include <framework/core/capture_progress_tracker.h>
 #include <framework/core/capture_reader_state.h>
+#include <framework/core/pipeline.h>
 #include <framework/interfaces/iblock_stream_reader.h>
 #include <framework/interfaces/icapture_block_stream_reader.h>
 
@@ -177,6 +178,7 @@ class FakeCaptureReader final : public ICaptureBlockStreamReaderV1 {
     BlockPollEvent PollBlock(int) override { return {BlockPollEvent::kError, nullptr, ENOTSUP}; }
     int ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>& batch) override {
         const int rc = state_.Release(batch);
+        if (rc == 0) ++release_count_;
         wake_.notify_all();
         return rc;
     }
@@ -262,6 +264,7 @@ class FakeCaptureReader final : public ICaptureBlockStreamReaderV1 {
         wake_.notify_all();
     }
     void SetSourceDropped(uint64_t packets) { state_.SetSourceDropped(packets); }
+    int ReleaseCount() const { return release_count_; }
 
  private:
     CaptureProgressV1 MakeFact(uint64_t sequence, int64_t time_ns, bool packet, bool idle,
@@ -284,6 +287,7 @@ class FakeCaptureReader final : public ICaptureBlockStreamReaderV1 {
     bool packets_ = true;
     uint64_t next_packet_ = 0;
     bool idle_sent_ = false;
+    int release_count_ = 0;
     std::mutex mutex_;
     std::condition_variable wake_;
 };
@@ -376,6 +380,75 @@ void TestFakeCaptureReader() {
     assert(failed.Close() == 0);
 }
 
+class CaptureFactProbeTask final : public IBlockTransformTaskV1, public IBlockTransformCaptureFactTaskV1 {
+ public:
+    explicit CaptureFactProbeTask(FakeCaptureReader* reader, bool emit = false) : reader_(reader), emit_(emit) {}
+    int Open(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<arrow::Schema>* output) override {
+        *output = std::move(schema);
+        return 0;
+    }
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t,
+                     std::vector<BlockTransformOutputV1>* outputs) override {
+        ++processed;
+        if (emit_) outputs->push_back({input, 0});
+        return 0;
+    }
+    int Flush(std::vector<BlockTransformOutputV1>*) override {
+        ++flushed;
+        return 0;
+    }
+    void Cancel() override { ++cancelled; }
+    std::string LastError() const override { return {}; }
+    int BindCaptureSource(const CaptureQueueIdentityV1&) override { return 0; }
+    int AcceptCaptureFact(const CaptureProgressV1& fact) override {
+        if (fact.packet_observed) assert(reader_->ReleaseCount() == processed);
+        facts.push_back(fact.fact_sequence);
+        if (fact.fact_sequence == 3) reader_->Finish();
+        return 0;
+    }
+    int processed = 0;
+    int flushed = 0;
+    int cancelled = 0;
+    std::vector<uint64_t> facts;
+
+ private:
+    FakeCaptureReader* reader_;
+    bool emit_;
+};
+
+void TestCapturePipelineFactOrder() {
+    FakeCaptureReader reader(41);
+    CaptureFactProbeTask task(&reader);
+    BlockTransformPipelineConfig config;
+    config.source = &reader;
+    config.source_schema = packet::PacketSchema();
+    config.transform = &task;
+    config.capture_fact_task = &task;
+    config.poll_timeout_ms = 0;
+    config.output_consumer = [](const BlockTransformOutputV1&) { return 0; };
+    BlockTransformPipelineRunner runner(std::move(config));
+    BlockTransformPipelineResult result;
+    std::string error;
+    assert(runner.Run(&result, &error) == BlockTransformPipelineError::kNone);
+    assert(error.empty() && result.terminal == BlockTransformPipelineTerminal::kCompleted);
+    assert(task.processed == 2 && reader.ReleaseCount() == 2 && task.flushed == 1);
+    assert(task.facts == std::vector<uint64_t>({1, 2, 3}));
+    assert(reader.Close() == 0);
+
+    FakeCaptureReader failed_reader(42);
+    CaptureFactProbeTask failed_task(&failed_reader, true);
+    BlockTransformPipelineConfig failed_config;
+    failed_config.source = &failed_reader;
+    failed_config.source_schema = packet::PacketSchema();
+    failed_config.transform = &failed_task;
+    failed_config.capture_fact_task = &failed_task;
+    failed_config.output_consumer = [](const BlockTransformOutputV1&) { return EIO; };
+    BlockTransformPipelineRunner failed_runner(std::move(failed_config));
+    assert(failed_runner.Run(&result, &error) == BlockTransformPipelineError::kOutputConsumerFailed);
+    assert(failed_reader.ReleaseCount() == 1 && failed_task.facts.empty());
+    assert(failed_task.flushed == 0 && failed_task.cancelled == 1);
+}
+
 }  // namespace
 
 void test_capture_contract_description() {
@@ -426,5 +499,6 @@ void test_capture_contract_description() {
     TestCaptureReaderState();
     TestCaptureProgressTracker();
     TestFakeCaptureReader();
+    TestCapturePipelineFactOrder();
     std::printf("[PASS] capture reader public description contract\n");
 }

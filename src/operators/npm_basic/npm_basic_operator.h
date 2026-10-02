@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 
@@ -17,7 +18,8 @@ namespace flowsql::npm {
 class NpmBasicOperator;
 class NpmBasicTaskRuntime;
 
-class NpmBasicTask final : public IBlockTransformTaskV1,
+class NpmBasicTask final : public IBlockTransformTaskV2,
+                           public IBlockTransformCaptureFactTaskV1,
                            public IBlockTransformManagedSinkTaskV1,
                            public IBlockTransformInputSourceTaskV1 {
  public:
@@ -26,10 +28,8 @@ class NpmBasicTask final : public IBlockTransformTaskV1,
     NpmBasicTask(NpmBasicTask&&) = delete;
     NpmBasicTask& operator=(NpmBasicTask&&) = delete;
 
-    int Open(std::shared_ptr<arrow::Schema> input_schema,
-             std::shared_ptr<arrow::Schema>* output_schema) override;
-    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
-                     int64_t ts_ms,
+    int Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema>* output_schema) override;
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
                      std::vector<BlockTransformOutputV1>* outputs) override;
     int Flush(std::vector<BlockTransformOutputV1>* outputs) override;
     void Cancel() override;
@@ -37,6 +37,10 @@ class NpmBasicTask final : public IBlockTransformTaskV1,
     int BindInputSource(const char* source) override;
     int BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) override;
     std::string ManagedSinkResultJson() const override;
+    int BindCaptureSource(const CaptureQueueIdentityV1& identity) override;
+    int AcceptCaptureFact(const CaptureProgressV1& fact) override;
+    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override;
+    int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) override;
 
     const std::string& TaskId() const noexcept;
     const std::string& WithParamsJson() const noexcept;
@@ -54,9 +58,7 @@ class NpmBasicTask final : public IBlockTransformTaskV1,
 
     friend class NpmBasicOperator;
 
-    NpmBasicTask(const BlockTransformTaskConfigV1& config,
-                 IQuerier* querier,
-                 const NpmBasicOperator* owner);
+    NpmBasicTask(const BlockTransformTaskConfigV1& config, IQuerier* querier, const NpmBasicOperator* owner, bool v2);
     ~NpmBasicTask() override;
 
     static int ErrorCodeForState(State state) noexcept;
@@ -75,6 +77,13 @@ class NpmBasicTask final : public IBlockTransformTaskV1,
     IChannel* managed_channel_ = nullptr;
     IQuerier* querier_ = nullptr;
     const NpmBasicOperator* owner_ = nullptr;
+    bool v2_ = false;
+    bool capture_bound_ = false;
+    CaptureQueueIdentityV1 capture_identity_;
+    std::string capture_source_name_;
+    uint64_t last_capture_fact_sequence_ = 0;
+    std::deque<CaptureProgressV1> pending_capture_facts_;
+    bool realtime_origin_initialized_ = false;
     std::shared_ptr<NpmBasicTaskRuntime> runtime_;
     std::atomic<State> state_{State::kCreated};
     std::atomic<const char*> last_error_{nullptr};
@@ -83,7 +92,7 @@ class NpmBasicTask final : public IBlockTransformTaskV1,
     bool has_observed_at_ = false;
 };
 
-class NpmBasicOperator final : public IPlugin, public IBlockTransformOperatorV1 {
+class NpmBasicOperator final : public IPlugin, public IBlockTransformOperatorV1, public IBlockTransformOperatorV2 {
  public:
     NpmBasicOperator() noexcept = default;
     /** Creates an already-started in-process provider for focused unit tests. */
@@ -98,9 +107,10 @@ class NpmBasicOperator final : public IPlugin, public IBlockTransformOperatorV1 
     std::string Category() const override;
     std::string Name() const override;
     std::string Description() const override;
-    int CreateTask(const BlockTransformTaskConfigV1& config,
-                   IBlockTransformTaskV1** task) override;
+    int CreateTask(const BlockTransformTaskConfigV1& config, IBlockTransformTaskV1** task) override;
     void ReleaseTask(IBlockTransformTaskV1* task) override;
+    int CreateTask(const BlockTransformTaskConfigV2& config, IBlockTransformTaskV2** task) override;
+    void ReleaseTask(IBlockTransformTaskV2* task) override;
 
  private:
     IQuerier* querier_ = nullptr;

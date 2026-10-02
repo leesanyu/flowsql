@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "binaddon_host_plugin.h"
 
@@ -996,7 +991,19 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
 
         const std::string key = meta.category + "." + meta.name;
         if (!local_keys.insert(ToLowerAscii(key)).second) {
-            return mark_broken(error::CONFLICT, "duplicate operators inside plugin", abi);
+            bool version_pair = abi == kCppOperatorPluginAbiVersionV2;
+            const auto& current = loaded->capabilities.back();
+            for (size_t previous = 0; previous + 1 < loaded->capabilities.size(); ++previous) {
+                const auto& existing = loaded->capabilities[previous];
+                if (ToLowerAscii(existing.category + "." + existing.name) != ToLowerAscii(key)) continue;
+                const bool v1_v2 = SameGuid(existing.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1) &&
+                                   SameGuid(current.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V2);
+                const bool v2_v1 = SameGuid(existing.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V2) &&
+                                   SameGuid(current.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1);
+                version_pair = version_pair && (v1_v2 || v2_v1);
+            }
+            if (!version_pair) return mark_broken(error::CONFLICT, "duplicate operators inside plugin", abi);
+            continue;
         }
         keys.push_back(key);
         names.push_back(meta.name);

@@ -73,13 +73,13 @@ struct NpmPacketBatchProcessStatus {
     int module_error = 0;
 };
 
-/** Processes a validated packet batch and advances offline event time after each successful row. */
+/** Processes a validated packet batch; realtime callers defer event time until the released capture fact. */
 NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
     const NpmObservationDomainMap& domain_map, const NpmPacketBatchView& batch, NpmSessionTable& sessions,
     packet::IPacketProtocolIdentifier& identifier, const std::vector<INpmAnalysisModule*>& modules,
     INpmResultWriter& writer, std::vector<NpmSessionEndEvent>* ended_events,
     const IFlowLabelMatcherV1* matcher = nullptr, const std::vector<NpmProtocolModuleAdapter*>& protocol_modules = {},
-    NpmTcpStreamProvider* streams = nullptr);
+    NpmTcpStreamProvider* streams = nullptr, bool advance_offline_progress = true);
 
 }  // namespace flowsql::npm
 

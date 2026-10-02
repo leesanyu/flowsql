@@ -112,6 +112,8 @@ struct BlockTransformPipelineConfig {
     IBlockTransformTaskV1* transform = nullptr;
     // Optional time interface of the same execution task as transform. Null preserves V1 behavior.
     IBlockTransformTimeDrivenTaskV1* time_transform = nullptr;
+    // Present only for a task-exclusive capture reader and the same execution transform task.
+    IBlockTransformCaptureFactTaskV1* capture_fact_task = nullptr;
     std::shared_ptr<const BoundFilterExpr> source_residual;
     std::shared_ptr<const BoundFilterExpr> transform_residual;
     std::function<int(const BlockTransformOutputV1&)> output_consumer;
