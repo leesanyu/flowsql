@@ -34,6 +34,7 @@
 #include <operators/npm_basic/output/npm_basic_result_encoder.h>
 #include <operators/npm_basic/output/npm_session_result_encoder.h>
 #include <plugins/npi/iprotocol.h>
+#include <tests/support/scoped_shared_library.h>
 #include <common/loader.hpp>
 
 #include <arrow/api.h>
@@ -11379,24 +11380,24 @@ void TestNpmBasicTaskCancelBeforeOpenAndDuringProcess() {
 }
 
 void TestNpmBasicV2PluginExports() {
-    void* handle = dlopen(FLOWSQL_NPM_BASIC_PLUGIN_PATH, RTLD_NOW | RTLD_LOCAL);
-    assert(handle != nullptr);
+    flowsql::test::ScopedSharedLibrary library(FLOWSQL_NPM_BASIC_PLUGIN_PATH);
+    assert(library);
 
     auto abi_version = reinterpret_cast<flowsql::CppOperatorPluginAbiVersionFn>(
-        dlsym(handle, flowsql::kCppOperatorPluginAbiVersionSymbol));
+        library.Symbol(flowsql::kCppOperatorPluginAbiVersionSymbol));
     auto operator_count =
-        reinterpret_cast<flowsql::CppOperatorPluginCountFn>(dlsym(handle, flowsql::kCppOperatorPluginCountSymbol));
+        reinterpret_cast<flowsql::CppOperatorPluginCountFn>(library.Symbol(flowsql::kCppOperatorPluginCountSymbol));
     auto describe = reinterpret_cast<flowsql::CppOperatorPluginDescribeV2Fn>(
-        dlsym(handle, flowsql::kCppOperatorPluginDescribeV2Symbol));
+        library.Symbol(flowsql::kCppOperatorPluginDescribeV2Symbol));
     auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityV2Fn>(
-        dlsym(handle, flowsql::kCppOperatorPluginCreateCapabilityV2Symbol));
+        library.Symbol(flowsql::kCppOperatorPluginCreateCapabilityV2Symbol));
     auto destroy = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityV2Fn>(
-        dlsym(handle, flowsql::kCppOperatorPluginDestroyCapabilityV2Symbol));
+        library.Symbol(flowsql::kCppOperatorPluginDestroyCapabilityV2Symbol));
     assert(abi_version != nullptr && operator_count != nullptr && describe != nullptr);
     assert(create != nullptr && destroy != nullptr);
-    assert(dlsym(handle, "pluginregist") == nullptr);
-    assert(dlsym(handle, flowsql::kCppOperatorPluginCreateV1Symbol) == nullptr);
-    assert(dlsym(handle, flowsql::kCppOperatorPluginDestroyV1Symbol) == nullptr);
+    assert(library.Symbol("pluginregist") == nullptr);
+    assert(library.Symbol(flowsql::kCppOperatorPluginCreateV1Symbol) == nullptr);
+    assert(library.Symbol(flowsql::kCppOperatorPluginDestroyV1Symbol) == nullptr);
     assert(abi_version() == flowsql::kCppOperatorPluginAbiVersionV2);
     assert(operator_count() == 2);
 
@@ -11560,7 +11561,6 @@ void TestNpmBasicV2PluginExports() {
 
     destroy(0, capability);
     destroy(0, nullptr);
-    assert(dlclose(handle) == 0);
 }
 
 struct ProtocolInputTrace {

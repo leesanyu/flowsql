@@ -36,6 +36,7 @@
 #include <rapidjson/document.h>
 #include <services/binaddon/binaddon_host_plugin.h>
 #include <services/catalog/catalog_plugin.h>
+#include <tests/support/scoped_shared_library.h>
 
 using namespace flowsql;
 using namespace flowsql::binaddon;
@@ -650,43 +651,43 @@ static void TestCppOperatorPluginContracts() {
 
     const std::string v1_path = FIXTURE_CPP_SO_PATH;
     ASSERT_TRUE(!v1_path.empty());
-    void* v1_handle = dlopen(v1_path.c_str(), RTLD_NOW | RTLD_LOCAL);
-    ASSERT_TRUE(v1_handle != nullptr);
+    flowsql::test::ScopedSharedLibrary v1_library(v1_path.c_str());
+    ASSERT_TRUE(v1_library);
     auto* v1_abi =
-        reinterpret_cast<CppOperatorPluginAbiVersionFn>(dlsym(v1_handle, kCppOperatorPluginAbiVersionSymbol));
-    auto* v1_count = reinterpret_cast<CppOperatorPluginCountFn>(dlsym(v1_handle, kCppOperatorPluginCountSymbol));
-    auto* v1_create = reinterpret_cast<CppOperatorPluginCreateV1Fn>(dlsym(v1_handle, kCppOperatorPluginCreateV1Symbol));
+        reinterpret_cast<CppOperatorPluginAbiVersionFn>(v1_library.Symbol(kCppOperatorPluginAbiVersionSymbol));
+    auto* v1_count = reinterpret_cast<CppOperatorPluginCountFn>(v1_library.Symbol(kCppOperatorPluginCountSymbol));
+    auto* v1_create =
+        reinterpret_cast<CppOperatorPluginCreateV1Fn>(v1_library.Symbol(kCppOperatorPluginCreateV1Symbol));
     auto* v1_destroy =
-        reinterpret_cast<CppOperatorPluginDestroyV1Fn>(dlsym(v1_handle, kCppOperatorPluginDestroyV1Symbol));
+        reinterpret_cast<CppOperatorPluginDestroyV1Fn>(v1_library.Symbol(kCppOperatorPluginDestroyV1Symbol));
     ASSERT_TRUE(v1_abi != nullptr);
     ASSERT_TRUE(v1_count != nullptr);
     ASSERT_TRUE(v1_create != nullptr);
     ASSERT_TRUE(v1_destroy != nullptr);
     ASSERT_EQ(v1_abi(), kCppOperatorPluginAbiVersionV1);
     ASSERT_EQ(v1_count(), 1);
-    ASSERT_TRUE(dlsym(v1_handle, kCppOperatorPluginDescribeV2Symbol) == nullptr);
-    ASSERT_TRUE(dlsym(v1_handle, kCppOperatorPluginCreateCapabilityV2Symbol) == nullptr);
-    ASSERT_TRUE(dlsym(v1_handle, kCppOperatorPluginDestroyCapabilityV2Symbol) == nullptr);
+    ASSERT_TRUE(v1_library.Symbol(kCppOperatorPluginDescribeV2Symbol) == nullptr);
+    ASSERT_TRUE(v1_library.Symbol(kCppOperatorPluginCreateCapabilityV2Symbol) == nullptr);
+    ASSERT_TRUE(v1_library.Symbol(kCppOperatorPluginDestroyCapabilityV2Symbol) == nullptr);
     IOperator* v1_operator = v1_create(0);
     ASSERT_TRUE(v1_operator != nullptr);
     ASSERT_EQ(v1_operator->Category(), std::string("cppdemo"));
     ASSERT_EQ(v1_operator->Name(), std::string("echo"));
     v1_destroy(v1_operator);
-    ASSERT_EQ(dlclose(v1_handle), 0);
 
     const std::string v2_path = FIXTURE_CPP_V2_SO_PATH;
     ASSERT_TRUE(!v2_path.empty());
-    void* v2_handle = dlopen(v2_path.c_str(), RTLD_NOW | RTLD_LOCAL);
-    ASSERT_TRUE(v2_handle != nullptr);
+    flowsql::test::ScopedSharedLibrary v2_library(v2_path.c_str());
+    ASSERT_TRUE(v2_library);
     auto* v2_abi =
-        reinterpret_cast<CppOperatorPluginAbiVersionFn>(dlsym(v2_handle, kCppOperatorPluginAbiVersionSymbol));
-    auto* v2_count = reinterpret_cast<CppOperatorPluginCountFn>(dlsym(v2_handle, kCppOperatorPluginCountSymbol));
+        reinterpret_cast<CppOperatorPluginAbiVersionFn>(v2_library.Symbol(kCppOperatorPluginAbiVersionSymbol));
+    auto* v2_count = reinterpret_cast<CppOperatorPluginCountFn>(v2_library.Symbol(kCppOperatorPluginCountSymbol));
     auto* v2_describe =
-        reinterpret_cast<CppOperatorPluginDescribeV2Fn>(dlsym(v2_handle, kCppOperatorPluginDescribeV2Symbol));
+        reinterpret_cast<CppOperatorPluginDescribeV2Fn>(v2_library.Symbol(kCppOperatorPluginDescribeV2Symbol));
     auto* v2_create = reinterpret_cast<CppOperatorPluginCreateCapabilityV2Fn>(
-        dlsym(v2_handle, kCppOperatorPluginCreateCapabilityV2Symbol));
+        v2_library.Symbol(kCppOperatorPluginCreateCapabilityV2Symbol));
     auto* v2_destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityV2Fn>(
-        dlsym(v2_handle, kCppOperatorPluginDestroyCapabilityV2Symbol));
+        v2_library.Symbol(kCppOperatorPluginDestroyCapabilityV2Symbol));
     ASSERT_TRUE(v2_abi != nullptr);
     ASSERT_TRUE(v2_count != nullptr);
     ASSERT_TRUE(v2_describe != nullptr);
@@ -694,9 +695,9 @@ static void TestCppOperatorPluginContracts() {
     ASSERT_TRUE(v2_destroy != nullptr);
     ASSERT_EQ(v2_abi(), kCppOperatorPluginAbiVersionV2);
     ASSERT_EQ(v2_count(), 3);
-    ASSERT_TRUE(dlsym(v2_handle, kCppOperatorPluginCreateV1Symbol) == nullptr);
-    ASSERT_TRUE(dlsym(v2_handle, "flowsql_stream_operator_count") == nullptr);
-    ASSERT_TRUE(dlsym(v2_handle, "flowsql_block_transform_operator_count") == nullptr);
+    ASSERT_TRUE(v2_library.Symbol(kCppOperatorPluginCreateV1Symbol) == nullptr);
+    ASSERT_TRUE(v2_library.Symbol("flowsql_stream_operator_count") == nullptr);
+    ASSERT_TRUE(v2_library.Symbol("flowsql_block_transform_operator_count") == nullptr);
 
     CppOperatorDescriptorV2 classic{};
     classic.struct_size = kCppOperatorDescriptorV2Size;
@@ -774,7 +775,6 @@ static void TestCppOperatorPluginContracts() {
     time_transform_operator->ReleaseTask(time_task);
     v2_destroy(2, time_transform_capability);
     v2_destroy(0, nullptr);
-    ASSERT_EQ(dlclose(v2_handle), 0);
 
     std::puts("[PASS] T42 C++ operator plugin V1/V2 contracts");
 }

@@ -10,6 +10,7 @@
 #include <framework/core/packet_codec.h>
 #include <framework/interfaces/cpp_operator_plugin_abi.h>
 #include <framework/interfaces/iblock_transform_operator.h>
+#include <tests/support/scoped_shared_library.h>
 #endif
 
 #include <httplib.h>
@@ -336,12 +337,12 @@ std::shared_ptr<arrow::RecordBatch> LabelingInput() {
 }
 
 void RunPublishedLabelingTask(Runtime* runtime, const char* reference, uint32_t expected_label) {
-    void* handle = dlopen(FLOWSQL_NPM_BASIC_PLUGIN_PATH, RTLD_NOW | RTLD_LOCAL);
-    assert(handle != nullptr);
+    flowsql::test::ScopedSharedLibrary library(FLOWSQL_NPM_BASIC_PLUGIN_PATH);
+    assert(library);
     auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityV2Fn>(
-        dlsym(handle, flowsql::kCppOperatorPluginCreateCapabilityV2Symbol));
+        library.Symbol(flowsql::kCppOperatorPluginCreateCapabilityV2Symbol));
     auto destroy = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityV2Fn>(
-        dlsym(handle, flowsql::kCppOperatorPluginDestroyCapabilityV2Symbol));
+        library.Symbol(flowsql::kCppOperatorPluginDestroyCapabilityV2Symbol));
     assert(create != nullptr && destroy != nullptr);
     void* capability = create(0, runtime->Querier());
     assert(capability != nullptr);
@@ -378,7 +379,6 @@ void RunPublishedLabelingTask(Runtime* runtime, const char* reference, uint32_t 
     outputs.clear();
     output_schema.reset();
     destroy(0, capability);
-    dlclose(handle);
 }
 #endif
 

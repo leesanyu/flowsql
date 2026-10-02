@@ -1,15 +1,14 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#include <common/loader.hpp>
 #include <framework/core/packet_codec.h>
 #include <framework/interfaces/cpp_operator_plugin_abi.h>
 #include <framework/interfaces/iblock_transform_operator.h>
 #include <plugins/npi/packet_decoder.h>
+#include <tests/support/scoped_shared_library.h>
+#include <common/loader.hpp>
 
 #include <arrow/api.h>
-
-#include <dlfcn.h>
 
 #include <charconv>
 #include <chrono>
@@ -96,53 +95,51 @@ uint64_t ValidateOutputs(const std::vector<flowsql::BlockTransformOutputV1>& out
     return count;
 }
 
-}  // namespace
-
-int main(int argc, char* argv[]) {
-    auto* loader = flowsql::PluginLoader::Single();
+struct BenchmarkCapability {
     flowsql::IBlockTransformOperatorV1* provider = nullptr;
     flowsql::IBlockTransformTaskV1* task = nullptr;
-    void* operator_library = nullptr;
     flowsql::CppOperatorPluginDestroyCapabilityV2Fn destroy_capability = nullptr;
-    try {
-        Require(argc == 1 || argc == 3, "usage: benchmark_npm_basic [batch_rows(1..4096) iterations(1..1000)]");
-        const int batch_rows = argc == 3 ? ParsePositive(argv[1], 4096) : 512;
-        const int iterations = argc == 3 ? ParsePositive(argv[2], 1000) : 100;
-        const std::string npi_option = std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\"}";
-        const char* libraries[] = {FLOWSQL_NPI_PLUGIN_PATH};
-        const char* options[] = {npi_option.c_str()};
-        Require(loader->Load(".", libraries, options, 1) == 0, "NPI plugin loading failed");
-        Require(loader->StartAll() == 0, "plugin start failed");
-        auto* protocol = static_cast<flowsql::IProtocol*>(loader->First(flowsql::IID_PROTOCOL));
-        Require(protocol != nullptr, "NPI protocol interface not registered");
-        const auto input = MakeInput(batch_rows, protocol);
-        operator_library = dlopen(FLOWSQL_NPM_BASIC_PLUGIN_PATH, RTLD_NOW | RTLD_LOCAL);
-        Require(operator_library != nullptr, "npm.basic library loading failed");
-        const auto version = reinterpret_cast<flowsql::CppOperatorPluginAbiVersionFn>(
-            dlsym(operator_library, flowsql::kCppOperatorPluginAbiVersionSymbol));
-        const auto count = reinterpret_cast<flowsql::CppOperatorPluginCountFn>(
-            dlsym(operator_library, flowsql::kCppOperatorPluginCountSymbol));
-        const auto describe = reinterpret_cast<flowsql::CppOperatorPluginDescribeV2Fn>(
-            dlsym(operator_library, flowsql::kCppOperatorPluginDescribeV2Symbol));
-        const auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityV2Fn>(
-            dlsym(operator_library, flowsql::kCppOperatorPluginCreateCapabilityV2Symbol));
-        destroy_capability = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityV2Fn>(
-            dlsym(operator_library, flowsql::kCppOperatorPluginDestroyCapabilityV2Symbol));
-        Require(version && count && describe && create && destroy_capability,
-                "npm.basic V2 plugin symbols missing");
-        Require(version() == flowsql::kCppOperatorPluginAbiVersionV2 && count() == 1,
-                "npm.basic plugin ABI mismatch");
-        flowsql::CppOperatorDescriptorV2 descriptor{};
-        descriptor.struct_size = flowsql::kCppOperatorDescriptorV2Size;
-        Require(describe(0, &descriptor) == 0 && descriptor.category != nullptr &&
-                    descriptor.name != nullptr && std::string_view(descriptor.category) == "npm" &&
-                    std::string_view(descriptor.name) == "basic",
-                "npm.basic operator descriptor mismatch");
-        provider = static_cast<flowsql::IBlockTransformOperatorV1*>(create(0, loader));
-        Require(provider != nullptr, "npm.basic capability creation failed");
-        const uint64_t packets = static_cast<uint64_t>(batch_rows) * static_cast<uint64_t>(iterations);
-        std::cout << "mode,packets,batch_rows,iterations,wall_ms,packets_per_second,output_rows\n";
-        const auto measure = [&](const char* mode, const char* with_params_json) {
+
+    ~BenchmarkCapability() {
+        if (task != nullptr) {
+            task->Cancel();
+            provider->ReleaseTask(task);
+        }
+        if (provider != nullptr && destroy_capability != nullptr) destroy_capability(0, provider);
+    }
+};
+
+void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader, flowsql::IProtocol* protocol) {
+    const auto input = MakeInput(batch_rows, protocol);
+    flowsql::test::ScopedSharedLibrary operator_library(FLOWSQL_NPM_BASIC_PLUGIN_PATH);
+    Require(static_cast<bool>(operator_library), "npm.basic library loading failed");
+    const auto version = reinterpret_cast<flowsql::CppOperatorPluginAbiVersionFn>(
+        operator_library.Symbol(flowsql::kCppOperatorPluginAbiVersionSymbol));
+    const auto count = reinterpret_cast<flowsql::CppOperatorPluginCountFn>(
+        operator_library.Symbol(flowsql::kCppOperatorPluginCountSymbol));
+    const auto describe = reinterpret_cast<flowsql::CppOperatorPluginDescribeV2Fn>(
+        operator_library.Symbol(flowsql::kCppOperatorPluginDescribeV2Symbol));
+    const auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityV2Fn>(
+        operator_library.Symbol(flowsql::kCppOperatorPluginCreateCapabilityV2Symbol));
+    BenchmarkCapability capability;
+    capability.destroy_capability = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityV2Fn>(
+        operator_library.Symbol(flowsql::kCppOperatorPluginDestroyCapabilityV2Symbol));
+    auto& provider = capability.provider;
+    auto& task = capability.task;
+    const auto destroy_capability = capability.destroy_capability;
+    Require(version && count && describe && create && destroy_capability, "npm.basic V2 plugin symbols missing");
+    Require(version() == flowsql::kCppOperatorPluginAbiVersionV2 && count() == 2, "npm.basic plugin ABI mismatch");
+    flowsql::CppOperatorDescriptorV2 descriptor{};
+    descriptor.struct_size = flowsql::kCppOperatorDescriptorV2Size;
+    Require(describe(0, &descriptor) == 0 && descriptor.category != nullptr && descriptor.name != nullptr &&
+                std::string_view(descriptor.category) == "npm" && std::string_view(descriptor.name) == "basic",
+            "npm.basic operator descriptor mismatch");
+    provider = static_cast<flowsql::IBlockTransformOperatorV1*>(create(0, loader));
+    Require(provider != nullptr, "npm.basic capability creation failed");
+    const uint64_t packets = static_cast<uint64_t>(batch_rows) * static_cast<uint64_t>(iterations);
+    std::cout << "mode,packets,batch_rows,iterations,wall_ms,packets_per_second,output_rows\n";
+    const auto measure =
+        [&](const char* mode, const char* with_params_json) {
             flowsql::BlockTransformTaskConfigV1 config;
             config.task_id = mode;
             config.with_params_json = with_params_json;
@@ -188,25 +185,32 @@ int main(int argc, char* argv[]) {
                       << std::setprecision(3) << wall_ms << ',' << static_cast<double>(packets) * 1000.0 / wall_ms
                       << ',' << output_rows << '\n';
         };
-        measure("basic-only", R"({"input_namespace":"benchmark.packet","source_domains":"0:7"})");
-        measure("basic+session",
-                R"({"input_namespace":"benchmark.packet","source_domains":"0:7",)"
-                R"("features":"basic,session","observing":"basic"})");
-        destroy_capability(0, provider);
-        provider = nullptr;
-        dlclose(operator_library);
-        operator_library = nullptr;
+    measure("basic-only", R"({"input_namespace":"benchmark.packet","source_domains":"0:7"})");
+    measure("basic+session", R"({"input_namespace":"benchmark.packet","source_domains":"0:7",)"
+                             R"("features":"basic,session","observing":"basic"})");
+}
+
+}  // namespace
+
+int main(int argc, char* argv[]) {
+    auto* loader = flowsql::PluginLoader::Single();
+    try {
+        Require(argc == 1 || argc == 3, "usage: benchmark_npm_basic [batch_rows(1..4096) iterations(1..1000)]");
+        const int batch_rows = argc == 3 ? ParsePositive(argv[1], 4096) : 512;
+        const int iterations = argc == 3 ? ParsePositive(argv[2], 1000) : 100;
+        const std::string npi_option = std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\"}";
+        const char* libraries[] = {FLOWSQL_NPI_PLUGIN_PATH};
+        const char* options[] = {npi_option.c_str()};
+        Require(loader->Load(".", libraries, options, 1) == 0, "NPI plugin loading failed");
+        Require(loader->StartAll() == 0, "plugin start failed");
+        auto* protocol = static_cast<flowsql::IProtocol*>(loader->First(flowsql::IID_PROTOCOL));
+        Require(protocol != nullptr, "NPI protocol interface not registered");
+        RunBenchmark(batch_rows, iterations, loader, protocol);
         loader->StopAll();
         loader->Unload();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "benchmark_npm_basic failed: " << error.what() << '\n';
-        if (task != nullptr) {
-            task->Cancel();
-            provider->ReleaseTask(task);
-        }
-        if (provider != nullptr && destroy_capability != nullptr) destroy_capability(0, provider);
-        if (operator_library != nullptr) dlclose(operator_library);
         loader->StopAll();
         loader->Unload();
         return 1;
