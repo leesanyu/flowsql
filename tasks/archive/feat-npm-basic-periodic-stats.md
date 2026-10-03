@@ -166,3 +166,17 @@ Basic 统一使用 `npm_basic_history_v1`、`npm_basic_latest_v1`、`npm_basic_f
 日志：`/tmp/npm-periodic-full-build.log`、`/tmp/npm-periodic-full-ctest-final.log`、`/tmp/npm-periodic-asan-runtime-test.log`、`/tmp/npm-periodic-benchmark-smoke.log`。
 
 独立发现：完整 test_npm_basic 的 LeakSanitizer 检出未修改的 NPI 初始化路径泄漏，1,222,349 bytes / 47 allocations，堆栈位于 ObjectsPool/NetworkLayer 和 TestNpiPipelinePoolOptionAndLeaseContract；复现目录 `/tmp/flowsql-npm-periodic-asan`，日志 `/tmp/npm-periodic-asan-test.log`。归属 NPI 生命周期任务，依跨任务隔离规则记录；周期专属 Sanitizer 和普通完整 CTest 的结果如上，未关闭 leak 检查或加入抑制规则。
+
+
+### 2026-10-03 复检修复
+
+提交 c0b7992 后复检确认正常 Stop 的最后采集事实未应用、显式 final 的 observed_at 仍为采集时间、公开 task 遮蔽迟到诊断三项契约偏差。用户依次授权修复，现已完成以下回归闭环；此前验收未覆盖的边界以本次结果为准。
+
+- Stop：正常 Flush 先应用已接受采集事实，再排空终态。公开 task 与 Scheduler 最后批次归还时 Stop 的四条周期记录与 EOF 一致；Cancel 不补终态，重复 Flush 不重发，reader/batch 正确归还。
+- 生成时间：Basic 收集器的 router 与直接 Drain final 投影均使用实际生成时刻；RST、idle、tuple reuse、EOF 验证生成时间范围，final 周期八列 NULL，采集时间/计数与 Session 时间语义保持原契约。
+- 迟到诊断：公开 task 的通用处理错误保留 runtime 详情；公开 task 与真实 PCAP Scheduler SQL 断言来源、timestamp_ns、closed_boundary_ns，失败后首次原因和已交付前缀保持不变。
+- 两项 P2 新回归均验证修复前失败、修复后通过；第二项局部 CTest 3/3 通过，23.33 秒。
+- 最终全量构建通过，无 Error/Warning；沙箱外完整 CTest 43/43 通过，74.89 秒；重新构建后的周期 ASan/UBSan/LeakSanitizer 3/3 通过，0.39 秒。Sanitizer 在沙箱内受 ptrace 限制后在沙箱外重跑，未禁用泄漏检查。
+- clang-format-18 修改区域检查、git diff --check 和范围核查通过。按用户最新指令本地提交三项修复，不推送，独立采集规划保持原样。
+
+复检日志：/tmp/npm-p2-full-build.log、/tmp/npm-p2-full-ctest.log、/tmp/npm-p2-asan-test.log；修复前失败证据见 /tmp/npm-stop-fix-test-before.log、/tmp/npm-stop-fix-scheduler-before.log、/tmp/npm-p2-time-test-before.log、/tmp/npm-p2-diagnostic-test-before.log。

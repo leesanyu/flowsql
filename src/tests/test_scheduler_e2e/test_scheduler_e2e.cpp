@@ -766,6 +766,24 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
             for (size_t index = 0; index < times.size(); ++index) {
                 record.meta.timestamp_ns = times[index];
                 record.meta.sequence = index + 1;
+                if (fixture_->control_tail && index + 1 == times.size()) {
+                    auto control = std::make_shared<std::vector<uint8_t>>(MakeSchedulerE2eIcmpPacket(false));
+                    record.meta.captured_len = static_cast<uint32_t>(control->size());
+                    record.meta.wire_len = record.meta.captured_len;
+                    record.raw_data.owner = control;
+                    record.raw_data.data = control->data();
+                    record.raw_data.size = control->size();
+                    record.layer.layer_count = 1;
+                    record.layer.transport_layer_index = packet::kNoLayerIndex;
+                    record.layer.transport_protocol = 1;
+                    record.layer.ports_valid = 0;
+                    record.layer.src_port = record.layer.dst_port = 0;
+                    record.layer.payload_offset = 34;
+                    std::memcpy(src.bytes, control->data() + 26, 4);
+                    std::memcpy(dst.bytes, control->data() + 30, 4);
+                    record.layer.src_ip = src;
+                    record.layer.dst_ip = dst;
+                }
                 records.push_back(record);
                 if (records.size() == fixture_->batch_size || index + 1 == times.size()) {
                     std::shared_ptr<arrow::RecordBatch> batch;
@@ -790,6 +808,11 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
             if (block != batch_ || released_) return EINVAL;
             released_ = true;
             ++fixture_->release_blocks;
+            if (fixture_->hold_last_release && step_ == batches_.size()) {
+                // Hold the processed batch until Stop/Cancel wakes this reader, before its fact is accepted.
+                std::unique_lock<std::mutex> lock(wait_mutex_);
+                ASSERT_TRUE(wait_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return cancelled_.load(); }));
+            }
             return fixture_->mode == Mode::kReleaseError ? EIO : 0;
         }
         void Cancel() override {
@@ -909,6 +932,8 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
     std::vector<int64_t> timeline;
     size_t batch_size = 1;
     bool endless = false;
+    bool control_tail = false;
+    bool hold_last_release = false;
 
  private:
     Source source_;
@@ -2473,6 +2498,24 @@ int main() {
         }
         capture_fixture.batch_size = 1;
 
+        const std::string late_channel = "npm_late_diagnostic";
+        const auto late_path = data_dir / "npm-late-diagnostic.pcap";
+        WriteSchedulerE2eBinary(late_path, MakeSchedulerE2eClassicCapture(
+                                               true, {{0, 20'000'000, periodic_packet}, {0, 1, periodic_packet}}));
+        ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(late_channel, late_path), rsp),
+                  error::OK);
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq("SELECT * FROM pcapfile." + late_channel +
+                               " USING npm.basic WITH source_domains='0:77',output_interval_ns=10000000,"
+                               "out_of_order_tolerance_ns=0 INTO sqlite.local"),
+                       rsp),
+                  error::INTERNAL_ERROR);
+        ASSERT_TRUE(rsp.find("late npm.basic packet") != std::string::npos);
+        ASSERT_TRUE(rsp.find("source=0") != std::string::npos);
+        ASSERT_TRUE(rsp.find("timestamp_ns=1") != std::string::npos);
+        ASSERT_TRUE(rsp.find("closed_boundary_ns=20000000") != std::string::npos);
+        ASSERT_EQ(stream_remove("/channels/stream/remove", MakePcapSourceRemoveRequest(late_channel), rsp), error::OK);
+
         const auto submit_batch = FindRouteHandler(loader, "POST", "/scheduler/batch/submit");
         const auto status_batch = FindRouteHandler(loader, "POST", "/scheduler/batch/status");
         const auto stop_batch = FindRouteHandler(loader, "POST", "/scheduler/batch/stop");
@@ -2545,6 +2588,72 @@ int main() {
             ASSERT_EQ(capture_fixture.release_blocks.load(), blocks_before + 4);
         }
         capture_fixture.endless = false;
+        capture_fixture.timeline = {1'000'000'001, 1'030'000'001};
+        capture_fixture.batch_size = 2;
+        capture_fixture.control_tail = true;
+        const auto stop_sql = live_base + ",features='basic,icmp' INTO sqlite.local";
+        const auto eof_run = run_managed(stop_sql);
+        const auto eof_history = query_history(eof_run, "npm_stop_eof_reference");
+        ASSERT_EQ(eof_history->num_rows(), 4);
+        const auto eof_rows = normalized(eof_history);
+        for (const bool cancel : {false, true}) {
+            capture_fixture.hold_last_release = true;
+            const int readers_before = capture_fixture.release_calls;
+            const int blocks_before = capture_fixture.release_blocks;
+            const std::string task_id = cancel ? "npm-pending-fact-cancel" : "npm-pending-fact-stop";
+            rapidjson::Document request;
+            request.SetObject();
+            request.AddMember("runtime_task_id", rapidjson::Value(task_id.c_str(), request.GetAllocator()),
+                              request.GetAllocator());
+            request.AddMember("sql_text", rapidjson::Value(stop_sql.c_str(), request.GetAllocator()),
+                              request.GetAllocator());
+            rapidjson::StringBuffer body;
+            rapidjson::Writer<rapidjson::StringBuffer> writer(body);
+            request.Accept(writer);
+            ASSERT_EQ(submit_batch("/scheduler/batch/submit", body.GetString(), rsp), error::OK);
+            const std::string identity_body = "{\"runtime_task_id\":\"" + task_id + "\"}";
+            std::string run_id;
+            rapidjson::Document status;
+            for (int attempt = 0; attempt < 300; ++attempt) {
+                ASSERT_EQ(status_batch("/scheduler/batch/status", identity_body, rsp), error::OK);
+                status.Parse(rsp.c_str());
+                ASSERT_TRUE(!status.HasParseError());
+                ASSERT_TRUE(std::string(status["status"].GetString()) != "failed");
+                if (status.HasMember("managed_result") && status["managed_result"].HasMember("run_id")) {
+                    run_id = status["managed_result"]["run_id"].GetString();
+                    if (capture_fixture.release_blocks == blocks_before + 1) break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            ASSERT_TRUE(!run_id.empty());
+            ASSERT_EQ(capture_fixture.release_blocks.load(), blocks_before + 1);
+            const auto history_sql = "SELECT * FROM npm_basic_history_v1 WHERE __npm_run_id='" + run_id + "'";
+            ASSERT_EQ(QueryCount(db, history_sql), 0);
+            const std::string stop_body =
+                "{\"runtime_task_id\":\"" + task_id + "\",\"mode\":\"" + (cancel ? "cancel" : "stop") + "\"}";
+            ASSERT_EQ(stop_batch("/scheduler/batch/stop", stop_body, rsp), error::OK);
+            for (int attempt = 0; attempt < 300; ++attempt) {
+                ASSERT_EQ(status_batch("/scheduler/batch/status", identity_body, rsp), error::OK);
+                status.Parse(rsp.c_str());
+                const std::string state = status["status"].GetString();
+                if (state != "running" && state != "stopping") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            ASSERT_EQ(std::string(status["status"].GetString()), cancel ? "cancelled" : "stopped");
+            ASSERT_EQ(QueryCount(db, history_sql), cancel ? 0 : 4);
+            if (!cancel) {
+                const auto history = query_history(run_id, "npm_pending_fact_history");
+                ASSERT_TRUE(normalized(history) == eof_rows);
+                for (int64_t row = 0; row < history->num_rows(); ++row)
+                    ASSERT_EQ(history->GetColumnByName("__npm_run_status")->GetScalar(row).ValueOrDie()->ToString(),
+                              "completed");
+            }
+            ASSERT_EQ(capture_fixture.release_calls, readers_before + 1);
+            ASSERT_EQ(capture_fixture.release_blocks.load(), blocks_before + 1);
+        }
+        capture_fixture.hold_last_release = false;
+        capture_fixture.control_tail = false;
+        capture_fixture.batch_size = 1;
         capture_fixture.timeline.clear();
 
         const auto session_run = run_managed(

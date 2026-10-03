@@ -5,10 +5,19 @@
 #include <arrow/api.h>
 
 #include <cerrno>
+#include <chrono>
 #include <new>
 #include <utility>
 
 namespace flowsql::npm {
+namespace {
+
+int64_t ResultGeneratedAtNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+}  // namespace
 
 NpmBasicResultCollector::NpmBasicResultCollector() : NpmBasicResultCollector(NpmBasicFeatureConfig{}) {}
 
@@ -88,7 +97,7 @@ NpmBasicDrainStatus NpmBasicResultCollector::Drain(const std::vector<NpmSessionE
                 NpmBasicResult result;
                 const auto& event = events[index];
                 status.projection_error = projector.ProjectFinal(event.snapshot.View(), event.snapshot.end_reason,
-                                                                 event.observed_at, &result);
+                                                                 ResultGeneratedAtNs(), &result);
                 if (status.projection_error != NpmBasicProjectionError::kNone) {
                     status.error = NpmBasicDrainError::kProjectionError;
                     status.event_index = static_cast<int64_t>(index);
@@ -140,7 +149,7 @@ NpmBasicDrainStatus NpmBasicResultCollector::RouteEnds(const std::vector<NpmSess
         const auto& event = events[index];
         NpmBasicResult result;
         status.projection_error =
-            projector.ProjectFinal(event.snapshot.View(), event.snapshot.end_reason, event.observed_at, &result);
+            projector.ProjectFinal(event.snapshot.View(), event.snapshot.end_reason, ResultGeneratedAtNs(), &result);
         if (status.projection_error != NpmBasicProjectionError::kNone) {
             status.error = NpmBasicDrainError::kProjectionError;
         } else {

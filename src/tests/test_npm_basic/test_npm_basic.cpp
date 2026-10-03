@@ -73,6 +73,11 @@ constexpr uint8_t kTcpSyn = 0x02;
 constexpr uint8_t kTcpRst = 0x04;
 constexpr uint8_t kTcpAck = 0x10;
 
+int64_t ResultClockNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
 bool SameGuid(const flowsql::Guid& left, const flowsql::Guid& right) { return !(left < right) && !(right < left); }
 
 class NpiInterfaceRegistry : public flowsql::IRegister {
@@ -5638,7 +5643,9 @@ void TestNpmBasicResultCollectorCopiesAndDrainsUnifiedBatches() {
         MakeCollectorEndEvent(92, npm::NpmSessionEndReason::kIdleTimeout, 9200),
     };
     std::shared_ptr<arrow::RecordBatch> normal_output;
+    const auto generated_start_ns = ResultClockNowNs();
     auto status = collector.Drain(normal_events, projector, budget, &normal_output);
+    const auto generated_end_ns = ResultClockNowNs();
     assert(status.error == npm::NpmBasicDrainError::kNone && status.event_index == -1);
     assert(collector.pending_results() == 0 && normal_output != nullptr);
     assert(normal_output->num_rows() == 3 && normal_output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
@@ -5648,8 +5655,9 @@ void TestNpmBasicResultCollectorCopiesAndDrainsUnifiedBatches() {
     const auto normal_a_ip = BasicResultColumn<arrow::StringArray>(normal_output, 7);
     const auto normal_reason = BasicResultColumn<arrow::StringArray>(normal_output, "end_reason");
     assert(normal_ids->Value(0) == 90 && normal_ids->Value(1) == 91 && normal_ids->Value(2) == 92);
-    assert(normal_observed->Value(0) == 9000 && normal_observed->Value(1) == 9100);
-    assert(normal_observed->Value(2) == 9200 && normal_a_ip->GetString(0) == "a-90");
+    assert(normal_observed->Value(0) == 9000 && normal_a_ip->GetString(0) == "a-90");
+    for (int64_t row : {1, 2})
+        assert(normal_observed->Value(row) >= generated_start_ns && normal_observed->Value(row) <= generated_end_ns);
     assert(!normal_final->Value(0) && normal_final->Value(1) && normal_final->Value(2));
     assert(normal_reason->IsNull(0) && normal_reason->GetString(1) == "closed");
     assert(normal_reason->GetString(2) == "idle_timeout");
@@ -5662,11 +5670,15 @@ void TestNpmBasicResultCollectorCopiesAndDrainsUnifiedBatches() {
         MakeCollectorEndEvent(94, npm::NpmSessionEndReason::kEof, 9400),
     };
     std::shared_ptr<arrow::RecordBatch> eof_output;
+    const auto eof_start_ns = ResultClockNowNs();
     status = collector.Drain(eof_events, projector, budget, &eof_output);
+    const auto eof_end_ns = ResultClockNowNs();
     assert(status.error == npm::NpmBasicDrainError::kNone && eof_output->num_rows() == 2);
     const auto eof_ids = BasicResultColumn<arrow::UInt64Array>(eof_output, 0);
     const auto eof_reason = BasicResultColumn<arrow::StringArray>(eof_output, "end_reason");
     assert(eof_ids->Value(0) == 93 && eof_ids->Value(1) == 94);
+    const auto eof_observed = BasicResultColumn<arrow::Int64Array>(eof_output, 3)->Value(1);
+    assert(eof_observed >= eof_start_ns && eof_observed <= eof_end_ns);
     assert(eof_reason->IsNull(0) && eof_reason->GetString(1) == "eof");
     assert(collector.pending_results() == 0 && stats->reserve_calls == 2);
 
@@ -5899,7 +5911,9 @@ void TestNpmEofFlusherSuccessEmptyAndRepeated() {
     npm::NpmEofFlusher flusher;
     assert(flusher.state() == npm::NpmEofFlushState::kOpen);
 
+    const auto generated_start_ns = ResultClockNowNs();
     auto status = flusher.Flush(5000, table, modules, collector, projector, budget, &output);
+    const auto generated_end_ns = ResultClockNowNs();
     assert(status.error == npm::NpmEofFlushError::kNone);
     assert(flusher.state() == npm::NpmEofFlushState::kFlushed);
     assert(table.size() == 0 && collector.pending_results() == 0);
@@ -5917,7 +5931,8 @@ void TestNpmEofFlusherSuccessEmptyAndRepeated() {
     assert(!is_final->Value(0) && !is_final->Value(1) && !is_final->Value(2));
     assert(!is_final->Value(3) && is_final->Value(4) && is_final->Value(5));
     assert(observed_at->Value(0) == 4011 && observed_at->Value(3) == 4022);
-    assert(observed_at->Value(4) == 5000 && observed_at->Value(5) == 5000);
+    for (int64_t row : {4, 5})
+        assert(observed_at->Value(row) >= generated_start_ns && observed_at->Value(row) <= generated_end_ns);
     assert(end_reason->IsNull(0) && end_reason->IsNull(3));
     assert(end_reason->GetString(4) == "eof" && end_reason->GetString(5) == "eof");
     assert(stats->reserve_calls == 1 && stats->release_calls == 0);
@@ -7280,7 +7295,12 @@ void AssertEquivalentBudgetUsage(const npm::NpmBudgetUsage& left, const npm::Npm
 void AssertEquivalentRecordBatch(const std::shared_ptr<arrow::RecordBatch>& left,
                                  const std::shared_ptr<arrow::RecordBatch>& right) {
     assert(left != nullptr && right != nullptr);
-    assert(left->Equals(*right));
+    assert(left->schema()->Equals(*right->schema(), true) && left->num_rows() == right->num_rows());
+    for (int column = 0; column < left->num_columns(); ++column) {
+        if (left->GetColumnByName("period_start_ns") && left->schema()->field(column)->name() == "observed_at")
+            continue;
+        assert(left->column(column)->Equals(*right->column(column)));
+    }
 }
 
 void AssertEquivalentOfflineBatchStatus(const npm::NpmBasicOfflineBatchStatus& left,
@@ -8581,7 +8601,9 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
         auto closed_input =
             MakeEncodedPacketBatch({MakeBatchPacketRecord(closed_packet, 0, closed_timestamp_ns, 2 * index + 2)});
         std::weak_ptr<arrow::RecordBatch> closed_input_owner = closed_input;
+        const auto closed_start_ns = ResultClockNowNs();
         status = runtime->ProcessOfflineBatch(closed_input, &output);
+        const auto closed_end_ns = ResultClockNowNs();
         assert(status.error == npm::NpmBasicOfflineBatchError::kNone);
         assert(status.runtime_state == npm::NpmEofFlushState::kOpen);
         assert(status.process_status.error == npm::NpmPacketBatchProcessError::kNone);
@@ -8604,7 +8626,8 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
             assert(SessionResultColumn<arrow::UInt64Array>(output, 24)->Value(0) == closed_payload.size());
         } else {
             assert(BasicResultColumn<arrow::UInt64Array>(output, 2)->Value(0) == 1);
-            assert(BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0) == closed_timestamp_ns);
+            const auto generated_at = BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0);
+            assert(generated_at >= closed_start_ns && generated_at <= closed_end_ns);
             assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
             assert(BasicResultColumn<arrow::Int64Array>(output, 11)->Value(0) == active_timestamp_ns);
             assert(BasicResultColumn<arrow::Int64Array>(output, 12)->Value(0) == closed_timestamp_ns);
@@ -8731,7 +8754,9 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
         auto replacement_input =
             MakeEncodedPacketBatch({MakeBatchPacketRecord(replacement_packet, 0, reuse_timestamp_ns, 3 * index + 2)});
         std::weak_ptr<arrow::RecordBatch> replacement_input_owner = replacement_input;
+        const auto reuse_start_ns = ResultClockNowNs();
         status = runtime->ProcessOfflineBatch(replacement_input, &output);
+        const auto reuse_end_ns = ResultClockNowNs();
         assert(status.error == npm::NpmBasicOfflineBatchError::kNone);
         assert(status.runtime_state == npm::NpmEofFlushState::kOpen);
         assert(status.process_status.error == npm::NpmPacketBatchProcessError::kNone);
@@ -8760,7 +8785,8 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
         } else {
             assert(BasicResultColumn<arrow::UInt64Array>(output, 0)->Value(0) == 1);
             assert(BasicResultColumn<arrow::UInt64Array>(output, 2)->Value(0) == 1);
-            assert(BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0) == reuse_timestamp_ns);
+            const auto generated_at = BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0);
+            assert(generated_at >= reuse_start_ns && generated_at <= reuse_end_ns);
             assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
             assert(BasicResultColumn<arrow::Int64Array>(output, 11)->Value(0) == old_timestamp_ns);
             assert(BasicResultColumn<arrow::Int64Array>(output, 12)->Value(0) == old_timestamp_ns);
@@ -8802,7 +8828,9 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
         auto closed_input =
             MakeEncodedPacketBatch({MakeBatchPacketRecord(closed_packet, 0, closed_timestamp_ns, 3 * index + 3)});
         std::weak_ptr<arrow::RecordBatch> closed_input_owner = closed_input;
+        const auto closed_start_ns = ResultClockNowNs();
         status = runtime->ProcessOfflineBatch(closed_input, &output);
+        const auto closed_end_ns = ResultClockNowNs();
         assert(status.error == npm::NpmBasicOfflineBatchError::kNone);
         assert(status.runtime_state == npm::NpmEofFlushState::kOpen);
         assert(status.process_status.error == npm::NpmPacketBatchProcessError::kNone);
@@ -8831,7 +8859,8 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
         } else {
             assert(BasicResultColumn<arrow::UInt64Array>(output, 0)->Value(0) == 2);
             assert(BasicResultColumn<arrow::UInt64Array>(output, 2)->Value(0) == 1);
-            assert(BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0) == closed_timestamp_ns);
+            const auto generated_at = BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0);
+            assert(generated_at >= closed_start_ns && generated_at <= closed_end_ns);
             assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
             assert(BasicResultColumn<arrow::Int64Array>(output, 11)->Value(0) == reuse_timestamp_ns);
             assert(BasicResultColumn<arrow::Int64Array>(output, 12)->Value(0) == closed_timestamp_ns);
@@ -8961,7 +8990,9 @@ void TestNpmBasicTaskRuntimeClosesTupleReuseReplacementImmediately() {
         auto replacement_input = MakeEncodedPacketBatch(
             {MakeBatchPacketRecord(replacement_packet, 0, replacement_timestamp_ns, 2 * index + 2)});
         std::weak_ptr<arrow::RecordBatch> replacement_input_owner = replacement_input;
+        const auto generated_start_ns = ResultClockNowNs();
         status = runtime->ProcessOfflineBatch(replacement_input, &output);
+        const auto generated_end_ns = ResultClockNowNs();
         assert(status.error == npm::NpmBasicOfflineBatchError::kNone);
         assert(status.runtime_state == npm::NpmEofFlushState::kOpen);
         assert(status.process_status.error == npm::NpmPacketBatchProcessError::kNone);
@@ -9031,8 +9062,8 @@ void TestNpmBasicTaskRuntimeClosesTupleReuseReplacementImmediately() {
 
             assert(session_ids->Value(0) == 1 && session_ids->Value(1) == 2);
             assert(revisions->Value(0) == 1 && revisions->Value(1) == 1);
-            assert(observed_at->Value(0) == replacement_timestamp_ns);
-            assert(observed_at->Value(1) == replacement_timestamp_ns);
+            for (int64_t row : {0, 1})
+                assert(observed_at->Value(row) >= generated_start_ns && observed_at->Value(row) <= generated_end_ns);
             assert(final_flags->Value(0) && final_flags->Value(1));
             assert(first_ns->Value(0) == old_timestamp_ns && last_ns->Value(0) == old_timestamp_ns);
             assert(first_ns->Value(1) == replacement_timestamp_ns);
@@ -9140,7 +9171,9 @@ void TestNpmBasicTaskRuntimeRoutesObservedEntity() {
         assert(budget->Usage().pending_output_bytes == 0);
 
         const int64_t observed_at = 500 + static_cast<int64_t>(index);
+        const auto generated_start_ns = ResultClockNowNs();
         const auto flush_status = runtime->FlushOffline(observed_at, &output);
+        const auto generated_end_ns = ResultClockNowNs();
         assert(flush_status.error == npm::NpmEofFlushError::kNone);
         assert(flush_status.drain_status.error == npm::NpmBasicDrainError::kNone);
         assert(runtime->State() == npm::NpmEofFlushState::kFlushed);
@@ -9155,7 +9188,8 @@ void TestNpmBasicTaskRuntimeRoutesObservedEntity() {
             assert(SessionResultColumn<arrow::UInt8Array>(output, 6)->Value(0) == 17);
             assert(SessionResultColumn<arrow::StringArray>(output, 18)->GetString(0) == "eof");
         } else {
-            assert(BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0) == observed_at);
+            const auto generated_at = BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0);
+            assert(generated_at >= generated_start_ns && generated_at <= generated_end_ns);
             assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
             assert(BasicResultColumn<arrow::StringArray>(output, "end_reason")->GetString(0) == "eof");
         }
@@ -9314,13 +9348,16 @@ void TestNpmBasicTaskRuntimeFlushesOfflineExactlyOnce() {
     output.reset();
     AssertTaskBudgetUsage(budget->Usage(), session_bytes, 0, 0, 0);
 
+    const auto generated_start_ns = ResultClockNowNs();
     auto flush_status = runtime->FlushOffline(500, &output);
+    const auto generated_end_ns = ResultClockNowNs();
     assert(flush_status.error == npm::NpmEofFlushError::kNone);
     assert(runtime->State() == npm::NpmEofFlushState::kFlushed);
     assert(runtime->LastError().empty() && pool.release_calls == 1);
     assert(output != nullptr && output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
     assert(output->num_rows() == 1 && output->num_columns() == 32);
-    assert(BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0) == 500);
+    const auto generated_at = BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0);
+    assert(generated_at >= generated_start_ns && generated_at <= generated_end_ns);
     assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
     assert(BasicResultColumn<arrow::StringArray>(output, "end_reason")->GetString(0) == "eof");
     AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, ResultBufferCapacity(output));
@@ -9478,6 +9515,103 @@ flowsql::BlockTransformTaskConfigV1 MakeOperatorTaskConfig(const std::string& ta
     config.with_params_json = with_params_json.c_str();
     config.pushed_filter_plan_json = pushed_filter_plan_json.c_str();
     return config;
+}
+
+void TestNpmBasicTaskPreservesLatePacketDiagnostic() {
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    npm::NpmBasicOperator provider(&querier);
+    const std::string task_id = "public-late-packet";
+    const std::string json =
+        R"({"source_domains":"7:77","output_interval_ns":"10000000","out_of_order_tolerance_ns":"0"})";
+    const std::string filter = R"({"version":1,"root":null})";
+    flowsql::IBlockTransformTaskV1* task = nullptr;
+    assert(provider.CreateTask(MakeOperatorTaskConfig(task_id, json, filter), &task) == 0);
+    std::shared_ptr<arrow::Schema> schema;
+    assert(task->Open(flowsql::packet::PacketSchema(), &schema) == 0);
+    const auto packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1});
+    std::vector<flowsql::BlockTransformOutputV1> outputs;
+    assert(task->ProcessBlock(MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 7, 1, 1)}), 0, &outputs) == 0);
+    outputs.clear();
+    assert(task->ProcessBlock(MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 7, 20'000'000, 2)}), 0, &outputs) ==
+           0);
+    assert(outputs.size() == 1 && outputs.front().batch->num_rows() == 2);
+    auto prefix = outputs.front().batch;
+    outputs.clear();
+    const auto late = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 7, 1, 3)});
+    assert(task->ProcessBlock(late, 0, &outputs) == -EIO && outputs.empty());
+    const auto diagnostic = task->LastError();
+    assert(diagnostic.find("late npm.basic packet") != std::string::npos);
+    assert(diagnostic.find("source=7") != std::string::npos);
+    assert(diagnostic.find("timestamp_ns=1") != std::string::npos);
+    assert(diagnostic.find("closed_boundary_ns=20000000") != std::string::npos);
+    assert(task->ProcessBlock(late, 0, &outputs) == -EPIPE && outputs.empty());
+    assert(task->Flush(&outputs) == -EPIPE && outputs.empty());
+    task->Cancel();
+    assert(task->LastError() == diagnostic && pool.release_calls == 1);
+    assert(PeriodicUInt(prefix, "interval_packets_ab", 0) == 1);
+    assert(PeriodicUInt(prefix, "interval_packets_ab", 1) == 0);
+    assert(!PeriodicFlag(prefix, "is_final", 0) && !PeriodicFlag(prefix, "is_final", 1));
+    prefix.reset();
+    schema.reset();
+    provider.ReleaseTask(task);
+}
+
+void TestNpmBasicFinalUsesGenerationTime() {
+    for (const bool rst_close : {true, false}) {
+        for (const bool observing_session : {false, true}) {
+            ContextDictionary dictionary;
+            ContextProtocol protocol(&dictionary);
+            ContextPool pool(&protocol);
+            SinglePoolQuerier querier(&pool);
+            npm::NpmBasicOperator provider(&querier);
+            const std::string task_id = "final-generation-time";
+            const std::string json =
+                std::string(R"({"source_domains":"0:77","result_mode":"final","features":"basic,session",)"
+                            R"("observing":")") +
+                (observing_session ? "session" : "basic") + "\"}";
+            const std::string filter = R"({"version":1,"root":null})";
+            flowsql::IBlockTransformTaskV1* task = nullptr;
+            assert(provider.CreateTask(MakeOperatorTaskConfig(task_id, json, filter), &task) == 0);
+            std::shared_ptr<arrow::Schema> schema;
+            assert(task->Open(flowsql::packet::PacketSchema(), &schema) == 0);
+            const auto packet =
+                MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1}, rst_close ? kTcpRst : kTcpAck);
+            const auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 1'000'000'000, 1)});
+            std::vector<flowsql::BlockTransformOutputV1> outputs;
+            int64_t started_ns = ResultClockNowNs();
+            assert(task->ProcessBlock(input, 0, &outputs) == 0);
+            if (!rst_close) {
+                for (const auto& output : outputs) assert(output.batch->num_rows() == 0);
+                outputs.clear();
+                started_ns = ResultClockNowNs();
+                assert(task->Flush(&outputs) == 0);
+            }
+            const int64_t finished_ns = ResultClockNowNs();
+            assert(outputs.size() == 1 && outputs.front().batch->num_rows() == 1);
+            const auto& result = outputs.front().batch;
+            const auto observed_at = PeriodicInt(result, "observed_at");
+            if (observing_session) {
+                assert(observed_at == 1'000'000'000);
+            } else {
+                assert(observed_at >= started_ns && observed_at <= finished_ns);
+                for (const char* column : {"period_start_ns", "period_end_ns", "period_complete", "interval_packets_ab",
+                                           "interval_packets_ba", "interval_wire_bytes_ab", "interval_wire_bytes_ba",
+                                           "interval_wire_bytes_total"})
+                    assert(result->GetColumnByName(column)->IsNull(0));
+                assert(PeriodicUInt(result, "wire_bytes_total") == packet.bytes.size());
+            }
+            assert(PeriodicInt(result, "first_ns") == 1'000'000'000);
+            assert(PeriodicInt(result, "last_ns") == 1'000'000'000);
+            assert(PeriodicFlag(result, "is_final"));
+            assert(PeriodicUInt(result, "packets_ab") == 1 && PeriodicUInt(result, "packets_ba") == 0);
+            outputs.clear();
+            schema.reset();
+            provider.ReleaseTask(task);
+        }
+    }
 }
 
 void TestNpmBasicOperatorCopiesConfigAndOwnsTasks() {
@@ -10510,6 +10644,108 @@ PacketFixture MakeControlPacket(bool ipv6 = false) {
     fixture.layer.src_port = fixture.layer.dst_port = 0;
     fixture.layer.payload_offset = header;
     return fixture;
+}
+
+void TestNpmBasicTaskFlushAppliesPendingCaptureFacts() {
+    const auto tcp = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1});
+    auto icmp = MakeControlPacket();
+    icmp.bytes[sizeof(flowsql::Ipv4Header)] = 8;
+    icmp.bytes[sizeof(flowsql::Ipv4Header) + 1] = 0;
+    using Row = std::array<uint64_t, 12>;
+    std::vector<Row> reference;
+    for (const bool drive_before_flush : {true, false}) {
+        for (const bool cancel : {false, true}) {
+            ContextDictionary dictionary;
+            ContextProtocol protocol(&dictionary);
+            ContextPool pool(&protocol);
+            SinglePoolQuerier querier(&pool);
+            npm::NpmBasicOperator provider(&querier);
+            flowsql::BlockTransformTaskConfigV2 config{};
+            config.struct_size = flowsql::kBlockTransformTaskConfigV2Size;
+            config.contract_version = flowsql::kBlockTransformContractVersionV2;
+            config.task_id = "pending-capture-stop";
+            config.with_params_json = R"({"input_namespace":"live","source_domains":"0:77","features":"basic,icmp",)"
+                                      R"("output_interval_ns":"10000000","out_of_order_tolerance_ns":"0"})";
+            config.pushed_filter_plan_json = R"({"version":1,"root":null})";
+            flowsql::IBlockTransformTaskV2* task = nullptr;
+            assert(provider.CreateTask(config, &task) == 0);
+            auto* capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV1*>(task);
+            assert(capture_task != nullptr);
+            flowsql::CaptureQueueIdentityV1 identity;
+            identity.source_name = "review.live";
+            identity.observation_domain_id = 77;
+            identity.generation = 1;
+            assert(capture_task->BindCaptureSource(identity) == 0);
+            std::shared_ptr<arrow::Schema> schema;
+            assert(task->Open(flowsql::packet::PacketSchema(), &schema) == 0);
+            std::vector<flowsql::BlockTransformOutputV1> outputs;
+            flowsql::CaptureProgressV1 fact;
+            fact.generation = 1;
+            fact.packet_observed = true;
+            fact.backlog = flowsql::CaptureBacklogV1::kEmpty;
+            for (const auto& record :
+                 {MakeBatchPacketRecord(tcp, 0, 10'000'001, 1), MakeBatchPacketRecord(icmp, 0, 40'000'001, 2)}) {
+                assert(task->ProcessBlock(MakeEncodedPacketBatch({record}), 0, &outputs) == 0);
+                for (const auto& output : outputs) assert(output.batch->num_rows() == 0);
+                outputs.clear();
+                fact.fact_sequence = record.meta.sequence;
+                fact.capture_time_ns = record.meta.timestamp_ns;
+                assert(capture_task->AcceptCaptureFact(fact) == 0);
+            }
+            std::vector<Row> rows;
+            const auto collect = [&] {
+                for (const auto& output : outputs) {
+                    for (int64_t row = 0; row < output.batch->num_rows(); ++row) {
+                        const auto& batch = output.batch;
+                        rows.push_back({PeriodicUInt(batch, "session_id", row), PeriodicUInt(batch, "revision", row),
+                                        static_cast<uint64_t>(PeriodicInt(batch, "period_start_ns", row)),
+                                        static_cast<uint64_t>(PeriodicInt(batch, "period_end_ns", row)),
+                                        PeriodicFlag(batch, "period_complete", row),
+                                        PeriodicFlag(batch, "is_final", row), PeriodicUInt(batch, "packets_ab", row),
+                                        PeriodicUInt(batch, "packets_ba", row),
+                                        PeriodicUInt(batch, "wire_bytes_total", row),
+                                        PeriodicUInt(batch, "interval_packets_ab", row),
+                                        PeriodicUInt(batch, "interval_packets_ba", row),
+                                        PeriodicUInt(batch, "interval_wire_bytes_total", row)});
+                    }
+                }
+                outputs.clear();
+            };
+            if (drive_before_flush) {
+                flowsql::BlockTransformTimeEventV1 time{};
+                time.struct_size = flowsql::kBlockTransformTimeEventV1Size;
+                time.contract_version = flowsql::kBlockTransformTimeDriveVersionV1;
+                time.monotonic_now_ns = 100;
+                time.wall_now_ns = 1'700'000'000'000'000'000;
+                assert(task->OnTime(time, &outputs) == 0);
+                collect();
+            }
+            if (cancel) {
+                task->Cancel();
+                assert(task->Flush(&outputs) == -ECANCELED && outputs.empty());
+                for (const auto& row : rows) assert(row[5] == 0);
+            } else {
+                assert(task->Flush(&outputs) == 0);
+                collect();
+                assert(rows.size() == 4);
+                for (size_t i = 0; i < rows.size(); ++i) {
+                    assert(rows[i][0] == rows.front()[0] && rows[i][1] == i + 1);
+                    assert(rows[i][2] == (i + 1) * 10'000'000 && rows[i][3] == (i + 2) * 10'000'000);
+                    assert(rows[i][4] == (i != 3) && rows[i][5] == (i == 3));
+                    assert(rows[i][6] == 1 && rows[i][7] == 0 && rows[i][8] == tcp.bytes.size());
+                    assert(rows[i][9] == (i == 0) && rows[i][10] == 0);
+                    assert(rows[i][11] == (i == 0 ? tcp.bytes.size() : 0));
+                }
+                if (reference.empty())
+                    reference = rows;
+                else
+                    assert(rows == reference);
+                assert(task->Flush(&outputs) != 0 && outputs.empty());
+            }
+            schema.reset();
+            provider.ReleaseTask(task);
+        }
+    }
 }
 
 void TestProtocolCatalogOpenAndDispatch() {
@@ -13563,6 +13799,9 @@ void TestTlsT3RuntimeRouting() {
 
 int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--periodic-only") {
+        TestNpmBasicTaskPreservesLatePacketDiagnostic();
+        TestNpmBasicFinalUsesGenerationTime();
+        TestNpmBasicTaskFlushAppliesPendingCaptureFacts();
         TestNpmPeriodicConfigurationParsing();
         TestNpmBasicPeriodicOrderDiagnosticsAndStalledBudget();
         TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions();
@@ -13736,6 +13975,8 @@ int main(int argc, char** argv) {
     TestNpmBasicTaskRuntimeEofFailureIsTerminal();
     TestNpmBasicTaskRuntimeConcurrentCancelIsNonBlockingAndStable();
     TestNpmBasicTaskRuntimeCancelKeepsDeliveredOutputAlive();
+    TestNpmBasicTaskPreservesLatePacketDiagnostic();
+    TestNpmBasicFinalUsesGenerationTime();
     TestNpmBasicOperatorCopiesConfigAndOwnsTasks();
     TestNpmBasicTaskObservingSchemaProbe();
     TestNpmBasicTaskProbeMatchesLegacyAndParametersV1();
@@ -13748,6 +13989,7 @@ int main(int argc, char** argv) {
 #endif
     TestNpmBasicTaskMethodPreconditions();
     TestNpmBasicTaskCancelBeforeOpenAndDuringProcess();
+    TestNpmBasicTaskFlushAppliesPendingCaptureFacts();
     TestNpmBasicV2PluginExports();
     return 0;
 }

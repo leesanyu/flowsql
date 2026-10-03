@@ -15,6 +15,7 @@
 #include <plugins/npi/iprotocol.h>
 
 #include <cerrno>
+#include <chrono>
 #include <new>
 #include <utility>
 
@@ -557,20 +558,34 @@ int NpmBasicTask::Flush(std::vector<BlockTransformOutputV1>* outputs) {
         return expected == State::kCancelled ? -ECANCELED : -EINVAL;
     }
 
-    std::vector<BlockTransformOutputV1> next_outputs;
-    try {
-        next_outputs.reserve(1);
-    } catch (const std::bad_alloc&) {
-        State expected = State::kOpened;
-        Fail(expected, kAllocationError);
-        return -ENOMEM;
-    }
-
     const auto runtime = Runtime();
     if (!runtime) {
         State expected = State::kOpened;
         Fail(expected, kRuntimeFlushError);
         return -EIO;
+    }
+
+    std::vector<BlockTransformOutputV1> next_outputs;
+    if (!pending_capture_facts_.empty()) {
+        // Stop can arrive after AcceptCaptureFact and before the runner's next OnTime.
+        BlockTransformTimeEventV1 event{};
+        event.struct_size = kBlockTransformTimeEventV1Size;
+        event.contract_version = kBlockTransformTimeDriveVersionV1;
+        event.monotonic_now_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        event.wall_now_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        const int rc = OnTime(event, &next_outputs);
+        if (rc != 0) return rc;
+    }
+    try {
+        next_outputs.reserve(next_outputs.size() + 1);
+    } catch (const std::bad_alloc&) {
+        State expected = State::kOpened;
+        Fail(expected, kAllocationError);
+        return -ENOMEM;
     }
 
     std::shared_ptr<arrow::RecordBatch> batch;
@@ -620,9 +635,10 @@ void NpmBasicTask::Cancel() {
 
 std::string NpmBasicTask::LastError() const {
     const char* error = last_error_.load(std::memory_order_acquire);
-    if (error != nullptr) return error;
+    if (error != nullptr && error != kRuntimeProcessError) return error;
     const auto runtime = Runtime();
-    return runtime ? runtime->LastError() : std::string();
+    const auto detail = runtime ? runtime->LastError() : std::string();
+    return detail.empty() && error != nullptr ? std::string(error) : detail;
 }
 
 const std::string& NpmBasicTask::TaskId() const noexcept { return task_id_; }

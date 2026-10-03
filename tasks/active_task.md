@@ -1,73 +1,46 @@
 # 即时工作台
 
-事项：`npm-basic-periodic-stats` 已完成；用户授权从 T0 到 T4 连续实施。
-关联 Feature Task：T0–T4，均已整体验收并勾选。
-当前 Atomic Slice：T4 归档关联链接核查；已完成，WIP=0。实现与全量验收已完成。
-规格：[归档](archive/feat-npm-basic-periodic-stats.md)。
+事项：依次修复 npm-basic-periodic-stats 检视确认的两个 P2；用户已授权连续执行两个独立切片。
+关联 Feature Task：T1 迟到失败诊断、T4 生产链路回归；规格：[归档](archive/feat-npm-basic-periodic-stats.md)。
+当前 Atomic Slice：公开 task 保留迟到来源、报文时间、封闭边界；已完成，WIP=0。
 
 ## 业务意图
 
-交付 PCAP/持续采集共用的事件时间周期统计、单一 Basic 契约、托管查询与后台 Stop/Cancel；完成全量验收并归档。
+迟到报文触发失败时，公开 task 与 Scheduler SQL 返回可定位的原始诊断，用户能识别来源与时间边界，已交付周期不被修改。
 
 ## Non-Goals
 
-- 不实现真实采集后端；真实网卡联验由 NetAdapter Feature 收口。
-- 不改变 Session/协议实体契约，不实现旧数据迁移或兼容层。
-- 用户已明确授权本 Feature 本地提交；不推送，不提交独立采集规划，不删除/移动目录，不混入 NPI 生命周期修复。
+- 不修改迟到判定、水位、预算、统计数据、公共接口或错误码。
+- 不重新调整已完成的 observed_at 和 Stop 修复；保留先前改动并回归。
+- 按用户最新指令本地提交本次检视的三项修复；不推送，不纳入独立采集规划与 Backlog，不混入 NPI 生命周期修复。
+
+## 冻结契约与主链路
+
+- 复用 LastError 的 string 返回与 runtime 已有诊断，无新增公共结构或 ABI。
+- ProcessBlock 失败 → task 终态维持原错误码 → LastError 对通用处理错误返回 runtime 详情 → runner/Scheduler 交付完整信息。
+- task 的配置/前置条件与 Cancel 错误保持原优先级，后续 Process/Flush/Cancel 不替换第一次失败原因。
 
 ## 允许修改文件
 
-- src/framework/core/pipeline.cpp
-- src/framework/core/pipeline.h
-- src/operators/npm_basic/CMakeLists.txt
-- src/operators/npm_basic/config/npm_basic_task_config.cpp
-- src/operators/npm_basic/config/npm_basic_task_config.h
-- src/operators/npm_basic/config/npm_parameters.cpp
-- src/operators/npm_basic/config/npm_parameters.h
-- src/operators/npm_basic/core/npm_basic_task_runtime.cpp
-- src/operators/npm_basic/core/npm_basic_task_runtime.h
-- src/operators/npm_basic/core/npm_eof_flusher.cpp
-- src/operators/npm_basic/core/npm_module_catalog.cpp
-- src/operators/npm_basic/core/npm_packet_processor.cpp
-- src/operators/npm_basic/core/npm_session_table.h
-- src/operators/npm_basic/modules/basic/npm_basic_result_projector.cpp
-- src/operators/npm_basic/npm_analysis_contract.cpp
-- src/operators/npm_basic/npm_analysis_contract.h
-- src/operators/npm_basic/npm_basic_operator.cpp
-- src/operators/npm_basic/npm_protocol_contract.cpp
-- src/operators/npm_basic/npm_protocol_contract.h
-- src/operators/npm_basic/output/npm_basic_result_collector.cpp
-- src/operators/npm_basic/output/npm_basic_result_collector.h
-- src/operators/npm_basic/output/npm_basic_result_encoder.cpp
-- src/services/scheduler/scheduler_batch_runtime.cpp
-- src/services/scheduler/scheduler_batch_runtime.h
-- src/services/scheduler/scheduler_routes.cpp
-- src/services/scheduler/scheduler_stream_executor.cpp
-- src/tests/test_framework/main.cpp
-- src/tests/test_npm_basic/CMakeLists.txt
-- src/tests/test_npm_basic/benchmark_npm_basic.cpp
-- src/tests/test_npm_basic/test_npm_basic.cpp
-- src/tests/test_npm_basic/test_npm_protocol_contract.cpp
-- src/tests/test_npm_basic/test_npm_result_backends.cpp
-- src/tests/test_npm_basic/test_npm_result_sqlite.cpp
-- src/tests/test_scheduler_e2e/test_scheduler_e2e.cpp
 - tasks/active_task.md
-- tasks/product_backlog.md
-- src/operators/npm_basic/modules/basic/npm_basic_periodic_stats.cpp
-- src/operators/npm_basic/modules/basic/npm_basic_periodic_stats.h
-- src/tests/test_npm_basic/test_npm_periodic_contract.cpp
-- src/tests/test_npm_basic/test_npm_periodic_stats.cpp
-- tasks/specs/feat-npm-basic-periodic-stats.md
 - tasks/archive/feat-npm-basic-periodic-stats.md
-- tasks/specs/feat-npm-linux-capture-backends.md
+- src/operators/npm_basic/npm_basic_operator.cpp
+- src/tests/test_npm_basic/test_npm_basic.cpp
+- src/tests/test_scheduler_e2e/test_scheduler_e2e.cpp
 
-## 验收命令
+基线已有 P1 和 observed_at 修复；保持原样。另有独立 product_backlog.md 和未跟踪 Linux 采集规格，不触碰。
+
+## 本轮步骤与验收
+
+先补公开 task 与 Scheduler PCAP SQL 的迟到诊断断言并确认修复前失败；调整通用处理错误的公开诊断选择，完成局部验证后全量回归并补复检证据。
 
 ```bash
+cmake --build build --target test_npm_basic test_scheduler_e2e -j8
+ctest --test-dir build -R '^test_(npm_basic|npm_periodic_runtime|scheduler_e2e)$' --output-on-failure
 cmake --build build -j8
 ctest --test-dir build --output-on-failure
+cmake --build /tmp/flowsql-npm-periodic-asan --target test_npm_basic -j8
 ctest --test-dir /tmp/flowsql-npm-periodic-asan -R '^test_npm_periodic_(contract|stats|runtime)$' --output-on-failure
-build/output/benchmark_npm_basic 4 1
 python3 /tmp/npm-periodic-format.py --check
 git diff --check
 git diff --name-only
@@ -76,23 +49,23 @@ git status --short
 
 ## 时间盒与停止条件
 
-- 归档关联链接切片为 10 分钟，仅修正 NetAdapter 对本 Feature 的引用；三个关联文档的本地链接核查通过，已完成并停止。
-- 用户连续授权范围 T0–T4 已收口；规格移入 archive，Backlog 标记 [x]。
-- 本地提交仅纳入本 Feature 代码、测试、工作台、归档和对应 Backlog 行；NetAdapter 规格及其他已有规划改动保留在工作区。
+- 30 分钟；迟到诊断回归先失败后通过、全量构建/CTest/周期 Sanitizer 与格式和范围检查通过即完成并停止。
+- 不增加其他任务；出现错误沿用当前边界自主修复。
 
 ## 完成证据
 
-- 全量构建 exit 0；benchmark 与 Scheduler 最后两处测试工具修改分别重新编译对应 target 通过。
-- 完整 CTest 沙箱外 43/43 通过，72.72 秒；四后端均实际执行，数据库/HTTP 集成没有跳过。
-- 周期契约/统计/runtime 的 ASan、UBSan、LeakSanitizer 3/3 通过，0.40 秒；Sanitizer 独立配置 FLOWSQL_NPM_PERIODIC_SANITIZERS=ON、FLOWSQL_FLOW_LABELING=OFF，复用主仓库依赖缓存。
-- Scheduler 验证 PCAP fast/timestamp、batch=1/4 与假实时源等价；后台运行身份与已交付历史可查询，Stop completed、Cancel incomplete，reader/batch 和模块预算归还。
-- Basic 固定 32 列/schema_version=1，标签三态；默认 periodic_snapshot/30 秒，显式 final 周期 NULL。UINT64_MAX、周期增量求和和四后端 history/latest/final 断言通过。
-- benchmark 4 packets / 1 iteration 的 Basic、Basic+Session 两模式均通过；未设置性能阈值。
-- clang-format-18 修改区域检查、git diff --check 和允许文件审查通过。既有 NPM 测试函数未移除；原有其他 Backlog 改动保留，NetAdapter 规格仅维护指向本归档的链接。
-- 日志：/tmp/npm-periodic-full-build.log、/tmp/npm-periodic-full-ctest-final.log、/tmp/npm-periodic-asan-runtime-test.log、/tmp/npm-periodic-benchmark-smoke.log。
+- 先前 P1 已完成：Stop 的 pending 事实按序应用，公开 task 与 Scheduler 的 EOF/Stop 等价及 Cancel 回归通过；对应 CTest 4/4，43.76 秒。详见 /tmp/npm-stop-fix-workbench-evidence.md。
+- 第一个 P2 已完成：公开 task 的生成时间断言修复前失败；收集器两个 final 投影出口使用实际系统时间，覆盖 router 与直接 Drain。
+- 回归：RST、EOF、idle、tuple reuse 验证 Basic 生成时间范围；final 周期列 NULL、first/last 与包/字节计数正确；Basic/Session 共存时 Session 保留原时间参数，配置形式等价比较独立生成时间。
+- 编译 test_npm_basic、test_scheduler_e2e 通过，无 Error/Warning；Basic 与周期 runtime 2/2 通过，1.09 秒；Scheduler E2E 1/1 通过，22.30 秒。
+- 修改区域 clang-format-18 与 git diff --check 通过。
+- 日志：/tmp/npm-p2-time-test-before.log、/tmp/npm-p2-time-build-after.log、/tmp/npm-p2-time-build-final.log、/tmp/npm-p2-time-test-final.log、/tmp/npm-p2-time-scheduler.log。
 
-## 跨任务问题隔离
-
-- 归属：NPI 生命周期。完整 test_npm_basic 的 LeakSanitizer 发现未修改的 ObjectsPool/NetworkLayer 初始化泄漏，1,222,349 bytes / 47 allocations；堆栈经过 TestNpiPipelinePoolOptionAndLeaseContract。
-- 复现：/tmp/flowsql-npm-periodic-asan 中的 test_npm_basic；日志 /tmp/npm-periodic-asan-test.log。plugins/npi 与 common/algo/objects_pool.hpp 无本 Feature diff。
-- 按跨任务隔离规则记录；周期专属 Sanitizer 通过，普通完整 test_npm_basic 保留执行，未关闭 leak 检查或加入抑制规则。
+- 第二个 P2 已完成：公开 task 与 Scheduler SQL 的迟到详情断言修复前均失败；LastError 对通用 runtime 处理错误返回 runtime 详情，其余 task 错误保持原优先级。
+- 公开 task 验证 source=7、timestamp_ns=1、closed_boundary_ns=20000000，后续 Process/Flush/Cancel 保留首次错误；已交付周期前缀不改写、不补终态，协议上下文归还一次。Scheduler 实际 PCAP SQL 验证 source=0 与相同时间/边界穿透到响应。
+- 局部 Basic/周期 runtime/Scheduler CTest 3/3 通过，23.33 秒；全量 cmake --build build -j8 通过，无 Error/Warning。
+- 沙箱外完整 CTest 43/43 通过，74.89 秒，包含先前 Stop 回归及四后端读写、Framework、Scheduler、其他模块。
+- 周期 ASan/UBSan/LeakSanitizer 3/3 通过，0.39 秒；重新构建 test_npm_basic 后执行，包含新生成时间、迟到诊断和 Stop 回归。沙箱内首次受 ptrace 限制，沙箱外重跑通过，未关闭泄漏检查。
+- 修改区域 clang-format-18 与 git diff --check 通过；允许范围核查通过，独立 Backlog/采集规划保持原样。
+- 日志：/tmp/npm-p2-diagnostic-test-before.log、/tmp/npm-p2-diagnostic-test-after.log、/tmp/npm-p2-full-build.log、/tmp/npm-p2-full-ctest.log、/tmp/npm-p2-asan-build.log、/tmp/npm-p2-asan-test.log。
+- 两个 P2 连续授权范围已完成并停止；本次检视确认的三项问题均已修复并回归，按用户最新指令本地提交，不推送。
