@@ -252,6 +252,7 @@ NpmParameterStatusV1 ParseCore(const rapidjson::Value* value, const NpmParameter
     status = ReadString(*value, "run_mode", "/core", &text);
     if (status.error != NpmParameterErrorV1::kNone) return status;
     if (text) {
+        output->run_mode_explicit = true;
         const std::string_view mode(text->GetString(), text->GetStringLength());
         if (mode == "offline") {
             output->analysis = DefaultNpmAnalysisConfig(NpmRunMode::kOffline);

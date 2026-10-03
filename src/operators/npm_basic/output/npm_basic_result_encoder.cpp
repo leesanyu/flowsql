@@ -128,6 +128,12 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
         arrow::UInt16Builder protocol_sub_id(pool);
         arrow::StringBuilder protocol(pool);
         arrow::StringBuilder end_reason(pool);
+        arrow::UInt64Builder wire_bytes_total(pool);
+        arrow::Int64Builder period_start_ns(pool), period_end_ns(pool);
+        arrow::BooleanBuilder period_complete(pool);
+        arrow::UInt64Builder interval_packets_ab(pool), interval_packets_ba(pool);
+        arrow::UInt64Builder interval_wire_bytes_ab(pool), interval_wire_bytes_ba(pool),
+            interval_wire_bytes_total(pool);
 
         auto check = [&](const arrow::Status& status, const char* field) {
             if (status.ok()) return true;
@@ -166,8 +172,34 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
                 !append_optional_string(result.protocol, &protocol, "protocol")) {
                 return NpmBasicEncodeError::kArrowError;
             }
-            if (labeling_enabled && !check(primary_label_id.Append(result.primary_label_id), "primary_label_id")) {
+            if (!check(
+                    labeling_enabled ? primary_label_id.Append(result.primary_label_id) : primary_label_id.AppendNull(),
+                    "primary_label_id")) {
                 return NpmBasicEncodeError::kArrowError;
+            }
+            if (!check(wire_bytes_total.Append(result.wire_bytes_total), "wire_bytes_total"))
+                return NpmBasicEncodeError::kArrowError;
+            if (result.period) {
+                const auto& p = *result.period;
+                if (!check(period_start_ns.Append(p.period_start_ns), "period_start_ns") ||
+                    !check(period_end_ns.Append(p.period_end_ns), "period_end_ns") ||
+                    !check(period_complete.Append(p.period_complete), "period_complete") ||
+                    !check(interval_packets_ab.Append(p.interval_packets_ab), "interval_packets_ab") ||
+                    !check(interval_packets_ba.Append(p.interval_packets_ba), "interval_packets_ba") ||
+                    !check(interval_wire_bytes_ab.Append(p.interval_wire_bytes_ab), "interval_wire_bytes_ab") ||
+                    !check(interval_wire_bytes_ba.Append(p.interval_wire_bytes_ba), "interval_wire_bytes_ba") ||
+                    !check(interval_wire_bytes_total.Append(p.interval_wire_bytes_total), "interval_wire_bytes_total"))
+                    return NpmBasicEncodeError::kArrowError;
+            } else {
+                if (!check(period_start_ns.AppendNull(), "period_start_ns") ||
+                    !check(period_end_ns.AppendNull(), "period_end_ns") ||
+                    !check(period_complete.AppendNull(), "period_complete") ||
+                    !check(interval_packets_ab.AppendNull(), "interval_packets_ab") ||
+                    !check(interval_packets_ba.AppendNull(), "interval_packets_ba") ||
+                    !check(interval_wire_bytes_ab.AppendNull(), "interval_wire_bytes_ab") ||
+                    !check(interval_wire_bytes_ba.AppendNull(), "interval_wire_bytes_ba") ||
+                    !check(interval_wire_bytes_total.AppendNull(), "interval_wire_bytes_total"))
+                    return NpmBasicEncodeError::kArrowError;
             }
             if (result.end_reason.has_value()) {
                 if (!check(end_reason.Append(NpmSessionEndReasonName(*result.end_reason)), "end_reason")) {
@@ -179,7 +211,7 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
         }
 
         std::vector<std::shared_ptr<arrow::Array>> arrays;
-        arrays.reserve(labeling_enabled ? 23 : 22);
+        arrays.reserve(32);
         auto finish = [&](auto* builder, const char* field) {
             std::shared_ptr<arrow::Array> array;
             if (!check(builder->Finish(&array), field)) return false;
@@ -195,17 +227,23 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
             !finish(&wire_bytes_ab, "wire_bytes_ab") || !finish(&wire_bytes_ba, "wire_bytes_ba")) {
             return NpmBasicEncodeError::kArrowError;
         }
-        if (labeling_enabled && !finish(&primary_label_id, "primary_label_id")) {
+        if (!finish(&primary_label_id, "primary_label_id")) {
             return NpmBasicEncodeError::kArrowError;
         }
         if (!finish(&protocol_status, "protocol_status") || !finish(&protocol_id, "protocol_id") ||
             !finish(&protocol_sub_id, "protocol_sub_id") || !finish(&protocol, "protocol") ||
-            !finish(&end_reason, "end_reason")) {
+            !finish(&end_reason, "end_reason") || !finish(&wire_bytes_total, "wire_bytes_total") ||
+            !finish(&period_start_ns, "period_start_ns") || !finish(&period_end_ns, "period_end_ns") ||
+            !finish(&period_complete, "period_complete") || !finish(&interval_packets_ab, "interval_packets_ab") ||
+            !finish(&interval_packets_ba, "interval_packets_ba") ||
+            !finish(&interval_wire_bytes_ab, "interval_wire_bytes_ab") ||
+            !finish(&interval_wire_bytes_ba, "interval_wire_bytes_ba") ||
+            !finish(&interval_wire_bytes_total, "interval_wire_bytes_total")) {
             return NpmBasicEncodeError::kArrowError;
         }
 
-        auto batch = arrow::RecordBatch::Make(NpmBasicResultSchema(labeling_enabled),
-                                              static_cast<int64_t>(results.size()), std::move(arrays));
+        auto batch =
+            arrow::RecordBatch::Make(NpmBasicResultSchema(), static_cast<int64_t>(results.size()), std::move(arrays));
         const auto validation = batch->ValidateFull();
         if (!validation.ok()) {
             return Fail(NpmBasicEncodeError::kArrowError, std::string("encoded batch: ") + validation.ToString(),

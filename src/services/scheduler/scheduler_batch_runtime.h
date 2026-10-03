@@ -1,15 +1,11 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_SCHEDULER_SCHEDULER_BATCH_RUNTIME_H_
 #define _FLOWSQL_SERVICES_SCHEDULER_SCHEDULER_BATCH_RUNTIME_H_
 
 #include <common/error_code.h>
+#include <framework/core/pipeline.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -49,6 +45,7 @@ struct BatchRuntimeSnapshot {
     int64_t result_row_count = 0;
     int64_t result_col_count = 0;
     std::string result_target;
+    std::string managed_result_json;
     int64_t created_ms = 0;
     int64_t started_ms = 0;
     int64_t last_active_ms = 0;
@@ -73,7 +70,8 @@ class SchedulerBatchRuntime final {
                int timeout_s,
                std::string* err_msg);
     int Query(const std::string& runtime_task_id, BatchRuntimeSnapshot* out) const;
-    int RequestStop(const std::string& runtime_task_id, std::string* err_msg);
+    int RequestStop(const std::string& runtime_task_id, std::string* err_msg, bool cancel = false);
+    static std::shared_ptr<BlockTransformRunControl> CurrentControl();
     void SweepFinished(int64_t now_ms, int retention_s, size_t max_count);
 
  private:
@@ -82,6 +80,7 @@ class SchedulerBatchRuntime final {
         std::vector<std::string> sqls;
         int timeout_s = 0;
         std::atomic<bool> stop_requested{false};
+        std::shared_ptr<BlockTransformRunControl> control = std::make_shared<BlockTransformRunControl>();
         BatchRuntimeSnapshot snapshot;
     };
 
@@ -111,4 +110,3 @@ class SchedulerBatchRuntime final {
 }  // namespace flowsql
 
 #endif  // _FLOWSQL_SERVICES_SCHEDULER_SCHEDULER_BATCH_RUNTIME_H_
-

@@ -13,6 +13,7 @@ namespace flowsql {
 namespace scheduler {
 
 namespace {
+thread_local std::shared_ptr<BlockTransformRunControl> current_control;
 
 BatchRuntimeStatus ParseExecuteTerminalStatus(const std::string& rsp) {
     if (rsp.empty()) return BatchRuntimeStatus::kCompleted;
@@ -52,6 +53,8 @@ bool IsTerminalBatchRuntimeStatus(BatchRuntimeStatus status) {
            status == BatchRuntimeStatus::kTimeout;
 }
 
+std::shared_ptr<BlockTransformRunControl> SchedulerBatchRuntime::CurrentControl() { return current_control; }
+
 SchedulerBatchRuntime::~SchedulerBatchRuntime() {
     Stop();
 }
@@ -78,6 +81,7 @@ void SchedulerBatchRuntime::Stop() {
         for (auto& kv : tasks_) {
             if (!kv.second) continue;
             kv.second->stop_requested.store(true, std::memory_order_release);
+            kv.second->control->Request(true);
             if (!IsTerminalBatchRuntimeStatus(kv.second->snapshot.status)) {
                 kv.second->snapshot.status = BatchRuntimeStatus::kStopping;
                 kv.second->snapshot.last_active_ms = CurrentTimeMs();
@@ -144,10 +148,11 @@ int SchedulerBatchRuntime::Query(const std::string& runtime_task_id, BatchRuntim
     auto it = tasks_.find(runtime_task_id);
     if (it == tasks_.end() || !it->second) return ENOENT;
     *out = it->second->snapshot;
+    out->managed_result_json = it->second->control->Snapshot();
     return 0;
 }
 
-int SchedulerBatchRuntime::RequestStop(const std::string& runtime_task_id, std::string* err_msg) {
+int SchedulerBatchRuntime::RequestStop(const std::string& runtime_task_id, std::string* err_msg, bool cancel) {
     if (runtime_task_id.empty()) {
         if (err_msg) *err_msg = "runtime_task_id is empty";
         return EINVAL;
@@ -160,6 +165,7 @@ int SchedulerBatchRuntime::RequestStop(const std::string& runtime_task_id, std::
     }
     auto task = it->second;
     task->stop_requested.store(true, std::memory_order_release);
+    task->control->Request(cancel);
     if (IsTerminalBatchRuntimeStatus(task->snapshot.status)) return 0;
     if (task->snapshot.status == BatchRuntimeStatus::kPending) {
         task->snapshot.status = BatchRuntimeStatus::kCancelled;
@@ -289,7 +295,9 @@ void SchedulerBatchRuntime::ExecuteTask(const std::shared_ptr<BatchRuntimeTask>&
         }
 
         std::string exec_rsp;
+        current_control = task->control;
         const int32_t rc = exec_fn_(task->sqls[i], &exec_rsp);
+        current_control.reset();
         if (rc != error::OK) {
             std::string err_code;
             std::string err_message;
@@ -300,7 +308,8 @@ void SchedulerBatchRuntime::ExecuteTask(const std::shared_ptr<BatchRuntimeTask>&
             if (err_message.empty()) err_message = "batch SQL execute failed";
 
             std::lock_guard<std::mutex> lock(mu_);
-            task->snapshot.status = BatchRuntimeStatus::kFailed;
+            task->snapshot.status =
+                task->control->cancel_requested.load() ? BatchRuntimeStatus::kCancelled : BatchRuntimeStatus::kFailed;
             task->snapshot.error_code = err_code;
             task->snapshot.error_message = err_message;
             task->snapshot.error_stage = err_stage;

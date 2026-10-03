@@ -21,6 +21,7 @@
 #include <operators/npm_basic/modules/dns/npm_dns_contract.h>
 #include <operators/npm_basic/modules/http1/npm_http1_contract.h>
 #include <operators/npm_basic/npm_basic_result_consumer.h>
+#include <operators/npm_basic/output/npm_basic_result_encoder.h>
 #include <services/database/database_plugin.h>
 
 namespace {
@@ -428,13 +429,57 @@ int main() {
     assert(probe.Text("SELECT __npm_run_status FROM npm_session_history_v1 WHERE __npm_run_id='run-failed'") ==
            "incomplete");
 
-    const auto labeled_basic = flowsql::npm::NpmBasicEntityDescriptorV1(true);
+    const auto labeled_basic = flowsql::npm::NpmBasicEntityDescriptorV1();
     auto labeled = CreateConsumer(factory.get(), {"task-labeled", "run-labeled"}, {labeled_basic},
                                   std::make_shared<BoundedBudget>());
     assert(labeled->Consume({"task-labeled", "run-labeled"}, labeled_basic, *MakeRows(labeled_basic, 101, 1)) == 0);
     assert(labeled->Finish() == 0);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_history_v1 WHERE __npm_run_id='run-labeled'") == 0);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_history_v2 WHERE __npm_run_id='run-labeled'") == 1);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_history_v1 WHERE __npm_run_id='run-labeled'") == 1);
+    assert(probe.Int64("SELECT COUNT(*) FROM sqlite_master WHERE name='npm_basic_history_v2'") == 0);
+
+    for (int labels : {0, 1, 2}) {
+        const std::string run = "run-periodic-" + std::to_string(labels);
+        auto periodic =
+            CreateConsumer(factory.get(), {"task-periodic", run}, {labeled_basic}, std::make_shared<BoundedBudget>());
+        flowsql::npm::NpmBasicResult row;
+        row.session_id = 101;
+        row.revision = 1;
+        row.protocol_status = flowsql::npm::NpmProtocolStatus::kUnknown;
+        row.primary_label_id = labels == 2 ? 17 : 0;
+        row.wire_bytes_ab = maximum - 10;
+        row.wire_bytes_total = maximum - 10;
+        row.period = flowsql::npm::NpmBasicPeriodStats{0, 30000000000LL, true, 1, 0, maximum - 10, 0, maximum - 10};
+        std::vector<flowsql::npm::NpmBasicResult> records{row};
+        row.revision = 2;
+        row.wire_bytes_ba = 10;
+        row.wire_bytes_total = maximum;
+        row.period = flowsql::npm::NpmBasicPeriodStats{30000000000LL, 60000000000LL, false, 0, 1, 0, 10, 10};
+        records.push_back(row);
+        row.revision = 3;
+        row.is_final = true;
+        row.end_reason = flowsql::npm::NpmSessionEndReason::kEof;
+        row.period->interval_packets_ba = 0;
+        row.period->interval_wire_bytes_ba = row.period->interval_wire_bytes_total = 0;
+        records.push_back(row);
+        std::shared_ptr<arrow::RecordBatch> encoded;
+        assert(flowsql::npm::EncodeNpmBasicResults(records, &encoded, nullptr, labels != 0) ==
+               flowsql::npm::NpmBasicEncodeError::kNone);
+        assert(periodic->Consume({"task-periodic", run}, labeled_basic, *encoded) == 0);
+        assert(periodic->Finish() == 0);
+        const std::string where = " WHERE __npm_run_id='" + run + "'";
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_history_v1" + where) == 3);
+        assert(probe.Text("SELECT interval_wire_bytes_total FROM npm_basic_history_v1" + where + " AND revision='1'") ==
+               std::to_string(maximum - 10));
+        assert(probe.Text("SELECT interval_wire_bytes_total FROM npm_basic_history_v1" + where + " AND revision='2'") ==
+               "10");
+        assert(probe.Text("SELECT interval_wire_bytes_total FROM npm_basic_final_v1" + where) == "0");
+        assert(probe.Text("SELECT wire_bytes_total FROM npm_basic_final_v1" + where) == std::to_string(maximum));
+        assert(probe.Text("SELECT revision FROM npm_basic_latest_v1" + where) == "3");
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_history_v1" + where + " AND primary_label_id IS NULL") ==
+               (labels == 0 ? 3 : 0));
+        if (labels)
+            assert(probe.Int64("SELECT primary_label_id FROM npm_basic_final_v1" + where) == (labels == 2 ? 17 : 0));
+    }
 
     {
         auto cancelled = CreateConsumer(factory.get(), {"task-cancelled", "run-cancelled"}, entities,

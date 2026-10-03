@@ -7,12 +7,12 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
-#include <cstdio>
 #include <common/error_code.h>
 #include <common/log.h>
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -25,7 +25,6 @@
 #include <unordered_set>
 
 #include "framework/core/channel_adapter.h"
-#include "framework/core/packet_codec.h"
 #include "framework/core/dataframe.h"
 #include "framework/core/dataframe_channel.h"
 #include "framework/core/fan_in_stream_channel.h"
@@ -34,29 +33,30 @@
 #include "framework/core/filter_expression.h"
 #include "framework/core/filter_planner.h"
 #include "framework/core/json_error_builder.h"
+#include "framework/core/packet_codec.h"
 #include "framework/core/pipeline.h"
 #include "framework/core/ring_stream_channel.h"
 #include "framework/core/sql_parser.h"
 #include "framework/core/sql_text_splitter.h"
+#include "framework/interfaces/iblock_stream_channel.h"
+#include "framework/interfaces/iblock_stream_factory.h"
+#include "framework/interfaces/ibridge.h"
+#include "framework/interfaces/ibuiltin_registry.h"
+#include "framework/interfaces/icapture_block_stream_reader.h"
 #include "framework/interfaces/ichannel.h"
 #include "framework/interfaces/ichannel_registry.h"
 #include "framework/interfaces/idatabase_channel.h"
 #include "framework/interfaces/idatabase_factory.h"
 #include "framework/interfaces/idataframe_channel.h"
-#include "framework/interfaces/ibuiltin_registry.h"
-#include "framework/interfaces/ibridge.h"
+#include "framework/interfaces/ifilter_domain_resolver.h"
 #include "framework/interfaces/ioperator.h"
 #include "framework/interfaces/ioperator_catalog.h"
 #include "framework/interfaces/ioperator_registry.h"
 #include "framework/interfaces/istream_channel.h"
 #include "framework/interfaces/istream_factory.h"
 #include "framework/interfaces/istream_manager.h"
-#include "framework/interfaces/iblock_stream_channel.h"
-#include "framework/interfaces/icapture_block_stream_reader.h"
-#include "framework/interfaces/iblock_stream_factory.h"
-#include "framework/interfaces/ifilter_domain_resolver.h"
-#include "scheduler_json_codec.h"
 #include "scheduler_internal_utils.h"
+#include "scheduler_json_codec.h"
 
 namespace flowsql {
 namespace scheduler {
@@ -1051,6 +1051,14 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
                              : stmt.with_params;
     const std::string with_params_json = MakeWithParamsJson(params);
     auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV1*>(source);
+    if (capture_reader && !stmt.operators.empty() && stmt.operators.front().category == "npm" &&
+        stmt.operators.front().name == "basic" && !managed_sink) {
+        if (error)
+            *error =
+                "continuous npm.basic requires INTO <database>.<name> managed target; DataFrame/unbounded foreground "
+                "output is unsupported";
+        return EINVAL;
+    }
     CaptureQueueIdentityV1 capture_identity;
     if (capture_reader) {
         CaptureReaderLimitsV1 capture_limits;
@@ -1154,6 +1162,13 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
         const int input_bind_rc = BindBlockTransformInputSource(probe.get(), stmt.source, error);
         if (input_bind_rc != 0) return input_bind_rc;
 
+        if (capture_reader) {
+            auto* capture_task = dynamic_cast<IBlockTransformCaptureFactTaskV1*>(probe.get());
+            if (capture_task && capture_task->BindCaptureSource(capture_identity) != 0) {
+                if (error) *error = "capture Schema probe source binding failed";
+                return EINVAL;
+            }
+        }
         int probe_open_rc = 0;
         try {
             probe_open_rc = probe->Open(source_schema, &planned_output_schema);
@@ -1289,11 +1304,20 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
         return appendable_sink->Append(&frame);
     };
 
+    config.control = SchedulerBatchRuntime::CurrentControl();
+    config.opened_callback = [managed_task, control = config.control]() {
+        if (managed_task && control) control->Publish(managed_task->ManagedSinkResultJson());
+    };
+    const auto run_control = config.control;
     BlockTransformPipelineRunner runner(std::move(config));
     BlockTransformPipelineResult result;
     std::string runner_error;
     const auto runner_rc = runner.Run(&result, &runner_error);
-    if (managed_task && managed_result_json) *managed_result_json = managed_task->ManagedSinkResultJson();
+    if (managed_task) {
+        const auto result_json = managed_task->ManagedSinkResultJson();
+        if (managed_result_json) *managed_result_json = result_json;
+        if (run_control) run_control->Publish(result_json);
+    }
     if (rows_affected) *rows_affected = result.output_rows;
     if (result.terminal == BlockTransformPipelineTerminal::kCompleted) {
         if (terminal) *terminal = BlockExecutionTerminal::kCompleted;
@@ -1347,6 +1371,13 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         return EINVAL;
     }
     auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV1*>(source);
+    if (capture_reader && stmt.operators.front().category == "npm" && stmt.operators.front().name == "basic") {
+        if (error)
+            *error =
+                "continuous npm.basic requires INTO <database>.<name> managed target; "
+                "DataFrame/unbounded foreground output is unsupported";
+        return EINVAL;
+    }
     CaptureQueueIdentityV1 capture_identity;
     if (capture_reader) {
         CaptureReaderLimitsV1 capture_limits;
@@ -1501,6 +1532,10 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         const int input_bind_rc = BindBlockTransformInputSource(probe.get(), stmt.source, error);
         if (input_bind_rc != 0) return input_bind_rc;
 
+        if (i == 0 && capture_reader) {
+            auto* capture_task = dynamic_cast<IBlockTransformCaptureFactTaskV1*>(probe.get());
+            if (capture_task && capture_task->BindCaptureSource(capture_identity) != 0) return EINVAL;
+        }
         int probe_open_rc = 0;
         try {
             probe_open_rc = probe->Open(input_schema, &plan.output_schema);

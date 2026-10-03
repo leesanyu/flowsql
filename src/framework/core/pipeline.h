@@ -8,13 +8,14 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "framework/core/filter_executor.h"
-#include "framework/interfaces/ichannel.h"
 #include "framework/interfaces/iblock_stream_channel.h"
 #include "framework/interfaces/iblock_transform_operator.h"
+#include "framework/interfaces/ichannel.h"
 #include "framework/interfaces/ioperator.h"
 
 namespace flowsql {
@@ -106,6 +107,38 @@ enum class BlockTransformPipelineTerminal : int32_t {
     kFailed,
 };
 
+/** Control requests never call the transform from a second thread. Wake registration owns no source. */
+class BlockTransformRunControl final {
+ public:
+    void Request(bool cancel) {
+        if (cancel)
+            cancel_requested.store(true);
+        else
+            stop_requested.store(true);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (wake_) wake_();
+    }
+    void BindWake(std::function<void()> wake) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        wake_ = std::move(wake);
+        if (wake_ && (stop_requested.load() || cancel_requested.load())) wake_();
+    }
+    void Publish(std::string json) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        result_json_ = std::move(json);
+    }
+    std::string Snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return result_json_;
+    }
+    std::atomic<bool> stop_requested{false}, cancel_requested{false};
+
+ private:
+    mutable std::mutex mutex_;
+    std::function<void()> wake_;
+    std::string result_json_;
+};
+
 struct BlockTransformPipelineConfig {
     IBlockStreamChannel* source = nullptr;
     std::shared_ptr<arrow::Schema> source_schema;
@@ -121,6 +154,8 @@ struct BlockTransformPipelineConfig {
     std::function<int64_t()> monotonic_clock_ns;
     std::function<int64_t()> wall_clock_ns;
     int poll_timeout_ms = 100;
+    std::shared_ptr<BlockTransformRunControl> control;
+    std::function<void()> opened_callback;
 };
 
 struct BlockTransformPipelineResult {

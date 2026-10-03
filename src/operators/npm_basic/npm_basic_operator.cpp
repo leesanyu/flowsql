@@ -330,6 +330,13 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
         expected = Fail(expected, error);
         return expected == State::kCancelled ? ECANCELED : EINVAL;
     }
+    if (!parsed.run_mode_explicit) {
+        parsed.analysis.run_mode = capture_bound_ ? NpmRunMode::kRealtime : NpmRunMode::kOffline;
+    } else if (v2_ && (parsed.analysis.run_mode == NpmRunMode::kRealtime) != capture_bound_) {
+        expected = State::kOpening;
+        expected = Fail(expected, "npm.basic run_mode conflicts with bound source capabilities");
+        return expected == State::kCancelled ? ECANCELED : EINVAL;
+    }
     NpmTimeCapabilities time_capabilities;
     if (v2_ && parsed.analysis.run_mode == NpmRunMode::kRealtime) {
         const bool schema_probe = task_id_.size() >= 7 && task_id_.compare(task_id_.size() - 7, 7, ".schema") == 0;

@@ -310,6 +310,14 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
                         status.row = current_row;
                         return status;
                     }
+                    for (auto* module : modules) {
+                        status.module_error = module->OnTime(progress.watermark_ns, packet.meta.timestamp_ns, writer);
+                        if (status.module_error != 0) {
+                            status.error = NpmPacketBatchProcessError::kModuleError;
+                            status.row = current_row;
+                            return status;
+                        }
+                    }
                     const NpmModuleTimeV1 time{{progress.watermark_ns}, packet.meta.timestamp_ns};
                     for (auto* module : protocol_modules) {
                         status.module_error = module->OnTime(time);
@@ -480,6 +488,15 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
                     status.row = current_row;
                     return status;
                 }
+                for (auto* module : modules) {
+                    status.module_error = module->OnTime(progress.watermark_ns, packet.meta.timestamp_ns, writer);
+                    if (status.module_error != 0) {
+                        status.error = NpmPacketBatchProcessError::kModuleError;
+                        status.row = current_row;
+                        return status;
+                    }
+                }
+
                 const NpmModuleTimeV1 time{{progress.watermark_ns}, packet.meta.timestamp_ns};
                 for (auto* module : protocol_modules) {
                     status.module_error = module->OnTime(time);

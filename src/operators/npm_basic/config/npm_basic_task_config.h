@@ -37,6 +37,7 @@ struct NpmBasicFeatureConfig {
 
 struct NpmBasicTaskConfig {
     NpmAnalysisConfig analysis;
+    bool run_mode_explicit = false;
     NpmObservationDomainMap domains;
     NpmBasicFeatureConfig features;
     std::string parameters_json;

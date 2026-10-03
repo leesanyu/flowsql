@@ -81,7 +81,7 @@ uint64_t ValidateOutputs(const std::vector<flowsql::BlockTransformOutputV1>& out
         const auto ids = std::static_pointer_cast<arrow::UInt64Array>(output.batch->column(0));
         const auto revisions = std::static_pointer_cast<arrow::UInt64Array>(output.batch->column(2));
         const auto finals = std::static_pointer_cast<arrow::BooleanArray>(output.batch->column(4));
-        const auto reasons = std::static_pointer_cast<arrow::StringArray>(output.batch->column(21));
+        const auto reasons = std::static_pointer_cast<arrow::StringArray>(output.batch->GetColumnByName("end_reason"));
         for (int64_t row = 0; row < output.batch->num_rows(); ++row) {
             Require(!ids->IsNull(row) && ids->Value(row) == *next_session_id &&
                         !revisions->IsNull(row) && revisions->Value(row) == 1 &&
@@ -148,14 +148,13 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
             std::shared_ptr<arrow::Schema> schema;
             const int open_rc = task->Open(input->schema(), &schema);
             Require(open_rc == 0, "task Open failed: " + task->LastError());
-            Require(schema != nullptr && schema->num_fields() == 22 &&
+            Require(schema != nullptr && schema->num_fields() == 32 &&
                         schema->field(0)->type()->Equals(arrow::uint64()) &&
                         schema->field(2)->type()->Equals(arrow::uint64()) &&
                         schema->field(4)->type()->Equals(arrow::boolean()) &&
-                        schema->field(21)->type()->Equals(arrow::utf8()) &&
-                        schema->metadata() != nullptr &&
+                        schema->field(22)->type()->Equals(arrow::utf8()) && schema->metadata() != nullptr &&
                         schema->metadata()->Get("flowsql.entity").ValueOrDie() == "npm_basic_result",
-                    "expected fixed 22-column Basic result schema");
+                    "expected fixed 32-column Basic result schema");
             std::vector<flowsql::BlockTransformOutputV1> outputs;
             uint64_t next_session_id = 1;
             const auto process = [&]() {
@@ -185,8 +184,8 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
                       << std::setprecision(3) << wall_ms << ',' << static_cast<double>(packets) * 1000.0 / wall_ms
                       << ',' << output_rows << '\n';
         };
-    measure("basic-only", R"({"input_namespace":"benchmark.packet","source_domains":"0:7"})");
-    measure("basic+session", R"({"input_namespace":"benchmark.packet","source_domains":"0:7",)"
+    measure("basic-only", R"({"input_namespace":"benchmark.packet","source_domains":"0:7","result_mode":"final"})");
+    measure("basic+session", R"({"input_namespace":"benchmark.packet","source_domains":"0:7","result_mode":"final",)"
                              R"("features":"basic,session","observing":"basic"})");
 }
 

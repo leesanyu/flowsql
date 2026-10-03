@@ -102,6 +102,10 @@ NpmBasicProjectionError NpmBasicResultProjector::Project(const NpmSessionView& s
         next.packets_ba = session.packets_ba;
         next.wire_bytes_ab = session.wire_bytes_ab;
         next.wire_bytes_ba = session.wire_bytes_ba;
+        if (session.wire_bytes_ba > std::numeric_limits<uint64_t>::max() - session.wire_bytes_ab) {
+            return NpmBasicProjectionError::kInvalidResult;
+        }
+        next.wire_bytes_total = session.wire_bytes_ab + session.wire_bytes_ba;
         next.primary_label_id = session.primary_label_id;
         next.protocol_status = session.protocol_status;
         if (session.protocol_status == NpmProtocolStatus::kIdentified) {

@@ -1602,6 +1602,32 @@ class ScriptedTimeDrivenBlockTransformTask final : public IBlockTransformTaskV2 
 // Test 7.6: single-transform block pipeline lifecycle
 // ============================================================
 void test_block_transform_pipeline_runner() {
+    for (bool cancel : {false, true}) {
+        const auto schema = arrow::schema({arrow::field("value", arrow::int64())});
+        ScriptedBlockSource source({{BlockPollEvent::kTimeout, nullptr, 0}});
+        ScriptedBlockTransformTask task(schema);
+        auto control = std::make_shared<BlockTransformRunControl>();
+        source.poll_hook = [control, cancel](int, int) { control->Request(cancel); };
+        BlockTransformPipelineConfig config;
+        config.source = &source;
+        config.source_schema = schema;
+        config.transform = &task;
+        config.control = control;
+        config.output_consumer = [](const BlockTransformOutputV1&) { return 0; };
+        config.opened_callback = [control]() { control->Publish("{\"run_id\":\"test-run\"}"); };
+        BlockTransformPipelineRunner runner(std::move(config));
+        BlockTransformPipelineResult result;
+        std::string error;
+        const auto rc = runner.Run(&result, &error);
+        assert(control->Snapshot() == "{\"run_id\":\"test-run\"}");
+        assert(source.cancel_calls >= 1);
+        assert(task.flush_calls == (cancel ? 0 : 1));
+        assert(task.cancel_calls == (cancel ? 1 : 0));
+        assert(rc == (cancel ? BlockTransformPipelineError::kCancelled : BlockTransformPipelineError::kNone));
+        assert(result.terminal ==
+               (cancel ? BlockTransformPipelineTerminal::kCancelled : BlockTransformPipelineTerminal::kStopped));
+    }
+
     printf("[TEST] block transform pipeline runner...\n");
     auto schema = arrow::schema({arrow::field("id", arrow::int32(), true)});
     auto make_batch = [&](const std::vector<int32_t>& values) {

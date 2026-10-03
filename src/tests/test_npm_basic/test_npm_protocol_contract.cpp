@@ -75,7 +75,7 @@ std::shared_ptr<arrow::RecordBatch> Rows(const npm::NpmEntityDescriptorV1& entit
 
 void TestEntitiesAndRows() {
     for (bool labeling : {false, true}) {
-        const auto basic = npm::NpmBasicEntityDescriptorV1(labeling);
+        const auto basic = npm::NpmBasicEntityDescriptorV1();
         const auto session = npm::NpmSessionEntityDescriptorV1(labeling);
         Expect(npm::ValidateNpmEntityDescriptorV1(basic), Error::kNone);
         Expect(npm::ValidateNpmEntityDescriptorV1(session), Error::kNone);
@@ -84,12 +84,13 @@ void TestEntitiesAndRows() {
         assert(basic.identity_column == "session_id" && session.identity_column == "session_id");
         const uint32_t expected_version = labeling ? 2 : 1;
         const std::string expected_version_text = std::to_string(expected_version);
-        assert(basic.schema_version == expected_version && session.schema_version == expected_version);
-        assert(basic.schema == npm::NpmBasicResultSchema(labeling));
+        assert(basic.schema_version == 1 && session.schema_version == expected_version);
+        assert(basic.schema == npm::NpmBasicResultSchema());
         assert(session.schema == npm::NpmSessionResultSchema(labeling));
-        assert(basic.schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == expected_version_text);
+        assert(basic.schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == "1");
         assert(session.schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == expected_version_text);
-        assert((basic.schema->GetFieldIndex("primary_label_id") >= 0) == labeling);
+        assert(basic.schema->GetFieldIndex("primary_label_id") >= 0 &&
+               basic.schema->GetFieldByName("primary_label_id")->nullable());
         assert((session.schema->GetFieldIndex("primary_label_id") >= 0) == labeling);
     }
 

@@ -109,7 +109,7 @@ NpmProtocolContractStatusV1 ValidateNpmModulePlanV1(const NpmModulePlanV1& plan,
 NpmProtocolContractStatusV1 ValidateNpmEntityRowsV1(std::string_view emitting_module,
                                                     const NpmEntityDescriptorV1& entity,
                                                     const arrow::RecordBatch& rows);
-NpmEntityDescriptorV1 NpmBasicEntityDescriptorV1(bool labeling_enabled = false);
+NpmEntityDescriptorV1 NpmBasicEntityDescriptorV1();
 NpmEntityDescriptorV1 NpmSessionEntityDescriptorV1(bool labeling_enabled = false);
 
 interface INpmResultEmitterV1 {

@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <operators/npm_basic/npm_basic_result_consumer.h>
+#include <operators/npm_basic/output/npm_basic_result_encoder.h>
 #include <services/database/database_plugin.h>
 
 namespace {
@@ -411,16 +412,64 @@ void TestRelations(const Backend& backend, const std::vector<NpmEntityDescriptor
     assert(RowCount(incomplete_rows) == 1);
     assert(StringValue(*incomplete_rows.front()->GetColumnByName("__npm_run_status"), 0) == "incomplete");
 
-    const auto basic_v2 = flowsql::npm::NpmBasicEntityDescriptorV1(true);
-    const std::string v2_run = prefix + "-v2";
-    auto v2 = CreateConsumer(backend.channel.get(), "pcapfile.v2", {"task-v2", v2_run}, {basic_v2});
-    auto v2_rows = MakeRows(basic_v2, maximum - 1, {maximum}, {true});
-    assert(v2->Consume({"task-v2", v2_run}, basic_v2, *v2_rows) == 0);
-    assert(v2->Finish() == 0);
-    assert(RowCount(Query(backend.channel.get(), backend.category,
-                          "SELECT * FROM npm_basic_history_v2 WHERE __npm_run_id='" + v2_run + "'")) == 1);
-    assert(RowCount(Query(backend.channel.get(), backend.category,
-                          "SELECT * FROM npm_basic_history_v1 WHERE __npm_run_id='" + v2_run + "'")) == 0);
+    const auto labeled_basic = flowsql::npm::NpmBasicEntityDescriptorV1();
+    assert(labeled_basic.schema->Equals(*basic.schema, true) && labeled_basic.schema_version == 1);
+    for (int labels : {0, 1, 2}) {
+        const std::string periodic_run = prefix + "-periodic-" + std::to_string(labels);
+        auto periodic = CreateConsumer(backend.channel.get(), "pcapfile.periodic", {"task-periodic", periodic_run},
+                                       {labeled_basic});
+        flowsql::npm::NpmBasicResult row;
+        row.session_id = 101;
+        row.revision = 1;
+        row.protocol_status = flowsql::npm::NpmProtocolStatus::kUnknown;
+        row.primary_label_id = labels == 2 ? 17 : 0;
+        row.wire_bytes_ab = maximum - 10;
+        row.wire_bytes_total = maximum - 10;
+        row.packets_ab = 1;
+        row.period = flowsql::npm::NpmBasicPeriodStats{0, 30000000000LL, true, 1, 0, maximum - 10, 0, maximum - 10};
+        std::vector<flowsql::npm::NpmBasicResult> records{row};
+        row.revision = 2;
+        row.packets_ba = 1;
+        row.wire_bytes_ba = 10;
+        row.wire_bytes_total = maximum;
+        row.period = flowsql::npm::NpmBasicPeriodStats{30000000000LL, 60000000000LL, false, 0, 1, 0, 10, 10};
+        records.push_back(row);
+        row.revision = 3;
+        row.is_final = true;
+        row.end_reason = flowsql::npm::NpmSessionEndReason::kEof;
+        row.period->interval_packets_ba = 0;
+        row.period->interval_wire_bytes_ba = row.period->interval_wire_bytes_total = 0;
+        records.push_back(row);
+        std::shared_ptr<arrow::RecordBatch> encoded;
+        assert(flowsql::npm::EncodeNpmBasicResults(records, &encoded, nullptr, labels != 0) ==
+               flowsql::npm::NpmBasicEncodeError::kNone);
+        assert(periodic->Consume({"task-periodic", periodic_run}, labeled_basic, *encoded) == 0);
+        assert(periodic->Finish() == 0);
+        const auto stored =
+            Query(backend.channel.get(), backend.category,
+                  "SELECT * FROM npm_basic_history_v1 WHERE __npm_run_id='" + periodic_run + "' ORDER BY revision");
+        assert(RowCount(stored) == 3);
+        uint64_t summed = 0;
+        for (const auto& batch : stored) {
+            const auto delta = batch->GetColumnByName("interval_wire_bytes_total");
+            const auto label = batch->GetColumnByName("primary_label_id");
+            for (int64_t index = 0; index < batch->num_rows(); ++index) {
+                assert(!delta->IsNull(index));
+                summed += UIntValue(*delta, index);
+                assert(label->IsNull(index) == (labels == 0));
+                if (labels != 0) assert(UIntValue(*label, index) == static_cast<uint64_t>(labels == 2 ? 17 : 0));
+            }
+        }
+        assert(summed == maximum);
+        const auto latest = Query(backend.channel.get(), backend.category,
+                                  "SELECT * FROM npm_basic_latest_v1 WHERE __npm_run_id='" + periodic_run + "'");
+        const auto terminal = Query(backend.channel.get(), backend.category,
+                                    "SELECT * FROM npm_basic_final_v1 WHERE __npm_run_id='" + periodic_run + "'");
+        assert(RowCount(latest) == 1 && RowCount(terminal) == 1);
+        assert(UIntValue(*terminal.front()->GetColumnByName("wire_bytes_total"), 0) == maximum);
+        assert(UIntValue(*terminal.front()->GetColumnByName("interval_wire_bytes_total"), 0) == 0);
+        assert(UIntValue(*latest.front()->GetColumnByName("revision"), 0) == 3);
+    }
 }
 
 void TestRetention(const Backend& backend, const std::vector<NpmEntityDescriptorV1>& entities,

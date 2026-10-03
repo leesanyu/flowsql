@@ -51,7 +51,7 @@ const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1() {
          [](const NpmBasicTaskConfig& config, std::string_view, NpmPreparedModuleV1* out) {
              out->plan.module_id = "basic";
              out->plan.input_mask = 3;
-             out->plan.entities = {NpmBasicEntityDescriptorV1(config.features.labeling_enabled)};
+             out->plan.entities = {NpmBasicEntityDescriptorV1()};
              out->create = [](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget>) { return NpmModuleInstanceV1{}; };
              return NpmProtocolContractStatusV1{};
          }},

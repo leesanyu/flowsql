@@ -124,6 +124,8 @@ class NpmSessionTable {
         return watermark_initialized_ && timestamp_ns < watermark_ns_;
     }
 
+    int64_t WatermarkNs() const noexcept { return watermark_ns_; }
+
     size_t size() const noexcept { return sessions_.size(); }
     uint64_t tracked_bytes() const noexcept { return tracked_session_bytes_; }
 

@@ -49,6 +49,7 @@ class NpmBasicResultCollector final : public INpmResultWriter {
 
     void BindRouter(std::shared_ptr<NpmResultRouter> router) { router_ = std::move(router); }
     NpmBasicDrainStatus RouteEnds(const std::vector<NpmSessionEndEvent>& events, NpmBasicResultProjector& projector);
+    void UsePeriodicBasic() { periodic_basic_ = true; }
     int Finish() { return router_ ? router_->Finish() : 0; }
     bool has_router() const { return router_ != nullptr; }
     int WriteBasic(const NpmBasicResult& result) override;
@@ -63,6 +64,7 @@ class NpmBasicResultCollector final : public INpmResultWriter {
 
  private:
     NpmBasicFeatureConfig features_;
+    bool periodic_basic_ = false;
     std::shared_ptr<NpmResultRouter> router_;
     std::vector<NpmBasicResult> pending_basic_;
     std::vector<NpmSessionResult> pending_session_;

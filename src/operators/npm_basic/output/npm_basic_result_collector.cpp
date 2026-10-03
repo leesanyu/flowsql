@@ -83,7 +83,7 @@ NpmBasicDrainStatus NpmBasicResultCollector::Drain(const std::vector<NpmSessionE
             basic_results.reserve(basic_results.size() + events.size());
         }
 
-        if (features_.basic_enabled) {
+        if (features_.basic_enabled && !periodic_basic_) {
             for (size_t index = 0; index < events.size(); ++index) {
                 NpmBasicResult result;
                 const auto& event = events[index];
@@ -135,7 +135,7 @@ NpmBasicDrainStatus NpmBasicResultCollector::Drain(const std::vector<NpmSessionE
 NpmBasicDrainStatus NpmBasicResultCollector::RouteEnds(const std::vector<NpmSessionEndEvent>& events,
                                                        NpmBasicResultProjector& projector) {
     NpmBasicDrainStatus status;
-    if (!features_.basic_enabled) return status;
+    if (!features_.basic_enabled || periodic_basic_) return status;
     for (size_t index = 0; index < events.size(); ++index) {
         const auto& event = events[index];
         NpmBasicResult result;

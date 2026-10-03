@@ -99,6 +99,14 @@ NpmEofFlushStatus NpmEofFlusher::Flush(int64_t observed_at, NpmSessionTable& ses
             }
             events.clear();
         }
+        for (auto* module : modules) {
+            status.module_error = module->OnFinish(observed_at, collector);
+            if (status.module_error != 0) {
+                status.error = NpmEofFlushError::kModuleError;
+                state_ = NpmEofFlushState::kFailed;
+                return status;
+            }
+        }
         for (auto* module : protocol_modules) {
             status.module_error = module->Finish(observed_at);
             if (status.module_error != 0) {

@@ -35,7 +35,7 @@ enum class NpmOverloadPolicy : uint8_t {
 
 constexpr int64_t kNpmNanosecondsPerSecond = 1000LL * 1000LL * 1000LL;
 constexpr int64_t kNpmMinOutputIntervalNs = 10LL * 1000LL * 1000LL;
-constexpr int64_t kNpmDefaultOutputIntervalNs = kNpmNanosecondsPerSecond;
+constexpr int64_t kNpmDefaultOutputIntervalNs = 30LL * kNpmNanosecondsPerSecond;
 constexpr int64_t kNpmMaxOutputIntervalNs = 60LL * 60LL * kNpmNanosecondsPerSecond;
 
 constexpr uint32_t kNpmMinPayloadSamplePackets = 1;
@@ -65,7 +65,7 @@ constexpr uint64_t kNpmMaxPendingOutputBytes = 1024ULL * 1024ULL * kNpmMebibyte;
 
 struct NpmAnalysisConfig {
     NpmRunMode run_mode = NpmRunMode::kOffline;
-    NpmResultMode result_mode = NpmResultMode::kFinal;
+    NpmResultMode result_mode = NpmResultMode::kPeriodicSnapshot;
     int64_t output_interval_ns = kNpmDefaultOutputIntervalNs;
     uint32_t payload_sample_packets = kNpmDefaultPayloadSamplePackets;
     int64_t tcp_idle_timeout_ns = kNpmDefaultTcpIdleTimeoutNs;
@@ -134,6 +134,17 @@ enum class NpmSessionEndReason : uint8_t {
     kEof = 3,
 };
 
+struct NpmBasicPeriodStats {
+    int64_t period_start_ns = 0;
+    int64_t period_end_ns = 0;
+    bool period_complete = false;
+    uint64_t interval_packets_ab = 0;
+    uint64_t interval_packets_ba = 0;
+    uint64_t interval_wire_bytes_ab = 0;
+    uint64_t interval_wire_bytes_ba = 0;
+    uint64_t interval_wire_bytes_total = 0;
+};
+
 struct NpmBasicResult {
     uint64_t session_id = 0;
     uint64_t observation_domain_id = 0;
@@ -152,6 +163,8 @@ struct NpmBasicResult {
     uint64_t packets_ba = 0;
     uint64_t wire_bytes_ab = 0;
     uint64_t wire_bytes_ba = 0;
+    uint64_t wire_bytes_total = 0;
+    std::optional<NpmBasicPeriodStats> period;
     uint32_t primary_label_id = 0;
     NpmProtocolStatus protocol_status = NpmProtocolStatus::kPending;
     std::optional<uint16_t> protocol_id;
@@ -168,12 +181,14 @@ enum class NpmBasicResultError : uint8_t {
     kProtocolFieldsMismatch,
     kMissingFinalEndReason,
     kUnexpectedActiveEndReason,
+    kInvalidTotals,
+    kInvalidPeriod,
 };
 
 const char* NpmProtocolStatusName(NpmProtocolStatus status);
 const char* NpmSessionEndReasonName(NpmSessionEndReason reason);
 NpmBasicResultError ValidateNpmBasicResult(const NpmBasicResult& result);
-std::shared_ptr<arrow::Schema> NpmBasicResultSchema(bool labeling_enabled = false);
+std::shared_ptr<arrow::Schema> NpmBasicResultSchema();
 
 enum class NpmRateStatus : uint8_t {
     kValid = 0,
@@ -431,6 +446,10 @@ interface INpmAnalysisModule {
                              NpmSessionEndReason reason,
                              int64_t observed_at_ns,
                              INpmResultWriter& writer) = 0;
+    /** Serialized safe event-time progress; never a wall-clock or ordinary poll timeout. */
+    virtual int OnTime(int64_t, int64_t, INpmResultWriter&) { return 0; }
+    /** Normal EOF/Stop after session ends; not invoked for cancellation or failure. */
+    virtual int OnFinish(int64_t, INpmResultWriter&) { return 0; }
 };
 
 struct NpmTimeCapabilities {

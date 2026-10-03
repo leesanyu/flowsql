@@ -61,7 +61,7 @@ bool AnyTcpValue(const NpmSessionResult& result) {
 NpmAnalysisConfig DefaultNpmAnalysisConfig(NpmRunMode mode) {
     NpmAnalysisConfig config;
     config.run_mode = mode;
-    config.result_mode = mode == NpmRunMode::kRealtime ? NpmResultMode::kPeriodicSnapshot : NpmResultMode::kFinal;
+    config.result_mode = NpmResultMode::kPeriodicSnapshot;
     return config;
 }
 
@@ -195,10 +195,22 @@ NpmBasicResultError ValidateNpmBasicResult(const NpmBasicResult& result) {
     if (!result.is_final && result.end_reason.has_value()) {
         return NpmBasicResultError::kUnexpectedActiveEndReason;
     }
+    if (result.wire_bytes_ba > std::numeric_limits<uint64_t>::max() - result.wire_bytes_ab ||
+        result.wire_bytes_total != result.wire_bytes_ab + result.wire_bytes_ba) {
+        return NpmBasicResultError::kInvalidTotals;
+    }
+    if (result.period) {
+        const auto& p = *result.period;
+        if (p.period_end_ns <= p.period_start_ns ||
+            p.interval_wire_bytes_ba > std::numeric_limits<uint64_t>::max() - p.interval_wire_bytes_ab ||
+            p.interval_wire_bytes_total != p.interval_wire_bytes_ab + p.interval_wire_bytes_ba) {
+            return NpmBasicResultError::kInvalidPeriod;
+        }
+    }
     return NpmBasicResultError::kNone;
 }
 
-std::shared_ptr<arrow::Schema> NpmBasicResultSchema(bool labeling_enabled) {
+std::shared_ptr<arrow::Schema> NpmBasicResultSchema() {
     static const std::shared_ptr<arrow::Schema> schema = [] {
         auto fields = std::vector<std::shared_ptr<arrow::Field>>{
             arrow::field("session_id", arrow::uint64(), false),
@@ -218,25 +230,29 @@ std::shared_ptr<arrow::Schema> NpmBasicResultSchema(bool labeling_enabled) {
             arrow::field("packets_ba", arrow::uint64(), false),
             arrow::field("wire_bytes_ab", arrow::uint64(), false),
             arrow::field("wire_bytes_ba", arrow::uint64(), false),
+            arrow::field("primary_label_id", arrow::uint32(), true),
             arrow::field("protocol_status", arrow::utf8(), false),
             arrow::field("protocol_id", arrow::uint16(), true),
             arrow::field("protocol_sub_id", arrow::uint16(), true),
             arrow::field("protocol", arrow::utf8(), true),
             arrow::field("end_reason", arrow::utf8(), true),
+            arrow::field("wire_bytes_total", arrow::uint64(), false),
+            arrow::field("period_start_ns", arrow::int64(), true),
+            arrow::field("period_end_ns", arrow::int64(), true),
+            arrow::field("period_complete", arrow::boolean(), true),
+            arrow::field("interval_packets_ab", arrow::uint64(), true),
+            arrow::field("interval_packets_ba", arrow::uint64(), true),
+            arrow::field("interval_wire_bytes_ab", arrow::uint64(), true),
+            arrow::field("interval_wire_bytes_ba", arrow::uint64(), true),
+            arrow::field("interval_wire_bytes_total", arrow::uint64(), true),
         };
         auto metadata = arrow::key_value_metadata(
-            {"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit"},
-            {"npm_basic_result", "1", "ns"});
+            {"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit", "flowsql.cumulative_scope",
+             "flowsql.interval_scope"},
+            {"npm_basic_result", "1", "ns", "session_until_period_boundary", "non_overlapping_period"});
         return arrow::schema(std::move(fields), std::move(metadata));
     }();
-    static const std::shared_ptr<arrow::Schema> labeled_schema = [&] {
-        auto fields = schema->fields();
-        fields.insert(fields.begin() + 17, arrow::field("primary_label_id", arrow::uint32(), false));
-        auto metadata = arrow::key_value_metadata(
-            {"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit"}, {"npm_basic_result", "2", "ns"});
-        return arrow::schema(std::move(fields), std::move(metadata));
-    }();
-    return labeling_enabled ? labeled_schema : schema;
+    return schema;
 }
 
 const char* NpmRateStatusName(NpmRateStatus status) {

@@ -25,6 +25,7 @@ target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/c
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_tcp_stream_shared.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_tcp_stream_provider.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/basic/npm_basic_result_projector.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/basic/npm_basic_periodic_stats.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_contract.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/icmp/npm_icmp_contract.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/icmp/npm_icmp_parser.cpp)
@@ -77,6 +78,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 )
 
 add_test(NAME test_npm_basic COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_basic)
+add_test(NAME test_npm_periodic_runtime COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_basic --periodic-only)
 add_test(NAME test_npm_tcp_stream_runtime COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_basic --tcp-stream-only)
 
 add_executable(test_npm_protocol_contract
@@ -402,6 +404,7 @@ add_executable(test_npm_result_sqlite test_npm_result_sqlite.cpp)
 target_include_directories(test_npm_result_sqlite PRIVATE ${CMAKE_SOURCE_DIR})
 target_compile_options(test_npm_result_sqlite PRIVATE -UNDEBUG)
 target_sources(test_npm_result_sqlite PRIVATE
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_basic_result_encoder.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_contract.cpp
@@ -418,6 +421,7 @@ add_executable(test_npm_result_backends test_npm_result_backends.cpp)
 target_include_directories(test_npm_result_backends PRIVATE ${CMAKE_SOURCE_DIR})
 target_compile_options(test_npm_result_backends PRIVATE -UNDEBUG)
 target_sources(test_npm_result_backends PRIVATE
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_basic_result_encoder.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
 )
@@ -445,3 +449,41 @@ target_link_libraries(benchmark_npm_basic flowsql_common)
 set_target_properties(benchmark_npm_basic PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
+
+add_executable(test_npm_periodic_contract
+    test_npm_periodic_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_basic_result_encoder.cpp
+)
+target_include_directories(test_npm_periodic_contract PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_periodic_contract PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move -Wno-unused-parameter)
+add_thirddepen(test_npm_periodic_contract arrow)
+target_link_libraries(test_npm_periodic_contract flowsql_common)
+set_target_properties(test_npm_periodic_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_periodic_contract COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_periodic_contract)
+
+add_executable(test_npm_periodic_stats test_npm_periodic_stats.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/basic/npm_basic_periodic_stats.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/basic/npm_basic_result_projector.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_protocol_context.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_table.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_key.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_task_budget.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/plugins/npi/packet_decoder.cpp
+)
+target_include_directories(test_npm_periodic_stats PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_periodic_stats PRIVATE -UNDEBUG)
+add_thirddepen(test_npm_periodic_stats arrow)
+target_link_libraries(test_npm_periodic_stats flowsql_common)
+set_target_properties(test_npm_periodic_stats PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_periodic_stats COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_periodic_stats)
+
+option(FLOWSQL_NPM_PERIODIC_SANITIZERS "Sanitize Basic periodic contract, statistics, and runtime tests" OFF)
+if(FLOWSQL_NPM_PERIODIC_SANITIZERS)
+    foreach(periodic_target IN ITEMS test_npm_periodic_contract test_npm_periodic_stats test_npm_basic)
+        target_compile_options(${periodic_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${periodic_target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()

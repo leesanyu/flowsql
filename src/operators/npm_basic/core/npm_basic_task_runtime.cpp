@@ -275,6 +275,14 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
                 return status;
             }
         }
+        if (config.features.basic_enabled && config.analysis.result_mode == NpmResultMode::kPeriodicSnapshot) {
+            auto periodic =
+                std::make_unique<NpmBasicPeriodicStats>(config.analysis, runtime->budget_, *runtime->projector_);
+            runtime->periodic_ = periodic.get();
+            runtime->collector_->UsePeriodicBasic();
+            runtime->modules_.push_back(periodic.get());
+            runtime->owned_modules_.push_back(std::move(periodic));
+        }
         *output_schema = std::move(result_schema);
         *output = std::move(runtime);
         return status;
@@ -377,6 +385,17 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::s
             config_.domains, *batch, *sessions_, *protocol_context_->Identifier(), modules_, *collector_, &ended_events,
             matcher_.get(), protocol_modules_, streams_.get(), config_.analysis.run_mode == NpmRunMode::kOffline);
         if (status.process_status.error != NpmPacketBatchProcessError::kNone) {
+            if (status.process_status.packet_status.session_error == NpmSessionTableError::kLatePacket &&
+                status.process_status.row >= 0) {
+                packet::PacketView late_packet;
+                packet::PacketLayerInfo late_layer;
+                if (batch->Get(status.process_status.row, &late_packet, &late_layer) == NpmPacketBatchError::kNone) {
+                    stream_error_ = "late npm.basic packet source=" + std::to_string(late_packet.meta.source_id) +
+                                    " timestamp_ns=" + std::to_string(late_packet.meta.timestamp_ns) +
+                                    " closed_boundary_ns=" + std::to_string(sessions_->WatermarkNs());
+                    SetLastErrorOnce(stream_error_.c_str());
+                }
+            }
             RememberStreamFailure();
             return fail(NpmBasicOfflineBatchError::kBatchProcessError, "npm.basic offline batch processing failed");
         }
@@ -493,6 +512,13 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
                 RememberStreamFailure();
                 return fail(NpmBasicRealtimeMaintenanceError::kModuleError, kRealtimeModuleError);
             }
+            for (auto* module : modules_) {
+                status.module_error = module->OnTime(progress.watermark_ns, input.observed_at_ns, *collector_);
+                if (status.module_error != 0) {
+                    RememberStreamFailure();
+                    return fail(NpmBasicRealtimeMaintenanceError::kModuleError, kRealtimeModuleError);
+                }
+            }
             const NpmModuleTimeV1 time{{progress.watermark_ns}, input.observed_at_ns};
             for (auto* module : protocol_modules_) {
                 status.module_error = module->OnTime(time);
@@ -510,7 +536,7 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
             }
             status.active_sessions = active.size();
             for (size_t index = 0; index < active.size(); ++index) {
-                if (config_.features.basic_enabled) {
+                if (config_.features.basic_enabled && !periodic_) {
                     NpmBasicResult result;
                     status.projection_error = projector_->ProjectActive(active[index], input.observed_at_ns, &result);
                     if (status.projection_error != NpmBasicProjectionError::kNone) {
@@ -663,6 +689,14 @@ void NpmBasicTaskRuntime::SetLastErrorOnce(const char* error) noexcept {
 }
 
 void NpmBasicTaskRuntime::RememberStreamFailure() noexcept {
+    if (periodic_ && !periodic_->LastError().empty()) {
+        try {
+            stream_error_ = periodic_->LastError();
+            SetLastErrorOnce(stream_error_.c_str());
+        } catch (const std::bad_alloc&) {
+        }
+        return;
+    }
     if (!streams_ || streams_->Failure().error == NpmTcpStreamError::kNone) return;
     try {
         const auto& failure = streams_->Failure();
@@ -720,6 +754,7 @@ void NpmBasicTaskRuntime::ReleaseResources() noexcept {
     if (streams_) streams_->Abort();
     streams_.reset();
     modules_.clear();
+    periodic_ = nullptr;
     protocol_modules_.clear();
     owned_modules_.clear();
     prepared_modules_.clear();

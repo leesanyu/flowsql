@@ -7,13 +7,13 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
-#include <cstdio>
-#include <chrono>
 #include <common/error_code.h>
 #include <common/log.h>
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -30,30 +30,30 @@
 #include "framework/core/fan_out_stream_channel.h"
 #include "framework/core/filter_planner.h"
 #include "framework/core/json_error_builder.h"
+#include "framework/core/packet_codec.h"
 #include "framework/core/pipeline.h"
 #include "framework/core/ring_stream_channel.h"
 #include "framework/core/sql_parser.h"
 #include "framework/core/sql_text_splitter.h"
-#include "framework/core/packet_codec.h"
+#include "framework/interfaces/iblock_stream_factory.h"
+#include "framework/interfaces/iblock_stream_manager.h"
+#include "framework/interfaces/iblock_stream_operator.h"
+#include "framework/interfaces/iblock_stream_reader.h"
+#include "framework/interfaces/ibridge.h"
+#include "framework/interfaces/ibuiltin_registry.h"
 #include "framework/interfaces/ichannel.h"
 #include "framework/interfaces/ichannel_registry.h"
 #include "framework/interfaces/idatabase_channel.h"
 #include "framework/interfaces/idatabase_factory.h"
 #include "framework/interfaces/idataframe_channel.h"
-#include "framework/interfaces/ibuiltin_registry.h"
-#include "framework/interfaces/iblock_stream_operator.h"
-#include "framework/interfaces/iblock_stream_factory.h"
-#include "framework/interfaces/iblock_stream_manager.h"
-#include "framework/interfaces/iblock_stream_reader.h"
-#include "framework/interfaces/ibridge.h"
 #include "framework/interfaces/ioperator.h"
 #include "framework/interfaces/ioperator_catalog.h"
 #include "framework/interfaces/ioperator_registry.h"
 #include "framework/interfaces/istream_channel.h"
 #include "framework/interfaces/istream_factory.h"
 #include "framework/interfaces/istream_manager.h"
-#include "scheduler_json_codec.h"
 #include "scheduler_internal_utils.h"
+#include "scheduler_json_codec.h"
 
 namespace flowsql {
 namespace scheduler {
@@ -512,6 +512,10 @@ int32_t SchedulerPlugin::HandleBatchStatus(const std::string&, const std::string
     w.Int64(snapshot.result_col_count);
     w.Key("result_target");
     w.String(snapshot.result_target.c_str());
+    if (!snapshot.managed_result_json.empty()) {
+        w.Key("managed_result");
+        w.RawValue(snapshot.managed_result_json.c_str(), snapshot.managed_result_json.size(), rapidjson::kObjectType);
+    }
     w.Key("created_ms");
     w.Int64(snapshot.created_ms);
     w.Key("started_ms");
@@ -544,7 +548,16 @@ int32_t SchedulerPlugin::HandleBatchStop(const std::string&, const std::string& 
     }
 
     std::string stop_err;
-    const int stop_rc = batch_runtime_.RequestStop(runtime_task_id, &stop_err);
+    bool cancel = false;
+    if (doc.HasMember("mode")) {
+        if (!doc["mode"].IsString() ||
+            (std::string(doc["mode"].GetString()) != "stop" && std::string(doc["mode"].GetString()) != "cancel")) {
+            rsp = BuildErrorJson("mode must be stop or cancel");
+            return error::BAD_REQUEST;
+        }
+        cancel = std::string(doc["mode"].GetString()) == "cancel";
+    }
+    const int stop_rc = batch_runtime_.RequestStop(runtime_task_id, &stop_err, cancel);
     if (stop_rc != 0) {
         rsp = BuildErrorJson("batch stop failed: " + stop_err);
         return stop_rc == ENOENT ? error::NOT_FOUND : error::BAD_REQUEST;

@@ -36,6 +36,7 @@
 | [x] | NPM ICMP 控制消息分析 (`npm-icmp-analysis`) | P1 | 为排查网络连通性异常的用户提供 ICMP/ICMPv6 回显关联、观测时延、错误消息及明确的不完整原因；在同一 `npm.basic` 任务内以独立控制消息身份和有界关联状态处理，允许被引用的 TCP/UDP 会话关联缺失，输出可独立观察并由统一结果存储消费的类型化结果；依赖 `npm-protocol-analysis` 的独立 packet/control-event 路径，持久化与查询由 `npm-result-query` 提供；不依赖共享 TCP 流或会话标签准入，不把 ICMP 强行归入端口会话。 | [归档](archive/feat-npm-icmp-analysis.md) |
 | [x] | NPM 实时采集通道抽象 (`npm-capture-contract`) | P1 | 让实时 NPM 的后端开发者和任务运行时能按同一规则交换 packet 与采集事实；交付源生命周期、观测域/队列身份、批次限额、保守时间进度、空闲/积压、缓冲归还及丢包/背压统计契约，使不同后端可独立接入并被统一验收。 | [归档](archive/feat-npm-capture-contract.md) |
 | [x] | NPM 基础分析生产实时接线 (`npm-basic-realtime-integration`) | P0 | 让生产实时 SQL 用户在无包、繁忙和背压时仍能取得 `npm.basic` 的周期结果与正确终结状态；依赖基础分析、时间驱动和采集契约，交付同一任务独占 reader 的采集事实与版本化时间通知接线，验证 EOF、取消和任务隔离；不实现采集后端、结果持久化或分析算法。 | [归档](archive/feat-npm-basic-realtime-integration.md) |
+| [x] | NPM TCP/UDP 会话周期统计 (`npm-basic-periodic-stats`) | P1 | 让分析 PCAP 与实时网卡流量的用户不必等长会话结束才查看统计；交付两类来源共用的可配置周期记录，包含每周期双向包数/字节增量与会话累计总量，以稳定会话身份串联时序，按采集时间划分周期并在正常结束时收尾，结果可经统一存储查询；不按周期重建会话或改变协议事务语义。 | [归档](archive/feat-npm-basic-periodic-stats.md) |
 | [ ] | NPM Linux 实时采集后端 (`npm-linux-capture-backends`) | P1 | 在统一采集契约下提供 AF_PACKET、PF_RING Classic、AF_XDP copy/generic-SKB 三种后端，统一配置、生命周期、过滤、时间戳和丢包/吞吐统计；不包含 PF_RING ZC 与 AF_XDP native zero-copy。 | 待创建 |
 | [ ] | NPM AF_XDP Native Zero-Copy (`npm-af-xdp-native-zerocopy`) | P2 | 提供 native XDP + AF_XDP zero-copy 能力，覆盖驱动/内核能力探测、队列与 RSS、UMEM、显式降级策略和硬件性能验证。 | 待创建 |
 | [ ] | NPM DPDK 运行环境与设备管理 (`npm-dpdk-runtime`) | P2 | 提供 DPDK EAL、hugepage、PCI/VFIO、NUMA、核心绑定、设备发现、能力探测和启动诊断；不包含 NPM 分析和跨进程数据面。 | 待创建 |

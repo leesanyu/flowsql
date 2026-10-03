@@ -20,6 +20,7 @@ add_library(${PROJECT_NAME} SHARED
     core/npm_tcp_stream_shared.cpp
     core/npm_tcp_stream_provider.cpp
     modules/basic/npm_basic_result_projector.cpp
+    modules/basic/npm_basic_periodic_stats.cpp
     modules/dns/npm_dns_contract.cpp
     modules/dns/npm_dns_module.cpp
     modules/dns/npm_dns_result_encoder.cpp

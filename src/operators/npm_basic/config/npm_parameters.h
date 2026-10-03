@@ -27,6 +27,7 @@ enum class NpmParameterSourceV1 : uint8_t {
 
 struct NpmCoreParametersV1 {
     NpmAnalysisConfig analysis;
+    bool run_mode_explicit = false;
     std::optional<std::string> labeling_reference;
     std::optional<uint32_t> labeling_memory_mib;
     std::optional<uint32_t> result_retention_days;

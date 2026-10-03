@@ -5,10 +5,10 @@
 
 #include <arrow/api.h>
 
+#include <common/log.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
-#include <common/log.h>
 #include <exception>
 #include <iterator>
 #include <optional>
@@ -537,12 +537,23 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         return BlockTransformPipelineError::kInvalidArgument;
     }
 
+    struct WakeLease {
+        std::shared_ptr<BlockTransformRunControl> control;
+        ~WakeLease() {
+            if (control) control->BindWake({});
+        }
+    } wake_lease{config_.control};
+    if (config_.control) config_.control->BindWake([this]() { config_.source->Cancel(); });
+    const auto cancelled = [&]() {
+        return cancel_requested_.load() || (config_.control && config_.control->cancel_requested.load());
+    };
+    const auto stopping = [&]() { return config_.control && config_.control->stop_requested.load(); };
     bool expected = false;
     if (!run_started_.compare_exchange_strong(expected, true)) {
         if (error) *error = "block transform pipeline can only run once";
         return BlockTransformPipelineError::kAlreadyRun;
     }
-    if (cancel_requested_.load()) {
+    if (cancelled()) {
         result->terminal = BlockTransformPipelineTerminal::kCancelled;
         if (error) *error = "block transform pipeline was cancelled before Run";
         return BlockTransformPipelineError::kCancelled;
@@ -590,6 +601,7 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         return fail(BlockTransformPipelineError::kTransformOpenFailed,
                     "transform Open failed: " + transform_error());
     }
+    if (config_.opened_callback) config_.opened_callback();
     if (!transform_output_schema) {
         return fail(BlockTransformPipelineError::kTransformOpenFailed,
                     "transform Open succeeded without an output Schema");
@@ -808,7 +820,12 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
 
     bool stopped = false;
     while (true) {
-        if (cancel_requested_.load()) {
+        if (stopping() && !cancelled()) {
+            stopped = true;
+            break;
+        }
+        if (cancelled()) {
+            Cancel();
             result->terminal = BlockTransformPipelineTerminal::kCancelled;
             if (error) *error = "block transform pipeline was cancelled";
             return BlockTransformPipelineError::kCancelled;
@@ -875,6 +892,10 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
                         "capture terminal event carried an unexpected progress fact");
         }
         if (event.kind == BlockPollEvent::kEof) break;
+        if (event.kind == BlockPollEvent::kCancelled && stopping() && !cancelled()) {
+            stopped = true;
+            break;
+        }
         if (event.kind == BlockPollEvent::kCancelled) {
             result->terminal = BlockTransformPipelineTerminal::kCancelled;
             if (error) {
@@ -924,7 +945,7 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         int transform_rc = static_cast<int>(BlockTransformStatusV1::kContinue);
         std::vector<BlockTransformOutputV1> outputs;
 
-        if (cancel_requested_.load()) {
+        if (cancelled()) {
             block_error = BlockTransformPipelineError::kCancelled;
             block_error_message = "block transform pipeline was cancelled";
         } else {
@@ -1019,7 +1040,8 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         }
     }
 
-    if (cancel_requested_.load()) {
+    if (cancelled()) {
+        Cancel();
         result->terminal = BlockTransformPipelineTerminal::kCancelled;
         if (error) *error = "block transform pipeline was cancelled before Flush";
         return BlockTransformPipelineError::kCancelled;

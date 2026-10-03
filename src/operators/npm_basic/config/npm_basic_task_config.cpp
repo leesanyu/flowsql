@@ -412,6 +412,7 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
 
             next.parameters_json.assign(parameters_text);
             next.analysis = std::move(parsed_parameters.core.analysis);
+            next.run_mode_explicit = parsed_parameters.core.run_mode_explicit;
             next.tcp_stream = parsed_parameters.core.tcp_stream;
             next.result_retention_days = parsed_parameters.core.result_retention_days;
             if (parsed_parameters.core.labeling_reference.has_value()) {
@@ -442,6 +443,7 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
 
         NpmBasicTaskConfig next;
         next.analysis = DefaultNpmAnalysisConfig(run_mode);
+        next.run_mode_explicit = values[FieldIndex(TaskConfigField::kRunMode)] != nullptr;
         if (const rapidjson::Value* value = values[FieldIndex(TaskConfigField::kResultMode)]) {
             const std::string_view text(value->GetString(), value->GetStringLength());
             if (text == "final") {

@@ -4,6 +4,7 @@
 #ifndef _FLOWSQL_OPERATORS_NPM_BASIC_NPM_BASIC_TASK_RUNTIME_H_
 #define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_BASIC_TASK_RUNTIME_H_
 
+#include <operators/npm_basic/modules/basic/npm_basic_periodic_stats.h>
 #include "npm_eof_flusher.h"
 #include "npm_protocol_context.h"
 #include "npm_session_table.h"
@@ -189,6 +190,7 @@ class NpmBasicTaskRuntime final {
     std::vector<NpmProtocolModuleAdapter*> protocol_modules_;
     std::unique_ptr<NpmTcpStreamProvider> streams_;
     std::vector<INpmAnalysisModule*> modules_;
+    NpmBasicPeriodicStats* periodic_ = nullptr;
     bool realtime_clock_initialized_ = false;
     int64_t last_realtime_drive_ns_ = 0;
     int64_t last_realtime_snapshot_ns_ = 0;
