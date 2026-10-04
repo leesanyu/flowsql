@@ -551,7 +551,7 @@ PacketFixture MakeIpv6UdpPacket(const char* src, uint16_t src_port, const char* 
     fixture.bytes.resize(sizeof(flowsql::Ipv6Header) + fragment_header_size + sizeof(flowsql::UdpHeader) +
                          payload.size());
     auto* ip = reinterpret_cast<flowsql::Ipv6Header*>(fixture.bytes.data());
-    ip->version = 6;
+    fixture.bytes[0] = 0x60;
     ip->payload = htons(static_cast<uint16_t>(fixture.bytes.size() - sizeof(flowsql::Ipv6Header)));
     ip->protocol = fragmented ? flowsql::ipv6::eNext::IPv6_EXT_FRAGMENT : flowsql::ipv6::eNext::UDP;
     ip->src_addr = ParseIpv6(src);
@@ -3994,7 +3994,8 @@ void TestProcessNpmOfflinePacketBatchErrorsAndAtomicOutput() {
     released_fact.capture_time_ns = 40;
     released_fact.packet_observed = true;
     released_fact.source_backlog_known = true;
-    assert(live_table.AdvanceCaptureProgress(released_fact).disposition == npm::NpmCaptureProgressDisposition::kAdvanced);
+    assert(live_table.AdvanceCaptureProgress(released_fact).disposition ==
+           npm::NpmCaptureProgressDisposition::kAdvanced);
 
     constexpr int64_t second = npm::kNpmNanosecondsPerSecond;
     auto idle_config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
@@ -7401,6 +7402,11 @@ void TestNpmTaskBudgetLimitsAtomicityAndIsolation() {
     AssertTaskBudgetUsage(budget.Usage(), 0, 0, 0, 0);
 
     npm::NpmTaskBudget independent(config);
+    const auto peak = budget.HighWaterMarks();
+    assert(peak.tracked_bytes == npm::kNpmMinTrackedBytes);
+    assert(peak.input_batch_bytes == 1 && peak.pending_output_bytes == npm::kNpmMinPendingOutputBytes);
+    // Releases and rejected reservations preserve the actual high-water marks.
+    assert(independent.HighWaterMarks().tracked_bytes == 0);
     assert(independent.Reserve(npm::NpmBudgetCategory::kSessionState, npm::kNpmMaxTrackedBytes) ==
            npm::NpmBudgetError::kNone);
     AssertTaskBudgetUsage(budget.Usage(), 0, 0, 0, 0);
@@ -8412,14 +8418,6 @@ void TestNpmBasicTaskRuntimeCleansSessionModuleFailures() {
         AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0);
     }
 }
-
-
-
-
-
-
-
-
 
 void TestNpmBasicTaskRuntimeProcessesAndDrainsOfflineBatch() {
     ContextDictionary dictionary;
@@ -10356,6 +10354,17 @@ void TestNpmBasicTaskCancelBeforeOpenAndDuringProcess() {
     provider.ReleaseTask(task);
 }
 
+flowsql::CaptureSourceSetV2 MakeCaptureSourceSet(flowsql::CaptureQueueIdentityV1 identity) {
+    identity.link_type = 1;
+    flowsql::CaptureSourceSetV2 sources;
+    sources.inputs = {identity};
+    sources.limits.max_packets_per_batch = 256;
+    sources.limits.max_bytes_per_batch = 1048576;
+    sources.limits.max_wait_ms = 10;
+    sources.limits.max_outstanding_batches = 1;
+    return sources;
+}
+
 void TestNpmBasicV2PluginExports() {
     flowsql::test::ScopedSharedLibrary library(FLOWSQL_NPM_BASIC_PLUGIN_PATH);
     assert(library);
@@ -10448,26 +10457,25 @@ void TestNpmBasicV2PluginExports() {
     v2_config.struct_size = flowsql::kBlockTransformTaskConfigV2Size;
     v2_config.contract_version = flowsql::kBlockTransformContractVersionV2;
     v2_config.task_id = "v2-realtime";
-    v2_config.with_params_json =
-        R"({"input_namespace":"live","source_domains":"7:77","run_mode":"realtime"})";
+    v2_config.with_params_json = R"({"input_namespace":"live","source_domains":"7:77","run_mode":"realtime"})";
     v2_config.pushed_filter_plan_json = filter_plan.c_str();
     flowsql::IBlockTransformTaskV2* v2_task = nullptr;
     assert(v2_provider->CreateTask(v2_config, &v2_task) == 0 && v2_task != nullptr);
-    auto* capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV1*>(v2_task);
+    auto* capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV2*>(v2_task);
     assert(capture_task != nullptr);
     std::shared_ptr<arrow::Schema> v2_schema;
     assert(v2_task->Open(flowsql::packet::PacketSchema(), &v2_schema) != 0);
     v2_provider->ReleaseTask(v2_task);
 
     assert(v2_provider->CreateTask(v2_config, &v2_task) == 0 && v2_task != nullptr);
-    capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV1*>(v2_task);
+    capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV2*>(v2_task);
     flowsql::CaptureQueueIdentityV1 identity;
     identity.source_name = "live.capture";
     identity.source_id = 7;
     identity.observation_domain_id = 77;
     identity.generation = 1;
-    assert(capture_task->BindCaptureSource(identity) == 0);
-    assert(capture_task->BindCaptureSource(identity) == EALREADY);
+    assert(capture_task->BindCaptureSources(MakeCaptureSourceSet(identity)) == 0);
+    assert(capture_task->BindCaptureSources(MakeCaptureSourceSet(identity)) == EALREADY);
     assert(v2_task->Open(flowsql::packet::PacketSchema(), &v2_schema) == 0);
     assert(v2_schema != nullptr && v2_schema->Equals(*npm::NpmBasicResultSchema(), true));
     flowsql::BlockTransformTimeDriveStateV1 time_state{};
@@ -10498,31 +10506,31 @@ void TestNpmBasicV2PluginExports() {
     fact.capture_time_ns = 100;
     fact.packet_observed = true;
     fact.backlog = flowsql::CaptureBacklogV1::kEmpty;
-    assert(capture_task->AcceptCaptureFact(fact) == 0);
+    assert(capture_task->AcceptCaptureFacts({fact}) == 0);
     assert(v2_task->GetTimeDriveState(&time_state) == 0 && time_state.deadline_ns == 0);
     time_event.monotonic_now_ns = 101;
     time_event.wall_now_ns = 500'000'000;
     assert(v2_task->OnTime(time_event, &time_outputs) == 0 && time_outputs.empty());
     assert(v2_task->GetTimeDriveState(&time_state) == 0);
     assert(time_state.deadline_ns == first_snapshot_deadline);
-    assert(capture_task->AcceptCaptureFact(fact) == EINVAL);
+    assert(capture_task->AcceptCaptureFacts({fact}) == EINVAL);
     fact.fact_sequence = 2;
     fact.generation = 2;
-    assert(capture_task->AcceptCaptureFact(fact) == EINVAL);
+    assert(capture_task->AcceptCaptureFacts({fact}) == EINVAL);
     fact.generation = 1;
     fact.queue_id = 1;
-    assert(capture_task->AcceptCaptureFact(fact) == EINVAL);
+    assert(capture_task->AcceptCaptureFacts({fact}) == EINVAL);
     fact.queue_id = 0;
     fact.capture_time_ns = 200;
     fact.packet_observed = false;
     fact.backlog = flowsql::CaptureBacklogV1::kPresent;
-    assert(capture_task->AcceptCaptureFact(fact) == 0);
+    assert(capture_task->AcceptCaptureFacts({fact}) == 0);
     time_event.monotonic_now_ns = 102;
     assert(v2_task->OnTime(time_event, &time_outputs) == 0 && time_outputs.empty());
     fact.fact_sequence = 3;
     fact.capture_time_ns = 300;
     fact.backlog = flowsql::CaptureBacklogV1::kUnknown;
-    assert(capture_task->AcceptCaptureFact(fact) == 0);
+    assert(capture_task->AcceptCaptureFacts({fact}) == 0);
     time_event.monotonic_now_ns = 103;
     assert(v2_task->OnTime(time_event, &time_outputs) == 0 && time_outputs.empty());
     time_event.monotonic_now_ns = first_snapshot_deadline;
@@ -10533,7 +10541,7 @@ void TestNpmBasicV2PluginExports() {
     fact.capture_time_ns = 31'000'000'000LL;
     fact.backlog = flowsql::CaptureBacklogV1::kEmpty;
     fact.source_idle_confirmed = true;
-    assert(capture_task->AcceptCaptureFact(fact) == 0);
+    assert(capture_task->AcceptCaptureFacts({fact}) == 0);
     time_event.monotonic_now_ns = first_snapshot_deadline + 1;
     assert(v2_task->OnTime(time_event, &time_outputs) == 0);
     assert(time_outputs.size() == 1 && time_outputs[0].batch->num_rows() == 1);
@@ -10646,6 +10654,44 @@ PacketFixture MakeControlPacket(bool ipv6 = false) {
     return fixture;
 }
 
+void TestIpv6WireVersionAndEthernetControlBounds() {
+    const npm::NpmObservationDomainMap domains{"wire-ipv6", {{1, 77}}};
+    auto udp = MakeIpv6UdpPacket("2001:db8::1", 41000, "2001:db8::2", 41001, {1, 2, 3});
+    npm::NpmSessionPacketBinding binding;
+    assert(udp.bytes[0] == 0x60);
+    assert(npm::BuildNpmSessionPacketBinding(domains, udp.View(1), udp.layer, &binding) ==
+           npm::NpmSessionPacketError::kNone);
+    // Traffic class and flow label do not move the wire version nibble.
+    udp.bytes[0] = 0x6f;
+    udp.bytes[1] = 0xab;
+    udp.bytes[2] = 0xcd;
+    udp.bytes[3] = 0xef;
+    assert(npm::BuildNpmSessionPacketBinding(domains, udp.View(1), udp.layer, &binding) ==
+           npm::NpmSessionPacketError::kNone);
+    udp.bytes[0] = 0x40;
+    assert(npm::BuildNpmSessionPacketBinding(domains, udp.View(1), udp.layer, &binding) ==
+           npm::NpmSessionPacketError::kInvalidPayloadBounds);
+
+    // Real Ethernet Router Solicitation: 14-byte L2, 40-byte IPv6, 16-byte ICMPv6 body.
+    auto control = MakeControlPacket(true);
+    control.bytes.resize(56);
+    reinterpret_cast<flowsql::Ipv6Header*>(control.bytes.data())->payload = htons(16);
+    control.bytes[40] = 133;
+    control.bytes.insert(control.bytes.begin(), 14, 0);
+    control.bytes[12] = 0x86;
+    control.bytes[13] = 0xdd;
+    control.layer.layer_count = 2;
+    control.layer.network_layer_index = 1;
+    control.layer.layers[0] = {static_cast<uint16_t>(flowsql::eLayer::ETHERNET), 0};
+    control.layer.layers[1] = {static_cast<uint16_t>(flowsql::eLayer::IPv6), 14};
+    control.layer.payload_offset = 54;
+    npm::NpmInputEventV1 event;
+    assert(npm::BuildNpmControlInput(domains, control.View(1), control.layer, &event) ==
+           npm::NpmSessionPacketError::kNone);
+    assert(event.kind == npm::NpmInputKindV1::kControlPacket && event.body.size == 16 && event.body[0] == 133);
+    assert(event.body_complete && !event.layer->ports_valid && event.observation_domain_id == 77);
+}
+
 void TestNpmBasicTaskFlushAppliesPendingCaptureFacts() {
     const auto tcp = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1});
     auto icmp = MakeControlPacket();
@@ -10669,13 +10715,13 @@ void TestNpmBasicTaskFlushAppliesPendingCaptureFacts() {
             config.pushed_filter_plan_json = R"({"version":1,"root":null})";
             flowsql::IBlockTransformTaskV2* task = nullptr;
             assert(provider.CreateTask(config, &task) == 0);
-            auto* capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV1*>(task);
+            auto* capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV2*>(task);
             assert(capture_task != nullptr);
             flowsql::CaptureQueueIdentityV1 identity;
             identity.source_name = "review.live";
             identity.observation_domain_id = 77;
             identity.generation = 1;
-            assert(capture_task->BindCaptureSource(identity) == 0);
+            assert(capture_task->BindCaptureSources(MakeCaptureSourceSet(identity)) == 0);
             std::shared_ptr<arrow::Schema> schema;
             assert(task->Open(flowsql::packet::PacketSchema(), &schema) == 0);
             std::vector<flowsql::BlockTransformOutputV1> outputs;
@@ -10690,7 +10736,7 @@ void TestNpmBasicTaskFlushAppliesPendingCaptureFacts() {
                 outputs.clear();
                 fact.fact_sequence = record.meta.sequence;
                 fact.capture_time_ns = record.meta.timestamp_ns;
-                assert(capture_task->AcceptCaptureFact(fact) == 0);
+                assert(capture_task->AcceptCaptureFacts({fact}) == 0);
             }
             std::vector<Row> rows;
             const auto collect = [&] {
@@ -13860,6 +13906,7 @@ int main(int argc, char** argv) {
     TestProtocolLifecycleDeadlinesSessionsAndEof();
     TestProtocolLabelIsolationAndAtomicFactoryFailure();
     TestProtocolCatalogOpenAndDispatch();
+    TestIpv6WireVersionAndEthernetControlBounds();
     TestProtocolOpenRejectionsAndControlCompatibility();
     TestConfigDefaultsAndEnumContract();
     TestConfigRangesAndUnsupportedValues();

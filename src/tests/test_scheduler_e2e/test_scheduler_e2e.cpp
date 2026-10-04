@@ -34,8 +34,8 @@
 #include <framework/core/packet_codec.h>
 #include <framework/core/stream_channel_adapter.h>
 #include <framework/interfaces/ibinaddon_host.h>
-#include <framework/interfaces/iblock_stream_operator.h>
 #include <framework/interfaces/iblock_stream_factory.h>
+#include <framework/interfaces/iblock_stream_operator.h>
 #include <framework/interfaces/iblock_stream_reader.h>
 #include <framework/interfaces/iblock_transform_operator.h>
 #include <framework/interfaces/icapture_block_stream_reader.h>
@@ -728,7 +728,7 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
         bool IsFinished() const override { return false; }
     };
 
-    class Reader final : public ICaptureBlockStreamReaderV1 {
+    class Reader final : public ICaptureBlockStreamReaderV2 {
      public:
         Reader(SchedulerCaptureFixture* fixture, uint64_t generation) : fixture_(fixture), generation_(generation) {
             auto bytes = std::make_shared<std::vector<uint8_t>>(MakeSchedulerE2eHttp1Packet(false, 0x10, 100, 0, ""));
@@ -821,24 +821,24 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
             wait_cv_.notify_all();
         }
         bool IsFinished() const override { return !fixture_->endless && step_ > batches_.size() + 2; }
-        int Describe(CaptureQueueIdentityV1* identity, CaptureReaderLimitsV1* limits) const override {
-            if (!identity || !limits) return EINVAL;
-            *identity = {};
-            identity->source_name = "capturetest.live";
-            identity->source_id = 7;
-            identity->observation_domain_id = 77;
-            identity->generation = generation_;
-            identity->link_type = 1;
-            *limits = {};
-            limits->max_packets_per_batch = fixture_->batch_size;
-            limits->max_bytes_per_batch = 4096;
-            limits->max_wait_ms = 100;
-            limits->max_outstanding_batches = 1;
+        int DescribeSources(CaptureSourceSetV2* sources) const override {
+            if (!sources) return EINVAL;
+            CaptureQueueIdentityV1 identity;
+            identity.source_name = "capturetest.live";
+            identity.source_id = 7;
+            identity.observation_domain_id = 77;
+            identity.generation = generation_;
+            identity.link_type = 1;
+            sources->inputs = {identity};
+            sources->limits.max_packets_per_batch = fixture_->batch_size;
+            sources->limits.max_bytes_per_batch = 4096;
+            sources->limits.max_wait_ms = 100;
+            sources->limits.max_outstanding_batches = 1;
             return 0;
         }
-        CapturePollEventV1 PollCapture(int) override {
+        CapturePollEventV2 PollCapture(int) override {
             ++fixture_->poll_capture_calls;
-            CapturePollEventV1 event;
+            CapturePollEventV2 event;
             if (cancelled_) {
                 event.block.kind = BlockPollEvent::kCancelled;
             } else if (step_ == 0 && fixture_->mode == Mode::kSourceError) {
@@ -849,14 +849,14 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
                 batch_ = batches_[step_];
                 released_ = false;
                 event.block = {BlockPollEvent::kData, batch_, 0};
-                event.has_progress = true;
-                event.progress = MakeFact(step_ + 1, true, false);
-                event.progress.capture_time_ns = batch_times_[step_];
+                event.progress.resize(1);
+                event.progress[0] = MakeFact(step_ + 1, true, false);
+                event.progress[0].capture_time_ns = batch_times_[step_];
             } else if (step_ == batches_.size()) {
                 event.block.kind = BlockPollEvent::kTimeout;
-                event.has_progress = true;
-                event.progress = MakeFact(step_ + 1, false, true);
-                event.progress.capture_time_ns = batch_times_.back();
+                event.progress.resize(1);
+                event.progress[0] = MakeFact(step_ + 1, false, true);
+                event.progress[0].capture_time_ns = batch_times_.back();
             } else if (fixture_->endless) {
                 std::unique_lock<std::mutex> lock(wait_mutex_);
                 wait_cv_.wait_for(lock, std::chrono::milliseconds(100), [this] { return cancelled_.load(); });
@@ -870,7 +870,7 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
             ++step_;
             return event;
         }
-        int ReadCounters(CaptureCountersV1* counters) const override {
+        int ReadInputCounters(uint32_t, CaptureCountersV1* counters) const override {
             if (!counters) return EINVAL;
             *counters = {};
             counters->generation = generation_;
@@ -1803,8 +1803,7 @@ int main() {
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &stop_capture_transform);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &managed_transform);
     loader->Regist(IID_BLOCK_STREAM_FACTORY, static_cast<IBlockStreamFactory*>(&capture_fixture));
-    loader->Regist(IID_BLOCK_STREAM_READER_FACTORY_V1,
-                   static_cast<IBlockStreamReaderFactoryV1*>(&capture_fixture));
+    loader->Regist(IID_BLOCK_STREAM_READER_FACTORY_V1, static_cast<IBlockStreamReaderFactoryV1*>(&capture_fixture));
     loader->Regist(IID_FLOW_LABELING_PROVIDER_V1, static_cast<IFlowLabelingProviderV1*>(&http1_labeling));
     loader->Regist(IID_CONFIG_CHANNEL_REGISTRY_V1, static_cast<IConfigChannelRegistryV1*>(&http1_labeling));
     const char* libs[] = {

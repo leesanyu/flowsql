@@ -8,14 +8,11 @@
 #include <common/typedef.h>
 
 #include <cstdint>
+#include <vector>
 
 #include "iblock_stream_channel.h"
 
 namespace flowsql {
-
-// {d51a78b9-8f60-48b0-a23b-15c42f7d9e06}
-const Guid IID_CAPTURE_BLOCK_STREAM_READER_V1 = {
-    0xd51a78b9, 0x8f60, 0x48b0, {0xa2, 0x3b, 0x15, 0xc4, 0x2f, 0x7d, 0x9e, 0x06}};
 
 constexpr uint32_t kCaptureBlockStreamContractVersionV1 = 1;
 
@@ -80,15 +77,6 @@ struct CaptureCountersV1 {
     uint32_t available_mask = 0;
 };
 
-/** Data and its progress fact are returned together, but the consumer applies the fact after release. */
-struct CapturePollEventV1 {
-    uint32_t struct_size = sizeof(CapturePollEventV1);
-    uint32_t contract_version = kCaptureBlockStreamContractVersionV1;
-    BlockPollEvent block;
-    bool has_progress = false;
-    CaptureProgressV1 progress;
-};
-
 enum class CaptureDescriptionErrorV1 : uint8_t {
     kNone = 0,
     kInvalidVersion,
@@ -114,15 +102,55 @@ inline CaptureDescriptionErrorV1 ValidateCaptureReaderDescriptionV1(const Captur
     return CaptureDescriptionErrorV1::kNone;
 }
 
-/** Optional extension of the existing task-exclusive IBlockStreamReaderFactoryV1 reader. */
-interface ICaptureBlockStreamReaderV1 : IBlockStreamChannel {
-    virtual ~ICaptureBlockStreamReaderV1() = default;
-    /** Caller initializes struct_size and contract_version in both output structures. */
-    virtual int Describe(CaptureQueueIdentityV1 * identity, CaptureReaderLimitsV1 * limits) const = 0;
-    /** Do not mix PollCapture and PollBlock in one reader run. The effective wait is capped by Describe(). */
-    virtual CapturePollEventV1 PollCapture(int timeout_ms) = 0;
-    /** Caller initializes struct_size and contract_version; a snapshot is cumulative within generation. */
-    virtual int ReadCounters(CaptureCountersV1 * counters) const = 0;
+constexpr uint32_t kCaptureBlockStreamContractVersionV2 = 2;
+
+// {091315e4-64fd-4e70-8f14-4e91a30cc902}
+const Guid IID_CAPTURE_BLOCK_STREAM_READER_V2 = {
+    0x091315e4, 0x64fd, 0x4e70, {0x8f, 0x14, 0x4e, 0x91, 0xa3, 0x0c, 0xc9, 0x02}};
+
+struct CaptureSourceSetV2 {
+    uint32_t struct_size = sizeof(CaptureSourceSetV2);
+    uint32_t contract_version = kCaptureBlockStreamContractVersionV2;
+    std::vector<CaptureQueueIdentityV1> inputs;
+    CaptureReaderLimitsV1 limits;
+    uint32_t max_inspected_packets_per_poll = 1024;
+    uint64_t max_inspected_bytes_per_poll = 4 * 1024 * 1024;
+    uint32_t max_poll_work_ms = 2;
+};
+
+struct CapturePollEventV2 {
+    uint32_t struct_size = sizeof(CapturePollEventV2);
+    uint32_t contract_version = kCaptureBlockStreamContractVersionV2;
+    BlockPollEvent block;
+    std::vector<CaptureProgressV1> progress;
+};
+
+inline CaptureDescriptionErrorV1 ValidateCaptureSourceSetV2(const CaptureSourceSetV2& sources) {
+    if (sources.struct_size < sizeof(CaptureSourceSetV2) ||
+        sources.contract_version != kCaptureBlockStreamContractVersionV2)
+        return CaptureDescriptionErrorV1::kInvalidVersion;
+    if (sources.inputs.empty()) return CaptureDescriptionErrorV1::kInvalidIdentity;
+    if (!sources.max_inspected_packets_per_poll || !sources.max_inspected_bytes_per_poll || !sources.max_poll_work_ms)
+        return CaptureDescriptionErrorV1::kInvalidLimits;
+    const auto& first = sources.inputs.front();
+    for (size_t i = 0; i < sources.inputs.size(); ++i) {
+        const auto& input = sources.inputs[i];
+        const auto error = ValidateCaptureReaderDescriptionV1(input, sources.limits);
+        if (error != CaptureDescriptionErrorV1::kNone) return error;
+        if (input.observation_domain_id != first.observation_domain_id || input.generation != first.generation ||
+            input.link_type != 1)
+            return CaptureDescriptionErrorV1::kInvalidIdentity;
+        for (size_t j = 0; j < i; ++j)
+            if (input.source_id == sources.inputs[j].source_id) return CaptureDescriptionErrorV1::kInvalidIdentity;
+    }
+    return CaptureDescriptionErrorV1::kNone;
+}
+
+interface ICaptureBlockStreamReaderV2 : IBlockStreamChannel {
+    virtual ~ICaptureBlockStreamReaderV2() = default;
+    virtual int DescribeSources(CaptureSourceSetV2 * sources) const = 0;
+    virtual CapturePollEventV2 PollCapture(int timeout_ms) = 0;
+    virtual int ReadInputCounters(uint32_t source_id, CaptureCountersV1 * counters) const = 0;
 };
 
 }  // namespace flowsql

@@ -1,59 +1,73 @@
 # 即时工作台
 
-事项：按用户要求同步 README 中 npm.basic 当前能力与周期统计用法。
-关联 Feature Task：已归档 npm-basic-periodic-stats 的文档同步，不重新开启实现任务；[契约](archive/feat-npm-basic-periodic-stats.md)。
-当前 Atomic Slice：同步周期模式、Basic Schema、查询及实时边界；已完成，WIP=0。
+关联 Feature Task：T5；规格：[NetAdapter](archive/feat-npm-linux-capture-backends.md)。
+当前 Atomic Slice：已完成NetAdapter Feature的本地提交与精确暂存审计。
+状态：已完成；WIP=0。T0～T5与完整DoD已完成；用户明确授权本地提交，本片审计后提交并停止。
 
 ## 业务意图
 
-让 README 读者能配置周期统计，正确区分周期增量、会话累计与终态，并了解当前离线/持续输入的结果交付方式及真实采集可用边界。
+以完整构建/CTest/格式检查及原始证据完成NetAdapter Feature验收，使T0～T5状态与实际交付一致。
 
 ## Non-Goals
 
-- 不修改算子、接口、Schema、测试或已归档规格，不实现采集后端。
-- 不修改独立 Backlog 与 Linux 采集规格，不开始后续 Feature Task；按用户最新指令仅本地提交 README 与工作台，不推送。
-- 不将 Session 性能指标或协议事务描述为 Basic 周期增量，不承诺实时结果推送或真实网卡联验完成。
+不新增功能、不修改生产行为/ABI/配置/Schema/进度门禁，不删除失败证据，不推送远端。
+不移动/删除目录；仅在DoD完整后将规格文件归档，不声称物理网卡吞吐或同接口/同目标并发支持。
 
 ## 冻结契约与主链路
 
-- 以当前配置解析器、Arrow Schema、周期统计实现、Scheduler 接线与归档契约交叉核对文档。
-- 来源能力选择模式 → 默认 periodic_snapshot/30 秒 → 安全采集时间封闭周期 → 输出 Basic 周期增量与累计值 → DataFrame 或已有托管关系查询。
-- Basic 固定 32 列 Schema v1；Session 标签版本与协议实体继续使用自身契约。
+前序验收：三后端真实收包、多队列T4、采集阶梯48项（4个AF_PACKET高负载失败保留）；
+无过滤SQL15/30/60秒、功能15/15、剩余周期4/4、持续25tick/s三后端×两帧長×四profile24/24。
+慢分析/慢输出6项、受控过载恢复三后端实际通过；压力阶段真实丢包不计入零丢包持续能力。
+完成证据逐项保存命令、预设阈值、范围、原始JSON/log和失败边界，引用历史事实必须有实际文件。
+全量build/完整CTest100%通过，全部Feature变更C++格式、shell/Python语法、diff检查通过后：
+规格勾T5/Feature完成，将文件移入tasks/archive；Backlog行勾完成/改链接，工作台记录最终证据。
 
 ## 允许修改文件
 
-- README.md
 - tasks/active_task.md
+- tasks/specs/feat-npm-linux-capture-backends.md（完成证据/状态及移出规格文件）
+- tasks/archive/feat-npm-linux-capture-backends.md（仅该规格文件归档）
+- tasks/product_backlog.md（仅该Feature状态/规格链接）
+- docs/netadapter.md（最终证据/边界/命令）
+- src/channels/netadapter/pfring-8.8.0-close.patch（仅规范补丁文本空白）
+- src/channels/netadapter/pfring-8.8.0-netns.patch（仅规范补丁文本空白）
+- build/netadapter-validation/**（日志/证据清单/快照）
 
-基线已有工作台和 product_backlog.md 修改，以及未跟踪的 Linux 采集规格；独立规划保持原样。
-上一工作台快照：/tmp/npm-readme-workbench-before.md；README 快照和独立文件校验基线也保存在 /tmp。
-验证脚本与日志只写入 /tmp。
+生产与测试代码本片只读，提交范围为已验收NetAdapter实现/公共V2迁移/诊断/测试/文档与完成状态。
+精确路径清单/tmp/flowsql-netadapter-commit-paths.txt；Backlog仅NetAdapter行入index，
+独立native zero-copy与DPDK用户态采集规划两行保持工作树未暂存；build原始日志/缓存不入提交。
+每patch后git diff --name-only；核查空index、暂存完整清单与内容哈希、git diff --cached --check后本地git commit。
+用户本轮“提交代码”已明确授权，不推送。
 
-## 本轮步骤与验收
-
-同步能力概述、默认 SQL、周期配置/字段/时间语义、Basic 版本及查询示例和实时接线边界；检查相对链接、Markdown、源码契约一致性与范围。
-本轮只修改 Markdown；复用已有相关 target 和测试验证文档依据，不新增测试。
+## 验收命令
 
 ```bash
-python3 /tmp/check-npm-readme.py
-cmake --build build --target test_npm_periodic_contract test_npm_periodic_stats test_npm_basic -j8
-ctest --test-dir build -R '^test_npm_(basic|periodic_contract|periodic_stats|periodic_runtime)$' --output-on-failure
+cmake --build build -j8
+ctest --test-dir build --output-on-failure
+clang-format-18 --dry-run --Werror <全部Feature变更的C++文件>
+bash -n src/tests/test_netadapter/run_isolated_validation.sh
+python3 -m py_compile src/tests/test_netadapter/run_validation_matrix.py
 git diff --check
 git diff --name-only
-git status --short
 ```
+
+完整CTest如有sandbox网络/权限失败则按权限流程复验，不把skip当真实网卡验收。
 
 ## 时间盒与停止条件
 
-- 20 分钟；文档核对、相关测试、格式和范围检查通过后更新证据并停止。
-- 不修改 Feature 状态或展开下一切片；若发现其他任务问题，只记录现象与依据。
+2026-10-04 17:03UTC起10分钟，17:13UTC截止；精确index审计通过后本地提交、核查HEAD与剩余两项规划改动并停止。
 
 ## 完成证据
 
-- README 已同步默认 periodic_snapshot/30 秒、15/30/60 秒及 JSON 配置、事件时间边界、增量/累计/终态语义、固定 32 列 Basic Schema v1 和 history/latest/final 查询；补全模块结果概览及实时接线/真实采集边界。
-- 运行中查询明确使用 Scheduler `/scheduler/batch/status` 的 managed_result，不将 Web 任务详情描述为提供该字段。
-- 文档核对通过：源码默认值与范围、Basic 32 列/周期 8 列、6 个 JSON 示例、单 INTO、相对链接、Markdown、旧说明清理和 Scheduler 状态响应契约。
-- 三个相关 target 构建成功，无 Error/Warning；Basic、periodic_runtime、periodic_contract、periodic_stats 的 CTest 4/4 通过，共 2.05 秒。
-- git diff --check 无诊断；本轮修改仅 README.md 与工作台。独立 Backlog 和未跟踪 Linux 采集规格的 SHA-256 与本轮基线一致。
-- 文档同步仅修改 Markdown，未新增测试、运行全量回归或真实采集，未开始下一切片。
-- 2026-10-04 用户授权提交：重新核对 README 与工作台差异、文档契约、独立文件校验和空白；提交范围仅 README.md 与 tasks/active_task.md，保留 Backlog 与采集规格，不推送。复用文档同步阶段已通过的 4/4 CTest，不重复运行。
+2026-10-05（北京时间）T5完整验收通过：功能15/15、剩余周期4/4、持续24/24、慢分析/慢输出6项及最终恢复3项通过。
+AF_XDP旧15/30/60秒原数据库一致性3/3通过，T4双TAP四RX队列实发/回收证据已复核。
+完整build通过且无Error/Warning；全部42个Feature变更C++格式、shell/Python语法及diff检查通过。
+首轮沙箱完整CTest44/48（socket/数据库权限失败），获准升级后完整48/48通过（66.83秒），两轮日志均保留。
+完整原始日志：t5-final-full-build.log、t5-final-format.log、t5-final-full-ctest-unrestricted.log。
+机器核查的完整证据清单build/netadapter-validation/t5-completion-evidence.json，持续汇总t5-sustained-25-aggregate.json。
+可持续声明限WSL2隔离Ethernet25tick/s各选定工况；历史高负载/并发/权限失败原始记录保留，不提高阈值或放宽门禁。
+规格T5已勾选并归档，Backlog该Feature已完成/改链接。
+用户本轮授权提交：复核完整DoD日志、当前验证入口/二进制哈希和精确提交范围；复用已通过48/48完整CTest。
+仅提交已验收Feature，独立规划两行与build证据保持原样，不推送；本地提交结果以Git命令及HEAD核查为准。
+
+暂存审计发现两份PF_RING补丁空白context行尾空格；仅缩减空白上下文，以原始代码片段git apply --check验证，生产代码不变。

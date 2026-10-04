@@ -1,0 +1,9 @@
+diff --git a/userland/lib/pfring.c b/userland/lib/pfring.c
+--- a/userland/lib/pfring.c
++++ b/userland/lib/pfring.c
+@@ -403,4 +403,4 @@ void pfring_close(pfring *ring) {
+-  if (getenv("PF_RING_RUNTIME_MANAGER") != NULL)
+ #ifdef HAVE_DL_REDIS
++  if (getenv("PF_RING_RUNTIME_MANAGER") != NULL)
+     pfring_stop_runtime_manager(ring);
+ #endif

@@ -5,6 +5,7 @@
 #define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_BASIC_OPERATOR_H_
 
 #include <common/iplugin.h>
+#include <framework/core/capture_progress_tracker.h>
 #include <framework/interfaces/iblock_transform_operator.h>
 
 #include <atomic>
@@ -19,7 +20,7 @@ class NpmBasicOperator;
 class NpmBasicTaskRuntime;
 
 class NpmBasicTask final : public IBlockTransformTaskV2,
-                           public IBlockTransformCaptureFactTaskV1,
+                           public IBlockTransformCaptureFactTaskV2,
                            public IBlockTransformManagedSinkTaskV1,
                            public IBlockTransformInputSourceTaskV1 {
  public:
@@ -37,8 +38,8 @@ class NpmBasicTask final : public IBlockTransformTaskV2,
     int BindInputSource(const char* source) override;
     int BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) override;
     std::string ManagedSinkResultJson() const override;
-    int BindCaptureSource(const CaptureQueueIdentityV1& identity) override;
-    int AcceptCaptureFact(const CaptureProgressV1& fact) override;
+    int BindCaptureSources(const CaptureSourceSetV2& sources) override;
+    int AcceptCaptureFacts(const std::vector<CaptureProgressV1>& facts) override;
     int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override;
     int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) override;
 
@@ -79,9 +80,9 @@ class NpmBasicTask final : public IBlockTransformTaskV2,
     const NpmBasicOperator* owner_ = nullptr;
     bool v2_ = false;
     bool capture_bound_ = false;
-    CaptureQueueIdentityV1 capture_identity_;
-    std::string capture_source_name_;
-    uint64_t last_capture_fact_sequence_ = 0;
+    CaptureSourceSetV2 capture_sources_;
+    std::vector<std::string> capture_source_names_;
+    std::unique_ptr<CaptureProgressTrackerV2> capture_tracker_;
     std::deque<CaptureProgressV1> pending_capture_facts_;
     bool realtime_origin_initialized_ = false;
     std::shared_ptr<NpmBasicTaskRuntime> runtime_;

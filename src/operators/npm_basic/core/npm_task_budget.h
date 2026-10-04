@@ -10,6 +10,12 @@
 
 namespace flowsql::npm {
 
+struct NpmBudgetHighWaterMarks {
+    uint64_t tracked_bytes = 0;
+    uint64_t input_batch_bytes = 0;
+    uint64_t pending_output_bytes = 0;
+};
+
 /** Task-private synchronized budget ledger. The configured limits are copied at construction. */
 class NpmTaskBudget final : public INpmTaskBudget {
  public:
@@ -23,11 +29,14 @@ class NpmTaskBudget final : public INpmTaskBudget {
     NpmBudgetError Reserve(NpmBudgetCategory category, uint64_t bytes) override;
     NpmBudgetError Release(NpmBudgetCategory category, uint64_t bytes) override;
     NpmBudgetUsage Usage() const override;
+    // Simultaneous tracked/pending totals, and the largest transient input reservation.
+    NpmBudgetHighWaterMarks HighWaterMarks() const;
 
  private:
     NpmAnalysisConfig config_;
     mutable std::mutex mutex_;
     NpmBudgetUsage usage_;
+    NpmBudgetHighWaterMarks high_water_;
 };
 
 }  // namespace flowsql::npm

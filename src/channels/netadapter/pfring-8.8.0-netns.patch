@@ -1,0 +1,9 @@
+diff --git a/kernel/pf_ring.c b/kernel/pf_ring.c
+--- a/kernel/pf_ring.c
++++ b/kernel/pf_ring.c
+@@ -4654,3 +4654,4 @@ static int ring_create(struct net *net, struct socket *sock, int protocol
+ #else
+-  sk = sk_alloc(net, PF_INET, GFP_KERNEL, &ring_proto, 1 /* FIXX kernel socket? */);
++  /* Userspace sockets must hold a netns reference until their deferred release. */
++  sk = sk_alloc(net, PF_INET, GFP_KERNEL, &ring_proto, kern);
+ #endif

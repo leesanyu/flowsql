@@ -6,8 +6,11 @@
 
 #include <framework/interfaces/icapture_block_stream_reader.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <map>
 #include <optional>
+#include <set>
 
 namespace flowsql {
 
@@ -114,6 +117,53 @@ class CaptureProgressTrackerV1 final {
     uint64_t last_sequence_ = 0;
     std::optional<int64_t> last_seen_time_ns_;
     std::optional<int64_t> capture_progress_ns_;
+};
+
+/** Transactional multi-input safety gate. A blocked input suspends the common candidate. */
+class CaptureProgressTrackerV2 final {
+ public:
+    explicit CaptureProgressTrackerV2(const CaptureSourceSetV2& sources) {
+        for (const auto& input : sources.inputs)
+            inputs_.emplace(input.source_id, Input{CaptureProgressTrackerV1(input)});
+    }
+    CaptureProgressErrorV1 Observe(const std::vector<CaptureProgressV1>& facts) {
+        auto next = inputs_;
+        std::set<uint32_t> seen;
+        for (const auto& fact : facts) {
+            auto it = next.find(fact.source_id);
+            if (it == next.end() || !seen.insert(fact.source_id).second) return CaptureProgressErrorV1::kWrongQueue;
+            auto result = it->second.tracker.Observe(
+                fact, fact.packet_observed ? std::optional<int64_t>(fact.capture_time_ns) : std::nullopt);
+            if (result.error != CaptureProgressErrorV1::kNone) return result.error;
+            it->second.safe = fact.backlog == CaptureBacklogV1::kEmpty &&
+                              (fact.packet_observed || fact.source_idle_confirmed) &&
+                              result.disposition != CaptureProgressDispositionV1::kTimeRegressed;
+        }
+        inputs_ = std::move(next);
+        return CaptureProgressErrorV1::kNone;
+    }
+    std::optional<int64_t> CommonCandidateNs() const {
+        std::optional<int64_t> candidate;
+        for (const auto& entry : inputs_) {
+            const auto progress = entry.second.tracker.ProgressNs();
+            if (!entry.second.safe || !progress) return std::nullopt;
+            candidate = candidate ? std::min(*candidate, *progress) : progress;
+        }
+        return candidate;
+    }
+    std::vector<uint32_t> BlockedInputs() const {
+        std::vector<uint32_t> result;
+        for (const auto& entry : inputs_)
+            if (!entry.second.safe || !entry.second.tracker.ProgressNs()) result.push_back(entry.first);
+        return result;
+    }
+
+ private:
+    struct Input {
+        CaptureProgressTrackerV1 tracker;
+        bool safe = false;
+    };
+    std::map<uint32_t, Input> inputs_;
 };
 
 }  // namespace flowsql

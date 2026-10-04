@@ -17,7 +17,7 @@
 namespace arrow {
 class RecordBatch;
 class Schema;
-}
+}  // namespace arrow
 
 namespace flowsql {
 
@@ -57,8 +57,7 @@ struct BlockTransformTaskConfigV2 {
     const char* pushed_filter_plan_json;
 };
 
-constexpr uint32_t kBlockTransformTaskConfigV2Size =
-    static_cast<uint32_t>(sizeof(BlockTransformTaskConfigV2));
+constexpr uint32_t kBlockTransformTaskConfigV2Size = static_cast<uint32_t>(sizeof(BlockTransformTaskConfigV2));
 
 struct BlockTransformOutputV1 {
     std::shared_ptr<arrow::RecordBatch> batch;
@@ -74,8 +73,7 @@ struct BlockTransformTimeDriveStateV1 {
     int64_t deadline_ns;
 };
 
-constexpr uint32_t kBlockTransformTimeDriveStateV1Size =
-    static_cast<uint32_t>(sizeof(BlockTransformTimeDriveStateV1));
+constexpr uint32_t kBlockTransformTimeDriveStateV1Size = static_cast<uint32_t>(sizeof(BlockTransformTimeDriveStateV1));
 
 /** Runtime-owned clock snapshot delivered only when an armed deadline is due. */
 struct BlockTransformTimeEventV1 {
@@ -85,8 +83,7 @@ struct BlockTransformTimeEventV1 {
     int64_t wall_now_ns;
 };
 
-constexpr uint32_t kBlockTransformTimeEventV1Size =
-    static_cast<uint32_t>(sizeof(BlockTransformTimeEventV1));
+constexpr uint32_t kBlockTransformTimeEventV1Size = static_cast<uint32_t>(sizeof(BlockTransformTimeEventV1));
 
 /** Task-owned transform state. One session must never be shared by concurrent tasks. */
 interface IBlockTransformTaskV1 {
@@ -96,8 +93,7 @@ interface IBlockTransformTaskV1 {
      * Called exactly once. Validates input_schema and makes the output schema available before the
      * first input block. A failed Open makes the session unusable except for Cancel/ReleaseTask.
      */
-    virtual int Open(std::shared_ptr<arrow::Schema> input_schema,
-                     std::shared_ptr<arrow::Schema>* output_schema) = 0;
+    virtual int Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema> * output_schema) = 0;
 
     /**
      * Produces zero, one, or multiple outputs in caller-owned storage.
@@ -105,15 +101,14 @@ interface IBlockTransformTaskV1 {
      * session again; this call-level handoff is the backpressure boundary. Return kContinue, kStop,
      * or a negative error. A negative return must leave outputs empty.
      */
-    virtual int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
-                             int64_t ts_ms,
+    virtual int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
                              std::vector<BlockTransformOutputV1>* outputs) = 0;
 
     /**
      * Called exactly once after normal EOF or kStop; it may produce zero or more outputs. A nonzero
      * return must leave outputs empty. Flush is not called after cancellation or another task error.
      */
-    virtual int Flush(std::vector<BlockTransformOutputV1>* outputs) = 0;
+    virtual int Flush(std::vector<BlockTransformOutputV1> * outputs) = 0;
 
     /** Must be safe to call concurrently and must make an in-flight blocking call return promptly. */
     virtual void Cancel() = 0;
@@ -130,22 +125,18 @@ interface IBlockTransformInputSourceTaskV1 {
 interface IBlockTransformTimeDrivenTaskV1 {
     virtual ~IBlockTransformTimeDrivenTaskV1() = default;
 
-    virtual int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) = 0;
-    virtual int OnTime(const BlockTransformTimeEventV1& event,
-                       std::vector<BlockTransformOutputV1>* outputs) = 0;
+    virtual int GetTimeDriveState(BlockTransformTimeDriveStateV1 * state) = 0;
+    virtual int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) = 0;
 };
 
 /** V2 task combines the unchanged V1 data lifecycle with the optional time capability. */
-interface IBlockTransformTaskV2 : public IBlockTransformTaskV1,
-                                  public IBlockTransformTimeDrivenTaskV1 {};
+interface IBlockTransformTaskV2 : public IBlockTransformTaskV1, public IBlockTransformTimeDrivenTaskV1{};
 
-/** Optional task-private capture binding. Runner serializes facts with data and time calls. */
-interface IBlockTransformCaptureFactTaskV1 {
-    virtual ~IBlockTransformCaptureFactTaskV1() = default;
-    /** Bind before Open. The task copies borrowed identity text. */
-    virtual int BindCaptureSource(const CaptureQueueIdentityV1& identity) = 0;
-    /** Deliver an ordered fact only after the corresponding batch has been released. */
-    virtual int AcceptCaptureFact(const CaptureProgressV1& fact) = 0;
+/** Atomically accept one poll's facts after the corresponding packet batch has been released. */
+interface IBlockTransformCaptureFactTaskV2 {
+    virtual ~IBlockTransformCaptureFactTaskV2() = default;
+    virtual int BindCaptureSources(const CaptureSourceSetV2& sources) = 0;
+    virtual int AcceptCaptureFacts(const std::vector<CaptureProgressV1>& facts) = 0;
 };
 
 constexpr uint32_t kBlockTransformManagedSinkContractVersionV1 = 1;
@@ -180,11 +171,10 @@ interface IBlockTransformOperatorV1 {
      * Creates an exclusive task session. The implementation must copy all config content before
      * returning and must not retain its raw pointers. The provider retains the allocation domain.
      */
-    virtual int CreateTask(const BlockTransformTaskConfigV1& config,
-                           IBlockTransformTaskV1** task) = 0;
+    virtual int CreateTask(const BlockTransformTaskConfigV1& config, IBlockTransformTaskV1** task) = 0;
 
     /** Called only after all task method calls have completed. */
-    virtual void ReleaseTask(IBlockTransformTaskV1* task) = 0;
+    virtual void ReleaseTask(IBlockTransformTaskV1 * task) = 0;
 };
 
 /** Stateless provider discovered through IID_BLOCK_TRANSFORM_OPERATOR_V2. */
@@ -199,11 +189,10 @@ interface IBlockTransformOperatorV2 {
      * Creates an exclusive V2 task. The provider must validate struct_size/version, copy borrowed
      * configuration text before returning, and retain the allocation domain until ReleaseTask.
      */
-    virtual int CreateTask(const BlockTransformTaskConfigV2& config,
-                           IBlockTransformTaskV2** task) = 0;
+    virtual int CreateTask(const BlockTransformTaskConfigV2& config, IBlockTransformTaskV2** task) = 0;
 
     /** Called only after all task method calls have completed. */
-    virtual void ReleaseTask(IBlockTransformTaskV2* task) = 0;
+    virtual void ReleaseTask(IBlockTransformTaskV2 * task) = 0;
 };
 
 }  // namespace flowsql

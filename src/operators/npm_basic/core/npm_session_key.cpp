@@ -197,7 +197,8 @@ NpmSessionPacketError ValidateNetworkRange(const NpmObservationDomainMap& domain
         if (!ReadHeader(packet, network_offset, &header)) {
             return NpmSessionPacketError::kInvalidPacketBounds;
         }
-        if (header.version != 6 ||
+        // IPv6 puts its version in the first wire octet; the legacy 32-bit C++ bitfield is not a wire accessor.
+        if ((packet.bytes.data[network_offset] >> 4) != 6 ||
             !AddSize(network_offset, sizeof(Ipv6Header) + static_cast<size_t>(ntohs(header.payload)), &network_end)) {
             return NpmSessionPacketError::kInvalidPayloadBounds;
         }

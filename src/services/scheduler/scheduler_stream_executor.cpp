@@ -61,10 +61,8 @@
 namespace flowsql {
 namespace scheduler {
 
-static std::string EnsureExecutionErrorJson(const std::string& rsp,
-                                            const std::string& fallback_error,
-                                            ErrorCodeId fallback_code,
-                                            ErrorStageId fallback_stage) {
+static std::string EnsureExecutionErrorJson(const std::string& rsp, const std::string& fallback_error,
+                                            ErrorCodeId fallback_code, ErrorStageId fallback_stage) {
     rapidjson::Document d;
     d.Parse(rsp.c_str());
     if (d.HasParseError() || !d.IsObject()) {
@@ -151,8 +149,7 @@ static std::string CanonicalSharedHubKey(const std::vector<std::string>& source_
 
 class SharedSourceState final : public std::enable_shared_from_this<SharedSourceState> {
  public:
-    explicit SharedSourceState(std::shared_ptr<IStreamChannel> source)
-        : source_(std::move(source)) {}
+    explicit SharedSourceState(std::shared_ptr<IStreamChannel> source) : source_(std::move(source)) {}
 
     PollEvent PollNext(int timeout_ms) {
         if (!source_) return PollEvent::Error(-EINVAL, "shared source unavailable");
@@ -173,29 +170,17 @@ class SharedSourceState final : public std::enable_shared_from_this<SharedSource
         return 0;
     }
 
-    bool IsFinished() const {
-        return source_ ? source_->IsFinished() : true;
-    }
+    bool IsFinished() const { return source_ ? source_->IsFinished() : true; }
 
-    bool IsFull() const {
-        return source_ && source_->IsFull();
-    }
+    bool IsFull() const { return source_ && source_->IsFull(); }
 
-    bool IsEmpty() const {
-        return !source_ || source_->IsEmpty();
-    }
+    bool IsEmpty() const { return !source_ || source_->IsEmpty(); }
 
-    size_t Capacity() const {
-        return source_ ? source_->Capacity() : 0;
-    }
+    size_t Capacity() const { return source_ ? source_->Capacity() : 0; }
 
-    size_t Size() const {
-        return source_ ? source_->Size() : 0;
-    }
+    size_t Size() const { return source_ ? source_->Size() : 0; }
 
-    std::shared_ptr<arrow::Schema> GetOutputSchema() {
-        return source_ ? source_->GetOutputSchema() : nullptr;
-    }
+    std::shared_ptr<arrow::Schema> GetOutputSchema() { return source_ ? source_->GetOutputSchema() : nullptr; }
 
     StreamChannelCapabilities Capabilities() const {
         return source_ ? source_->Capabilities() : StreamChannelCapabilities{};
@@ -226,21 +211,13 @@ class StatelessSourceView final : public IStreamChannel {
     }
     ~StatelessSourceView() override { (void)Close(); }
 
-    const char* Category() override {
-        return state_ ? state_->Category() : "stateless";
-    }
+    const char* Category() override { return state_ ? state_->Category() : "stateless"; }
 
-    const char* Name() override {
-        return view_name_.c_str();
-    }
+    const char* Name() override { return view_name_.c_str(); }
 
-    const char* Type() override {
-        return ChannelType::kStream;
-    }
+    const char* Type() override { return ChannelType::kStream; }
 
-    const char* Schema() override {
-        return state_ ? state_->Schema() : "[]";
-    }
+    const char* Schema() override { return state_ ? state_->Schema() : "[]"; }
 
     int Open() override { return 0; }
     int Close() override {
@@ -253,18 +230,14 @@ class StatelessSourceView final : public IStreamChannel {
     bool IsOpened() const override { return true; }
     int Flush() override { return 0; }
 
-    int Put(std::shared_ptr<arrow::RecordBatch>, int64_t) override {
-        return ENOTSUP;
-    }
+    int Put(std::shared_ptr<arrow::RecordBatch>, int64_t) override { return ENOTSUP; }
 
     PollEvent PollNext(int timeout_ms = 100) override {
         if (!state_) return PollEvent::Error(-EINVAL, "invalid shared spmc state");
         return state_->PollNext(timeout_ms);
     }
 
-    std::shared_ptr<arrow::Schema> GetOutputSchema() override {
-        return state_ ? state_->GetOutputSchema() : nullptr;
-    }
+    std::shared_ptr<arrow::Schema> GetOutputSchema() override { return state_ ? state_->GetOutputSchema() : nullptr; }
 
     int SetFilter(const char*, std::vector<std::string>* unsupported_out) override {
         if (unsupported_out) unsupported_out->clear();
@@ -284,9 +257,7 @@ class StatelessSourceView final : public IStreamChannel {
     void Cancel() override {
         if (state_) state_->Cancel();
     }
-    bool IsFinished() const override {
-        return state_ && state_->IsFinished();
-    }
+    bool IsFinished() const override { return state_ && state_->IsFinished(); }
 
  private:
     std::shared_ptr<SharedSourceState> state_;
@@ -296,26 +267,16 @@ class StatelessSourceView final : public IStreamChannel {
 
 class FanOutPartitionView final : public IStreamChannel {
  public:
-    FanOutPartitionView(std::shared_ptr<FanOutStreamChannel> parent,
-                        std::shared_ptr<IStreamChannel> partition)
-        : parent_(std::move(parent)),
-          partition_(std::move(partition)) {}
+    FanOutPartitionView(std::shared_ptr<FanOutStreamChannel> parent, std::shared_ptr<IStreamChannel> partition)
+        : parent_(std::move(parent)), partition_(std::move(partition)) {}
 
-    const char* Category() override {
-        return partition_ ? partition_->Category() : "fanout";
-    }
+    const char* Category() override { return partition_ ? partition_->Category() : "fanout"; }
 
-    const char* Name() override {
-        return partition_ ? partition_->Name() : "fanout.partition";
-    }
+    const char* Name() override { return partition_ ? partition_->Name() : "fanout.partition"; }
 
-    const char* Type() override {
-        return ChannelType::kStream;
-    }
+    const char* Type() override { return ChannelType::kStream; }
 
-    const char* Schema() override {
-        return partition_ ? partition_->Schema() : "[]";
-    }
+    const char* Schema() override { return partition_ ? partition_->Schema() : "[]"; }
 
     int Open() override { return 0; }
     int Close() override { return partition_ ? partition_->Close() : 0; }
@@ -335,8 +296,7 @@ class FanOutPartitionView final : public IStreamChannel {
         return partition_ ? partition_->GetOutputSchema() : nullptr;
     }
 
-    int SetFilter(const char* condition_json,
-                  std::vector<std::string>* unsupported_out) override {
+    int SetFilter(const char* condition_json, std::vector<std::string>* unsupported_out) override {
         return partition_ ? partition_->SetFilter(condition_json, unsupported_out) : EINVAL;
     }
 
@@ -398,8 +358,7 @@ std::shared_ptr<IOperator> SchedulerPlugin::FindOperator(const std::string& cate
     return nullptr;
 }
 
-std::shared_ptr<IOperator> SchedulerPlugin::CreateOperator(const std::string& category,
-                                                           const std::string& name) {
+std::shared_ptr<IOperator> SchedulerPlugin::CreateOperator(const std::string& category, const std::string& name) {
     if (!querier_) return nullptr;
     auto* op_registry = static_cast<IOperatorRegistry*>(querier_->First(IID_OPERATOR_REGISTRY));
     if (op_registry) {
@@ -421,8 +380,7 @@ std::shared_ptr<IOperator> SchedulerPlugin::CreateOperator(const std::string& ca
     return nullptr;
 }
 
-IBlockStreamOperator* SchedulerPlugin::FindBlockOperator(const std::string& category,
-                                                          const std::string& name) {
+IBlockStreamOperator* SchedulerPlugin::FindBlockOperator(const std::string& category, const std::string& name) {
     if (!querier_) return nullptr;
     IBlockStreamOperator* found = nullptr;
     size_t matches = 0;
@@ -437,33 +395,25 @@ IBlockStreamOperator* SchedulerPlugin::FindBlockOperator(const std::string& cate
 }
 
 SchedulerPlugin::BlockTransformProviderRef SchedulerPlugin::FindBlockTransformOperator(
-    const std::string& category,
-    const std::string& name,
-    CppOperatorCapabilityLeaseV1* dynamic_lease,
-    bool* ambiguous,
+    const std::string& category, const std::string& name, CppOperatorCapabilityLeaseV1* dynamic_lease, bool* ambiguous,
     int* traverse_error) {
     if (dynamic_lease) *dynamic_lease = {};
     if (ambiguous) *ambiguous = false;
     if (traverse_error) *traverse_error = 0;
     if (!querier_ || !dynamic_lease) return {};
 
-    auto resolve_version = [&](const Guid& iid,
-                               bool is_v2,
-                               void** selected,
-                               CppOperatorCapabilityLeaseV1* selected_lease,
-                               bool* version_ambiguous) {
+    auto resolve_version = [&](const Guid& iid, bool is_v2, void** selected,
+                               CppOperatorCapabilityLeaseV1* selected_lease, bool* version_ambiguous) {
         *selected = nullptr;
         *selected_lease = {};
         *version_ambiguous = false;
         size_t matches = 0;
         int traversal_rc = querier_->Traverse(iid, [&](void* value) -> int {
             if (!value) return 0;
-            const std::string candidate_category =
-                is_v2 ? static_cast<IBlockTransformOperatorV2*>(value)->Category()
-                      : static_cast<IBlockTransformOperatorV1*>(value)->Category();
-            const std::string candidate_name =
-                is_v2 ? static_cast<IBlockTransformOperatorV2*>(value)->Name()
-                      : static_cast<IBlockTransformOperatorV1*>(value)->Name();
+            const std::string candidate_category = is_v2 ? static_cast<IBlockTransformOperatorV2*>(value)->Category()
+                                                         : static_cast<IBlockTransformOperatorV1*>(value)->Category();
+            const std::string candidate_name = is_v2 ? static_cast<IBlockTransformOperatorV2*>(value)->Name()
+                                                     : static_cast<IBlockTransformOperatorV1*>(value)->Name();
             if (!IEquals(candidate_category, category) || candidate_name != name) return 0;
             *selected = value;
             ++matches;
@@ -473,29 +423,26 @@ SchedulerPlugin::BlockTransformProviderRef SchedulerPlugin::FindBlockTransformOp
 
         CppOperatorCapabilityLeaseV1 acquired_dynamic_lease;
         bool invalid_dynamic_lease = false;
-        traversal_rc = querier_->Traverse(
-            IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1,
-            [&](void* value) -> int {
-                auto* registry = static_cast<ICppOperatorPluginRegistryV1*>(value);
-                if (!registry) return 0;
+        traversal_rc = querier_->Traverse(IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1, [&](void* value) -> int {
+            auto* registry = static_cast<ICppOperatorPluginRegistryV1*>(value);
+            if (!registry) return 0;
 
-                CppOperatorCapabilityLeaseV1 candidate_lease;
-                if (registry->Acquire(
-                        category.c_str(), name.c_str(), iid, &candidate_lease) != 0) {
-                    return 0;
-                }
-                if (!candidate_lease.capability || !candidate_lease.lifetime) {
-                    invalid_dynamic_lease = true;
-                    return 0;
-                }
-
-                *selected = candidate_lease.capability;
-                ++matches;
-                if (matches == 1) {
-                    acquired_dynamic_lease = std::move(candidate_lease);
-                }
+            CppOperatorCapabilityLeaseV1 candidate_lease;
+            if (registry->Acquire(category.c_str(), name.c_str(), iid, &candidate_lease) != 0) {
                 return 0;
-            });
+            }
+            if (!candidate_lease.capability || !candidate_lease.lifetime) {
+                invalid_dynamic_lease = true;
+                return 0;
+            }
+
+            *selected = candidate_lease.capability;
+            ++matches;
+            if (matches == 1) {
+                acquired_dynamic_lease = std::move(candidate_lease);
+            }
+            return 0;
+        });
         if (traversal_rc != 0) return traversal_rc;
         if (invalid_dynamic_lease) return EPROTO;
         *version_ambiguous = matches > 1;
@@ -510,12 +457,8 @@ SchedulerPlugin::BlockTransformProviderRef SchedulerPlugin::FindBlockTransformOp
     void* selected = nullptr;
     CppOperatorCapabilityLeaseV1 selected_lease;
     bool version_ambiguous = false;
-    int traversal_rc = resolve_version(
-        IID_BLOCK_TRANSFORM_OPERATOR_V2,
-        true,
-        &selected,
-        &selected_lease,
-        &version_ambiguous);
+    int traversal_rc =
+        resolve_version(IID_BLOCK_TRANSFORM_OPERATOR_V2, true, &selected, &selected_lease, &version_ambiguous);
     if (traverse_error) *traverse_error = traversal_rc;
     if (traversal_rc != 0) return {};
     if (version_ambiguous) {
@@ -527,12 +470,8 @@ SchedulerPlugin::BlockTransformProviderRef SchedulerPlugin::FindBlockTransformOp
         return {nullptr, static_cast<IBlockTransformOperatorV2*>(selected)};
     }
 
-    traversal_rc = resolve_version(
-        IID_BLOCK_TRANSFORM_OPERATOR_V1,
-        false,
-        &selected,
-        &selected_lease,
-        &version_ambiguous);
+    traversal_rc =
+        resolve_version(IID_BLOCK_TRANSFORM_OPERATOR_V1, false, &selected, &selected_lease, &version_ambiguous);
     if (traverse_error) *traverse_error = traversal_rc;
     if (traversal_rc != 0) return {};
     if (version_ambiguous) {
@@ -544,20 +483,17 @@ SchedulerPlugin::BlockTransformProviderRef SchedulerPlugin::FindBlockTransformOp
     return {static_cast<IBlockTransformOperatorV1*>(selected), nullptr};
 }
 
-int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source,
-                                           IBlockStreamOperator* op,
-                                           const std::shared_ptr<const BoundFilterExpr>& source_residual,
-                                           BlockExecutionTerminal* terminal,
-                                           int64_t* rows_affected,
-                                           std::string* error) {
+int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source, IBlockStreamOperator* op,
+                                          const std::shared_ptr<const BoundFilterExpr>& source_residual,
+                                          BlockExecutionTerminal* terminal, int64_t* rows_affected,
+                                          std::string* error) {
     if (terminal) *terminal = BlockExecutionTerminal::kFailed;
     if (!source || !op) return EINVAL;
     BlockFilterStage source_filter(source_residual);
     if (source_residual) {
         std::shared_ptr<arrow::Schema> filtered_schema;
         std::string filter_error;
-        const auto open_rc = source_filter.Open(
-            packet::PacketSchema(), &filtered_schema, &filter_error);
+        const auto open_rc = source_filter.Open(packet::PacketSchema(), &filtered_schema, &filter_error);
         if (open_rc != FilterEvalError::kNone) {
             if (error) *error = "source-stage residual Open failed: " + filter_error;
             return EINVAL;
@@ -594,8 +530,7 @@ int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source,
                 if (rc == 0 && source_residual) {
                     BlockTransformOutputV1 filtered;
                     std::string filter_error;
-                    const auto eval_rc = source_filter.ProcessBlock(
-                        event.batch, 0, &filtered, &filter_error);
+                    const auto eval_rc = source_filter.ProcessBlock(event.batch, 0, &filtered, &filter_error);
                     if (eval_rc != FilterEvalError::kNone || !filtered.batch) {
                         if (error) *error = "source-stage residual failed: " + filter_error;
                         rc = EINVAL;
@@ -669,8 +604,7 @@ int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source,
     }
     if (rows_affected) *rows_affected = rows;
     if (terminal) {
-        *terminal = stopped ? BlockExecutionTerminal::kStopped
-                            : BlockExecutionTerminal::kCompleted;
+        *terminal = stopped ? BlockExecutionTerminal::kStopped : BlockExecutionTerminal::kCompleted;
     }
     return 0;
 }
@@ -679,13 +613,10 @@ namespace {
 
 class SchemaCheckingBlockTransformTask final : public IBlockTransformTaskV1 {
  public:
-    SchemaCheckingBlockTransformTask(
-        IBlockTransformTaskV1* task,
-        std::shared_ptr<arrow::Schema> expected_output_schema)
+    SchemaCheckingBlockTransformTask(IBlockTransformTaskV1* task, std::shared_ptr<arrow::Schema> expected_output_schema)
         : task_(task), expected_output_schema_(std::move(expected_output_schema)) {}
 
-    int Open(std::shared_ptr<arrow::Schema> input_schema,
-             std::shared_ptr<arrow::Schema>* output_schema) override {
+    int Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema>* output_schema) override {
         if (!task_) return EINVAL;
         const int rc = task_->Open(std::move(input_schema), output_schema);
         if (rc != 0) return rc;
@@ -697,21 +628,16 @@ class SchemaCheckingBlockTransformTask final : public IBlockTransformTaskV1 {
         return 0;
     }
 
-    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
-                     int64_t ts_ms,
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
                      std::vector<BlockTransformOutputV1>* outputs) override {
         return task_->ProcessBlock(input, ts_ms, outputs);
     }
 
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
-        return task_->Flush(outputs);
-    }
+    int Flush(std::vector<BlockTransformOutputV1>* outputs) override { return task_->Flush(outputs); }
 
     void Cancel() override { task_->Cancel(); }
 
-    std::string LastError() const override {
-        return last_error_.empty() ? task_->LastError() : last_error_;
-    }
+    std::string LastError() const override { return last_error_.empty() ? task_->LastError() : last_error_; }
 
  private:
     IBlockTransformTaskV1* task_ = nullptr;
@@ -719,10 +645,7 @@ class SchemaCheckingBlockTransformTask final : public IBlockTransformTaskV1 {
     std::string last_error_;
 };
 
-const std::string* FindStageFilterText(
-    const SqlStatement& stmt,
-    uint32_t after_stage,
-    bool* duplicate) {
+const std::string* FindStageFilterText(const SqlStatement& stmt, uint32_t after_stage, bool* duplicate) {
     if (duplicate) *duplicate = false;
     const std::string* found = nullptr;
     for (const auto& filter : stmt.stage_filters) {
@@ -736,9 +659,7 @@ const std::string* FindStageFilterText(
     return found;
 }
 
-bool ParseStageFilter(const std::string* filter_text,
-                      uint32_t after_stage,
-                      std::shared_ptr<FilterExpr>* expression,
+bool ParseStageFilter(const std::string* filter_text, uint32_t after_stage, std::shared_ptr<FilterExpr>* expression,
                       std::string* error) {
     if (!expression) return false;
     expression->reset();
@@ -753,18 +674,13 @@ bool ParseStageFilter(const std::string* filter_text,
     return false;
 }
 
-int ResolveFilterDomain(IQuerier* querier,
-                        FilterDomainTargetKindV1 target_kind,
-                        const std::string& target_category,
-                        const std::string& target_name,
-                        const std::shared_ptr<arrow::Schema>& output_schema,
-                        const std::shared_ptr<FilterExpr>& expression,
-                        std::shared_ptr<FilterExpr>* resolved_expression,
+int ResolveFilterDomain(IQuerier* querier, FilterDomainTargetKindV1 target_kind, const std::string& target_category,
+                        const std::string& target_name, const std::shared_ptr<arrow::Schema>& output_schema,
+                        const std::shared_ptr<FilterExpr>& expression, std::shared_ptr<FilterExpr>* resolved_expression,
                         std::string* error) {
     if (resolved_expression) resolved_expression->reset();
     if (error) error->clear();
-    if (!resolved_expression || !output_schema || !expression || target_category.empty() ||
-        target_name.empty()) {
+    if (!resolved_expression || !output_schema || !expression || target_category.empty() || target_name.empty()) {
         if (error) *error = "filter domain resolver request is incomplete";
         return EIO;
     }
@@ -783,65 +699,57 @@ int ResolveFilterDomain(IQuerier* querier,
     size_t owner_count = 0;
     int resolution_error = 0;
     std::string resolution_diagnostic;
-    const int traversal_rc = querier->Traverse(
-        IID_FILTER_DOMAIN_RESOLVER_V1,
-        [&](void* value) -> int {
-            auto* resolver = static_cast<IFilterDomainResolverV1*>(value);
-            if (!resolver) {
-                resolution_error = EIO;
-                resolution_diagnostic =
-                    "filter domain resolver discovery returned a null provider";
-                return -1;
-            }
+    const int traversal_rc = querier->Traverse(IID_FILTER_DOMAIN_RESOLVER_V1, [&](void* value) -> int {
+        auto* resolver = static_cast<IFilterDomainResolverV1*>(value);
+        if (!resolver) {
+            resolution_error = EIO;
+            resolution_diagnostic = "filter domain resolver discovery returned a null provider";
+            return -1;
+        }
 
-            FilterDomainResolveResultV1 result;
-            int rc = 0;
-            try {
-                rc = resolver->Resolve(request, &result);
-            } catch (const std::exception& ex) {
+        FilterDomainResolveResultV1 result;
+        int rc = 0;
+        try {
+            rc = resolver->Resolve(request, &result);
+        } catch (const std::exception& ex) {
+            resolution_error = EIO;
+            resolution_diagnostic = "filter domain resolver threw: " + std::string(ex.what());
+            return -1;
+        } catch (...) {
+            resolution_error = EIO;
+            resolution_diagnostic = "filter domain resolver threw an unknown exception";
+            return -1;
+        }
+        if (rc == ENOTSUP) {
+            if (result.lowered_expression) {
                 resolution_error = EIO;
-                resolution_diagnostic =
-                    "filter domain resolver threw: " + std::string(ex.what());
-                return -1;
-            } catch (...) {
-                resolution_error = EIO;
-                resolution_diagnostic = "filter domain resolver threw an unknown exception";
+                resolution_diagnostic = "non-owner filter domain resolver returned an expression";
                 return -1;
             }
-            if (rc == ENOTSUP) {
-                if (result.lowered_expression) {
-                    resolution_error = EIO;
-                    resolution_diagnostic =
-                        "non-owner filter domain resolver returned an expression";
-                    return -1;
-                }
-                return 0;
-            }
-            if (rc != 0) {
-                resolution_error = rc == ENOMEM || rc == EFAULT ? EIO : EINVAL;
-                resolution_diagnostic =
-                    result.diagnostic.empty()
-                        ? "filter domain resolver rejected the expression with code " +
-                              std::to_string(rc)
-                        : std::move(result.diagnostic);
-                return -1;
-            }
-            if (!result.lowered_expression) {
-                resolution_error = EIO;
-                resolution_diagnostic =
-                    "owning filter domain resolver returned no expression";
-                return -1;
-            }
-            if (owner_count != 0) {
-                resolution_error = EIO;
-                resolution_diagnostic =
-                    "multiple filter domain resolvers accepted the current stage";
-                return -1;
-            }
-            ++owner_count;
-            *resolved_expression = std::move(result.lowered_expression);
             return 0;
-        });
+        }
+        if (rc != 0) {
+            resolution_error = rc == ENOMEM || rc == EFAULT ? EIO : EINVAL;
+            resolution_diagnostic =
+                result.diagnostic.empty()
+                    ? "filter domain resolver rejected the expression with code " + std::to_string(rc)
+                    : std::move(result.diagnostic);
+            return -1;
+        }
+        if (!result.lowered_expression) {
+            resolution_error = EIO;
+            resolution_diagnostic = "owning filter domain resolver returned no expression";
+            return -1;
+        }
+        if (owner_count != 0) {
+            resolution_error = EIO;
+            resolution_diagnostic = "multiple filter domain resolvers accepted the current stage";
+            return -1;
+        }
+        ++owner_count;
+        *resolved_expression = std::move(result.lowered_expression);
+        return 0;
+    });
     if (resolution_error != 0) {
         resolved_expression->reset();
         if (error) *error = std::move(resolution_diagnostic);
@@ -850,8 +758,7 @@ int ResolveFilterDomain(IQuerier* querier,
     if (traversal_rc != 0) {
         resolved_expression->reset();
         if (error) {
-            *error = "filter domain resolver traversal failed with code " +
-                     std::to_string(traversal_rc);
+            *error = "filter domain resolver traversal failed with code " + std::to_string(traversal_rc);
         }
         return EIO;
     }
@@ -859,30 +766,24 @@ int ResolveFilterDomain(IQuerier* querier,
     return 0;
 }
 
-int ResolveAndBindStageFilter(IQuerier* querier,
-                              FilterDomainTargetKindV1 target_kind,
-                              const std::string& target_category,
-                              const std::string& target_name,
+int ResolveAndBindStageFilter(IQuerier* querier, FilterDomainTargetKindV1 target_kind,
+                              const std::string& target_category, const std::string& target_name,
                               const std::shared_ptr<arrow::Schema>& output_schema,
-                              const std::shared_ptr<FilterExpr>& expression,
-                              const std::string& stage_label,
-                              std::shared_ptr<const BoundFilterExpr>* bound_expression,
-                              std::string* error) {
+                              const std::shared_ptr<FilterExpr>& expression, const std::string& stage_label,
+                              std::shared_ptr<const BoundFilterExpr>* bound_expression, std::string* error) {
     if (bound_expression) bound_expression->reset();
     if (!expression) return 0;
 
     std::shared_ptr<FilterExpr> resolved_expression;
     std::string detail;
-    const int resolve_rc = ResolveFilterDomain(
-        querier, target_kind, target_category, target_name, output_schema, expression,
-        &resolved_expression, &detail);
+    const int resolve_rc = ResolveFilterDomain(querier, target_kind, target_category, target_name, output_schema,
+                                               expression, &resolved_expression, &detail);
     if (resolve_rc != 0) {
         if (error) *error = stage_label + " filter domain resolution failed: " + detail;
         return resolve_rc;
     }
 
-    const auto bind_rc = BindFilterExpression(
-        output_schema, resolved_expression, bound_expression, &detail);
+    const auto bind_rc = BindFilterExpression(output_schema, resolved_expression, bound_expression, &detail);
     if (bind_rc != FilterBindError::kNone) {
         if (error) *error = stage_label + " filter binding failed: " + detail;
         return EINVAL;
@@ -901,19 +802,15 @@ std::string SafeBlockTransformLastError(IBlockTransformTaskV1* task) {
 
 }  // namespace
 
-int SchedulerPlugin::BuildBlockSourceFilterPlan(
-    IBlockStreamChannel* source,
-    const SqlStatement& stmt,
-    BlockSourceFilterPlan* plan,
-    std::string* error) {
+int SchedulerPlugin::BuildBlockSourceFilterPlan(IBlockStreamChannel* source, const SqlStatement& stmt,
+                                                BlockSourceFilterPlan* plan, std::string* error) {
     if (plan) *plan = BlockSourceFilterPlan{};
     if (error) error->clear();
     if (!source || !plan || !error) return EINVAL;
     plan->pushed_filter_plan_json = kEmptyCanonicalFilterPlanV1;
 
     bool duplicate_source_filter = false;
-    const auto* source_filter_text = FindStageFilterText(
-        stmt, 0, &duplicate_source_filter);
+    const auto* source_filter_text = FindStageFilterText(stmt, 0, &duplicate_source_filter);
     if (duplicate_source_filter) {
         *error = "block source contains duplicate filters";
         return EINVAL;
@@ -926,11 +823,10 @@ int SchedulerPlugin::BuildBlockSourceFilterPlan(
 
     const auto source_schema = packet::PacketSchema();
     std::shared_ptr<const BoundFilterExpr> bound_source_filter;
-    const int filter_rc = ResolveAndBindStageFilter(
-        querier_, FilterDomainTargetKindV1::kSource,
-        source->Category() ? source->Category() : "",
-        source->Name() ? source->Name() : "", source_schema, source_expression,
-        "source-stage", &bound_source_filter, error);
+    const int filter_rc =
+        ResolveAndBindStageFilter(querier_, FilterDomainTargetKindV1::kSource,
+                                  source->Category() ? source->Category() : "", source->Name() ? source->Name() : "",
+                                  source_schema, source_expression, "source-stage", &bound_source_filter, error);
     if (filter_rc != 0) return filter_rc;
 
     FilterPushdownTarget target;
@@ -940,8 +836,7 @@ int SchedulerPlugin::BuildBlockSourceFilterPlan(
     target.output_schema = source_schema;
     FilterPushdownNegotiation negotiation;
     std::string plan_error;
-    const auto negotiate_rc = NegotiateFilterPushdown(
-        querier_, target, bound_source_filter, &negotiation, &plan_error);
+    const auto negotiate_rc = NegotiateFilterPushdown(querier_, target, bound_source_filter, &negotiation, &plan_error);
     if (negotiate_rc != FilterPlanError::kNone) {
         *error = "source-stage filter pushdown negotiation failed: " + plan_error;
         return negotiate_rc == FilterPlanError::kInvalidArgument ||
@@ -953,8 +848,7 @@ int SchedulerPlugin::BuildBlockSourceFilterPlan(
 
     FilterTaskSessionPlan exclusive_plan;
     const auto exclusive_rc = MaterializeFilterTaskSessionPlan(
-        source_schema, bound_source_filter, negotiation,
-        FilterTaskIsolation::kExclusive, &exclusive_plan, &plan_error);
+        source_schema, bound_source_filter, negotiation, FilterTaskIsolation::kExclusive, &exclusive_plan, &plan_error);
     if (exclusive_rc != FilterPlanError::kNone) {
         *error = "source-stage exclusive filter task planning failed: " + plan_error;
         return exclusive_rc == FilterPlanError::kInvalidArgument ||
@@ -965,8 +859,7 @@ int SchedulerPlugin::BuildBlockSourceFilterPlan(
     }
     FilterTaskSessionPlan shared_plan;
     const auto shared_rc = MaterializeFilterTaskSessionPlan(
-        source_schema, bound_source_filter, negotiation,
-        FilterTaskIsolation::kSharedSource, &shared_plan, &plan_error);
+        source_schema, bound_source_filter, negotiation, FilterTaskIsolation::kSharedSource, &shared_plan, &plan_error);
     if (shared_rc != FilterPlanError::kNone) {
         *error = "source-stage shared filter task planning failed: " + plan_error;
         return shared_rc == FilterPlanError::kInvalidArgument ||
@@ -976,8 +869,7 @@ int SchedulerPlugin::BuildBlockSourceFilterPlan(
                    : EIO;
     }
 
-    plan->pushed_filter_plan_json =
-        std::move(exclusive_plan.pushed_filter_plan_json);
+    plan->pushed_filter_plan_json = std::move(exclusive_plan.pushed_filter_plan_json);
     plan->exclusive_residual = std::move(exclusive_plan.residual_expression);
     plan->shared_residual = std::move(shared_plan.residual_expression);
     return 0;
@@ -1022,8 +914,7 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
     }
 
     bool duplicate_transform_filter = false;
-    const auto* transform_filter_text = FindStageFilterText(
-        stmt, 1, &duplicate_transform_filter);
+    const auto* transform_filter_text = FindStageFilterText(stmt, 1, &duplicate_transform_filter);
     if (duplicate_transform_filter) {
         if (error) *error = "block transform stage contains duplicate filters";
         return EINVAL;
@@ -1046,11 +937,9 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
 
     const auto source_schema = packet::PacketSchema();
 
-    const auto& params = !stmt.operator_with_params.empty()
-                             ? stmt.operator_with_params.front()
-                             : stmt.with_params;
+    const auto& params = !stmt.operator_with_params.empty() ? stmt.operator_with_params.front() : stmt.with_params;
     const std::string with_params_json = MakeWithParamsJson(params);
-    auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV1*>(source);
+    auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV2*>(source);
     if (capture_reader && !stmt.operators.empty() && stmt.operators.front().category == "npm" &&
         stmt.operators.front().name == "basic" && !managed_sink) {
         if (error)
@@ -1059,18 +948,16 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
                 "output is unsupported";
         return EINVAL;
     }
-    CaptureQueueIdentityV1 capture_identity;
+    CaptureSourceSetV2 capture_sources;
     if (capture_reader) {
-        CaptureReaderLimitsV1 capture_limits;
         int describe_rc = 0;
         try {
-            describe_rc = capture_reader->Describe(&capture_identity, &capture_limits);
+            describe_rc = capture_reader->DescribeSources(&capture_sources);
         } catch (...) {
             if (error) *error = "capture reader Describe threw";
             return EFAULT;
         }
-        if (describe_rc != 0 || ValidateCaptureReaderDescriptionV1(capture_identity, capture_limits) !=
-                                    CaptureDescriptionErrorV1::kNone) {
+        if (describe_rc != 0 || ValidateCaptureSourceSetV2(capture_sources) != CaptureDescriptionErrorV1::kNone) {
             if (error) *error = "capture reader returned an invalid identity or limits";
             return describe_rc != 0 ? describe_rc : EINVAL;
         }
@@ -1081,15 +968,12 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
     std::shared_ptr<arrow::Schema> planned_output_schema;
 
     auto make_task_holder = [provider](IBlockTransformTaskV1* task) {
-        return std::unique_ptr<IBlockTransformTaskV1,
-                               std::function<void(IBlockTransformTaskV1*)>>(
-            task,
-            [provider](IBlockTransformTaskV1* owned) {
+        return std::unique_ptr<IBlockTransformTaskV1, std::function<void(IBlockTransformTaskV1*)>>(
+            task, [provider](IBlockTransformTaskV1* owned) {
                 if (!owned) return;
                 try {
                     if (provider.v2) {
-                        provider.v2->ReleaseTask(
-                            static_cast<IBlockTransformTaskV2*>(owned));
+                        provider.v2->ReleaseTask(static_cast<IBlockTransformTaskV2*>(owned));
                     } else {
                         provider.v1->ReleaseTask(owned);
                     }
@@ -1097,24 +981,17 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
                 }
             });
     };
-    auto create_task = [&](const std::string& session_task_id,
-                           const FilterTaskSessionPlan& filter_plan,
-                           IBlockTransformTaskV1** data_task,
-                           IBlockTransformTimeDrivenTaskV1** time_task,
+    auto create_task = [&](const std::string& session_task_id, const FilterTaskSessionPlan& filter_plan,
+                           IBlockTransformTaskV1** data_task, IBlockTransformTimeDrivenTaskV1** time_task,
                            std::string* plan_error) {
         if (data_task) *data_task = nullptr;
         if (time_task) *time_task = nullptr;
         if (provider.v1) {
-            return CreateBlockTransformTaskSession(
-                provider.v1,
-                session_task_id,
-                with_params_json,
-                filter_plan,
-                data_task,
-                plan_error);
+            return CreateBlockTransformTaskSession(provider.v1, session_task_id, with_params_json, filter_plan,
+                                                   data_task, plan_error);
         }
-        if (!provider.v2 || !data_task || !time_task || session_task_id.empty() ||
-            with_params_json.empty() || filter_plan.pushed_filter_plan_json.empty()) {
+        if (!provider.v2 || !data_task || !time_task || session_task_id.empty() || with_params_json.empty() ||
+            filter_plan.pushed_filter_plan_json.empty()) {
             if (plan_error) *plan_error = "invalid V2 block transform task request";
             return FilterPlanError::kInvalidArgument;
         }
@@ -1148,12 +1025,8 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
         IBlockTransformTaskV1* probe_raw = nullptr;
         IBlockTransformTimeDrivenTaskV1* probe_time = nullptr;
         std::string plan_error;
-        const auto create_probe = create_task(
-            task_id + ".schema",
-            transform_filter_plan,
-            &probe_raw,
-            &probe_time,
-            &plan_error);
+        const auto create_probe =
+            create_task(task_id + ".schema", transform_filter_plan, &probe_raw, &probe_time, &plan_error);
         if (create_probe != FilterPlanError::kNone) {
             if (error) *error = "transform Schema probe creation failed: " + plan_error;
             return EIO;
@@ -1163,8 +1036,8 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
         if (input_bind_rc != 0) return input_bind_rc;
 
         if (capture_reader) {
-            auto* capture_task = dynamic_cast<IBlockTransformCaptureFactTaskV1*>(probe.get());
-            if (capture_task && capture_task->BindCaptureSource(capture_identity) != 0) {
+            auto* capture_task = dynamic_cast<IBlockTransformCaptureFactTaskV2*>(probe.get());
+            if (capture_task && capture_task->BindCaptureSources(capture_sources) != 0) {
                 if (error) *error = "capture Schema probe source binding failed";
                 return EINVAL;
             }
@@ -1208,11 +1081,10 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
         probe.reset();
 
         std::shared_ptr<const BoundFilterExpr> bound_transform_filter;
-        const int filter_rc = ResolveAndBindStageFilter(
-            querier_, FilterDomainTargetKindV1::kTransform,
-            stmt.operators.front().category, stmt.operators.front().name,
-            planned_output_schema, transform_expression, "operator-stage",
-            &bound_transform_filter, &plan_error);
+        const int filter_rc =
+            ResolveAndBindStageFilter(querier_, FilterDomainTargetKindV1::kTransform, stmt.operators.front().category,
+                                      stmt.operators.front().name, planned_output_schema, transform_expression,
+                                      "operator-stage", &bound_transform_filter, &plan_error);
         if (filter_rc != 0) {
             if (error) *error = plan_error;
             return filter_rc;
@@ -1224,8 +1096,8 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
         target.name = stmt.operators.front().name;
         target.output_schema = planned_output_schema;
         FilterPushdownNegotiation negotiation;
-        const auto negotiate_rc = NegotiateFilterPushdown(
-            querier_, target, bound_transform_filter, &negotiation, &plan_error);
+        const auto negotiate_rc =
+            NegotiateFilterPushdown(querier_, target, bound_transform_filter, &negotiation, &plan_error);
         if (negotiate_rc != FilterPlanError::kNone) {
             if (error) *error = "operator-stage filter pushdown negotiation failed: " + plan_error;
             return negotiate_rc == FilterPlanError::kInvalidArgument ||
@@ -1234,13 +1106,9 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
                        ? EINVAL
                        : EIO;
         }
-        const auto materialize_rc = MaterializeFilterTaskSessionPlan(
-            planned_output_schema,
-            bound_transform_filter,
-            negotiation,
-            FilterTaskIsolation::kExclusive,
-            &transform_filter_plan,
-            &plan_error);
+        const auto materialize_rc =
+            MaterializeFilterTaskSessionPlan(planned_output_schema, bound_transform_filter, negotiation,
+                                             FilterTaskIsolation::kExclusive, &transform_filter_plan, &plan_error);
         if (materialize_rc != FilterPlanError::kNone) {
             if (error) *error = "operator-stage filter task planning failed: " + plan_error;
             return EIO;
@@ -1250,12 +1118,8 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
     IBlockTransformTaskV1* execution_raw = nullptr;
     IBlockTransformTimeDrivenTaskV1* execution_time = nullptr;
     std::string plan_error;
-    const auto create_execution = create_task(
-        task_id + ".run",
-        transform_filter_plan,
-        &execution_raw,
-        &execution_time,
-        &plan_error);
+    const auto create_execution =
+        create_task(task_id + ".run", transform_filter_plan, &execution_raw, &execution_time, &plan_error);
     if (create_execution != FilterPlanError::kNone) {
         if (error) *error = "transform execution task creation failed: " + plan_error;
         return EIO;
@@ -1264,8 +1128,8 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
     const int input_bind_rc = BindBlockTransformInputSource(execution.get(), stmt.source, error);
     if (input_bind_rc != 0) return input_bind_rc;
     if (capture_reader) {
-        auto* capture_task = dynamic_cast<IBlockTransformCaptureFactTaskV1*>(execution.get());
-        if (capture_task && capture_task->BindCaptureSource(capture_identity) != 0) {
+        auto* capture_task = dynamic_cast<IBlockTransformCaptureFactTaskV2*>(execution.get());
+        if (capture_task && capture_task->BindCaptureSources(capture_sources) != 0) {
             if (error) *error = "capture source binding failed";
             return EINVAL;
         }
@@ -1282,18 +1146,17 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
             return bind_rc;
         }
     }
-    SchemaCheckingBlockTransformTask checked_execution(
-        execution.get(), planned_output_schema);
-    IBlockTransformTaskV1* runner_task = planned_output_schema
-                                             ? static_cast<IBlockTransformTaskV1*>(&checked_execution)
-                                             : execution.get();
+    SchemaCheckingBlockTransformTask checked_execution(execution.get(), planned_output_schema);
+    IBlockTransformTaskV1* runner_task =
+        planned_output_schema ? static_cast<IBlockTransformTaskV1*>(&checked_execution) : execution.get();
 
     BlockTransformPipelineConfig config;
     config.source = source;
     config.source_schema = source_schema;
     config.transform = runner_task;
     config.time_transform = execution_time;
-    config.capture_fact_task = capture_reader ? dynamic_cast<IBlockTransformCaptureFactTaskV1*>(execution.get()) : nullptr;
+    config.capture_fact_task =
+        capture_reader ? dynamic_cast<IBlockTransformCaptureFactTaskV2*>(execution.get()) : nullptr;
     config.source_residual = source_residual;
     config.transform_residual = transform_filter_plan.residual_expression;
     config.output_consumer = [appendable_sink, managed_sink](const BlockTransformOutputV1& output) {
@@ -1308,6 +1171,7 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
     config.opened_callback = [managed_task, control = config.control]() {
         if (managed_task && control) control->Publish(managed_task->ManagedSinkResultJson());
     };
+    config.progress_callback = config.opened_callback;
     const auto run_control = config.control;
     BlockTransformPipelineRunner runner(std::move(config));
     BlockTransformPipelineResult result;
@@ -1328,8 +1192,7 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
     }
     if (runner_rc == BlockTransformPipelineError::kNone) return 0;
     if (error) {
-        *error = runner_error.empty() ? "block transform pipeline execution failed"
-                                     : std::move(runner_error);
+        *error = runner_error.empty() ? "block transform pipeline execution failed" : std::move(runner_error);
     }
     return runner_rc == BlockTransformPipelineError::kCancelled ? ECANCELED : EIO;
 }
@@ -1351,11 +1214,11 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     if (terminal) *terminal = BlockExecutionTerminal::kFailed;
     if (rows_affected) *rows_affected = 0;
     if (error) error->clear();
-    if (!source || !sink || providers.size() < 2 ||
-        providers.size() != stmt.operators.size()) {
+    if (!source || !sink || providers.size() < 2 || providers.size() != stmt.operators.size()) {
         if (error) {
-            *error = "multi block transform pipeline requires one source, aligned providers, "
-                     "operators, and a sink";
+            *error =
+                "multi block transform pipeline requires one source, aligned providers, "
+                "operators, and a sink";
         }
         return EINVAL;
     }
@@ -1370,7 +1233,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         if (error) *error = "multi block transform pipeline requires an appendable DataFrame sink";
         return EINVAL;
     }
-    auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV1*>(source);
+    auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV2*>(source);
     if (capture_reader && stmt.operators.front().category == "npm" && stmt.operators.front().name == "basic") {
         if (error)
             *error =
@@ -1378,18 +1241,16 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
                 "DataFrame/unbounded foreground output is unsupported";
         return EINVAL;
     }
-    CaptureQueueIdentityV1 capture_identity;
+    CaptureSourceSetV2 capture_sources;
     if (capture_reader) {
-        CaptureReaderLimitsV1 capture_limits;
         int describe_rc = 0;
         try {
-            describe_rc = capture_reader->Describe(&capture_identity, &capture_limits);
+            describe_rc = capture_reader->DescribeSources(&capture_sources);
         } catch (...) {
             if (error) *error = "capture reader Describe threw";
             return EFAULT;
         }
-        if (describe_rc != 0 ||
-            ValidateCaptureReaderDescriptionV1(capture_identity, capture_limits) != CaptureDescriptionErrorV1::kNone) {
+        if (describe_rc != 0 || ValidateCaptureSourceSetV2(capture_sources) != CaptureDescriptionErrorV1::kNone) {
             if (error) *error = "capture reader returned an invalid identity or limits";
             return describe_rc != 0 ? describe_rc : EINVAL;
         }
@@ -1398,8 +1259,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     std::vector<const std::string*> stage_filter_texts(providers.size() + 1);
     for (size_t stage = 1; stage < stage_filter_texts.size(); ++stage) {
         bool duplicate = false;
-        stage_filter_texts[stage] = FindStageFilterText(
-            stmt, static_cast<uint32_t>(stage), &duplicate);
+        stage_filter_texts[stage] = FindStageFilterText(stmt, static_cast<uint32_t>(stage), &duplicate);
         if (duplicate) {
             if (error) *error = "block transform stage contains duplicate filters";
             return EINVAL;
@@ -1414,8 +1274,8 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
 
     std::vector<std::shared_ptr<FilterExpr>> stage_expressions(stage_filter_texts.size());
     for (size_t stage = 1; stage < stage_filter_texts.size(); ++stage) {
-        if (!ParseStageFilter(
-                stage_filter_texts[stage], static_cast<uint32_t>(stage), &stage_expressions[stage], error)) {
+        if (!ParseStageFilter(stage_filter_texts[stage], static_cast<uint32_t>(stage), &stage_expressions[stage],
+                              error)) {
             return EINVAL;
         }
     }
@@ -1432,46 +1292,32 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     const std::string task_id = NextStreamTaskId();
     auto input_schema = source_schema;
 
-    using TaskHolder = std::unique_ptr<
-        IBlockTransformTaskV1,
-        std::function<void(IBlockTransformTaskV1*)>>;
-    auto make_task_holder = [](BlockTransformProviderRef provider,
-                               IBlockTransformTaskV1* task) {
-        return TaskHolder(
-            task,
-            [provider](IBlockTransformTaskV1* owned) {
-                if (!owned) return;
-                try {
-                    if (provider.v2) {
-                        provider.v2->ReleaseTask(
-                            static_cast<IBlockTransformTaskV2*>(owned));
-                    } else {
-                        provider.v1->ReleaseTask(owned);
-                    }
-                } catch (...) {
+    using TaskHolder = std::unique_ptr<IBlockTransformTaskV1, std::function<void(IBlockTransformTaskV1*)>>;
+    auto make_task_holder = [](BlockTransformProviderRef provider, IBlockTransformTaskV1* task) {
+        return TaskHolder(task, [provider](IBlockTransformTaskV1* owned) {
+            if (!owned) return;
+            try {
+                if (provider.v2) {
+                    provider.v2->ReleaseTask(static_cast<IBlockTransformTaskV2*>(owned));
+                } else {
+                    provider.v1->ReleaseTask(owned);
                 }
-            });
+            } catch (...) {
+            }
+        });
     };
-    auto create_task = [](BlockTransformProviderRef provider,
-                          const std::string& session_task_id,
-                          const std::string& with_params_json,
-                          const FilterTaskSessionPlan& filter_plan,
-                          IBlockTransformTaskV1** data_task,
-                          IBlockTransformTimeDrivenTaskV1** time_task,
+    auto create_task = [](BlockTransformProviderRef provider, const std::string& session_task_id,
+                          const std::string& with_params_json, const FilterTaskSessionPlan& filter_plan,
+                          IBlockTransformTaskV1** data_task, IBlockTransformTimeDrivenTaskV1** time_task,
                           std::string* plan_error) {
         if (data_task) *data_task = nullptr;
         if (time_task) *time_task = nullptr;
         if (provider.v1) {
-            return CreateBlockTransformTaskSession(
-                provider.v1,
-                session_task_id,
-                with_params_json,
-                filter_plan,
-                data_task,
-                plan_error);
+            return CreateBlockTransformTaskSession(provider.v1, session_task_id, with_params_json, filter_plan,
+                                                   data_task, plan_error);
         }
-        if (!provider.v2 || !data_task || !time_task || session_task_id.empty() ||
-            with_params_json.empty() || filter_plan.pushed_filter_plan_json.empty()) {
+        if (!provider.v2 || !data_task || !time_task || session_task_id.empty() || with_params_json.empty() ||
+            filter_plan.pushed_filter_plan_json.empty()) {
             if (plan_error) *plan_error = "invalid V2 block transform task request";
             return FilterPlanError::kInvalidArgument;
         }
@@ -1505,26 +1351,18 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         auto& plan = stage_plans[i];
         plan.provider = providers[i];
         plan.filter_plan.pushed_filter_plan_json = kEmptyCanonicalFilterPlanV1;
-        const auto& params = i < stmt.operator_with_params.size()
-                                 ? stmt.operator_with_params[i]
-                                 : empty_params;
+        const auto& params = i < stmt.operator_with_params.size() ? stmt.operator_with_params[i] : empty_params;
         plan.with_params_json = MakeWithParamsJson(params);
 
         IBlockTransformTaskV1* probe_raw = nullptr;
         IBlockTransformTimeDrivenTaskV1* probe_time = nullptr;
         std::string plan_error;
-        const auto create_probe = create_task(
-            plan.provider,
-            task_id + ".stage" + std::to_string(i + 1) + ".schema",
-            plan.with_params_json,
-            plan.filter_plan,
-            &probe_raw,
-            &probe_time,
-            &plan_error);
+        const auto create_probe =
+            create_task(plan.provider, task_id + ".stage" + std::to_string(i + 1) + ".schema", plan.with_params_json,
+                        plan.filter_plan, &probe_raw, &probe_time, &plan_error);
         if (create_probe != FilterPlanError::kNone) {
             if (error) {
-                *error = "transform stage " + std::to_string(i + 1) +
-                         " Schema probe creation failed: " + plan_error;
+                *error = "transform stage " + std::to_string(i + 1) + " Schema probe creation failed: " + plan_error;
             }
             return EIO;
         }
@@ -1533,16 +1371,15 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         if (input_bind_rc != 0) return input_bind_rc;
 
         if (i == 0 && capture_reader) {
-            auto* capture_task = dynamic_cast<IBlockTransformCaptureFactTaskV1*>(probe.get());
-            if (capture_task && capture_task->BindCaptureSource(capture_identity) != 0) return EINVAL;
+            auto* capture_task = dynamic_cast<IBlockTransformCaptureFactTaskV2*>(probe.get());
+            if (capture_task && capture_task->BindCaptureSources(capture_sources) != 0) return EINVAL;
         }
         int probe_open_rc = 0;
         try {
             probe_open_rc = probe->Open(input_schema, &plan.output_schema);
         } catch (const std::exception& ex) {
             if (error) {
-                *error = "transform stage " + std::to_string(i + 1) +
-                         " Schema probe Open threw: " + ex.what();
+                *error = "transform stage " + std::to_string(i + 1) + " Schema probe Open threw: " + ex.what();
             }
             try {
                 probe->Cancel();
@@ -1551,8 +1388,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
             return EFAULT;
         } catch (...) {
             if (error) {
-                *error = "transform stage " + std::to_string(i + 1) +
-                         " Schema probe Open threw an unknown exception";
+                *error = "transform stage " + std::to_string(i + 1) + " Schema probe Open threw an unknown exception";
             }
             try {
                 probe->Cancel();
@@ -1562,8 +1398,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         }
         if (probe_open_rc != 0 || !plan.output_schema) {
             if (error) {
-                *error = "transform stage " + std::to_string(i + 1) +
-                         " Schema probe Open failed";
+                *error = "transform stage " + std::to_string(i + 1) + " Schema probe Open failed";
                 const std::string detail = SafeBlockTransformLastError(probe.get());
                 if (!detail.empty()) *error += ": " + detail;
             }
@@ -1577,8 +1412,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
             probe->Cancel();
         } catch (...) {
             if (error) {
-                *error = "transform stage " + std::to_string(i + 1) +
-                         " Schema probe Cancel failed";
+                *error = "transform stage " + std::to_string(i + 1) + " Schema probe Cancel failed";
             }
             return EFAULT;
         }
@@ -1586,13 +1420,10 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
 
         if (stage_expressions[i + 1]) {
             std::shared_ptr<const BoundFilterExpr> bound_filter;
-            const std::string stage_label =
-                "transform stage " + std::to_string(i + 1);
+            const std::string stage_label = "transform stage " + std::to_string(i + 1);
             const int filter_rc = ResolveAndBindStageFilter(
-                querier_, FilterDomainTargetKindV1::kTransform,
-                stmt.operators[i].category, stmt.operators[i].name,
-                plan.output_schema, stage_expressions[i + 1], stage_label,
-                &bound_filter, &plan_error);
+                querier_, FilterDomainTargetKindV1::kTransform, stmt.operators[i].category, stmt.operators[i].name,
+                plan.output_schema, stage_expressions[i + 1], stage_label, &bound_filter, &plan_error);
             if (filter_rc != 0) {
                 if (error) *error = plan_error;
                 return filter_rc;
@@ -1604,8 +1435,8 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
             target.name = stmt.operators[i].name;
             target.output_schema = plan.output_schema;
             FilterPushdownNegotiation negotiation;
-            const auto negotiate_rc = NegotiateFilterPushdown(
-                querier_, target, bound_filter, &negotiation, &plan_error);
+            const auto negotiate_rc =
+                NegotiateFilterPushdown(querier_, target, bound_filter, &negotiation, &plan_error);
             if (negotiate_rc != FilterPlanError::kNone) {
                 if (error) {
                     *error = "transform stage " + std::to_string(i + 1) +
@@ -1617,17 +1448,12 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
                            ? EINVAL
                            : EIO;
             }
-            const auto materialize_rc = MaterializeFilterTaskSessionPlan(
-                plan.output_schema,
-                bound_filter,
-                negotiation,
-                FilterTaskIsolation::kExclusive,
-                &plan.filter_plan,
-                &plan_error);
+            const auto materialize_rc =
+                MaterializeFilterTaskSessionPlan(plan.output_schema, bound_filter, negotiation,
+                                                 FilterTaskIsolation::kExclusive, &plan.filter_plan, &plan_error);
             if (materialize_rc != FilterPlanError::kNone) {
                 if (error) {
-                    *error = "transform stage " + std::to_string(i + 1) +
-                             " filter task planning failed: " + plan_error;
+                    *error = "transform stage " + std::to_string(i + 1) + " filter task planning failed: " + plan_error;
                 }
                 return EIO;
             }
@@ -1646,14 +1472,9 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         IBlockTransformTaskV1* execution_raw = nullptr;
         IBlockTransformTimeDrivenTaskV1* execution_time = nullptr;
         std::string plan_error;
-        const auto create_execution = create_task(
-            plan.provider,
-            task_id + ".stage" + std::to_string(i + 1) + ".run",
-            plan.with_params_json,
-            plan.filter_plan,
-            &execution_raw,
-            &execution_time,
-            &plan_error);
+        const auto create_execution =
+            create_task(plan.provider, task_id + ".stage" + std::to_string(i + 1) + ".run", plan.with_params_json,
+                        plan.filter_plan, &execution_raw, &execution_time, &plan_error);
         if (create_execution != FilterPlanError::kNone) {
             for (auto* task : execution_tasks) {
                 try {
@@ -1662,8 +1483,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
                 }
             }
             if (error) {
-                *error = "transform stage " + std::to_string(i + 1) +
-                         " execution task creation failed: " + plan_error;
+                *error = "transform stage " + std::to_string(i + 1) + " execution task creation failed: " + plan_error;
             }
             return EIO;
         }
@@ -1671,8 +1491,8 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         const int input_bind_rc = BindBlockTransformInputSource(execution.get(), stmt.source, error);
         if (input_bind_rc != 0) return input_bind_rc;
         if (i == 0 && capture_reader) {
-            auto* capture_task = dynamic_cast<IBlockTransformCaptureFactTaskV1*>(execution.get());
-            if (capture_task && capture_task->BindCaptureSource(capture_identity) != 0) {
+            auto* capture_task = dynamic_cast<IBlockTransformCaptureFactTaskV2*>(execution.get());
+            if (capture_task && capture_task->BindCaptureSources(capture_sources) != 0) {
                 if (error) *error = "capture source binding failed";
                 return EINVAL;
             }
@@ -1690,13 +1510,10 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         expected_output_schemas.push_back(plan.output_schema);
         residuals.push_back(plan.filter_plan.residual_expression);
     }
-    const bool has_time_tasks = std::any_of(
-        time_tasks.begin(), time_tasks.end(), [](const auto* task) { return task != nullptr; });
-    SynchronousBlockTransformChainTask chain_task(
-        execution_tasks,
-        std::move(time_tasks),
-        std::move(expected_output_schemas),
-        residuals);
+    const bool has_time_tasks =
+        std::any_of(time_tasks.begin(), time_tasks.end(), [](const auto* task) { return task != nullptr; });
+    SynchronousBlockTransformChainTask chain_task(execution_tasks, std::move(time_tasks),
+                                                  std::move(expected_output_schemas), residuals);
 
     BlockTransformPipelineConfig config;
     config.source = source;
@@ -1704,7 +1521,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     config.transform = &chain_task;
     config.time_transform = has_time_tasks ? &chain_task : nullptr;
     config.capture_fact_task = capture_reader && !execution_tasks.empty()
-                                   ? dynamic_cast<IBlockTransformCaptureFactTaskV1*>(execution_tasks.front())
+                                   ? dynamic_cast<IBlockTransformCaptureFactTaskV2*>(execution_tasks.front())
                                    : nullptr;
     config.source_residual = source_residual;
     config.output_consumer = [appendable_sink](const BlockTransformOutputV1& output) {
@@ -1728,8 +1545,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     }
     if (runner_rc == BlockTransformPipelineError::kNone) return 0;
     if (error) {
-        *error = runner_error.empty() ? "multi block transform pipeline execution failed"
-                                     : std::move(runner_error);
+        *error = runner_error.empty() ? "multi block transform pipeline execution failed" : std::move(runner_error);
     }
     return runner_rc == BlockTransformPipelineError::kCancelled ? ECANCELED : EIO;
 }
@@ -1762,17 +1578,15 @@ static std::string BuildQuery(const std::string& source_name, const SqlStatement
     std::smatch m;
     if (std::regex_search(sql, m, FROM_PATTERN)) {
         // 只替换第一个匹配（主查询的 FROM），子查询不受影响
-        sql = sql.substr(0, m.position()) +
-              m[1].str() + table +
-              sql.substr(m.position() + m.length());
+        sql = sql.substr(0, m.position()) + m[1].str() + table + sql.substr(m.position() + m.length());
     }
 
     return sql;
 }
 
 // --- 辅助：对 DataFrame 通道应用 WHERE 过滤 ---
-static std::shared_ptr<DataFrameChannel> ApplyDataFrameFilter(
-    IDataFrameChannel* src, const std::string& where_clause, uint64_t seq) {
+static std::shared_ptr<DataFrameChannel> ApplyDataFrameFilter(IDataFrameChannel* src, const std::string& where_clause,
+                                                              uint64_t seq) {
     DataFrame data;
     if (src->Read(&data) != 0 || data.RowCount() == 0) return nullptr;
 
@@ -1785,13 +1599,10 @@ static std::shared_ptr<DataFrameChannel> ApplyDataFrameFilter(
 }
 
 // --- 无算子：纯数据搬运 ---
-int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
-                                      const std::string& source_type,
-                                      const std::string& sink_type,
-                                      const SqlStatement& stmt,
-                                      const std::shared_ptr<const BoundFilterExpr>& source_residual,
-                                      int64_t* rows_affected,
-                                      std::string* error) {
+int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink, const std::string& source_type,
+                                     const std::string& sink_type, const SqlStatement& stmt,
+                                     const std::shared_ptr<const BoundFilterExpr>& source_residual,
+                                     int64_t* rows_affected, std::string* error) {
     if (source_type == ChannelType::kBlockStream && sink_type == ChannelType::kDataFrame) {
         auto* src = dynamic_cast<IBlockStreamChannel*>(source);
         auto* dst = dynamic_cast<IDataFrameChannel*>(sink);
@@ -1802,8 +1613,7 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
         if (source_residual) {
             std::shared_ptr<arrow::Schema> filtered_schema;
             std::string filter_error;
-            const auto open_rc = source_filter.Open(
-                source_schema, &filtered_schema, &filter_error);
+            const auto open_rc = source_filter.Open(source_schema, &filtered_schema, &filter_error);
             if (open_rc != FilterEvalError::kNone) {
                 if (error) *error = "source-stage residual Open failed: " + filter_error;
                 return EINVAL;
@@ -1824,8 +1634,7 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
                     if (source_residual) {
                         BlockTransformOutputV1 filtered;
                         std::string filter_error;
-                        const auto eval_rc = source_filter.ProcessBlock(
-                            event.batch, 0, &filtered, &filter_error);
+                        const auto eval_rc = source_filter.ProcessBlock(event.batch, 0, &filtered, &filter_error);
                         if (eval_rc != FilterEvalError::kNone || !filtered.batch) {
                             if (error) {
                                 *error = "source-stage residual failed: " + filter_error;
@@ -1979,11 +1788,8 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink,
 }
 
 // --- 有算子：自动适配通道类型 ---
-int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
-                                          IOperator* op,
-                                          const std::string& sink_type,
-                                          const SqlStatement& stmt, int64_t* rows_affected,
-                                          std::string* error) {
+int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink, IOperator* op, const std::string& sink_type,
+                                         const SqlStatement& stmt, int64_t* rows_affected, std::string* error) {
     std::vector<IOperator*> ops;
     std::vector<IChannel*> inputs;
     inputs.push_back(source);
@@ -1992,10 +1798,8 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink,
 }
 
 int SchedulerPlugin::ExecuteWithOperatorChain(Span<IChannel*> inputs, IChannel* sink,
-                                              const std::vector<IOperator*>& ops,
-                                              const std::string& sink_type,
-                                              const SqlStatement& stmt, int64_t* rows_affected,
-                                              std::string* error) {
+                                              const std::vector<IOperator*>& ops, const std::string& sink_type,
+                                              const SqlStatement& stmt, int64_t* rows_affected, std::string* error) {
     if (ops.empty() || inputs.empty()) return -1;
 
     Span<IChannel*> stage_inputs = inputs;
@@ -2086,7 +1890,8 @@ int SchedulerPlugin::ExecuteWithOperatorChain(Span<IChannel*> inputs, IChannel* 
         if (stage_buffers.empty()) return -1;
 
         std::string table = ExtractTableName(stmt.dest);
-        int64_t written_rows = ChannelAdapter::WriteFromDataFrame(stage_buffers.back().get(), db_sink, table.c_str(), error);
+        int64_t written_rows =
+            ChannelAdapter::WriteFromDataFrame(stage_buffers.back().get(), db_sink, table.c_str(), error);
         if (written_rows < 0) return -1;
 
         if (rows_affected) *rows_affected = written_rows;
@@ -2100,18 +1905,15 @@ std::string SchedulerPlugin::QueryStreamChannelRole(const std::string& type, con
     if (!stream_manager) return "both";
     std::string role = "both";
     const std::string expect_type = ToLowerAscii(type);
-    stream_manager->QueryChannels([&](const std::string& ch_type,
-                                      const std::string& ch_name,
-                                      const std::string& option,
-                                      const std::string&) {
-        if (ToLowerAscii(ch_type) != expect_type || ch_name != name) return;
-        role = ReadRoleFromOption(option);
-    });
+    stream_manager->QueryChannels(
+        [&](const std::string& ch_type, const std::string& ch_name, const std::string& option, const std::string&) {
+            if (ToLowerAscii(ch_type) != expect_type || ch_name != name) return;
+            role = ReadRoleFromOption(option);
+        });
     return role;
 }
 
-int32_t SchedulerPlugin::ResolveSourceBindings(const SqlStatement& stmt,
-                                               SourceResolveResult* out,
+int32_t SchedulerPlugin::ResolveSourceBindings(const SqlStatement& stmt, SourceResolveResult* out,
                                                std::string* err_rsp) {
     if (!out) {
         if (err_rsp) *err_rsp = BuildErrorJson("source resolve target is null");
@@ -2129,8 +1931,7 @@ int32_t SchedulerPlugin::ResolveSourceBindings(const SqlStatement& stmt,
     out->has_block_source = false;
     if (err_rsp) err_rsp->clear();
 
-    auto fail = [&](int32_t status,
-                    const std::string& message,
+    auto fail = [&](int32_t status, const std::string& message,
                     ErrorCodeId error_code = ErrorCodeId::kUnknown) -> int32_t {
         if (err_rsp) {
             if (error_code == ErrorCodeId::kUnknown) {
@@ -2174,7 +1975,8 @@ int32_t SchedulerPlugin::ResolveSourceBindings(const SqlStatement& stmt,
                             ErrorCodeId::kStreamHubSelectorInvalid);
             }
             auto* block_ch = dynamic_cast<IBlockStreamChannel*>(source_ch);
-            if (!block_ch) return fail(error::BAD_REQUEST, "source channel cast to IBlockStreamChannel failed: " + ref.base);
+            if (!block_ch)
+                return fail(error::BAD_REQUEST, "source channel cast to IBlockStreamChannel failed: " + ref.base);
             out->has_block_source = true;
             out->channels.push_back(source_ch);
             out->block_channels.emplace_back(block_ch, [](IBlockStreamChannel*) {});
@@ -2198,22 +2000,20 @@ int32_t SchedulerPlugin::ResolveSourceBindings(const SqlStatement& stmt,
         out->has_stream_source = true;
         auto* stream_ch = dynamic_cast<IStreamChannel*>(source_ch);
         if (!stream_ch) {
-            return fail(error::BAD_REQUEST,
-                        "source channel cast to IStreamChannel failed: " + ref.base);
+            return fail(error::BAD_REQUEST, "source channel cast to IStreamChannel failed: " + ref.base);
         }
         const std::string source_role = QueryStreamChannelRole(stream_ch->Category(), stream_ch->Name());
         if (!IsSourceRoleAllowed(source_role)) {
             return fail(error::BAD_REQUEST,
-                        "stream channel role does not allow source: " +
-                            std::string(stream_ch->Category()) + "." + stream_ch->Name(),
+                        "stream channel role does not allow source: " + std::string(stream_ch->Category()) + "." +
+                            stream_ch->Name(),
                         ErrorCodeId::kStreamChannelRoleMismatch);
         }
 
         if (stream_ch->IsHubChannel()) {
             if (IEquals(stream_ch->HubModeHint() ? stream_ch->HubModeHint() : "", "merge")) {
                 if (ref.has_selector) {
-                    return fail(error::BAD_REQUEST,
-                                "stream_hub(merge) does not allow selector: " + source_ref,
+                    return fail(error::BAD_REQUEST, "stream_hub(merge) does not allow selector: " + source_ref,
                                 ErrorCodeId::kStreamHubSelectorNotAllowedMerge);
                 }
                 out->channels.push_back(stream_ch);
@@ -2225,14 +2025,13 @@ int32_t SchedulerPlugin::ResolveSourceBindings(const SqlStatement& stmt,
 
             const size_t partition_count = stream_ch->HubPartitionCount();
             if (partition_count == 0) {
-                return fail(error::BAD_REQUEST,
-                            "stream_hub(split) has no derived partitions: " + ref.base,
+                return fail(error::BAD_REQUEST, "stream_hub(split) has no derived partitions: " + ref.base,
                             ErrorCodeId::kStreamHubSelectorInvalid);
             }
             if (partition_count > max_resolved_sources_) {
                 return fail(error::BAD_REQUEST,
-                            "resolved sources exceed max_resolved_sources: " +
-                                std::to_string(partition_count) + " > " + std::to_string(max_resolved_sources_),
+                            "resolved sources exceed max_resolved_sources: " + std::to_string(partition_count) + " > " +
+                                std::to_string(max_resolved_sources_),
                             ErrorCodeId::kStreamHubSelectorOutOfRange);
             }
 
@@ -2243,43 +2042,36 @@ int32_t SchedulerPlugin::ResolveSourceBindings(const SqlStatement& stmt,
                 for (size_t i = 0; i < partition_count; ++i) {
                     auto partition = stream_ch->HubPartition(i);
                     if (!partition) {
-                        return fail(error::BAD_REQUEST,
-                                    "stream_hub partition resolve failed: " + ref.base,
+                        return fail(error::BAD_REQUEST, "stream_hub partition resolve failed: " + ref.base,
                                     ErrorCodeId::kStreamHubSelectorInvalid);
                     }
                     out->channels.push_back(partition.get());
                     out->stream_channels.push_back(partition);
-                    out->source_keys.push_back(
-                        MakeStreamChannelKey(partition->Category(), partition->Name()));
-                    out->resolved_sources.push_back(
-                        ref.base + "[" + std::to_string(i) + "]");
+                    out->source_keys.push_back(MakeStreamChannelKey(partition->Category(), partition->Name()));
+                    out->resolved_sources.push_back(ref.base + "[" + std::to_string(i) + "]");
                 }
                 continue;
             }
 
             const int idx = ref.selector_index;
             if (idx < 0 || static_cast<size_t>(idx) >= partition_count) {
-                return fail(error::BAD_REQUEST,
-                            "stream_hub selector out of range: " + source_ref,
+                return fail(error::BAD_REQUEST, "stream_hub selector out of range: " + source_ref,
                             ErrorCodeId::kStreamHubSelectorOutOfRange);
             }
             auto partition = stream_ch->HubPartition(static_cast<size_t>(idx));
             if (!partition) {
-                return fail(error::BAD_REQUEST,
-                            "stream_hub partition resolve failed: " + source_ref,
+                return fail(error::BAD_REQUEST, "stream_hub partition resolve failed: " + source_ref,
                             ErrorCodeId::kStreamHubSelectorInvalid);
             }
             out->channels.push_back(partition.get());
             out->stream_channels.push_back(partition);
-            out->source_keys.push_back(
-                MakeStreamChannelKey(partition->Category(), partition->Name()));
+            out->source_keys.push_back(MakeStreamChannelKey(partition->Category(), partition->Name()));
             out->resolved_sources.push_back(ref.base + "[" + std::to_string(idx) + "]");
             continue;
         }
 
         if (ref.has_selector) {
-            return fail(error::BAD_REQUEST,
-                        "channel selector is only supported on stream_hub source: " + source_ref,
+            return fail(error::BAD_REQUEST, "channel selector is only supported on stream_hub source: " + source_ref,
                         ErrorCodeId::kStreamHubSelectorInvalid);
         }
         out->channels.push_back(stream_ch);
@@ -2291,10 +2083,7 @@ int32_t SchedulerPlugin::ResolveSourceBindings(const SqlStatement& stmt,
     return error::OK;
 }
 
-int32_t SchedulerPlugin::ResolveStreamSink(
-    const SqlStatement& stmt,
-    SinkBinding* binding,
-    std::string* err_out) {
+int32_t SchedulerPlugin::ResolveStreamSink(const SqlStatement& stmt, SinkBinding* binding, std::string* err_out) {
     if (!binding) {
         if (err_out) *err_out = "invalid sink binding target";
         return error::BAD_REQUEST;
@@ -2318,10 +2107,9 @@ int32_t SchedulerPlugin::ResolveStreamSink(
     }
     if (dest_ref.has_selector && IsStreamRefName(dest_ref.base)) {
         if (err_out) {
-            *err_out = BuildExecutionErrorJson(
-                "INTO stream selector is not allowed: " + stmt.dest,
-                ErrorCodeId::kStreamHubSelectorNotAllowedInto,
-                ErrorStageId::kSinkResolve);
+            *err_out =
+                BuildExecutionErrorJson("INTO stream selector is not allowed: " + stmt.dest,
+                                        ErrorCodeId::kStreamHubSelectorNotAllowedInto, ErrorStageId::kSinkResolve);
         }
         return error::BAD_REQUEST;
     }
@@ -2337,11 +2125,9 @@ int32_t SchedulerPlugin::ResolveStreamSink(
         const std::string sink_role = QueryStreamChannelRole(matched->Category(), matched->Name());
         if (!IsSinkRoleAllowed(sink_role)) {
             if (err_out) {
-                *err_out = BuildExecutionErrorJson(
-                    "stream channel role does not allow sink: " +
-                        std::string(matched->Category()) + "." + matched->Name(),
-                    ErrorCodeId::kStreamChannelRoleMismatch,
-                    ErrorStageId::kSinkResolve);
+                *err_out = BuildExecutionErrorJson("stream channel role does not allow sink: " +
+                                                       std::string(matched->Category()) + "." + matched->Name(),
+                                                   ErrorCodeId::kStreamChannelRoleMismatch, ErrorStageId::kSinkResolve);
             }
             return error::BAD_REQUEST;
         }
@@ -2361,9 +2147,7 @@ int32_t SchedulerPlugin::ResolveStreamSink(
     }
 
     if (IsDataframeRefName(dest_ref.base)) {
-        auto* ch_registry = querier_
-            ? static_cast<IChannelRegistry*>(querier_->First(IID_CHANNEL_REGISTRY))
-            : nullptr;
+        auto* ch_registry = querier_ ? static_cast<IChannelRegistry*>(querier_->First(IID_CHANNEL_REGISTRY)) : nullptr;
         if (!ch_registry) {
             if (err_out) *err_out = "channel registry unavailable";
             return error::UNAVAILABLE;
@@ -2404,8 +2188,9 @@ int32_t SchedulerPlugin::ResolveStreamSink(
     std::string db_name;
     std::string table_from_dest;
     if (!ParseDatabaseDestination(dest_ref.base, &db_type, &db_name, &table_from_dest)) {
-        if (err_out) *err_out = "invalid INTO destination: " + dest_ref.base +
-            ", expected stream.<name>, dataframe.<name>, or <db_type>.<db_name>[.<table>]";
+        if (err_out)
+            *err_out = "invalid INTO destination: " + dest_ref.base +
+                       ", expected stream.<name>, dataframe.<name>, or <db_type>.<db_name>[.<table>]";
         return error::BAD_REQUEST;
     }
 
@@ -2424,9 +2209,7 @@ int32_t SchedulerPlugin::ResolveStreamSink(
         return error::OK;
     }
 
-    auto* db_factory = querier_
-        ? static_cast<IDatabaseFactory*>(querier_->First(IID_DATABASE_FACTORY))
-        : nullptr;
+    auto* db_factory = querier_ ? static_cast<IDatabaseFactory*>(querier_->First(IID_DATABASE_FACTORY)) : nullptr;
     if (!db_factory) {
         if (err_out) *err_out = "database factory unavailable";
         return error::UNAVAILABLE;
@@ -2451,10 +2234,8 @@ int32_t SchedulerPlugin::ResolveStreamSink(
     return error::OK;
 }
 
-int32_t SchedulerPlugin::BuildStreamExecutionPlan(const SqlStatement& stmt,
-                                                  const std::string& lease_owner_id,
-                                                  bool skip_lease_acquire,
-                                                  StreamExecutionPlan* plan,
+int32_t SchedulerPlugin::BuildStreamExecutionPlan(const SqlStatement& stmt, const std::string& lease_owner_id,
+                                                  bool skip_lease_acquire, StreamExecutionPlan* plan,
                                                   std::string* err_rsp) {
     if (!plan || !err_rsp) return error::INTERNAL_ERROR;
     err_rsp->clear();
@@ -2529,8 +2310,7 @@ int32_t SchedulerPlugin::BuildStreamExecutionPlan(const SqlStatement& stmt,
     const std::unordered_map<std::string, std::string> with_params =
         !stmt.operator_with_params.empty() ? stmt.operator_with_params[0] : stmt.with_params;
     if (with_params.find("sink_table") != with_params.end()) {
-        *err_rsp = BuildErrorJson(
-            "sink_table is not supported for stream tasks; use INTO <db_type>.<db_name>.<table>");
+        *err_rsp = BuildErrorJson("sink_table is not supported for stream tasks; use INTO <db_type>.<db_name>.<table>");
         return error::BAD_REQUEST;
     }
 
@@ -2607,34 +2387,27 @@ int32_t SchedulerPlugin::ValidateStreamExecutionPlan(StreamExecutionPlan* plan, 
             if (!sc || !caps.semantics.supports_timeout_poll || !caps.concurrency.lock_free_poll) {
                 const std::string src_name =
                     sc ? (std::string(sc->Category()) + "." + sc->Name()) : plan->source_keys[i];
-                *err_rsp = BuildExecutionErrorJson(
-                    "stream fanin capability mismatch: source=" + src_name +
-                        ", reason=source must support timeout poll and lock-free poll",
-                    ErrorCodeId::kStreamFaninCapabilityMismatch,
-                    ErrorStageId::kFanin);
+                *err_rsp = BuildExecutionErrorJson("stream fanin capability mismatch: source=" + src_name +
+                                                       ", reason=source must support timeout poll and lock-free poll",
+                                                   ErrorCodeId::kStreamFaninCapabilityMismatch, ErrorStageId::kFanin);
                 return error::BAD_REQUEST;
             }
         }
-        source = std::make_shared<FanInStreamChannel>(
-            "fanin", plan->runtime_task_id + ".fanin", plan->source_channels);
+        source = std::make_shared<FanInStreamChannel>("fanin", plan->runtime_task_id + ".fanin", plan->source_channels);
     }
     plan->source = source;
 
     const OperatorRef& op_ref = plan->parsed_ops[0];
     plan->first_operator_holder = CreateOperator(op_ref.category, op_ref.name);
     if (!plan->first_operator_holder) {
-        *err_rsp = BuildExecutionErrorJson(
-            "operator create failed: " + op_ref.category + "." + op_ref.name,
-            ErrorCodeId::kOpExecFail,
-            ErrorStageId::kExecute);
+        *err_rsp = BuildExecutionErrorJson("operator create failed: " + op_ref.category + "." + op_ref.name,
+                                           ErrorCodeId::kOpExecFail, ErrorStageId::kExecute);
         return error::NOT_FOUND;
     }
     plan->first_stream_operator = std::dynamic_pointer_cast<IStreamOperator>(plan->first_operator_holder);
     if (!plan->first_stream_operator) {
-        *err_rsp = BuildExecutionErrorJson(
-            "operator is not stream operator: " + op_ref.category + "." + op_ref.name,
-            ErrorCodeId::kOpExecFail,
-            ErrorStageId::kExecute);
+        *err_rsp = BuildExecutionErrorJson("operator is not stream operator: " + op_ref.category + "." + op_ref.name,
+                                           ErrorCodeId::kOpExecFail, ErrorStageId::kExecute);
         return error::BAD_REQUEST;
     }
 
@@ -2650,10 +2423,9 @@ int32_t SchedulerPlugin::ValidateStreamExecutionPlan(StreamExecutionPlan* plan, 
     if (plan->sink_type == ChannelType::kStream) {
         auto* sink_stream = dynamic_cast<IStreamChannel*>(plan->sink_channel.get());
         if (!sink_stream) {
-            *err_rsp = BuildExecutionErrorJson(
-                "stream sink cast to IStreamChannel failed",
-                ErrorCodeId::kStreamSinkCapabilityMismatch,
-                ErrorStageId::kCapabilityCheck);
+            *err_rsp =
+                BuildExecutionErrorJson("stream sink cast to IStreamChannel failed",
+                                        ErrorCodeId::kStreamSinkCapabilityMismatch, ErrorStageId::kCapabilityCheck);
             return error::BAD_REQUEST;
         }
         plan->sink_caps = sink_stream->Capabilities();
@@ -2670,20 +2442,16 @@ int32_t SchedulerPlugin::ValidateStreamExecutionPlan(StreamExecutionPlan* plan, 
 
     if (plan->strategy == ParallelStrategy::STATELESS && plan->parallelism > 1) {
         const bool poll_mode_ok = plan->source_caps.concurrency.poll_mode == ConsumerMode::MULTI;
-        const bool consumers_ok = plan->source_caps.concurrency.max_consumers == 0 ||
-                                  plan->source_caps.concurrency.max_consumers >=
-                                      static_cast<uint32_t>(plan->parallelism);
+        const bool consumers_ok =
+            plan->source_caps.concurrency.max_consumers == 0 ||
+            plan->source_caps.concurrency.max_consumers >= static_cast<uint32_t>(plan->parallelism);
         if (!poll_mode_ok || !consumers_ok) {
             *err_rsp = BuildCapabilityMismatchJson(
                 "stream source capability mismatch: strategy=STATELESS, parallelism=" +
-                    std::to_string(plan->parallelism) +
-                    ", required.poll_mode=MULTI, actual.poll_mode=" +
+                    std::to_string(plan->parallelism) + ", required.poll_mode=MULTI, actual.poll_mode=" +
                     std::string(StreamConsumerModeName(plan->source_caps.concurrency.poll_mode)) +
-                    ", actual.max_consumers=" +
-                    std::to_string(plan->source_caps.concurrency.max_consumers),
-                ErrorCodeId::kStreamSourceCapabilityMismatch,
-                &plan->source_caps,
-                &plan->sink_caps);
+                    ", actual.max_consumers=" + std::to_string(plan->source_caps.concurrency.max_consumers),
+                ErrorCodeId::kStreamSourceCapabilityMismatch, &plan->source_caps, &plan->sink_caps);
             return error::BAD_REQUEST;
         }
     }
@@ -2691,28 +2459,22 @@ int32_t SchedulerPlugin::ValidateStreamExecutionPlan(StreamExecutionPlan* plan, 
     if (plan->parallelism > 1) {
         const bool put_mode_ok = plan->sink_caps.concurrency.put_mode == ProducerMode::MULTI;
         const bool producers_ok = plan->sink_caps.concurrency.max_producers == 0 ||
-                                  plan->sink_caps.concurrency.max_producers >=
-                                      static_cast<uint32_t>(plan->parallelism);
+                                  plan->sink_caps.concurrency.max_producers >= static_cast<uint32_t>(plan->parallelism);
         if (!put_mode_ok || !producers_ok) {
             *err_rsp = BuildCapabilityMismatchJson(
-                "stream sink capability mismatch: strategy=" +
-                    std::to_string(static_cast<int>(plan->strategy)) +
+                "stream sink capability mismatch: strategy=" + std::to_string(static_cast<int>(plan->strategy)) +
                     ", parallelism=" + std::to_string(plan->parallelism) +
                     ", required.put_mode=MULTI, actual.put_mode=" +
                     std::string(StreamProducerModeName(plan->sink_caps.concurrency.put_mode)) +
-                    ", actual.max_producers=" +
-                    std::to_string(plan->sink_caps.concurrency.max_producers),
-                ErrorCodeId::kStreamSinkCapabilityMismatch,
-                &plan->source_caps,
-                &plan->sink_caps);
+                    ", actual.max_producers=" + std::to_string(plan->sink_caps.concurrency.max_producers),
+                ErrorCodeId::kStreamSinkCapabilityMismatch, &plan->source_caps, &plan->sink_caps);
             return error::BAD_REQUEST;
         }
     }
     return error::OK;
 }
 
-int32_t SchedulerPlugin::AcquireStreamExecutionLease(StreamExecutionPlan* plan,
-                                                     LeaseToken* lease_token,
+int32_t SchedulerPlugin::AcquireStreamExecutionLease(StreamExecutionPlan* plan, LeaseToken* lease_token,
                                                      std::string* err_rsp) {
     if (!plan || !lease_token || !err_rsp) return error::INTERNAL_ERROR;
     err_rsp->clear();
@@ -2731,73 +2493,49 @@ int32_t SchedulerPlugin::AcquireStreamExecutionLease(StreamExecutionPlan* plan,
     std::string conflict_key;
     std::string version_conflict_key;
     bool blocked_by_mutation = false;
-    const int lease_rc = TryAcquireStreamTaskLeases(plan->runtime_task_id,
-                                                    plan->source_keys,
-                                                    plan->sink_keys,
-                                                    &conflict_key,
-                                                    &blocked_by_mutation,
-                                                    plan->lease_owner_id,
-                                                    &plan->version_snapshot,
-                                                    &version_conflict_key);
+    const int lease_rc = TryAcquireStreamTaskLeases(plan->runtime_task_id, plan->source_keys, plan->sink_keys,
+                                                    &conflict_key, &blocked_by_mutation, plan->lease_owner_id,
+                                                    &plan->version_snapshot, &version_conflict_key);
     if (lease_rc != 0) {
         if (lease_rc == EBUSY) {
             if (blocked_by_mutation) {
-                *err_rsp = BuildExecutionErrorJson(
-                    "stream channel is being modified: " + conflict_key,
-                    ErrorCodeId::kStreamChannelMutating,
-                    ErrorStageId::kLease);
+                *err_rsp = BuildExecutionErrorJson("stream channel is being modified: " + conflict_key,
+                                                   ErrorCodeId::kStreamChannelMutating, ErrorStageId::kLease);
                 return error::CONFLICT;
             }
-            *err_rsp = BuildExecutionErrorJson(
-                "stream source is in use: " + conflict_key,
-                ErrorCodeId::kStreamSourceInUse,
-                ErrorStageId::kLease);
+            *err_rsp = BuildExecutionErrorJson("stream source is in use: " + conflict_key,
+                                               ErrorCodeId::kStreamSourceInUse, ErrorStageId::kLease);
             return error::CONFLICT;
         }
         if (lease_rc == EAGAIN) {
-            *err_rsp = BuildExecutionErrorJson(
-                "stream channel changed during execute prepare: " + version_conflict_key,
-                ErrorCodeId::kStreamChannelVersionChanged,
-                ErrorStageId::kLease);
+            *err_rsp = BuildExecutionErrorJson("stream channel changed during execute prepare: " + version_conflict_key,
+                                               ErrorCodeId::kStreamChannelVersionChanged, ErrorStageId::kLease);
             return error::CONFLICT;
         }
-        *err_rsp = BuildExecutionErrorJson(
-            "stream channel lease acquire failed",
-            ErrorCodeId::kStreamLeaseFailed,
-            ErrorStageId::kLease);
+        *err_rsp = BuildExecutionErrorJson("stream channel lease acquire failed", ErrorCodeId::kStreamLeaseFailed,
+                                           ErrorStageId::kLease);
         return MapStreamManagerErrorToStatus(lease_rc);
     }
 
-    *lease_token = LeaseToken([this, runtime_task_id = plan->runtime_task_id]() {
-        ReleaseStreamTaskLeases(runtime_task_id);
-    });
+    *lease_token =
+        LeaseToken([this, runtime_task_id = plan->runtime_task_id]() { ReleaseStreamTaskLeases(runtime_task_id); });
     return error::OK;
 }
 
-int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt,
-                                           std::string& rsp,
-                                           const std::string& lease_owner_id,
-                                           bool skip_lease_acquire) {
+int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt, std::string& rsp,
+                                           const std::string& lease_owner_id, bool skip_lease_acquire) {
     StreamExecutionPlan plan;
     std::string err_rsp;
-    int32_t rc = BuildStreamExecutionPlan(stmt,
-                                          lease_owner_id,
-                                          skip_lease_acquire,
-                                          &plan,
-                                          &err_rsp);
+    int32_t rc = BuildStreamExecutionPlan(stmt, lease_owner_id, skip_lease_acquire, &plan, &err_rsp);
     if (rc != error::OK) {
-        rsp = EnsureExecutionErrorJson(err_rsp,
-                                       "build stream execution plan failed",
-                                       ErrorCodeId::kSqlTextInvalid,
+        rsp = EnsureExecutionErrorJson(err_rsp, "build stream execution plan failed", ErrorCodeId::kSqlTextInvalid,
                                        ErrorStageId::kParse);
         return rc;
     }
 
     rc = ValidateStreamExecutionPlan(&plan, &err_rsp);
     if (rc != error::OK) {
-        rsp = EnsureExecutionErrorJson(err_rsp,
-                                       "validate stream execution plan failed",
-                                       ErrorCodeId::kOpExecFail,
+        rsp = EnsureExecutionErrorJson(err_rsp, "validate stream execution plan failed", ErrorCodeId::kOpExecFail,
                                        ErrorStageId::kCapabilityCheck);
         return rc;
     }
@@ -2805,9 +2543,7 @@ int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt,
     LeaseToken lease_token;
     rc = AcquireStreamExecutionLease(&plan, &lease_token, &err_rsp);
     if (rc != error::OK) {
-        rsp = EnsureExecutionErrorJson(err_rsp,
-                                       "acquire stream lease failed",
-                                       ErrorCodeId::kStreamLeaseFailed,
+        rsp = EnsureExecutionErrorJson(err_rsp, "acquire stream lease failed", ErrorCodeId::kStreamLeaseFailed,
                                        ErrorStageId::kLease);
         return rc;
     }
@@ -2815,8 +2551,7 @@ int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt,
     std::shared_ptr<IStreamChannel> source = plan.source;
     std::shared_ptr<IChannel> output = plan.sink_channel;
     if (!source || !output) {
-        rsp = BuildExecutionErrorJson("stream execution plan source/sink is null",
-                                      ErrorCodeId::kOpExecFail,
+        rsp = BuildExecutionErrorJson("stream execution plan source/sink is null", ErrorCodeId::kOpExecFail,
                                       ErrorStageId::kExecute);
         return error::INTERNAL_ERROR;
     }
@@ -2833,10 +2568,8 @@ int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt,
     std::shared_ptr<IStreamChannel> source_override;
     rc = AcquireSharedSourceSubscription(&plan, &source_override, &err_rsp);
     if (rc != error::OK) {
-        rsp = EnsureExecutionErrorJson(err_rsp,
-                                       "acquire shared source subscription failed",
-                                       ErrorCodeId::kSharedSourceSubscribeFailed,
-                                       ErrorStageId::kSourceResolve);
+        rsp = EnsureExecutionErrorJson(err_rsp, "acquire shared source subscription failed",
+                                       ErrorCodeId::kSharedSourceSubscribeFailed, ErrorStageId::kSourceResolve);
         return rc;
     }
     const bool using_shared_source = (source_override != nullptr);
@@ -2849,8 +2582,7 @@ int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt,
         std::vector<std::string> unsupported;
         const int filter_rc = source->SetFilter(plan.stmt.where_clause.c_str(), &unsupported);
         if (filter_rc != 0) {
-            rsp = BuildExecutionErrorJson("stream source SetFilter failed",
-                                          ErrorCodeId::kOpExecFail,
+            rsp = BuildExecutionErrorJson("stream source SetFilter failed", ErrorCodeId::kOpExecFail,
                                           ErrorStageId::kExecute);
             return error::BAD_REQUEST;
         }
@@ -2860,9 +2592,7 @@ int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt,
             for (size_t i = 0; i < unsupported.size(); ++i) {
                 oss << (i == 0 ? " " : ", ") << unsupported[i];
             }
-            rsp = BuildExecutionErrorJson(oss.str(),
-                                          ErrorCodeId::kOpExecFail,
-                                          ErrorStageId::kExecute);
+            rsp = BuildExecutionErrorJson(oss.str(), ErrorCodeId::kOpExecFail, ErrorStageId::kExecute);
             return error::BAD_REQUEST;
         }
     }
@@ -2878,8 +2608,7 @@ int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt,
     } else if (plan.strategy == ParallelStrategy::STATELESS) {
         shared_source_state = std::make_shared<SharedSourceState>(source);
         for (int i = 0; i < plan.parallelism; ++i) {
-            input_ports.push_back(
-                std::make_shared<StatelessSourceView>(shared_source_state, static_cast<uint32_t>(i)));
+            input_ports.push_back(std::make_shared<StatelessSourceView>(shared_source_state, static_cast<uint32_t>(i)));
         }
     } else if (plan.strategy == ParallelStrategy::KEYED) {
         RingStreamChannelOptions partition_opts;
@@ -2888,34 +2617,26 @@ int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt,
             partition_opts.ring_size = NextPowerOfTwo(std::max<size_t>(64, source_cap));
         }
         fanout = std::make_shared<FanOutStreamChannel>(
-            "fanout",
-            plan.runtime_task_id + ".fanout",
-            source,
-            static_cast<size_t>(plan.parallelism),
-            FanOutMode::ROUTE_BY_PARTITION_ID,
-            plan.first_stream_operator->GetPartitionSpec(),
-            partition_opts);
+            "fanout", plan.runtime_task_id + ".fanout", source, static_cast<size_t>(plan.parallelism),
+            FanOutMode::ROUTE_BY_PARTITION_ID, plan.first_stream_operator->GetPartitionSpec(), partition_opts);
         open_target = fanout;
         for (int i = 0; i < plan.parallelism; ++i) {
             auto part = fanout->GetPartition(static_cast<size_t>(i));
             if (!part) {
-                rsp = BuildExecutionErrorJson("fanout partition create failed",
-                                              ErrorCodeId::kOpExecFail,
+                rsp = BuildExecutionErrorJson("fanout partition create failed", ErrorCodeId::kOpExecFail,
                                               ErrorStageId::kExecute);
                 return error::INTERNAL_ERROR;
             }
             input_ports.push_back(std::make_shared<FanOutPartitionView>(fanout, part));
         }
     } else {
-        rsp = BuildExecutionErrorJson("unsupported stream parallel strategy",
-                                      ErrorCodeId::kOpExecFail,
+        rsp = BuildExecutionErrorJson("unsupported stream parallel strategy", ErrorCodeId::kOpExecFail,
                                       ErrorStageId::kExecute);
         return error::BAD_REQUEST;
     }
 
     if (input_ports.empty()) {
-        rsp = BuildExecutionErrorJson("stream input ports build failed",
-                                      ErrorCodeId::kOpExecFail,
+        rsp = BuildExecutionErrorJson("stream input ports build failed", ErrorCodeId::kOpExecFail,
                                       ErrorStageId::kExecute);
         return error::INTERNAL_ERROR;
     }
@@ -2929,28 +2650,24 @@ int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt,
         if (i == 0) {
             stream_op = plan.first_stream_operator;
         } else {
-            std::shared_ptr<IOperator> op_holder =
-                CreateOperator(plan.parsed_ops[0].category, plan.parsed_ops[0].name);
+            std::shared_ptr<IOperator> op_holder = CreateOperator(plan.parsed_ops[0].category, plan.parsed_ops[0].name);
             if (!op_holder) {
-                rsp = BuildExecutionErrorJson("operator create failed for shard",
-                                              ErrorCodeId::kOpExecFail,
+                rsp = BuildExecutionErrorJson("operator create failed for shard", ErrorCodeId::kOpExecFail,
                                               ErrorStageId::kExecute);
                 return error::INTERNAL_ERROR;
             }
             stream_op = std::dynamic_pointer_cast<IStreamOperator>(op_holder);
         }
         if (!stream_op) {
-            rsp = BuildExecutionErrorJson("stream operator cast failed for shard",
-                                          ErrorCodeId::kOpExecFail,
+            rsp = BuildExecutionErrorJson("stream operator cast failed for shard", ErrorCodeId::kOpExecFail,
                                           ErrorStageId::kExecute);
             return error::INTERNAL_ERROR;
         }
 
         const int init_rc = stream_op->Init(with_params_json.c_str(), plan.sink_ctx);
         if (init_rc != 0) {
-            const std::string err = stream_op->LastError().empty()
-                ? "stream operator Init failed"
-                : stream_op->LastError();
+            const std::string err =
+                stream_op->LastError().empty() ? "stream operator Init failed" : stream_op->LastError();
             rsp = BuildExecutionErrorJson(err, ErrorCodeId::kOpExecFail, ErrorStageId::kExecute);
             return error::BAD_REQUEST;
         }
@@ -2958,30 +2675,22 @@ int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt,
         if (static_schema) {
             const int schema_rc = stream_op->OnSchemaReady(static_schema);
             if (schema_rc != 0) {
-                const std::string err = stream_op->LastError().empty()
-                    ? "stream operator OnSchemaReady failed"
-                    : stream_op->LastError();
+                const std::string err =
+                    stream_op->LastError().empty() ? "stream operator OnSchemaReady failed" : stream_op->LastError();
                 rsp = BuildExecutionErrorJson(err, ErrorCodeId::kOpExecFail, ErrorStageId::kExecute);
                 return error::BAD_REQUEST;
             }
         }
 
-        task->AddShard(std::make_shared<ShardRunner>(
-            static_cast<uint32_t>(i),
-            input_ports[i],
-            stream_op,
-            output,
-            task.get(),
-            static_schema != nullptr));
+        task->AddShard(std::make_shared<ShardRunner>(static_cast<uint32_t>(i), input_ports[i], stream_op, output,
+                                                     task.get(), static_schema != nullptr));
     }
     task->PrepareForRun(static_cast<uint32_t>(input_ports.size()), CurrentTimeMs());
     task->SetSourceResolveMeta(plan.resolved_sources, plan.source_expand_rule);
 
     const int open_rc = open_target->Open();
     if (open_rc != 0) {
-        rsp = BuildExecutionErrorJson("open stream source failed",
-                                      ErrorCodeId::kOpExecFail,
-                                      ErrorStageId::kExecute);
+        rsp = BuildExecutionErrorJson("open stream source failed", ErrorCodeId::kOpExecFail, ErrorStageId::kExecute);
         return error::INTERNAL_ERROR;
     }
 
@@ -3023,8 +2732,7 @@ int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt,
     return error::OK;
 }
 
-int32_t SchedulerPlugin::ClassifySqlTaskKind(const std::string& sql_text,
-                                             std::string* task_kind,
+int32_t SchedulerPlugin::ClassifySqlTaskKind(const std::string& sql_text, std::string* task_kind,
                                              std::string* err_rsp) {
     if (!task_kind || !err_rsp) return error::INTERNAL_ERROR;
     task_kind->clear();

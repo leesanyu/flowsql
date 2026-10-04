@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 
 #include "npm_basic_operator.h"
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include "npm_basic_result_consumer.h"
 
@@ -130,18 +133,20 @@ int NpmBasicTask::BindInputSource(const char* source) {
     }
 }
 
-int NpmBasicTask::BindCaptureSource(const CaptureQueueIdentityV1& identity) {
+int NpmBasicTask::BindCaptureSources(const CaptureSourceSetV2& sources) {
     if (!v2_) return ENOTSUP;
     if (state_.load(std::memory_order_acquire) != State::kCreated || capture_bound_) return EALREADY;
-    if (identity.struct_size < sizeof(CaptureQueueIdentityV1) ||
-        identity.contract_version != kCaptureBlockStreamContractVersionV1 || !identity.source_name ||
-        identity.source_name[0] == '\0' || identity.generation == 0) {
-        return EINVAL;
-    }
+    if (ValidateCaptureSourceSetV2(sources) != CaptureDescriptionErrorV1::kNone) return EINVAL;
     try {
-        capture_source_name_ = identity.source_name;
-        capture_identity_ = identity;
-        capture_identity_.source_name = capture_source_name_.c_str();
+        auto next = sources;
+        std::vector<std::string> names;
+        names.reserve(sources.inputs.size());
+        for (const auto& input : sources.inputs) names.emplace_back(input.source_name);
+        capture_sources_ = std::move(next);
+        capture_source_names_ = std::move(names);
+        for (size_t i = 0; i < capture_sources_.inputs.size(); ++i)
+            capture_sources_.inputs[i].source_name = capture_source_names_[i].c_str();
+        capture_tracker_ = std::make_unique<CaptureProgressTrackerV2>(capture_sources_);
         capture_bound_ = true;
         return 0;
     } catch (const std::bad_alloc&) {
@@ -149,20 +154,19 @@ int NpmBasicTask::BindCaptureSource(const CaptureQueueIdentityV1& identity) {
     }
 }
 
-int NpmBasicTask::AcceptCaptureFact(const CaptureProgressV1& fact) {
+int NpmBasicTask::AcceptCaptureFacts(const std::vector<CaptureProgressV1>& facts) {
     if (state_.load(std::memory_order_acquire) != State::kOpened || !v2_ || !capture_bound_) return EPIPE;
-    if (fact.struct_size < sizeof(CaptureProgressV1) || fact.contract_version != kCaptureBlockStreamContractVersionV1 ||
-        fact.source_id != capture_identity_.source_id || fact.queue_id != capture_identity_.queue_id ||
-        fact.generation != capture_identity_.generation || fact.fact_sequence == 0 ||
-        fact.fact_sequence <= last_capture_fact_sequence_ || fact.capture_time_ns < 0 ||
-        (fact.packet_observed && fact.source_idle_confirmed) ||
-        (fact.backlog != CaptureBacklogV1::kUnknown && fact.backlog != CaptureBacklogV1::kEmpty &&
-         fact.backlog != CaptureBacklogV1::kPresent)) {
-        return EINVAL;
-    }
+    if (facts.empty()) return 0;
     try {
-        pending_capture_facts_.push_back(fact);
-        last_capture_fact_sequence_ = fact.fact_sequence;
+        auto next = *capture_tracker_;
+        if (next.Observe(facts) != CaptureProgressErrorV1::kNone) return EINVAL;
+        CaptureProgressV1 common;
+        const auto candidate = next.CommonCandidateNs();
+        common.capture_time_ns = candidate.value_or(0);
+        common.source_idle_confirmed = candidate.has_value();
+        common.backlog = candidate ? CaptureBacklogV1::kEmpty : CaptureBacklogV1::kUnknown;
+        pending_capture_facts_.push_back(common);
+        *capture_tracker_ = std::move(next);
         return 0;
     } catch (const std::bad_alloc&) {
         return ENOMEM;
@@ -273,7 +277,38 @@ int NpmBasicTask::BindManagedSink(const BlockTransformManagedSinkBindingV1& bind
 
 std::string NpmBasicTask::ManagedSinkResultJson() const {
     const auto runtime = Runtime();
-    return runtime ? runtime->ManagedResultJson() : std::string();
+    if (!runtime) return {};
+    const auto json = runtime->ManagedResultJson();
+    rapidjson::Document document;
+    document.Parse(json.c_str());
+    if (!document.IsObject()) return json;
+    auto& allocator = document.GetAllocator();
+    rapidjson::Value diagnostics(rapidjson::kObjectType);
+    const auto budget = std::static_pointer_cast<NpmTaskBudget>(runtime->Budget());
+    const auto usage = budget->Usage();
+    const auto peak = budget->HighWaterMarks();
+    diagnostics.AddMember("tracked_bytes", NpmTrackedBudgetBytes(usage), allocator);
+    diagnostics.AddMember("pending_output_bytes", usage.pending_output_bytes, allocator);
+    diagnostics.AddMember("input_batch_bytes", usage.input_batch_bytes, allocator);
+    diagnostics.AddMember("tracked_peak_bytes", peak.tracked_bytes, allocator);
+    diagnostics.AddMember("pending_output_peak_bytes", peak.pending_output_bytes, allocator);
+    diagnostics.AddMember("input_batch_peak_bytes", peak.input_batch_bytes, allocator);
+    diagnostics.AddMember("tracked_limit_bytes", runtime->Config().analysis.max_tracked_bytes, allocator);
+    diagnostics.AddMember("pending_output_limit_bytes", runtime->Config().analysis.max_pending_output_bytes, allocator);
+    const auto common = capture_tracker_ ? capture_tracker_->CommonCandidateNs() : std::nullopt;
+    if (common)
+        diagnostics.AddMember("common_candidate_ns", *common, allocator);
+    else
+        diagnostics.AddMember("common_candidate_ns", rapidjson::Value(rapidjson::kNullType), allocator);
+    rapidjson::Value blocked(rapidjson::kArrayType);
+    if (capture_tracker_)
+        for (auto source : capture_tracker_->BlockedInputs()) blocked.PushBack(source, allocator);
+    diagnostics.AddMember("blocked_inputs", blocked, allocator);
+    document.AddMember("diagnostics", diagnostics, allocator);
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    document.Accept(writer);
+    return buffer.GetString();
 }
 
 int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema>* output_schema) {
@@ -347,13 +382,24 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
             return expected == State::kCancelled ? ECANCELED : EINVAL;
         }
         if (capture_bound_) {
-            uint64_t observation_domain_id = 0;
-            if (ResolveNpmObservationDomain(parsed.domains, capture_identity_.source_id, &observation_domain_id) !=
-                    NpmObservationDomainError::kNone ||
-                observation_domain_id != capture_identity_.observation_domain_id) {
-                expected = State::kOpening;
-                expected = Fail(expected, "npm.basic realtime source domain conflicts with capture identity");
-                return expected == State::kCancelled ? ECANCELED : EINVAL;
+            rapidjson::Document with;
+            with.Parse(with_params_json_.c_str());
+            const bool explicit_domains = with.IsObject() && with.HasMember("source_domains");
+            if (!explicit_domains) {
+                parsed.domains.source_id_as_domain = false;
+                parsed.domains.bindings.clear();
+                for (const auto& input : capture_sources_.inputs)
+                    parsed.domains.bindings.push_back({input.source_id, input.observation_domain_id});
+            }
+            for (const auto& input : capture_sources_.inputs) {
+                uint64_t domain = 0;
+                if (ResolveNpmObservationDomain(parsed.domains, input.source_id, &domain) !=
+                        NpmObservationDomainError::kNone ||
+                    domain != input.observation_domain_id) {
+                    expected = State::kOpening;
+                    expected = Fail(expected, "npm.basic realtime source domain conflicts with capture identity");
+                    return expected == State::kCancelled ? ECANCELED : EINVAL;
+                }
             }
         }
         time_capabilities = {true, true, true, true};

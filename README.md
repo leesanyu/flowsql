@@ -1188,6 +1188,7 @@ flowSQL/
 - [NPM 协议模块运行时](tasks/archive/feat-npm-protocol-analysis.md)
 - [NPM 多实体结果存储与查询](tasks/archive/feat-npm-result-query.md)
 - [NPM 共享有界 TCP 字节流接入说明](docs/npm-tcp-stream.md)
+- [NetAdapter 采集与隔离真实联验](docs/netadapter.md)
 - [NPM TLS 握手分析规格](tasks/archive/feat-npm-tls-handshake-analysis.md)
 - [Baseline 插件说明](src/plugins/baseline/README.md)
 - [C++ 算子插件 Sample](samples/cpp_operator/README.md)

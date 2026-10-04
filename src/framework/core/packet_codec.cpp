@@ -5,9 +5,10 @@
 
 #include <arrow/api.h>
 
+#include <cerrno>
 #include <cstring>
-#include <new>
 #include <limits>
+#include <new>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -94,8 +95,7 @@ PacketBatchError ValidatePacketRecord(const PacketRecord& record, std::string* e
 }  // namespace
 
 PacketBatchError EncodePacketBatch(const std::vector<PacketRecord>& records,
-                                    std::shared_ptr<arrow::RecordBatch>* output,
-                                    std::string* error) {
+                                   std::shared_ptr<arrow::RecordBatch>* output, std::string* error) {
     if (output == nullptr) return PacketBatchError::kNullOutput;
     *output = nullptr;
     if (error) error->clear();
@@ -109,39 +109,56 @@ PacketBatchError EncodePacketBatch(const std::vector<PacketRecord>& records,
         }
     }
 
+    size_t index = 0;
+    return EncodePacketStream(
+        [&](PacketRecord* record) {
+            if (index == records.size()) return ENOENT;
+            *record = records[index++];
+            return 0;
+        },
+        static_cast<uint32_t>(records.size()), arrow::default_memory_pool(), output, error);
+}
+
+PacketBatchError EncodePacketStream(const std::function<int(PacketRecord*)>& next, uint32_t max_records,
+                                    arrow::MemoryPool* pool, std::shared_ptr<arrow::RecordBatch>* output,
+                                    std::string* error) {
+    if (!output || !pool) return PacketBatchError::kNullOutput;
+    *output = nullptr;
+    if (error) error->clear();
+    uint32_t rows = 0;
     try {
-        arrow::Int64Builder timestamp;
-        arrow::UInt32Builder captured_len;
-        arrow::UInt32Builder wire_len;
-        arrow::UInt32Builder link_type;
-        arrow::UInt32Builder source_id;
-        arrow::UInt64Builder sequence;
-        arrow::BinaryBuilder raw_data;
-        arrow::UInt8Builder layer_status;
-        arrow::UInt8Builder layer_count;
-        auto layer_ids_values = std::make_shared<arrow::UInt16Builder>();
-        arrow::FixedSizeListBuilder layer_ids(arrow::default_memory_pool(), layer_ids_values, kMaxLayerDepth);
-        auto layer_offsets_values = std::make_shared<arrow::UInt32Builder>();
-        arrow::FixedSizeListBuilder layer_offsets(arrow::default_memory_pool(), layer_offsets_values, kMaxLayerDepth);
-        arrow::UInt8Builder endpoint_scope;
-        arrow::UInt8Builder network_layer_index;
-        arrow::UInt8Builder transport_layer_index;
-        arrow::UInt32Builder payload_offset;
-        arrow::FixedSizeBinaryBuilder src_mac(arrow::fixed_size_binary(6));
-        arrow::FixedSizeBinaryBuilder dst_mac(arrow::fixed_size_binary(6));
-        arrow::UInt32Builder src_ip_v4;
-        arrow::UInt32Builder dst_ip_v4;
-        arrow::BinaryBuilder src_ip_v6;
-        arrow::BinaryBuilder dst_ip_v6;
-        arrow::UInt8Builder src_ip_family;
-        arrow::UInt8Builder dst_ip_family;
-        arrow::UInt8Builder transport_protocol;
-        arrow::UInt16Builder src_port;
-        arrow::UInt16Builder dst_port;
-        arrow::BooleanBuilder ports_valid;
-        arrow::UInt8Builder protocol_status;
-        arrow::UInt16Builder protocol_id;
-        arrow::UInt16Builder protocol_sub_id;
+        arrow::Int64Builder timestamp(pool);
+        arrow::UInt32Builder captured_len(pool);
+        arrow::UInt32Builder wire_len(pool);
+        arrow::UInt32Builder link_type(pool);
+        arrow::UInt32Builder source_id(pool);
+        arrow::UInt64Builder sequence(pool);
+        arrow::BinaryBuilder raw_data(pool);
+        arrow::UInt8Builder layer_status(pool);
+        arrow::UInt8Builder layer_count(pool);
+        auto layer_ids_values = std::make_shared<arrow::UInt16Builder>(pool);
+        arrow::FixedSizeListBuilder layer_ids(pool, layer_ids_values, kMaxLayerDepth);
+        auto layer_offsets_values = std::make_shared<arrow::UInt32Builder>(pool);
+        arrow::FixedSizeListBuilder layer_offsets(pool, layer_offsets_values, kMaxLayerDepth);
+        arrow::UInt8Builder endpoint_scope(pool);
+        arrow::UInt8Builder network_layer_index(pool);
+        arrow::UInt8Builder transport_layer_index(pool);
+        arrow::UInt32Builder payload_offset(pool);
+        arrow::FixedSizeBinaryBuilder src_mac(arrow::fixed_size_binary(6), pool);
+        arrow::FixedSizeBinaryBuilder dst_mac(arrow::fixed_size_binary(6), pool);
+        arrow::UInt32Builder src_ip_v4(pool);
+        arrow::UInt32Builder dst_ip_v4(pool);
+        arrow::BinaryBuilder src_ip_v6(pool);
+        arrow::BinaryBuilder dst_ip_v6(pool);
+        arrow::UInt8Builder src_ip_family(pool);
+        arrow::UInt8Builder dst_ip_family(pool);
+        arrow::UInt8Builder transport_protocol(pool);
+        arrow::UInt16Builder src_port(pool);
+        arrow::UInt16Builder dst_port(pool);
+        arrow::BooleanBuilder ports_valid(pool);
+        arrow::UInt8Builder protocol_status(pool);
+        arrow::UInt16Builder protocol_id(pool);
+        arrow::UInt16Builder protocol_sub_id(pool);
 
         auto check = [&](const arrow::Status& status, const char* field) {
             if (status.ok()) return true;
@@ -151,12 +168,8 @@ PacketBatchError EncodePacketBatch(const std::vector<PacketRecord>& records,
         auto append_mac = [&](const MacAddress& mac, arrow::FixedSizeBinaryBuilder& builder, const char* field) {
             return mac.valid ? check(builder.Append(mac.value.bytes), field) : check(builder.AppendNull(), field);
         };
-        auto append_ip = [&](const IpAddress& address,
-                             arrow::UInt32Builder& v4,
-                             arrow::BinaryBuilder& v6,
-                             arrow::UInt8Builder& family,
-                             const char* v4_field,
-                             const char* v6_field,
+        auto append_ip = [&](const IpAddress& address, arrow::UInt32Builder& v4, arrow::BinaryBuilder& v6,
+                             arrow::UInt8Builder& family, const char* v4_field, const char* v6_field,
                              const char* family_field) {
             if (const auto* value = std::get_if<IPv4Address>(&address)) {
                 return check(v4.Append(value->addr), v4_field) && check(v6.AppendNull(), v6_field) &&
@@ -171,7 +184,14 @@ PacketBatchError EncodePacketBatch(const std::vector<PacketRecord>& records,
                    check(family.Append(static_cast<uint8_t>(AddressFamily::kNone)), family_field);
         };
 
-        for (const auto& record : records) {
+        PacketRecord record;
+        for (; rows < max_records; ++rows) {
+            const int next_rc = next(&record);
+            if (next_rc == ENOENT) break;
+            if (next_rc != 0)
+                return SetBatchError(PacketBatchError::kInvalidRecord, "packet stream read failed", error);
+            const auto validation = ValidatePacketRecord(record, error);
+            if (validation != PacketBatchError::kNone) return validation;
             const auto& meta = record.meta;
             const auto& layer = record.layer;
             const auto& protocol = record.protocol;
@@ -187,7 +207,7 @@ PacketBatchError EncodePacketBatch(const std::vector<PacketRecord>& records,
             if (meta.captured_len == 0) {
                 if (!check(raw_data.Append(std::string_view()), "raw_data")) return PacketBatchError::kArrowError;
             } else if (!check(raw_data.Append(record.raw_data.data, static_cast<int32_t>(record.raw_data.size)),
-                               "raw_data")) {
+                              "raw_data")) {
                 return PacketBatchError::kArrowError;
             }
 
@@ -206,8 +226,7 @@ PacketBatchError EncodePacketBatch(const std::vector<PacketRecord>& records,
                 !check(network_layer_index.Append(layer.network_layer_index), "network_layer_index") ||
                 !check(transport_layer_index.Append(layer.transport_layer_index), "transport_layer_index") ||
                 !check(payload_offset.Append(layer.payload_offset), "payload_offset") ||
-                !append_mac(layer.src_mac, src_mac, "src_mac") ||
-                !append_mac(layer.dst_mac, dst_mac, "dst_mac") ||
+                !append_mac(layer.src_mac, src_mac, "src_mac") || !append_mac(layer.dst_mac, dst_mac, "dst_mac") ||
                 !append_ip(layer.src_ip, src_ip_v4, src_ip_v6, src_ip_family, "src_ip_v4", "src_ip_v6",
                            "src_ip_family") ||
                 !append_ip(layer.dst_ip, dst_ip_v4, dst_ip_v6, dst_ip_family, "dst_ip_v4", "dst_ip_v6",
@@ -252,9 +271,8 @@ PacketBatchError EncodePacketBatch(const std::vector<PacketRecord>& records,
             return true;
         };
         if (!finish(timestamp, "timestamp_ns") || !finish(captured_len, "captured_len") ||
-            !finish(wire_len, "wire_len") || !finish(link_type, "link_type") ||
-            !finish(source_id, "source_id") || !finish(sequence, "sequence") ||
-            !finish(raw_data, "raw_data") || !finish(layer_status, "layer_status") ||
+            !finish(wire_len, "wire_len") || !finish(link_type, "link_type") || !finish(source_id, "source_id") ||
+            !finish(sequence, "sequence") || !finish(raw_data, "raw_data") || !finish(layer_status, "layer_status") ||
             !finish(layer_count, "layer_count") || !finish(layer_ids, "layer_ids") ||
             !finish(layer_offsets, "layer_offsets") || !finish(endpoint_scope, "endpoint_scope") ||
             !finish(network_layer_index, "network_layer_index") ||
@@ -268,7 +286,7 @@ PacketBatchError EncodePacketBatch(const std::vector<PacketRecord>& records,
             !finish(protocol_sub_id, "protocol_sub_id")) {
             return PacketBatchError::kArrowError;
         }
-        *output = arrow::RecordBatch::Make(PacketSchema(), static_cast<int64_t>(records.size()), std::move(arrays));
+        *output = arrow::RecordBatch::Make(PacketSchema(), static_cast<int64_t>(rows), std::move(arrays));
         return PacketBatchError::kNone;
     } catch (const std::bad_alloc&) {
         return SetBatchError(PacketBatchError::kAllocationFailed, "packet batch allocation failed", error);

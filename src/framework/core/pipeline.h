@@ -20,12 +20,7 @@
 
 namespace flowsql {
 
-enum class PipelineState : int32_t {
-    IDLE = 0,
-    RUNNING,
-    STOPPED,
-    FAILED
-};
+enum class PipelineState : int32_t { IDLE = 0, RUNNING, STOPPED, FAILED };
 
 // Pipeline — 纯连接器，只负责将 source 和 sink 通道交给算子
 class Pipeline {
@@ -68,14 +63,11 @@ class BlockFilterStage {
 
     /** Open exactly once and expose the unchanged output Schema before the first block. */
     FilterEvalError Open(const std::shared_ptr<arrow::Schema>& input_schema,
-                         std::shared_ptr<arrow::Schema>* output_schema,
-                         std::string* error);
+                         std::shared_ptr<arrow::Schema>* output_schema, std::string* error);
 
     /** Produce exactly one data block, including when filtering leaves zero rows. */
-    FilterEvalError ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
-                                 int64_t ts_ms,
-                                 BlockTransformOutputV1* output,
-                                 std::string* error) const;
+    FilterEvalError ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
+                                 BlockTransformOutputV1* output, std::string* error) const;
 
     bool IsOpen() const { return opened_; }
 
@@ -146,7 +138,7 @@ struct BlockTransformPipelineConfig {
     // Optional time interface of the same execution task as transform. Null preserves V1 behavior.
     IBlockTransformTimeDrivenTaskV1* time_transform = nullptr;
     // Present only for a task-exclusive capture reader and the same execution transform task.
-    IBlockTransformCaptureFactTaskV1* capture_fact_task = nullptr;
+    IBlockTransformCaptureFactTaskV2* capture_fact_task = nullptr;
     std::shared_ptr<const BoundFilterExpr> source_residual;
     std::shared_ptr<const BoundFilterExpr> transform_residual;
     std::function<int(const BlockTransformOutputV1&)> output_consumer;
@@ -156,6 +148,8 @@ struct BlockTransformPipelineConfig {
     int poll_timeout_ms = 100;
     std::shared_ptr<BlockTransformRunControl> control;
     std::function<void()> opened_callback;
+    // Called on the execution thread at most once per 200 ms; readers use a published snapshot.
+    std::function<void()> progress_callback;
 };
 
 struct BlockTransformPipelineResult {
@@ -169,32 +163,25 @@ struct BlockTransformPipelineResult {
 /** Synchronous transform chain with optional, stage-aligned time capabilities. */
 class SynchronousBlockTransformChainTask final : public IBlockTransformTaskV2 {
  public:
-    SynchronousBlockTransformChainTask(
-        std::vector<IBlockTransformTaskV1*> tasks,
-        std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks,
-        std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas,
-        const std::vector<std::shared_ptr<const BoundFilterExpr>>& residuals);
+    SynchronousBlockTransformChainTask(std::vector<IBlockTransformTaskV1*> tasks,
+                                       std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks,
+                                       std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas,
+                                       const std::vector<std::shared_ptr<const BoundFilterExpr>>& residuals);
 
-    int Open(std::shared_ptr<arrow::Schema> input_schema,
-             std::shared_ptr<arrow::Schema>* output_schema) override;
-    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
-                     int64_t ts_ms,
+    int Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema>* output_schema) override;
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
                      std::vector<BlockTransformOutputV1>* outputs) override;
     int Flush(std::vector<BlockTransformOutputV1>* outputs) override;
     void Cancel() override;
     std::string LastError() const override;
 
     int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override;
-    int OnTime(const BlockTransformTimeEventV1& event,
-               std::vector<BlockTransformOutputV1>* outputs) override;
+    int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) override;
 
  private:
-    int PropagateFrom(size_t first_stage,
-                      std::vector<BlockTransformOutputV1> inputs,
-                      std::vector<BlockTransformOutputV1>* outputs,
-                      bool* stopped);
-    int FilterStageOutputs(size_t stage,
-                           const std::vector<BlockTransformOutputV1>& inputs,
+    int PropagateFrom(size_t first_stage, std::vector<BlockTransformOutputV1> inputs,
+                      std::vector<BlockTransformOutputV1>* outputs, bool* stopped);
+    int FilterStageOutputs(size_t stage, const std::vector<BlockTransformOutputV1>& inputs,
                            std::vector<BlockTransformOutputV1>* outputs);
     int QueryTimeState(size_t stage, BlockTransformTimeDriveStateV1* state);
     int SetStageError(size_t stage, std::string detail, int rc);
@@ -216,8 +203,7 @@ class BlockTransformPipelineRunner {
  public:
     explicit BlockTransformPipelineRunner(BlockTransformPipelineConfig config);
 
-    BlockTransformPipelineError Run(BlockTransformPipelineResult* result,
-                                    std::string* error);
+    BlockTransformPipelineError Run(BlockTransformPipelineResult* result, std::string* error);
     void Cancel();
 
  private:

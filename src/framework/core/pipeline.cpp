@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 
 #include "pipeline.h"
+#include <map>
+#include <set>
+#include "packet_codec.h"
 
 #include <arrow/api.h>
 
@@ -38,9 +41,7 @@ void Pipeline::Run() {
     state_ = PipelineState::STOPPED;
 }
 
-void Pipeline::Stop() {
-    state_ = PipelineState::STOPPED;
-}
+void Pipeline::Stop() { state_ = PipelineState::STOPPED; }
 
 // --- PipelineBuilder ---
 
@@ -67,14 +68,11 @@ std::unique_ptr<Pipeline> PipelineBuilder::Build() {
     return pipeline;
 }
 
-BlockFilterStage::BlockFilterStage(
-    std::shared_ptr<const BoundFilterExpr> residual_expression)
+BlockFilterStage::BlockFilterStage(std::shared_ptr<const BoundFilterExpr> residual_expression)
     : residual_expression_(std::move(residual_expression)) {}
 
-FilterEvalError BlockFilterStage::Open(
-    const std::shared_ptr<arrow::Schema>& input_schema,
-    std::shared_ptr<arrow::Schema>* output_schema,
-    std::string* error) {
+FilterEvalError BlockFilterStage::Open(const std::shared_ptr<arrow::Schema>& input_schema,
+                                       std::shared_ptr<arrow::Schema>* output_schema, std::string* error) {
     if (output_schema) output_schema->reset();
     if (error) error->clear();
     if (!input_schema || !output_schema) {
@@ -97,8 +95,7 @@ FilterEvalError BlockFilterStage::Open(
             auto empty_array = arrow::MakeArrayOfNull(field->type(), 0);
             if (!empty_array.ok()) {
                 if (error) {
-                    *error = "filter stage could not build validation batch: " +
-                             empty_array.status().ToString();
+                    *error = "filter stage could not build validation batch: " + empty_array.status().ToString();
                 }
                 return FilterEvalError::kArrowError;
             }
@@ -106,8 +103,7 @@ FilterEvalError BlockFilterStage::Open(
         }
         auto validation_batch = arrow::RecordBatch::Make(input_schema, 0, empty_columns);
         std::shared_ptr<arrow::RecordBatch> ignored;
-        const auto validation = FilterRecordBatch(
-            validation_batch, residual_expression_, &ignored, error);
+        const auto validation = FilterRecordBatch(validation_batch, residual_expression_, &ignored, error);
         if (validation != FilterEvalError::kNone) return validation;
     }
 
@@ -117,11 +113,8 @@ FilterEvalError BlockFilterStage::Open(
     return FilterEvalError::kNone;
 }
 
-FilterEvalError BlockFilterStage::ProcessBlock(
-    const std::shared_ptr<arrow::RecordBatch>& input,
-    int64_t ts_ms,
-    BlockTransformOutputV1* output,
-    std::string* error) const {
+FilterEvalError BlockFilterStage::ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
+                                               BlockTransformOutputV1* output, std::string* error) const {
     if (output) *output = BlockTransformOutputV1{};
     if (error) error->clear();
     if (!opened_ || !input || !output) {
@@ -135,8 +128,7 @@ FilterEvalError BlockFilterStage::ProcessBlock(
 
     std::shared_ptr<arrow::RecordBatch> filtered = input;
     if (residual_expression_) {
-        const auto filter_result = FilterRecordBatch(
-            input, residual_expression_, &filtered, error);
+        const auto filter_result = FilterRecordBatch(input, residual_expression_, &filtered, error);
         if (filter_result != FilterEvalError::kNone) return filter_result;
     }
     output->batch = std::move(filtered);
@@ -145,8 +137,7 @@ FilterEvalError BlockFilterStage::ProcessBlock(
 }
 
 SynchronousBlockTransformChainTask::SynchronousBlockTransformChainTask(
-    std::vector<IBlockTransformTaskV1*> tasks,
-    std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks,
+    std::vector<IBlockTransformTaskV1*> tasks, std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks,
     std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas,
     const std::vector<std::shared_ptr<const BoundFilterExpr>>& residuals)
     : tasks_(std::move(tasks)),
@@ -156,13 +147,10 @@ SynchronousBlockTransformChainTask::SynchronousBlockTransformChainTask(
     for (const auto& residual : residuals) filters_.emplace_back(residual);
 }
 
-int SynchronousBlockTransformChainTask::Open(
-    std::shared_ptr<arrow::Schema> input_schema,
-    std::shared_ptr<arrow::Schema>* output_schema) {
-    if (open_attempted_ || !input_schema || !output_schema || tasks_.empty() ||
-        tasks_.size() != time_tasks_.size() ||
-        tasks_.size() != expected_output_schemas_.size() ||
-        tasks_.size() != filters_.size() ||
+int SynchronousBlockTransformChainTask::Open(std::shared_ptr<arrow::Schema> input_schema,
+                                             std::shared_ptr<arrow::Schema>* output_schema) {
+    if (open_attempted_ || !input_schema || !output_schema || tasks_.empty() || tasks_.size() != time_tasks_.size() ||
+        tasks_.size() != expected_output_schemas_.size() || tasks_.size() != filters_.size() ||
         std::any_of(tasks_.begin(), tasks_.end(), [](const auto* task) { return !task; })) {
         last_error_ = "multi transform chain received an invalid Open request";
         return EINVAL;
@@ -191,8 +179,7 @@ int SynchronousBlockTransformChainTask::Open(
 
         std::string filter_error;
         std::shared_ptr<arrow::Schema> filtered_schema;
-        const auto filter_rc = filters_[i].Open(
-            actual_output_schema, &filtered_schema, &filter_error);
+        const auto filter_rc = filters_[i].Open(actual_output_schema, &filtered_schema, &filter_error);
         if (filter_rc != FilterEvalError::kNone) {
             if (filter_error.empty()) filter_error = "residual filter Open failed";
             return SetStageError(i, std::move(filter_error), EINVAL);
@@ -205,10 +192,8 @@ int SynchronousBlockTransformChainTask::Open(
     return 0;
 }
 
-int SynchronousBlockTransformChainTask::ProcessBlock(
-    const std::shared_ptr<arrow::RecordBatch>& input,
-    int64_t ts_ms,
-    std::vector<BlockTransformOutputV1>* outputs) {
+int SynchronousBlockTransformChainTask::ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
+                                                     std::vector<BlockTransformOutputV1>* outputs) {
     if (!opened_ || !input || !outputs || !outputs->empty() || flush_started_) {
         last_error_ = "multi transform chain received an invalid ProcessBlock request";
         return -EINVAL;
@@ -223,8 +208,7 @@ int SynchronousBlockTransformChainTask::ProcessBlock(
                    : static_cast<int>(BlockTransformStatusV1::kContinue);
 }
 
-int SynchronousBlockTransformChainTask::Flush(
-    std::vector<BlockTransformOutputV1>* outputs) {
+int SynchronousBlockTransformChainTask::Flush(std::vector<BlockTransformOutputV1>* outputs) {
     if (!opened_ || !outputs || !outputs->empty() || flush_started_) {
         last_error_ = "multi transform chain received an invalid Flush request";
         return EINVAL;
@@ -255,11 +239,9 @@ int SynchronousBlockTransformChainTask::Flush(
 
         std::vector<BlockTransformOutputV1> propagated_outputs;
         bool ignored_stop = false;
-        const int propagate_rc = PropagateFrom(
-            i + 1, std::move(filtered_outputs), &propagated_outputs, &ignored_stop);
+        const int propagate_rc = PropagateFrom(i + 1, std::move(filtered_outputs), &propagated_outputs, &ignored_stop);
         if (propagate_rc != 0) return propagate_rc;
-        final_outputs.insert(final_outputs.end(),
-                             std::make_move_iterator(propagated_outputs.begin()),
+        final_outputs.insert(final_outputs.end(), std::make_move_iterator(propagated_outputs.begin()),
                              std::make_move_iterator(propagated_outputs.end()));
     }
 
@@ -279,14 +261,10 @@ void SynchronousBlockTransformChainTask::Cancel() {
     }
 }
 
-std::string SynchronousBlockTransformChainTask::LastError() const {
-    return last_error_;
-}
+std::string SynchronousBlockTransformChainTask::LastError() const { return last_error_; }
 
-int SynchronousBlockTransformChainTask::GetTimeDriveState(
-    BlockTransformTimeDriveStateV1* state) {
-    if (!opened_ || flush_started_ || !state ||
-        state->struct_size < kBlockTransformTimeDriveStateV1Size ||
+int SynchronousBlockTransformChainTask::GetTimeDriveState(BlockTransformTimeDriveStateV1* state) {
+    if (!opened_ || flush_started_ || !state || state->struct_size < kBlockTransformTimeDriveStateV1Size ||
         state->contract_version != kBlockTransformTimeDriveVersionV1) {
         last_error_ = "multi transform chain received an invalid time state request";
         return -EINVAL;
@@ -300,8 +278,7 @@ int SynchronousBlockTransformChainTask::GetTimeDriveState(
         BlockTransformTimeDriveStateV1 stage_state{};
         const int state_rc = QueryTimeState(i, &stage_state);
         if (state_rc != 0) return state_rc;
-        if (stage_state.armed == 1 &&
-            (aggregate.armed == 0 || stage_state.deadline_ns < aggregate.deadline_ns)) {
+        if (stage_state.armed == 1 && (aggregate.armed == 0 || stage_state.deadline_ns < aggregate.deadline_ns)) {
             aggregate.armed = 1;
             aggregate.deadline_ns = stage_state.deadline_ns;
         }
@@ -310,13 +287,11 @@ int SynchronousBlockTransformChainTask::GetTimeDriveState(
     return 0;
 }
 
-int SynchronousBlockTransformChainTask::OnTime(
-    const BlockTransformTimeEventV1& event,
-    std::vector<BlockTransformOutputV1>* outputs) {
+int SynchronousBlockTransformChainTask::OnTime(const BlockTransformTimeEventV1& event,
+                                               std::vector<BlockTransformOutputV1>* outputs) {
     if (!opened_ || flush_started_ || !outputs || !outputs->empty() ||
         event.struct_size < kBlockTransformTimeEventV1Size ||
-        event.contract_version != kBlockTransformTimeDriveVersionV1 ||
-        event.monotonic_now_ns < 0) {
+        event.contract_version != kBlockTransformTimeDriveVersionV1 || event.monotonic_now_ns < 0) {
         last_error_ = "multi transform chain received an invalid OnTime request";
         return -EINVAL;
     }
@@ -341,9 +316,8 @@ int SynchronousBlockTransformChainTask::OnTime(
         } catch (...) {
             return SetStageError(i, "OnTime threw an unknown exception", EFAULT);
         }
-        const bool valid_status =
-            time_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
-            time_rc == static_cast<int>(BlockTransformStatusV1::kStop);
+        const bool valid_status = time_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
+                                  time_rc == static_cast<int>(BlockTransformStatusV1::kStop);
         if (!valid_status) {
             if (!stage_outputs.empty()) {
                 return SetStageError(i, "OnTime failed while returning output batches", EPROTO);
@@ -365,11 +339,10 @@ int SynchronousBlockTransformChainTask::OnTime(
 
         std::vector<BlockTransformOutputV1> propagated_outputs;
         bool downstream_stopped = false;
-        const int propagate_rc = PropagateFrom(
-            i + 1, std::move(filtered_outputs), &propagated_outputs, &downstream_stopped);
+        const int propagate_rc =
+            PropagateFrom(i + 1, std::move(filtered_outputs), &propagated_outputs, &downstream_stopped);
         if (propagate_rc != 0) return propagate_rc;
-        final_outputs.insert(final_outputs.end(),
-                             std::make_move_iterator(propagated_outputs.begin()),
+        final_outputs.insert(final_outputs.end(), std::make_move_iterator(propagated_outputs.begin()),
                              std::make_move_iterator(propagated_outputs.end()));
 
         if (time_rc == static_cast<int>(BlockTransformStatusV1::kStop) || downstream_stopped) {
@@ -383,11 +356,8 @@ int SynchronousBlockTransformChainTask::OnTime(
                          : static_cast<int>(BlockTransformStatusV1::kContinue);
 }
 
-int SynchronousBlockTransformChainTask::PropagateFrom(
-    size_t first_stage,
-    std::vector<BlockTransformOutputV1> inputs,
-    std::vector<BlockTransformOutputV1>* outputs,
-    bool* stopped) {
+int SynchronousBlockTransformChainTask::PropagateFrom(size_t first_stage, std::vector<BlockTransformOutputV1> inputs,
+                                                      std::vector<BlockTransformOutputV1>* outputs, bool* stopped) {
     if (!outputs || !stopped || first_stage > tasks_.size()) return -EINVAL;
     outputs->clear();
     for (size_t i = first_stage; i < tasks_.size(); ++i) {
@@ -403,9 +373,8 @@ int SynchronousBlockTransformChainTask::PropagateFrom(
             } catch (...) {
                 return SetStageError(i, "ProcessBlock threw an unknown exception", EFAULT);
             }
-            const bool valid_status =
-                process_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
-                process_rc == static_cast<int>(BlockTransformStatusV1::kStop);
+            const bool valid_status = process_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
+                                      process_rc == static_cast<int>(BlockTransformStatusV1::kStop);
             if (!valid_status) {
                 if (!stage_outputs.empty()) {
                     return SetStageError(i, "ProcessBlock failed while returning output batches", EPROTO);
@@ -417,8 +386,7 @@ int SynchronousBlockTransformChainTask::PropagateFrom(
             std::vector<BlockTransformOutputV1> filtered_outputs;
             const int filter_rc = FilterStageOutputs(i, stage_outputs, &filtered_outputs);
             if (filter_rc != 0) return filter_rc;
-            next_inputs.insert(next_inputs.end(),
-                               std::make_move_iterator(filtered_outputs.begin()),
+            next_inputs.insert(next_inputs.end(), std::make_move_iterator(filtered_outputs.begin()),
                                std::make_move_iterator(filtered_outputs.end()));
         }
         inputs = std::move(next_inputs);
@@ -427,18 +395,16 @@ int SynchronousBlockTransformChainTask::PropagateFrom(
     return 0;
 }
 
-int SynchronousBlockTransformChainTask::FilterStageOutputs(
-    size_t stage,
-    const std::vector<BlockTransformOutputV1>& inputs,
-    std::vector<BlockTransformOutputV1>* outputs) {
+int SynchronousBlockTransformChainTask::FilterStageOutputs(size_t stage,
+                                                           const std::vector<BlockTransformOutputV1>& inputs,
+                                                           std::vector<BlockTransformOutputV1>* outputs) {
     if (!outputs || stage >= filters_.size()) return -EINVAL;
     outputs->clear();
     for (const auto& input : inputs) {
         if (!input.batch) return SetStageError(stage, "returned a null output batch", EPROTO);
         BlockTransformOutputV1 filtered;
         std::string filter_error;
-        const auto filter_rc = filters_[stage].ProcessBlock(
-            input.batch, input.ts_ms, &filtered, &filter_error);
+        const auto filter_rc = filters_[stage].ProcessBlock(input.batch, input.ts_ms, &filtered, &filter_error);
         if (filter_rc != FilterEvalError::kNone) {
             if (filter_error.empty()) filter_error = "residual filter failed";
             return SetStageError(stage, std::move(filter_error), EIO);
@@ -448,9 +414,7 @@ int SynchronousBlockTransformChainTask::FilterStageOutputs(
     return 0;
 }
 
-int SynchronousBlockTransformChainTask::QueryTimeState(
-    size_t stage,
-    BlockTransformTimeDriveStateV1* state) {
+int SynchronousBlockTransformChainTask::QueryTimeState(size_t stage, BlockTransformTimeDriveStateV1* state) {
     if (!state || stage >= time_tasks_.size() || !time_tasks_[stage]) return -EINVAL;
     *state = BlockTransformTimeDriveStateV1{};
     state->struct_size = kBlockTransformTimeDriveStateV1Size;
@@ -468,18 +432,14 @@ int SynchronousBlockTransformChainTask::QueryTimeState(
     }
     if (state->struct_size < kBlockTransformTimeDriveStateV1Size ||
         state->contract_version != kBlockTransformTimeDriveVersionV1 || state->armed > 1 ||
-        std::any_of(std::begin(state->reserved), std::end(state->reserved),
-                    [](uint8_t value) { return value != 0; }) ||
+        std::any_of(std::begin(state->reserved), std::end(state->reserved), [](uint8_t value) { return value != 0; }) ||
         (state->armed == 1 && state->deadline_ns < 0)) {
         return SetStageError(stage, "time state returned an invalid contract", EPROTO);
     }
     return 0;
 }
 
-int SynchronousBlockTransformChainTask::SetStageError(
-    size_t stage,
-    std::string detail,
-    int rc) {
+int SynchronousBlockTransformChainTask::SetStageError(size_t stage, std::string detail, int rc) {
     last_error_ = "transform stage " + std::to_string(stage + 1) + ": " + detail;
     if (rc == 0) return -EIO;
     return rc > 0 ? -rc : rc;
@@ -495,8 +455,7 @@ std::string SynchronousBlockTransformChainTask::TaskError(size_t stage) const {
     }
 }
 
-BlockTransformPipelineRunner::BlockTransformPipelineRunner(
-    BlockTransformPipelineConfig config)
+BlockTransformPipelineRunner::BlockTransformPipelineRunner(BlockTransformPipelineConfig config)
     : config_(std::move(config)) {}
 
 void BlockTransformPipelineRunner::Cancel() {
@@ -513,9 +472,8 @@ void BlockTransformPipelineRunner::Cancel() {
     }
 }
 
-BlockTransformPipelineError BlockTransformPipelineRunner::Run(
-    BlockTransformPipelineResult* result,
-    std::string* error) {
+BlockTransformPipelineError BlockTransformPipelineRunner::Run(BlockTransformPipelineResult* result,
+                                                              std::string* error) {
     if (error) error->clear();
     if (!result) {
         if (error) *error = "block transform pipeline result must not be null";
@@ -523,15 +481,16 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
     }
     *result = BlockTransformPipelineResult{};
 
-    if (!config_.source || !config_.source_schema || !config_.transform ||
-        !config_.output_consumer || config_.poll_timeout_ms < 0) {
+    if (!config_.source || !config_.source_schema || !config_.transform || !config_.output_consumer ||
+        config_.poll_timeout_ms < 0) {
         if (error) {
-            *error = "block transform pipeline requires source, source Schema, transform, "
-                     "consumer, and a non-negative poll timeout";
+            *error =
+                "block transform pipeline requires source, source Schema, transform, "
+                "consumer, and a non-negative poll timeout";
         }
         return BlockTransformPipelineError::kInvalidArgument;
     }
-    auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV1*>(config_.source);
+    auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV2*>(config_.source);
     if (config_.capture_fact_task && !capture_reader) {
         if (error) *error = "capture fact task requires a capture reader";
         return BlockTransformPipelineError::kInvalidArgument;
@@ -577,8 +536,7 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
     BlockFilterStage source_filter(config_.source_residual);
     std::shared_ptr<arrow::Schema> transform_input_schema;
     std::string stage_error;
-    const auto source_open = source_filter.Open(
-        config_.source_schema, &transform_input_schema, &stage_error);
+    const auto source_open = source_filter.Open(config_.source_schema, &transform_input_schema, &stage_error);
     if (source_open != FilterEvalError::kNone) {
         if (stage_error.empty()) stage_error = "source residual filter could not open";
         return fail(BlockTransformPipelineError::kFilterOpenFailed,
@@ -588,18 +546,15 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
     std::shared_ptr<arrow::Schema> transform_output_schema;
     int transform_open_rc = 0;
     try {
-        transform_open_rc = config_.transform->Open(
-            transform_input_schema, &transform_output_schema);
+        transform_open_rc = config_.transform->Open(transform_input_schema, &transform_output_schema);
     } catch (const std::exception& ex) {
         return fail(BlockTransformPipelineError::kTransformOpenFailed,
                     std::string("transform Open threw: ") + ex.what());
     } catch (...) {
-        return fail(BlockTransformPipelineError::kTransformOpenFailed,
-                    "transform Open threw an unknown exception");
+        return fail(BlockTransformPipelineError::kTransformOpenFailed, "transform Open threw an unknown exception");
     }
     if (transform_open_rc != 0) {
-        return fail(BlockTransformPipelineError::kTransformOpenFailed,
-                    "transform Open failed: " + transform_error());
+        return fail(BlockTransformPipelineError::kTransformOpenFailed, "transform Open failed: " + transform_error());
     }
     if (config_.opened_callback) config_.opened_callback();
     if (!transform_output_schema) {
@@ -610,16 +565,14 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
     BlockFilterStage output_filter(config_.transform_residual);
     std::shared_ptr<arrow::Schema> consumer_schema;
     stage_error.clear();
-    const auto output_open = output_filter.Open(
-        transform_output_schema, &consumer_schema, &stage_error);
+    const auto output_open = output_filter.Open(transform_output_schema, &consumer_schema, &stage_error);
     if (output_open != FilterEvalError::kNone) {
         if (stage_error.empty()) stage_error = "transform residual filter could not open";
         return fail(BlockTransformPipelineError::kFilterOpenFailed,
                     "transform residual filter Open failed: " + stage_error);
     }
 
-    auto deliver_outputs = [&](const std::vector<BlockTransformOutputV1>& outputs,
-                               std::string* delivery_error) {
+    auto deliver_outputs = [&](const std::vector<BlockTransformOutputV1>& outputs, std::string* delivery_error) {
         for (const auto& output : outputs) {
             if (!output.batch) {
                 *delivery_error = "transform returned a null output batch";
@@ -629,8 +582,8 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         for (const auto& output : outputs) {
             BlockTransformOutputV1 filtered_output;
             std::string filter_error;
-            const auto filter_rc = output_filter.ProcessBlock(
-                output.batch, output.ts_ms, &filtered_output, &filter_error);
+            const auto filter_rc =
+                output_filter.ProcessBlock(output.batch, output.ts_ms, &filtered_output, &filter_error);
             if (filter_rc != FilterEvalError::kNone) {
                 if (filter_error.empty()) filter_error = "transform residual filter failed";
                 *delivery_error = "transform residual filter failed: " + filter_error;
@@ -648,8 +601,7 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
                 return BlockTransformPipelineError::kOutputConsumerFailed;
             }
             if (consumer_rc != 0) {
-                *delivery_error = "output consumer failed with code " +
-                                  std::to_string(consumer_rc);
+                *delivery_error = "output consumer failed with code " + std::to_string(consumer_rc);
                 return BlockTransformPipelineError::kOutputConsumerFailed;
             }
             ++result->output_blocks;
@@ -662,11 +614,10 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
     auto read_monotonic_now = [&](int64_t* now_ns, std::string* clock_error) {
         int64_t value = -1;
         try {
-            value = config_.monotonic_clock_ns
-                        ? config_.monotonic_clock_ns()
-                        : std::chrono::duration_cast<std::chrono::nanoseconds>(
-                              std::chrono::steady_clock::now().time_since_epoch())
-                              .count();
+            value = config_.monotonic_clock_ns ? config_.monotonic_clock_ns()
+                                               : std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                     std::chrono::steady_clock::now().time_since_epoch())
+                                                     .count();
         } catch (const std::exception& ex) {
             *clock_error = std::string("monotonic clock threw: ") + ex.what();
             return false;
@@ -688,11 +639,10 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
     };
     auto read_wall_now = [&](int64_t* now_ns, std::string* clock_error) {
         try {
-            *now_ns = config_.wall_clock_ns
-                          ? config_.wall_clock_ns()
-                          : std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::system_clock::now().time_since_epoch())
-                                .count();
+            *now_ns = config_.wall_clock_ns ? config_.wall_clock_ns()
+                                            : std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                  std::chrono::system_clock::now().time_since_epoch())
+                                                  .count();
             return true;
         } catch (const std::exception& ex) {
             *clock_error = std::string("wall clock threw: ") + ex.what();
@@ -702,8 +652,7 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
             return false;
         }
     };
-    auto get_time_state = [&](BlockTransformTimeDriveStateV1* state,
-                              std::string* state_error) {
+    auto get_time_state = [&](BlockTransformTimeDriveStateV1* state, std::string* state_error) {
         *state = BlockTransformTimeDriveStateV1{};
         state->struct_size = kBlockTransformTimeDriveStateV1Size;
         state->contract_version = kBlockTransformTimeDriveVersionV1;
@@ -738,10 +687,7 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         return true;
     };
 
-    auto service_time = [&](int* poll_timeout_ms,
-                            bool* fired,
-                            bool* time_stopped,
-                            std::string* time_error) {
+    auto service_time = [&](int* poll_timeout_ms, bool* fired, bool* time_stopped, std::string* time_error) {
         *poll_timeout_ms = config_.poll_timeout_ms;
         *fired = false;
         *time_stopped = false;
@@ -758,10 +704,8 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         if (state.armed == 0) return BlockTransformPipelineError::kNone;
         if (state.deadline_ns > monotonic_now_ns) {
             constexpr int64_t kNanosecondsPerMillisecond = 1000 * 1000;
-            const int64_t deadline_wait_ms =
-                (state.deadline_ns - monotonic_now_ns) / kNanosecondsPerMillisecond;
-            *poll_timeout_ms = static_cast<int>(
-                std::min<int64_t>(config_.poll_timeout_ms, deadline_wait_ms));
+            const int64_t deadline_wait_ms = (state.deadline_ns - monotonic_now_ns) / kNanosecondsPerMillisecond;
+            *poll_timeout_ms = static_cast<int>(std::min<int64_t>(config_.poll_timeout_ms, deadline_wait_ms));
             return BlockTransformPipelineError::kNone;
         }
 
@@ -788,9 +732,8 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
                                    : BlockTransformPipelineError::kTransformContractViolation;
         }
 
-        const bool valid_status =
-            time_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
-            time_rc == static_cast<int>(BlockTransformStatusV1::kStop);
+        const bool valid_status = time_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
+                                  time_rc == static_cast<int>(BlockTransformStatusV1::kStop);
         if (!valid_status) {
             if (!outputs.empty()) {
                 *time_error = "transform OnTime failed while returning output batches";
@@ -819,7 +762,12 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
     };
 
     bool stopped = false;
+    auto next_progress_snapshot = std::chrono::steady_clock::now();
     while (true) {
+        if (config_.progress_callback && std::chrono::steady_clock::now() >= next_progress_snapshot) {
+            config_.progress_callback();
+            next_progress_snapshot = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+        }
         if (stopping() && !cancelled()) {
             stopped = true;
             break;
@@ -835,8 +783,7 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         bool time_fired = false;
         bool time_stopped = false;
         std::string time_error;
-        const auto time_rc = service_time(
-            &poll_timeout_ms, &time_fired, &time_stopped, &time_error);
+        const auto time_rc = service_time(&poll_timeout_ms, &time_fired, &time_stopped, &time_error);
         if (time_rc != BlockTransformPipelineError::kNone) {
             return fail(time_rc, std::move(time_error));
         }
@@ -847,17 +794,17 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         if (time_fired) continue;
 
         BlockPollEvent event;
-        std::optional<CaptureProgressV1> capture_fact;
+        std::vector<CaptureProgressV1> capture_facts;
         try {
             if (config_.capture_fact_task) {
                 const auto capture_event = capture_reader->PollCapture(poll_timeout_ms);
-                if (capture_event.struct_size < sizeof(CapturePollEventV1) ||
-                    capture_event.contract_version != kCaptureBlockStreamContractVersionV1) {
+                if (capture_event.struct_size < sizeof(CapturePollEventV2) ||
+                    capture_event.contract_version != kCaptureBlockStreamContractVersionV2) {
                     return fail(BlockTransformPipelineError::kSourcePollFailed,
                                 "capture poll contract version is invalid");
                 }
                 event = capture_event.block;
-                if (capture_event.has_progress) capture_fact = capture_event.progress;
+                capture_facts = capture_event.progress;
             } else {
                 event = config_.source->PollBlock(poll_timeout_ms);
             }
@@ -870,13 +817,14 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         }
 
         if (event.kind == BlockPollEvent::kTimeout) {
-            if (capture_fact) {
-                if (capture_fact->packet_observed) {
+            if (!capture_facts.empty()) {
+                if (std::any_of(capture_facts.begin(), capture_facts.end(),
+                                [](const auto& fact) { return fact.packet_observed; })) {
                     return fail(BlockTransformPipelineError::kSourcePollFailed, "empty capture poll claimed a packet");
                 }
                 int fact_rc = 0;
                 try {
-                    fact_rc = config_.capture_fact_task->AcceptCaptureFact(*capture_fact);
+                    fact_rc = config_.capture_fact_task->AcceptCaptureFacts(capture_facts);
                 } catch (...) {
                     return fail(BlockTransformPipelineError::kTransformFailed, "capture fact delivery threw");
                 }
@@ -887,7 +835,7 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
             }
             continue;
         }
-        if (capture_fact && event.kind != BlockPollEvent::kData) {
+        if (!capture_facts.empty() && event.kind != BlockPollEvent::kData) {
             return fail(BlockTransformPipelineError::kSourcePollFailed,
                         "capture terminal event carried an unexpected progress fact");
         }
@@ -909,31 +857,32 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         }
         if (event.kind == BlockPollEvent::kError) {
             return fail(BlockTransformPipelineError::kSourcePollFailed,
-                        "block source PollBlock failed with code " +
-                            std::to_string(event.err));
+                        "block source PollBlock failed with code " + std::to_string(event.err));
         }
         if (event.kind != BlockPollEvent::kData || !event.batch) {
-            return fail(BlockTransformPipelineError::kSourcePollFailed,
-                        "block source returned an invalid data event");
+            return fail(BlockTransformPipelineError::kSourcePollFailed, "block source returned an invalid data event");
         }
         std::string capture_contract_error;
         if (config_.capture_fact_task) {
-            if (!capture_fact || !capture_fact->packet_observed || event.batch->num_rows() <= 0 ||
-                event.batch->num_columns() == 0) {
+            if (event.batch->num_rows() <= 0 || !event.batch->schema()->Equals(*packet::PacketSchema(), true)) {
                 capture_contract_error = "capture data is missing packet progress";
             } else {
-                auto timestamps = std::dynamic_pointer_cast<arrow::Int64Array>(event.batch->column(0));
-                if (!timestamps || timestamps->null_count() != 0) {
-                    capture_contract_error = "capture packet time column is invalid";
-                } else {
-                    int64_t max_time = timestamps->Value(0);
-                    for (int64_t row = 1; row < timestamps->length(); ++row) {
-                        max_time = std::max(max_time, timestamps->Value(row));
-                    }
-                    if (capture_fact->capture_time_ns > max_time) {
-                        capture_contract_error = "capture fact time exceeds processed packet time";
-                    }
+                const auto timestamps = std::static_pointer_cast<arrow::Int64Array>(event.batch->column(0));
+                const auto sources = std::static_pointer_cast<arrow::UInt32Array>(event.batch->column(4));
+                std::map<uint32_t, int64_t> maxima;
+                for (int64_t row = 0; row < event.batch->num_rows(); ++row) {
+                    auto [it, inserted] = maxima.emplace(sources->Value(row), timestamps->Value(row));
+                    if (!inserted) it->second = std::max(it->second, timestamps->Value(row));
                 }
+                std::set<uint32_t> proven;
+                for (const auto& fact : capture_facts) {
+                    if (!fact.packet_observed) continue;
+                    const auto it = maxima.find(fact.source_id);
+                    if (it == maxima.end() || fact.capture_time_ns > it->second ||
+                        !proven.insert(fact.source_id).second)
+                        capture_contract_error = "capture fact time exceeds processed packet time or source is invalid";
+                }
+                if (proven.size() != maxima.size()) capture_contract_error = "capture data is missing packet progress";
             }
         }
 
@@ -951,40 +900,33 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         } else {
             BlockTransformOutputV1 filtered_input;
             stage_error.clear();
-            const auto filter_rc = source_filter.ProcessBlock(
-                event.batch, 0, &filtered_input, &stage_error);
+            const auto filter_rc = source_filter.ProcessBlock(event.batch, 0, &filtered_input, &stage_error);
             if (filter_rc != FilterEvalError::kNone) {
                 if (stage_error.empty()) stage_error = "source residual filter failed";
                 block_error = BlockTransformPipelineError::kOutputFilterFailed;
                 block_error_message = "source residual filter failed: " + stage_error;
             } else {
                 try {
-                    transform_rc = config_.transform->ProcessBlock(
-                        filtered_input.batch, 0, &outputs);
+                    transform_rc = config_.transform->ProcessBlock(filtered_input.batch, 0, &outputs);
                 } catch (const std::exception& ex) {
-                    block_error = outputs.empty()
-                                      ? BlockTransformPipelineError::kTransformFailed
-                                      : BlockTransformPipelineError::kTransformContractViolation;
-                    block_error_message = std::string("transform ProcessBlock threw: ") +
-                                          ex.what();
+                    block_error = outputs.empty() ? BlockTransformPipelineError::kTransformFailed
+                                                  : BlockTransformPipelineError::kTransformContractViolation;
+                    block_error_message = std::string("transform ProcessBlock threw: ") + ex.what();
                 } catch (...) {
-                    block_error = outputs.empty()
-                                      ? BlockTransformPipelineError::kTransformFailed
-                                      : BlockTransformPipelineError::kTransformContractViolation;
+                    block_error = outputs.empty() ? BlockTransformPipelineError::kTransformFailed
+                                                  : BlockTransformPipelineError::kTransformContractViolation;
                     block_error_message = "transform ProcessBlock threw an unknown exception";
                 }
             }
         }
 
         if (block_error == BlockTransformPipelineError::kNone) {
-            const bool valid_status =
-                transform_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
-                transform_rc == static_cast<int>(BlockTransformStatusV1::kStop);
+            const bool valid_status = transform_rc == static_cast<int>(BlockTransformStatusV1::kContinue) ||
+                                      transform_rc == static_cast<int>(BlockTransformStatusV1::kStop);
             if (!valid_status) {
                 if (!outputs.empty()) {
                     block_error = BlockTransformPipelineError::kTransformContractViolation;
-                    block_error_message =
-                        "transform ProcessBlock failed while returning output batches";
+                    block_error_message = "transform ProcessBlock failed while returning output batches";
                 } else {
                     block_error = BlockTransformPipelineError::kTransformFailed;
                     block_error_message = "transform ProcessBlock failed: " + transform_error();
@@ -1006,8 +948,7 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         }
         if (release_rc != 0) {
             block_error = BlockTransformPipelineError::kSourceReleaseFailed;
-            block_error_message = "block source ReleaseBlock failed with code " +
-                                  std::to_string(release_rc);
+            block_error_message = "block source ReleaseBlock failed with code " + std::to_string(release_rc);
         }
 
         if (block_error == BlockTransformPipelineError::kCancelled) {
@@ -1022,10 +963,10 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         if (!capture_contract_error.empty()) {
             return fail(BlockTransformPipelineError::kSourcePollFailed, std::move(capture_contract_error));
         }
-        if (capture_fact) {
+        if (!capture_facts.empty()) {
             int fact_rc = 0;
             try {
-                fact_rc = config_.capture_fact_task->AcceptCaptureFact(*capture_fact);
+                fact_rc = config_.capture_fact_task->AcceptCaptureFacts(capture_facts);
             } catch (...) {
                 return fail(BlockTransformPipelineError::kTransformFailed, "capture fact delivery threw");
             }
@@ -1052,14 +993,12 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
     try {
         flush_rc = config_.transform->Flush(&flush_outputs);
     } catch (const std::exception& ex) {
-        return fail(flush_outputs.empty()
-                        ? BlockTransformPipelineError::kTransformFailed
-                        : BlockTransformPipelineError::kTransformContractViolation,
+        return fail(flush_outputs.empty() ? BlockTransformPipelineError::kTransformFailed
+                                          : BlockTransformPipelineError::kTransformContractViolation,
                     std::string("transform Flush threw: ") + ex.what());
     } catch (...) {
-        return fail(flush_outputs.empty()
-                        ? BlockTransformPipelineError::kTransformFailed
-                        : BlockTransformPipelineError::kTransformContractViolation,
+        return fail(flush_outputs.empty() ? BlockTransformPipelineError::kTransformFailed
+                                          : BlockTransformPipelineError::kTransformContractViolation,
                     "transform Flush threw an unknown exception");
     }
     if (flush_rc != 0) {
@@ -1067,8 +1006,7 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
             return fail(BlockTransformPipelineError::kTransformContractViolation,
                         "transform Flush failed while returning output batches");
         }
-        return fail(BlockTransformPipelineError::kTransformFailed,
-                    "transform Flush failed: " + transform_error());
+        return fail(BlockTransformPipelineError::kTransformFailed, "transform Flush failed: " + transform_error());
     }
 
     std::string delivery_error;
@@ -1077,8 +1015,7 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(
         return fail(delivery_rc, std::move(delivery_error));
     }
 
-    result->terminal = stopped ? BlockTransformPipelineTerminal::kStopped
-                               : BlockTransformPipelineTerminal::kCompleted;
+    result->terminal = stopped ? BlockTransformPipelineTerminal::kStopped : BlockTransformPipelineTerminal::kCompleted;
     return BlockTransformPipelineError::kNone;
 }
 
