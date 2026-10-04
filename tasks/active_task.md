@@ -1,47 +1,43 @@
 # 即时工作台
 
-事项：依次修复 npm-basic-periodic-stats 检视确认的两个 P2；用户已授权连续执行两个独立切片。
-关联 Feature Task：T1 迟到失败诊断、T4 生产链路回归；规格：[归档](archive/feat-npm-basic-periodic-stats.md)。
-当前 Atomic Slice：公开 task 保留迟到来源、报文时间、封闭边界；已完成，WIP=0。
+事项：按用户要求同步 README 中 npm.basic 当前能力与周期统计用法。
+关联 Feature Task：已归档 npm-basic-periodic-stats 的文档同步，不重新开启实现任务；[契约](archive/feat-npm-basic-periodic-stats.md)。
+当前 Atomic Slice：同步周期模式、Basic Schema、查询及实时边界；已完成，WIP=0。
 
 ## 业务意图
 
-迟到报文触发失败时，公开 task 与 Scheduler SQL 返回可定位的原始诊断，用户能识别来源与时间边界，已交付周期不被修改。
+让 README 读者能配置周期统计，正确区分周期增量、会话累计与终态，并了解当前离线/持续输入的结果交付方式及真实采集可用边界。
 
 ## Non-Goals
 
-- 不修改迟到判定、水位、预算、统计数据、公共接口或错误码。
-- 不重新调整已完成的 observed_at 和 Stop 修复；保留先前改动并回归。
-- 按用户最新指令本地提交本次检视的三项修复；不推送，不纳入独立采集规划与 Backlog，不混入 NPI 生命周期修复。
+- 不修改算子、接口、Schema、测试或已归档规格，不实现采集后端。
+- 不修改独立 Backlog 与 Linux 采集规格，不开始后续 Feature Task；按用户最新指令仅本地提交 README 与工作台，不推送。
+- 不将 Session 性能指标或协议事务描述为 Basic 周期增量，不承诺实时结果推送或真实网卡联验完成。
 
 ## 冻结契约与主链路
 
-- 复用 LastError 的 string 返回与 runtime 已有诊断，无新增公共结构或 ABI。
-- ProcessBlock 失败 → task 终态维持原错误码 → LastError 对通用处理错误返回 runtime 详情 → runner/Scheduler 交付完整信息。
-- task 的配置/前置条件与 Cancel 错误保持原优先级，后续 Process/Flush/Cancel 不替换第一次失败原因。
+- 以当前配置解析器、Arrow Schema、周期统计实现、Scheduler 接线与归档契约交叉核对文档。
+- 来源能力选择模式 → 默认 periodic_snapshot/30 秒 → 安全采集时间封闭周期 → 输出 Basic 周期增量与累计值 → DataFrame 或已有托管关系查询。
+- Basic 固定 32 列 Schema v1；Session 标签版本与协议实体继续使用自身契约。
 
 ## 允许修改文件
 
+- README.md
 - tasks/active_task.md
-- tasks/archive/feat-npm-basic-periodic-stats.md
-- src/operators/npm_basic/npm_basic_operator.cpp
-- src/tests/test_npm_basic/test_npm_basic.cpp
-- src/tests/test_scheduler_e2e/test_scheduler_e2e.cpp
 
-基线已有 P1 和 observed_at 修复；保持原样。另有独立 product_backlog.md 和未跟踪 Linux 采集规格，不触碰。
+基线已有工作台和 product_backlog.md 修改，以及未跟踪的 Linux 采集规格；独立规划保持原样。
+上一工作台快照：/tmp/npm-readme-workbench-before.md；README 快照和独立文件校验基线也保存在 /tmp。
+验证脚本与日志只写入 /tmp。
 
 ## 本轮步骤与验收
 
-先补公开 task 与 Scheduler PCAP SQL 的迟到诊断断言并确认修复前失败；调整通用处理错误的公开诊断选择，完成局部验证后全量回归并补复检证据。
+同步能力概述、默认 SQL、周期配置/字段/时间语义、Basic 版本及查询示例和实时接线边界；检查相对链接、Markdown、源码契约一致性与范围。
+本轮只修改 Markdown；复用已有相关 target 和测试验证文档依据，不新增测试。
 
 ```bash
-cmake --build build --target test_npm_basic test_scheduler_e2e -j8
-ctest --test-dir build -R '^test_(npm_basic|npm_periodic_runtime|scheduler_e2e)$' --output-on-failure
-cmake --build build -j8
-ctest --test-dir build --output-on-failure
-cmake --build /tmp/flowsql-npm-periodic-asan --target test_npm_basic -j8
-ctest --test-dir /tmp/flowsql-npm-periodic-asan -R '^test_npm_periodic_(contract|stats|runtime)$' --output-on-failure
-python3 /tmp/npm-periodic-format.py --check
+python3 /tmp/check-npm-readme.py
+cmake --build build --target test_npm_periodic_contract test_npm_periodic_stats test_npm_basic -j8
+ctest --test-dir build -R '^test_npm_(basic|periodic_contract|periodic_stats|periodic_runtime)$' --output-on-failure
 git diff --check
 git diff --name-only
 git status --short
@@ -49,23 +45,15 @@ git status --short
 
 ## 时间盒与停止条件
 
-- 30 分钟；迟到诊断回归先失败后通过、全量构建/CTest/周期 Sanitizer 与格式和范围检查通过即完成并停止。
-- 不增加其他任务；出现错误沿用当前边界自主修复。
+- 20 分钟；文档核对、相关测试、格式和范围检查通过后更新证据并停止。
+- 不修改 Feature 状态或展开下一切片；若发现其他任务问题，只记录现象与依据。
 
 ## 完成证据
 
-- 先前 P1 已完成：Stop 的 pending 事实按序应用，公开 task 与 Scheduler 的 EOF/Stop 等价及 Cancel 回归通过；对应 CTest 4/4，43.76 秒。详见 /tmp/npm-stop-fix-workbench-evidence.md。
-- 第一个 P2 已完成：公开 task 的生成时间断言修复前失败；收集器两个 final 投影出口使用实际系统时间，覆盖 router 与直接 Drain。
-- 回归：RST、EOF、idle、tuple reuse 验证 Basic 生成时间范围；final 周期列 NULL、first/last 与包/字节计数正确；Basic/Session 共存时 Session 保留原时间参数，配置形式等价比较独立生成时间。
-- 编译 test_npm_basic、test_scheduler_e2e 通过，无 Error/Warning；Basic 与周期 runtime 2/2 通过，1.09 秒；Scheduler E2E 1/1 通过，22.30 秒。
-- 修改区域 clang-format-18 与 git diff --check 通过。
-- 日志：/tmp/npm-p2-time-test-before.log、/tmp/npm-p2-time-build-after.log、/tmp/npm-p2-time-build-final.log、/tmp/npm-p2-time-test-final.log、/tmp/npm-p2-time-scheduler.log。
-
-- 第二个 P2 已完成：公开 task 与 Scheduler SQL 的迟到详情断言修复前均失败；LastError 对通用 runtime 处理错误返回 runtime 详情，其余 task 错误保持原优先级。
-- 公开 task 验证 source=7、timestamp_ns=1、closed_boundary_ns=20000000，后续 Process/Flush/Cancel 保留首次错误；已交付周期前缀不改写、不补终态，协议上下文归还一次。Scheduler 实际 PCAP SQL 验证 source=0 与相同时间/边界穿透到响应。
-- 局部 Basic/周期 runtime/Scheduler CTest 3/3 通过，23.33 秒；全量 cmake --build build -j8 通过，无 Error/Warning。
-- 沙箱外完整 CTest 43/43 通过，74.89 秒，包含先前 Stop 回归及四后端读写、Framework、Scheduler、其他模块。
-- 周期 ASan/UBSan/LeakSanitizer 3/3 通过，0.39 秒；重新构建 test_npm_basic 后执行，包含新生成时间、迟到诊断和 Stop 回归。沙箱内首次受 ptrace 限制，沙箱外重跑通过，未关闭泄漏检查。
-- 修改区域 clang-format-18 与 git diff --check 通过；允许范围核查通过，独立 Backlog/采集规划保持原样。
-- 日志：/tmp/npm-p2-diagnostic-test-before.log、/tmp/npm-p2-diagnostic-test-after.log、/tmp/npm-p2-full-build.log、/tmp/npm-p2-full-ctest.log、/tmp/npm-p2-asan-build.log、/tmp/npm-p2-asan-test.log。
-- 两个 P2 连续授权范围已完成并停止；本次检视确认的三项问题均已修复并回归，按用户最新指令本地提交，不推送。
+- README 已同步默认 periodic_snapshot/30 秒、15/30/60 秒及 JSON 配置、事件时间边界、增量/累计/终态语义、固定 32 列 Basic Schema v1 和 history/latest/final 查询；补全模块结果概览及实时接线/真实采集边界。
+- 运行中查询明确使用 Scheduler `/scheduler/batch/status` 的 managed_result，不将 Web 任务详情描述为提供该字段。
+- 文档核对通过：源码默认值与范围、Basic 32 列/周期 8 列、6 个 JSON 示例、单 INTO、相对链接、Markdown、旧说明清理和 Scheduler 状态响应契约。
+- 三个相关 target 构建成功，无 Error/Warning；Basic、periodic_runtime、periodic_contract、periodic_stats 的 CTest 4/4 通过，共 2.05 秒。
+- git diff --check 无诊断；本轮修改仅 README.md 与工作台。独立 Backlog 和未跟踪 Linux 采集规格的 SHA-256 与本轮基线一致。
+- 文档同步仅修改 Markdown，未新增测试、运行全量回归或真实采集，未开始下一切片。
+- 2026-10-04 用户授权提交：重新核对 README 与工作台差异、文档契约、独立文件校验和空白；提交范围仅 README.md 与 tasks/active_task.md，保留 Backlog 与采集规格，不推送。复用文档同步阶段已通过的 4/4 CTest，不重复运行。

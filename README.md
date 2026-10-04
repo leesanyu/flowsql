@@ -17,7 +17,7 @@ FlowSQL 是一个全栈式实时数据处理与分析平台，通过扩展的 SQ
 - **SQL 驱动**：扩展 SQL 语法统一数据采集、分析、探索操作
 - **流批双模式统一**：Batch 与 Stream 均采用 SQL 驱动、统一任务管理与统一插件体系
 - **三类算子统一管理**：内置算子（builtin）+ Python 算子 + C++ 插件算子统一走 `/api/operators/*`
-- **离线网络分析**：PCAP/PCAPNG 文件通道、阶段过滤，以及 `npm.basic` 的 Basic/Session 会话分析与可选流量标签
+- **网络会话与协议分析**：PCAP/PCAPNG 文件通道、阶段过滤，以及 `npm.basic` 的 Basic 周期统计、Session 性能分析、DNS/HTTP/1/TLS/ICMP 分析与可选流量标签
 - **NPM 结果存储与查询**：SQLite、MySQL、PostgreSQL、ClickHouse 托管多实体结果，按运行实例查询历史、最新快照和终态
 - **配置资源版本化**：JSON/YAML/XML 配置通道持久化，消费者通过精确 revision 冻结任务配置
 - **在线基线检测**：Baseline 插件通过 `IBaselineService` 提供 `Optional Bootstrap`、在线 rolling、基线 band、maturity / score trust 和 Relation fusion 能力
@@ -530,10 +530,11 @@ INTO dataframe.dns_pair
 pcapfile 过滤只做链路层/网络层/传输层 Layer 解码，不执行应用协议识别；不支持 payload 内容、正则、BPF/
 tcpdump 语法，也不代表 TCP stream、重组、会话或客户端/服务端方向分析。
 
-### npm.basic 离线会话分析
+### npm.basic 网络会话与协议分析
 
 `npm.basic` 消费固定 Packet RecordBatch，对端点完整的 TCP/UDP 进行双向会话归属、基础计数和有限 payload
-采样识别；可同时启用 Basic 基础结果与 Session 性能结果，复用一次解码、会话化和协议识别。
+采样识别；Basic 默认每 30 秒输出会话的双向包数/字节增量及累计总量，支持离线 PCAP 与持续采集共用统计语义。
+可同时启用 Basic 基础结果与 Session 性能结果，复用一次解码、会话化和协议识别。
 Session 提供当前捕获点可观察的速率、TCP RTT/重传等指标，以状态和 nullable 值表达证据不足；结果不保留
 `raw_data`。任务内部已提供按主标签准入的共享有界 TCP 字节流，供 DNS 等协议模块复用；生产目录支持
 Basic、Session、DNS、HTTP/1、TLS、ICMP 结果模块。不能区分隧道上下文的封装流量会明确报错。
@@ -549,7 +550,8 @@ Scheduler EAL option、Config Channel 精确快照、`labeling_memory_mib` 连�
 NPI 的 JSON option 必须包含指向可读协议词典的 `ldfile`，例如原生运行目录中的
 `{"ldfile":"./config/protocols.yml"}`，Docker 中为 `/opt/flowsql/config/protocols.yml`。
 
-对已经创建或上传的离线通道执行，默认生成 Basic 结果：
+对已经创建或上传的离线通道执行，默认生成 Basic 的 30 秒周期记录，并在正常 EOF 输出会话终态。
+执行结束后，DataFrame 保存本次运行的全部周期记录：
 
 ```sql
 SELECT *
@@ -584,6 +586,76 @@ INTO dataframe.session_metrics
 共享参数使用 `parameters.core`，例如 `parameters='{"schema_version":1,"core":{"max_active_sessions":100000}}'`。
 使用 `parameters` 时，不能同时提供旧的顶层调优参数（如 `run_mode`、`max_active_sessions`），
 但 `features`、`observing`、`input_namespace`、`source_domains` 可照常使用。
+
+#### Basic 周期统计
+
+`periodic_snapshot` 是 `result_mode` 的取值。周期配置可直接写在顶层 `WITH`，或放入
+`parameters.core`；两种配置形式不能混用共享调优参数。
+
+| 参数 | 默认行为 | 含义 |
+| --- | --- | --- |
+| `result_mode` | `'periodic_snapshot'` | 输出周期增量与截至该周期的会话累计值；显式 `'final'` 只导出会话终态。 |
+| `output_interval_ns` | `30000000000`（30 秒） | 周期宽度，单位纳秒，范围为 10 ms～1 h；任务打开时冻结。 |
+| `run_mode` | 按来源能力选择 | 有限非采集源使用 `'offline'`，持续采集源使用 `'realtime'`；显式配置与来源能力冲突时失败。 |
+
+例如，按 15 秒统计离线流量；30 秒、60 秒分别使用 `30000000000`、`60000000000`：
+
+```sql
+SELECT *
+FROM pcapfile.capture
+USING npm.basic
+WITH result_mode='periodic_snapshot',
+     output_interval_ns=15000000000
+INTO dataframe.flow_timeline
+```
+
+相同配置也可写成 JSON，便于与模块私有参数一起提供：
+
+```sql
+SELECT *
+FROM pcapfile.capture
+USING npm.basic
+WITH parameters='{"schema_version":1,"core":{"result_mode":"periodic_snapshot","output_interval_ns":15000000000}}'
+INTO dataframe.flow_timeline
+```
+
+周期按报文的 Unix epoch 纳秒采集时间划分，为 UTC epoch 对齐的非重叠区间 `[k * P, (k + 1) * P)`；
+恰好落在右边界的包进入下一周期。PCAP 的 fast/timestamp 回放速度和批次大小不改变周期归属，
+无需按墙钟慢速回放。安全时间水位确认跨过右边界后才封闭周期；实时源积压、未知进度或下游背压可能延后交付。
+普通 Poll timeout 或定时器唤醒不会单独证明周期完整。落入已封闭周期的迟到包会使任务失败，
+诊断包含来源、报文时间和封闭边界，已交付结果不会被回写。
+
+同一会话跨周期保持 `session_id`、方向、识别与模块状态，每条输出递增 `revision`。
+会话从首包所在周期到结束前的已确认完整周期均有记录，无包周期的增量为 0；空输入不产生会话行。
+周期结束不会结束会话，也不会重置 Session 性能跟踪或 DNS/HTTP/1/TLS/ICMP 的事务生命周期。
+
+| Basic 字段 | 统计含义 |
+| --- | --- |
+| `period_start_ns`、`period_end_ns` | 该记录所属周期的名义左右边界；按此范围解释统计时间。 |
+| `period_complete` | 是否已确认覆盖到周期右边界；提前结束的尾部周期为 `false`。 |
+| `interval_packets_ab`、`interval_packets_ba` | 本条新交付的双向包数增量。 |
+| `interval_wire_bytes_ab`、`interval_wire_bytes_ba`、`interval_wire_bytes_total` | 本条新交付的双向字节增量及合计；合计等于两个方向之和，可跨非重叠周期相加。 |
+| `packets_ab`、`packets_ba`、`wire_bytes_ab`、`wire_bytes_ba`、`wire_bytes_total` | 截至本条统计边界的会话累计值；总字节数等于两个方向之和，不能跨 revision 求和。 |
+| `observed_at` | 结果实际生成时刻，不能代替周期边界。 |
+| `is_final`、`end_reason` | 会话是否终结及终结原因；与周期是否完整分别判断。 |
+
+字节数使用报文的 `wire_len`，单位 byte；捕获截断不会改用 `captured_len`，重传报文仍计入捕获点观察到的流量。
+正常关闭、idle timeout、tuple reuse 或 EOF/Stop 会排空剩余周期并输出一次终态。尾部不足一个周期时保留
+名义 `period_end_ns`，以 `period_complete=false` 标记；没有未交付增量时仍输出零增量终态标记，
+可沿用上一周期范围。对同一运行/会话，全部 interval 计数之和等于最终累计值。
+
+需要仅导出整会话终态时，显式选择 `final`：
+
+```sql
+SELECT *
+FROM pcapfile.capture
+USING npm.basic
+WITH result_mode='final'
+INTO dataframe.flow_final
+```
+
+此时 Basic 仍使用相同 Schema，八个周期字段均为 NULL，`wire_bytes_total` 等累计字段有效。
+完整时间与统计契约见 [NPM TCP/UDP 会话周期统计](tasks/archive/feat-npm-basic-periodic-stats.md)。
 
 #### DNS 事务分析
 
@@ -763,23 +835,30 @@ INTO mysql.flowsql-mysql
 
 #### 结果、过滤与运行边界
 
-默认离线模式 `run_mode='offline'`、最终结果模式 `result_mode='final'`；共享配置和模块配置详见
-[NPM 参数契约](tasks/archive/feat-npm-basic-parameters.md)。
+PCAP 默认使用 `run_mode='offline'`；两类来源均默认使用 `result_mode='periodic_snapshot'`。
+共享配置和模块配置见 [NPM 参数契约](tasks/archive/feat-npm-basic-parameters.md)，当前默认值与 Basic
+数据形状见上述周期统计说明及其[契约](tasks/archive/feat-npm-basic-periodic-stats.md)。
 
-| 结果实体 | 无标签 Schema v1 | 启用 labeling 的 Schema v2 |
+| 结果实体 | Schema | 标签对数据形状的影响 |
 | --- | --- | --- |
-| `basic` / `npm_basic_result` | 22 列，含会话身份、双向计数、协议识别与终结信息 | 增加 `primary_label_id`，共 23 列 |
-| `session` / `npm_session_result` | 49 列，含会话身份、速率与 TCP/UDP 性能指标 | 增加 `primary_label_id`，共 50 列 |
-| `dns_transaction` | 固定 Schema v1，含查询、响应、时长与不完整原因 | 与左列相同；准入标签不新增结果列 |
+| `basic` / `npm_basic_result` | 固定 Schema v1，32 列，含会话身份、周期增量、累计总量、协议识别与终结信息 | 固定包含 nullable `primary_label_id`；标签开关不改变 Schema |
+| `session` / `npm_session_result` | 无标签为 Schema v1、49 列，含会话身份、速率与 TCP/UDP 性能指标 | 启用 labeling 后增加 `primary_label_id`，使用 Schema v2、50 列 |
+| `dns_transaction` | 固定 Schema v1，含查询、响应、时长与不完整原因 | 准入标签不新增结果列 |
+| `http1_transaction` | 固定 Schema v1，22 列，含请求/响应头与配对结果 | 准入标签不新增结果列 |
+| `tls_handshake` | 固定 Schema v1，25 列，含初始握手可见事实 | 准入标签不新增结果列 |
+| `icmp_event` | 固定 Schema v1，28 列，含回显关联与差错消息 | 无须启用 labeling |
 
-结果包含 `session_id`、`observation_domain_id`、`revision`、`observed_at`、`is_final` 等字段。
-Basic/Session metadata 中的 `flowsql.schema_version` 随是否包含主标签列区分为 1 或 2；时间戳使用 Unix epoch 纳秒，
-持续时间与 RTT 等时长使用纳秒。最终行不再是 `pending`；`unknown` 的协议 ID/名称为空。
-`session_id` 在任务内唯一，托管结果使用 `__npm_run_id` 区分运行；同一运行/会话的多个 revision 为累计快照，
-不能直接求和。性能指标的解释与边界见 [Session 分析契约](tasks/archive/feat-npm-session-analysis.md)。
+Basic/Session 包含 `session_id`、`observation_domain_id`、`revision`、`observed_at`、`is_final` 等字段。
+Basic 的 `flowsql.schema_version` 恒为 1；`primary_label_id` 未启用 labeling 时为 NULL，启用但未命中时为 0，
+命中时为对应非零标签 ID。Session 继续按标签开关使用版本 1 或 2。
+时间戳使用 Unix epoch 纳秒，持续时间与 RTT 等时长使用纳秒。最终行不再是 `pending`；
+`unknown` 的协议 ID/名称为空。
+`session_id` 在任务内唯一，托管结果使用 `__npm_run_id` 区分运行。Basic 的 interval 列可按周期相加，
+累计列与 Session 累计性能指标不能跨 revision 直接求和。
+性能指标的解释与边界见 [Session 分析契约](tasks/archive/feat-npm-session-analysis.md)。
 
 离线正常 EOF 立即结束剩余会话并排空结果，不等待 idle timeout。最终 `end_reason` 明确区分 `closed`、
-`idle_timeout`、`tuple_reuse` 和 `eof`；`eof` 不代表 TCP 正常关闭。取消或读取错误只异常清理，不输出伪装
+`idle_timeout`、`tuple_reuse` 和 `eof`；`eof` 不代表 TCP 正常关闭。取消、读取或消费者错误只异常清理，不输出伪装
 完整的正常 EOF 结果。普通 DataFrame 输出可在 `USING npm.basic ... WITH ...` 后使用结果阶段过滤，
 例如 `WHERE protocol = 'HTTP'`；放在 `USING` 前的 source-stage 过滤会改变所有模块的输入与统计。
 
@@ -810,6 +889,20 @@ INTO mysql.flowsql-mysql
 | `npm_<entity>_latest_v<version>` | 每个运行、每个实体实例的最大 revision |
 | `npm_<entity>_final_v<version>` | `is_final=true` 的终态结果 |
 
+Basic 的关系名固定为 `npm_basic_history_v1`、`npm_basic_latest_v1` 和 `npm_basic_final_v1`，
+不随标签开关变化。查看每个周期的时序应读取 history，例如：
+
+```sql
+SELECT *
+FROM mysql.flowsql-mysql.npm_basic_history_v1
+WHERE __npm_run_id='替换为本次响应中的run_id'
+INTO dataframe.basic_timeline
+```
+
+按 `session_id`、`period_start_ns` 和 `revision` 解释这些记录。history 保留全部周期行和终态标记；
+latest 只保留每个会话最大 revision 的累计状态；final 只保留会话终态，其 interval 列是最后未交付的
+部分或零，整会话总量应读取累计列。查看流量趋势时不能只读取 latest 或 final。
+
 例如，用本次响应中的 `run_id` 读取无标签 Session 的最新结果：
 
 ```sql
@@ -819,7 +912,7 @@ WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.session_latest
 ```
 
-- 使用响应返回的关系名；含标签列的 Basic/Session 使用 `_v2`。`latest` 按每个运行分别取最新 revision，
+- 使用响应返回的关系名；Basic 固定使用 `_v1`，含标签列的 Session 使用 `_v2`。`latest` 按每个运行分别取最新 revision，
   因此需要用 `__npm_run_id` 选择本次运行。
 - 三种关系都包含 `__npm_run_id`、`__npm_task_id`、`__npm_run_status`。失败前已提交的数据可能保留为
   `incomplete`，可据此排查；`metadata_status='unknown'` 表示运行状态落库结果无法确认。
@@ -849,9 +942,15 @@ INTO mysql.flowsql-mysql
 
 #### 生产实时边界
 
-框架时间驱动 `stream-time-drive` 与 NPM 协议模块运行时已经交付；生产 NPM 实时 SQL 仍待
-`npm-capture-contract` 和 `npm-basic-realtime-integration` 接入真实采集事实。当前可用的是离线 SQL，
-任务内周期维护和模块时间契约已通过模拟测试。
+采集 reader 契约、框架时间驱动与 `npm.basic` 的生产实时接线已经交付。PCAP 和假采集 reader 的 SQL 联验
+覆盖共用周期统计、安全水位、空闲/积压、背压以及 EOF/Stop/Cancel；真实网卡后端与联验仍待
+[Linux 采集后端规划](tasks/product_backlog.md)实施。
+
+持续采集任务使用已有异步 Batch 入口（`POST /api/tasks/batch/execute`，`mode='async'`）和单个
+两段式托管数据库目标，例如 `INTO sqlite.npm`；数据库通道需预先创建。无 INTO 或 DataFrame 目标会在
+启动前被拒绝。运行期间，使用提交响应的 `runtime_task_id` 查询 Scheduler 的
+`POST /scheduler/batch/status`，可从 `managed_result` 取得 `run_id` 和结果关系名，再查询已写入的 history。
+普通同步查询不会持续推送周期结果。正常 Stop 排空最后批次与终态，Cancel 只保留已交付前缀并异常回收。
 
 #### 基础引擎性能基线
 
