@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "task_plugin.h"
 
@@ -580,11 +575,11 @@ std::string TaskPlugin::MakeNowTaskId(uint64_t seq) {
     return std::string("tsk_") + ts + "_" + std::to_string(seq);
 }
 
-int32_t TaskPlugin::ClassifySqlTaskKindViaScheduler(const std::string& sql,
-                                                    std::string* task_kind_out,
-                                                    std::string* err_rsp) {
+int32_t TaskPlugin::ClassifySqlTaskKindViaScheduler(const std::string& sql, std::string* task_kind_out,
+                                                    std::string* err_rsp, bool* requires_async) {
     if (task_kind_out) task_kind_out->clear();
     if (err_rsp) err_rsp->clear();
+    if (requires_async) *requires_async = false;
     if (sql.empty()) {
         if (err_rsp) *err_rsp = BuildErrorJson("invalid request, sql must not be empty");
         return error::BAD_REQUEST;
@@ -619,6 +614,13 @@ int32_t TaskPlugin::ClassifySqlTaskKindViaScheduler(const std::string& sql,
         return error::INTERNAL_ERROR;
     }
     if (task_kind_out) *task_kind_out = task_kind;
+    if (classify_doc.HasMember("requires_async")) {
+        if (!classify_doc["requires_async"].IsBool()) {
+            if (err_rsp) *err_rsp = BuildErrorJson("invalid scheduler classify requires_async");
+            return error::INTERNAL_ERROR;
+        }
+        if (requires_async) *requires_async = classify_doc["requires_async"].GetBool();
+    }
     return error::OK;
 }
 
@@ -1046,11 +1048,14 @@ int32_t TaskPlugin::HandleBatchExecute(const std::string&, const std::string& re
         return error::BAD_REQUEST;
     }
 
+    size_t async_sql_index = sqls.size();
     for (size_t i = 0; i < sqls.size(); ++i) {
         const auto& sql = sqls[i];
         std::string task_kind;
         std::string classify_err_rsp;
-        const int32_t classify_rc = ClassifySqlTaskKindViaScheduler(sql, &task_kind, &classify_err_rsp);
+        bool requires_async = false;
+        const int32_t classify_rc =
+            ClassifySqlTaskKindViaScheduler(sql, &task_kind, &classify_err_rsp, &requires_async);
         if (classify_rc != error::OK) {
             rsp = classify_err_rsp.empty() ? BuildErrorJson("sql classify failed") : classify_err_rsp;
             return classify_rc;
@@ -1062,6 +1067,7 @@ int32_t TaskPlugin::HandleBatchExecute(const std::string&, const std::string& re
                 i);
             return error::BAD_REQUEST;
         }
+        if (requires_async && async_sql_index == sqls.size()) async_sql_index = i;
     }
 
     std::string mode = "async";
@@ -1080,6 +1086,11 @@ int32_t TaskPlugin::HandleBatchExecute(const std::string&, const std::string& re
         }
     }
     const bool sync = (mode == "sync");
+    if (sync && async_sql_index < sqls.size()) {
+        rsp = BuildErrorWithCodeAndSqlIndexJson("连续采集任务不支持同步执行，请使用 mode='async'。",
+                                                "ASYNC_EXECUTION_REQUIRED", async_sql_index);
+        return error::BAD_REQUEST;
+    }
     int timeout_s = 0;
     if (d.HasMember("timeout_s")) {
         if (!d["timeout_s"].IsInt()) {
@@ -1242,7 +1253,9 @@ int32_t TaskPlugin::HandleSqlClassify(const std::string&, const std::string& req
 
     std::string task_kind;
     std::string classify_err_rsp;
-    const int32_t rc = ClassifySqlTaskKindViaScheduler(d["sql"].GetString(), &task_kind, &classify_err_rsp);
+    bool requires_async = false;
+    const int32_t rc =
+        ClassifySqlTaskKindViaScheduler(d["sql"].GetString(), &task_kind, &classify_err_rsp, &requires_async);
     if (rc != error::OK) {
         rsp = classify_err_rsp.empty() ? BuildErrorJson("scheduler sql classify failed") : classify_err_rsp;
         return rc;
@@ -1253,6 +1266,8 @@ int32_t TaskPlugin::HandleSqlClassify(const std::string&, const std::string& req
     w.StartObject();
     w.Key("task_kind");
     w.String(task_kind.c_str());
+    w.Key("requires_async");
+    w.Bool(requires_async);
     w.EndObject();
     rsp = out.GetString();
     return error::OK;
@@ -1280,10 +1295,13 @@ int32_t TaskPlugin::HandleSqlAnalyze(const std::string&, const std::string& req,
 
     std::vector<std::string> statement_kinds;
     statement_kinds.reserve(sqls.size());
+    bool requires_async = false;
     for (size_t i = 0; i < sqls.size(); ++i) {
         std::string task_kind;
         std::string classify_err_rsp;
-        const int32_t classify_rc = ClassifySqlTaskKindViaScheduler(sqls[i], &task_kind, &classify_err_rsp);
+        bool statement_requires_async = false;
+        const int32_t classify_rc =
+            ClassifySqlTaskKindViaScheduler(sqls[i], &task_kind, &classify_err_rsp, &statement_requires_async);
         if (classify_rc != error::OK) {
             std::string err_text = "sql classify failed";
             std::string err_code = ToErrorCode(ErrorCodeId::kSqlAnalyzeClassifyFailed);
@@ -1305,6 +1323,7 @@ int32_t TaskPlugin::HandleSqlAnalyze(const std::string&, const std::string& req,
             rsp = BuildErrorWithCodeAndSqlIndexJson(err_text, err_code, i);
             return classify_rc;
         }
+        requires_async = requires_async || statement_requires_async;
         statement_kinds.push_back(std::move(task_kind));
     }
 
@@ -1338,6 +1357,8 @@ int32_t TaskPlugin::HandleSqlAnalyze(const std::string&, const std::string& req,
     w.EndArray();
     w.Key("task_kind");
     w.String(task_kind.c_str());
+    w.Key("requires_async");
+    w.Bool(requires_async);
     w.EndObject();
     rsp = out.GetString();
     return error::OK;

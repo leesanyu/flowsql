@@ -26,6 +26,7 @@
               type="success"
               @click="openPcapUploadDialog"
             >上传 PCAP</el-button>
+            <el-button v-if="activeChannelType === 'stream'" type="primary" @click="openAddNetAdapterDialog">新增网卡采集通道</el-button>
             <el-button v-if="activeChannelType === 'stream'" type="primary" @click="openAddStreamDialog">新增 Stream 通道</el-button>
           </div>
         </div>
@@ -142,24 +143,26 @@
                 <el-tag v-if="scope.row.in_use" style="margin-left:8px" type="warning" size="small">in_use</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="300">
+            <el-table-column label="操作" width="340">
               <template #default="scope">
+                <el-button type="info" size="small" text @click="viewStreamConfig(scope.row)">配置</el-button>
                 <el-button
                   v-if="scope.row.type !== 'pcapfile'"
                   type="primary"
                   size="small"
                   text
+                  :disabled="scope.row.in_use"
                   @click="openEditStreamDialog(scope.row)"
                 >编辑</el-button>
                 <el-button
-                  v-if="scope.row.type !== 'pcapfile'"
+                  v-if="scope.row.type !== 'pcapfile' && scope.row.supports_reset"
                   type="warning"
                   size="small"
                   text
                   :disabled="scope.row.in_use"
                   @click="resetStream(scope.row)"
                 >重置</el-button>
-                <el-button type="danger" size="small" text @click="removeStream(scope.row)">删除</el-button>
+                <el-button type="danger" size="small" text :disabled="scope.row.in_use" @click="removeStream(scope.row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -327,12 +330,20 @@
       </template>
     </el-dialog>
 
+    <el-dialog v-model="showStreamConfig" title="通道配置" width="620px">
+      <el-descriptions :column="1" border>
+        <el-descriptions-item v-for="field in streamConfigFields" :key="field.key" :label="field.label">
+          {{ field.value }}
+        </el-descriptions-item>
+      </el-descriptions>
+    </el-dialog>
+
     <el-dialog v-model="showStreamDialog" :title="streamDialogTitle" width="620px" @close="resetStreamForm">
       <el-form :model="streamForm" label-width="120px">
-        <el-form-item label="通道类型" required>
-          <el-select v-model="streamForm.type" placeholder="请选择类型" style="width:100%" @change="onStreamTypeChange">
+        <el-form-item v-if="streamForm.type !== 'netadapter'" label="通道类型" required>
+          <el-select v-model="streamForm.type" :disabled="streamDialogMode === 'edit'" placeholder="请选择类型" style="width:100%" @change="onStreamTypeChange">
             <el-option
-              v-for="def in streamDefinitions"
+              v-for="def in creatableStreamDefinitions"
               :key="def.channel_type"
               :label="def.display_name || def.channel_type"
               :value="def.channel_type"
@@ -343,7 +354,7 @@
           <el-input v-model="streamForm.name" placeholder="例如 npm_hub" :disabled="streamDialogMode === 'edit'" />
         </el-form-item>
         <el-form-item label="角色" required>
-          <el-select v-model="streamForm.role" style="width:100%">
+          <el-select v-model="streamForm.role" :disabled="currentStreamRoles.length === 1" style="width:100%">
             <el-option
               v-for="role in currentStreamRoles"
               :key="role"
@@ -356,7 +367,7 @@
         <el-form-item
           v-for="field in currentStreamSchema"
           :key="field.key"
-          :label="field.key"
+          :label="field.desc || field.key"
           :required="!!field.required"
         >
           <el-select
@@ -374,6 +385,7 @@
           <el-input-number
             v-else-if="field.type === 'int'"
             v-model="streamForm.options[field.key]"
+            :precision="0"
             :min="field.has_range ? field.min_value : undefined"
             :max="field.has_range && field.max_value > 0 ? field.max_value : undefined"
             style="width:100%"
@@ -489,6 +501,7 @@ import api, {
 } from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ConfigChannels from './ConfigChannels.vue'
+import { normalizeStreamOptions as buildStreamOptions } from '../utils/streamChannel.js'
 
 const searchText = ref('')
 const activeChannelType = ref('dataframe')
@@ -509,6 +522,8 @@ const showStreamDialog = ref(false)
 const streamDialogMode = ref('add')
 const streamSubmitting = ref(false)
 const streamArrayInputs = ref({})
+const showStreamConfig = ref(false)
+const streamConfigFields = ref([])
 const showPcapUploadDialog = ref(false)
 const pcapSubmitting = ref(false)
 const pcapInput = ref(null)
@@ -522,9 +537,12 @@ const streamForm = ref({
   options: {}
 })
 
-const streamDialogTitle = computed(() =>
-  streamDialogMode.value === 'edit' ? '编辑 Stream 通道' : '新增 Stream 通道'
-)
+const streamDialogTitle = computed(() => {
+  if (streamForm.value.type === 'netadapter') {
+    return streamDialogMode.value === 'edit' ? '编辑网卡采集通道' : '新增网卡采集通道'
+  }
+  return streamDialogMode.value === 'edit' ? '编辑 Stream 通道' : '新增 Stream 通道'
+})
 
 const form = ref({
   type: 'mysql', name: '', host: '127.0.0.1', port: '',
@@ -563,6 +581,10 @@ const sectionTitle = computed(() => {
   if (activeChannelType.value === 'config') return '配置通道'
   return 'Stream 通道'
 })
+
+const creatableStreamDefinitions = computed(() =>
+  streamDefinitions.value.filter(def => def.channel_type !== 'netadapter')
+)
 
 const currentStreamDefinition = computed(() =>
   streamDefinitions.value.find(d => d.channel_type === streamForm.value.type) || null
@@ -649,6 +671,7 @@ const loadStreamChannels = async () => {
       role: ch.type === 'pcapfile' ? 'source' : (ch.role || 'both'),
       status: ch.status || 'unknown',
       in_use: !!ch.in_use,
+      supports_reset: ch.supports_reset !== false,
       size: Number(ch.size || 0),
       capacity: Number(ch.capacity || 0),
       is_finite: !!ch.is_finite,
@@ -823,11 +846,25 @@ const openAddStreamDialog = async () => {
     await loadStreamDefinitions()
   }
   streamForm.value = {
-    type: streamDefinitions.value[0]?.channel_type || '',
+    type: creatableStreamDefinitions.value[0]?.channel_type || '',
     name: '',
     role: 'both',
     options: {}
   }
+  applyStreamSchemaDefaults()
+  showStreamDialog.value = true
+}
+
+const openAddNetAdapterDialog = async () => {
+  if (streamDefinitions.value.length === 0) {
+    await loadStreamDefinitions()
+  }
+  if (!streamDefinitions.value.some(def => def.channel_type === 'netadapter')) {
+    ElMessage.error('当前服务未提供网卡采集通道，请检查采集服务配置')
+    return
+  }
+  streamDialogMode.value = 'add'
+  streamForm.value = { type: 'netadapter', name: '', role: 'source', options: {} }
   applyStreamSchemaDefaults()
   showStreamDialog.value = true
 }
@@ -899,6 +936,7 @@ const submitPcapUpload = async () => {
 }
 
 const openEditStreamDialog = async (row) => {
+  if (row.in_use) { ElMessage.warning('通道正在使用，请先停止采集任务'); return }
   streamDialogMode.value = 'edit'
   if (streamDefinitions.value.length === 0) {
     await loadStreamDefinitions()
@@ -927,25 +965,22 @@ const openEditStreamDialog = async (row) => {
   showStreamDialog.value = true
 }
 
-const normalizeStreamOptions = () => {
-  const out = {}
-  currentStreamSchema.value.forEach((field) => {
-    let val = streamForm.value.options[field.key]
-    if (field.type === 'array') {
-      const text = streamArrayInputs.value[field.key] || ''
-      val = text.split(',').map(v => v.trim()).filter(Boolean)
-    } else if (field.type === 'int') {
-      val = Number(val)
-      if (!Number.isFinite(val)) val = Number(field.default_value || 0)
-    } else if (field.type === 'bool') {
-      val = !!val
-    }
-    if (field.required && (val === '' || val === null || val === undefined || (Array.isArray(val) && val.length === 0))) {
-      throw new Error(`参数 ${field.key} 为必填`)
-    }
-    out[field.key] = val
-  })
-  return out
+const normalizeStreamOptions = () =>
+  buildStreamOptions(currentStreamSchema.value, streamForm.value.options, streamArrayInputs.value)
+
+const viewStreamConfig = (row) => {
+  const definition = streamDefinitions.value.find(item => item.channel_type === row.type)
+  const fields = definition?.option_schema || Object.keys(row.option_json || {}).map(key => ({ key }))
+  streamConfigFields.value = [
+    { key: 'name', label: '通道名称', value: `${row.type}.${row.name}` },
+    { key: 'role', label: '角色', value: row.role },
+    ...fields.map(field => {
+      const value = row.option_json?.[field.key]
+      return { key: field.key, label: field.desc || field.key,
+        value: Array.isArray(value) ? value.join('、') : typeof value === 'boolean' ? (value ? '是' : '否') : value }
+    })
+  ]
+  showStreamConfig.value = true
 }
 
 const submitStreamForm = async () => {
@@ -983,6 +1018,7 @@ const submitStreamForm = async () => {
 }
 
 const removeStream = async (row) => {
+  if (row.in_use) { ElMessage.warning('通道正在使用，请先停止采集任务'); return }
   try {
     await ElMessageBox.confirm(`确认删除 Stream 通道 ${row.type}.${row.name}？`, '删除确认', { type: 'warning' })
     await api.removeStreamChannel(row.type, row.name)

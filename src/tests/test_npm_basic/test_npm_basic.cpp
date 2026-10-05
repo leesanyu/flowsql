@@ -6337,6 +6337,15 @@ void TestNpmBasicTaskConfigInputDefaults() {
     assert(npm::ParseNpmBasicTaskConfig("{}", &config, false, npm::ProductionNpmModuleCatalogV1(), "pcapfile.http")
                .error == npm::NpmBasicTaskConfigError::kNone);
     assert(config.domains.input_namespace == "pcapfile.http");
+    for (const char* json :
+         {R"({"features":"basic,session,dns,http1,tls,icmp"})",
+          R"({"features":"basic,session,dns,http1,tls,icmp","parameters":"{\"schema_version\":1}"})"}) {
+        assert(
+            npm::ParseNpmBasicTaskConfig(json, &config, false, npm::ProductionNpmModuleCatalogV1(), "netadapter.eth0")
+                .error == npm::NpmBasicTaskConfigError::kNone);
+        assert(config.domains.input_namespace == "netadapter.eth0");
+        assert(config.domains.source_id_as_domain && config.domains.bindings.empty());
+    }
     assert(npm::ParseNpmBasicTaskConfig(R"({"input_namespace":"custom"})", &config, false,
                                         npm::ProductionNpmModuleCatalogV1(), "pcapfile.http")
                .error == npm::NpmBasicTaskConfigError::kNone);
@@ -9933,6 +9942,16 @@ void TestNpmBasicTaskReportsConfigurationFailurePaths() {
                    R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
                    R"JSON("run_mode":"offline","parameters":"{\"schema_version\":1}"})JSON",
                    {"configuration source conflict", "/run_mode"});
+    assert_failure("task-six-modules-missing-dns-config", R"({"features":"basic,session,dns,http1,tls,icmp"})",
+                   {"runtime creation failed", "invalid module configuration", "/dns/primary_label_ids"});
+    assert_failure("task-missing-http1-config", R"({"features":"basic,http1"})",
+                   {"invalid module configuration", "/http1/primary_label_ids"});
+    assert_failure("task-missing-tls-config", R"({"features":"basic,tls"})",
+                   {"invalid module configuration", "/tls/primary_label_ids"});
+    assert_failure(
+        "task-dns-requires-labeling",
+        R"({"features":"basic,dns","parameters":"{\"schema_version\":1,\"dns\":{\"primary_label_ids\":[1001]}}"})",
+        {"required module capability is unavailable", "/dns/labeling"});
 }
 
 void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
@@ -10552,6 +10571,24 @@ void TestNpmBasicV2PluginExports() {
     time_outputs.clear();
     v2_schema.reset();
     v2_task->Cancel();
+    v2_provider->ReleaseTask(v2_task);
+
+    // Omitted input parameters inherit the named source and reader domain, not domain=source_id.
+    v2_config.task_id = "v2-input-defaults";
+    v2_config.with_params_json = "{}";
+    assert(v2_provider->CreateTask(v2_config, &v2_task) == 0 && v2_task != nullptr);
+    auto* input_task = dynamic_cast<flowsql::IBlockTransformInputSourceTaskV1*>(v2_task);
+    assert(input_task != nullptr && input_task->BindInputSource("netadapter.eth0") == 0);
+    capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV2*>(v2_task);
+    assert(capture_task != nullptr && capture_task->BindCaptureSources(MakeCaptureSourceSet(identity)) == 0);
+    assert(v2_task->Open(flowsql::packet::PacketSchema(), &v2_schema) == 0);
+    assert(v2_task->ProcessBlock(live_batch, 1, &packet_outputs) == 0);
+    packet_outputs.clear();
+    assert(v2_task->Flush(&packet_outputs) == 0);
+    assert(packet_outputs.size() == 1 && packet_outputs[0].batch->num_rows() == 1);
+    assert(BasicResultColumn<arrow::UInt64Array>(packet_outputs[0].batch, "observation_domain_id")->Value(0) == 77);
+    packet_outputs.clear();
+    v2_schema.reset();
     v2_provider->ReleaseTask(v2_task);
     destroy(1, v2_capability);
 

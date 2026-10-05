@@ -3,6 +3,20 @@
 `netadapter` 用同一个具名 source 接入一个观测域中的多张 Ethernet 网卡；创建配置选择
 `af_packet`、`pfring_classic` 或 `af_xdp_copy_skb`。三后端完整性能矩阵仍按规格 T5 验收。
 
+## Web 通道配置
+
+在“通道管理 → Stream 通道”点击“新增网卡采集通道”，该入口与“新增 Stream 通道”并列，直接打开网卡配置表单。
+角色固定为source，填写通道名称与一个或多个网卡名（逗号分隔），选择AF_PACKET、PF_RING Classic或AF_XDP copy/generic-SKB。
+混杂模式默认开启，截断长度默认65535字节，采集缓冲默认64MiB且由所有输入共享。
+保存后列表中的“配置”查看实际参数；“编辑”修改五项配置，通道类型和名称固定。
+观测域身份、reader及采集限额是只读诊断，编辑保存不会将这些字段送回配置解析器。
+配置保存时不打开设备，网卡、权限和驱动在启动采集任务时检查；失败保留表单以便修正。
+使用中的通道禁用编辑/删除，服务端仍校验busy；先停止采集任务，释放reader后再修改或删除。
+NetAdapter是连续采集源，不提供Stream队列的重置操作；创建后的SQL来源为`netadapter.<name>`。
+
+Web经现有`/api/channels/stream/*`路由转发Scheduler。类型与五项表单Schema通过
+`IBlockStreamChannelDescriptorV1`公共IID发现，不依赖NetAdapter具体类或修改既有管理器ABI。
+
 ## 构建与插件
 
 ```bash
@@ -11,7 +25,7 @@ cmake --build build -j8
 ctest --test-dir build --output-on-failure
 ```
 
-在 Scheduler 所在进程加载 NPI、NetAdapter 管理插件和所选后端 provider。普通部署清单需增加以下条目，
+在 Scheduler 所在进程加载 NPI、NetAdapter 管理插件和所选后端 provider。默认deploy-single.yaml/deploy-multi.yaml已加载NetAdapter及三后端provider。自定义部署需包含以下条目，
 并按框架批次完成所有插件的 Option、Load、Start：
 
 ```yaml
@@ -118,13 +132,21 @@ generic XDP 仍从 RX0 接收。因此双 veth 用于通道/生产 SQL 联验，
 
 持续 NPM 任务通过后台 batch submit 入口启动，并使用已创建的托管数据库目标：
 
+控制台识别连续采集源后会自动切换为异步执行、禁用同步选项，并显示
+“当前 SQL 使用连续采集源，已切换为异步执行。”。API 调用应使用 `mode='async'`；
+显式指定 `mode='sync'` 时，创建任务前立即返回 HTTP 400、`error_code=ASYNC_EXECUTION_REQUIRED` 和
+`sql_index`，提示“连续采集任务不支持同步执行，请使用 mode='async'。”。
+有限输入（如 pcapfile）仍可选择同步或异步。
+
 ```sql
 SELECT * FROM netadapter.edge_mirror
 WHERE wire_len >= 64 AND (transport_protocol = 6 OR transport_protocol = 17)
 USING npm.basic WITH output_interval_ns=15000000000 INTO sqlite.npm
 ```
 
-无需填写 source_domains，Scheduler 从独占 reader 的输入集合自动绑定。窗口按 UTC epoch 对齐；
+input_namespace 与 source_domains 均可省略：前者默认取 SQL 中的具名输入（如 netadapter.edge_mirror），
+后者由 Scheduler 从独占 reader 的输入集合自动绑定。显式空值仍属于非法配置，显式映射必须匹配 reader 身份。
+窗口按 UTC epoch 对齐；
 任一输入积压、进度未知或时钟回拨时，共同安全水位暂停。维护定时器只唤醒工作，不代替采集事件时间。
 后台状态提供 runtime_task_id/run_id 和结果关系；Stop 排空正常尾部，Cancel 保留已交付前缀并异常结束。
 
@@ -138,6 +160,23 @@ WITH output_interval_ns=15000000000,features='basic,icmp' INTO sqlite.npm
 Basic 与 ICMP 结果仍写入同一个托管数据库目标。IPv6 版本从线格式首字节高四位读取，
 合法 Router Solicitation 即使没有 transport layer 也能作为无端口控制事件进入已启用模块；
 它不创建 TCP/UDP 会话。默认仅启用 basic 时拒绝未启用模块的控制输入，原契约保持。
+
+控制台的 npm.basic 来自算子管理中已上传并激活的插件。CMake 更新 build/output/libflowsql_npm_basic.so
+后，已安装到 uploads/binaddon 的副本不会自动更新；单纯重启仍会按元数据库记录加载旧副本。
+升级时先备份旧文件，再通过算子管理停用并删除旧注册，上传当前构建产物并激活。不同文件名也不能绕过同名算子冲突。
+NetAdapter 需要当前插件提供的 Block Transform V2 能力；旧版插件可能仍把省略的输入参数当作错误。
+
+例如，以下配置省略两个输入参数即可启用基础、会话和 ICMP 分析，并统一写入一个托管数据库目标：
+
+```sql
+SELECT * FROM netadapter.eth0 USING npm.basic
+WITH features='basic,session,icmp'
+INTO mysql.flowsql-mysql
+```
+
+DNS、HTTP1、TLS 模块还要求启用 labeling、引用已发布的标签配置，并分别在 parameters.dns/http1/tls
+中配置 primary_label_ids；仅把这些模块加入 features 并不满足它们的 Open 契约。这与输入参数是否可省略相互独立。
+标签配置通过 parameters.core.labeling 引用 config.<name>@<revision>，详见[流量标签配置](flow-labeling.md)。
 
 ## 隔离真实收包记录
 

@@ -14,7 +14,7 @@
             <el-tag v-else-if="sqlTaskKind === 'mixed'" type="warning">混合 SQL（仅异步）</el-tag>
             <el-tag v-else-if="sqlTaskKind === 'batch'" type="info">批任务 SQL</el-tag>
             <el-radio-group v-model="executeMode" size="small">
-              <el-radio-button v-if="allowSyncMode" label="sync">同步</el-radio-button>
+              <el-radio-button :disabled="!allowSyncMode" label="sync">同步</el-radio-button>
               <el-radio-button label="async">异步</el-radio-button>
             </el-radio-group>
             <el-button type="primary" @click="executeSQL" :loading="executing">
@@ -31,6 +31,13 @@
         :rows="8"
         placeholder="多SQL采用分号(;)分隔"
         class="sql-textarea"
+      />
+      <el-alert
+        v-if="executionPolicy.notice"
+        :title="executionPolicy.notice"
+        type="info"
+        :closable="false"
+        show-icon
       />
 
       <!-- 执行结果 -->
@@ -173,6 +180,7 @@ import { CaretRight, Refresh } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import api from '../api'
 import { formatTaskResult } from '../utils/taskResult.js'
+import { taskExecutionPolicy } from '../utils/taskExecution.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const router = useRouter()
@@ -194,7 +202,8 @@ const sqlAnalyze = ref({
   statement_count: 0,
   statements: [],
   statement_kinds: [],
-  task_kind: 'unknown'
+  task_kind: 'unknown',
+  requires_async: false
 })
 const POLL_INTERVAL_MS = 2000
 const STREAM_DEMO_SQL = `SELECT * FROM tcp_session_mock.tcp_src
@@ -206,7 +215,8 @@ const resetSqlAnalyze = () => {
     statement_count: 0,
     statements: [],
     statement_kinds: [],
-    task_kind: 'unknown'
+    task_kind: 'unknown',
+    requires_async: false
   }
 }
 
@@ -223,7 +233,8 @@ const normalizeAnalyzePayload = (payload) => {
     statement_count: statementCount,
     statements,
     statement_kinds: statementKinds,
-    task_kind: taskKind
+    task_kind: taskKind,
+    requires_async: payload?.requires_async === true
   }
 }
 
@@ -262,13 +273,13 @@ const parseApiError = (error) => {
   return `${tip} [${code}]`
 }
 
-const isStreamSql = computed(() => sqlTaskKind.value === 'stream')
 const sqlStatements = computed(() => {
   const list = sqlAnalyze.value?.statements
   return Array.isArray(list) ? list : []
 })
 const isMultiSql = computed(() => sqlStatements.value.length > 1)
-const allowSyncMode = computed(() => !isStreamSql.value && !isMultiSql.value)
+const executionPolicy = computed(() => taskExecutionPolicy(sqlAnalyze.value, executeMode.value))
+const allowSyncMode = computed(() => executionPolicy.value.allowSync)
 
 const isTerminal = (status) => ['completed', 'failed', 'stopped', 'cancelled', 'timeout'].includes(status)
 
@@ -340,16 +351,11 @@ const analyzeCurrentSql = async ({ silent = false } = {}) => {
     if (seq !== analyzeSeq) return sqlAnalyze.value
     const normalized = normalizeAnalyzePayload(res?.data)
     sqlAnalyze.value = normalized
-    if (normalized.statement_count > 1) {
-      executeMode.value = 'async'
-    }
+    executeMode.value = taskExecutionPolicy(normalized, executeMode.value).mode
     if (normalized.task_kind === 'batch' || normalized.task_kind === 'stream') {
       applySqlTaskKind(normalized.task_kind)
     } else {
       applySqlTaskKind('unknown')
-      if (normalized.statement_count > 1) {
-        executeMode.value = 'async'
-      }
     }
     return normalized
   } catch (error) {
@@ -441,6 +447,7 @@ const executeSQL = async () => {
       analyzeTimer = null
     }
     const analysis = await analyzeCurrentSql()
+    executeMode.value = taskExecutionPolicy(analysis, executeMode.value).mode
     const sqls = Array.isArray(analysis?.statements) ? analysis.statements : []
     if (sqls.length === 0) {
       throw new Error('SQL 文本为空或无法解析')

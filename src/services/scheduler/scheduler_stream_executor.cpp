@@ -39,6 +39,7 @@
 #include "framework/core/sql_parser.h"
 #include "framework/core/sql_text_splitter.h"
 #include "framework/interfaces/iblock_stream_channel.h"
+#include "framework/interfaces/iblock_stream_channel_descriptor.h"
 #include "framework/interfaces/iblock_stream_factory.h"
 #include "framework/interfaces/ibridge.h"
 #include "framework/interfaces/ibuiltin_registry.h"
@@ -2732,11 +2733,12 @@ int32_t SchedulerPlugin::ExecuteStreamTask(const SqlStatement& stmt, std::string
     return error::OK;
 }
 
-int32_t SchedulerPlugin::ClassifySqlTaskKind(const std::string& sql_text, std::string* task_kind,
-                                             std::string* err_rsp) {
+int32_t SchedulerPlugin::ClassifySqlTaskKind(const std::string& sql_text, std::string* task_kind, std::string* err_rsp,
+                                             bool* requires_async) {
     if (!task_kind || !err_rsp) return error::INTERNAL_ERROR;
     task_kind->clear();
     err_rsp->clear();
+    if (requires_async) *requires_async = false;
 
     static constexpr size_t kMaxSqlLength = 64 * 1024;
     if (sql_text.size() > kMaxSqlLength) {
@@ -2770,6 +2772,23 @@ int32_t SchedulerPlugin::ClassifySqlTaskKind(const std::string& sql_text, std::s
     }
 
     *task_kind = source_resolved.has_stream_source ? "stream" : "batch";
+    if (requires_async) {
+        *requires_async = source_resolved.has_stream_source;
+        if (querier_ && !source_resolved.block_channels.empty()) {
+            querier_->Traverse(IID_BLOCK_STREAM_CHANNEL_DESCRIPTOR_V1, [&](void* value) {
+                static_cast<IBlockStreamChannelDescriptorV1*>(value)->DescribeChannelTypes([&](const auto& type) {
+                    if (type.is_finite) return;
+                    for (const auto& channel : source_resolved.block_channels) {
+                        if (IEquals(channel->Category(), type.channel_type)) {
+                            *requires_async = true;
+                            break;
+                        }
+                    }
+                });
+                return 0;
+            });
+        }
+    }
     return error::OK;
 }
 

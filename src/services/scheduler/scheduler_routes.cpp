@@ -35,6 +35,7 @@
 #include "framework/core/ring_stream_channel.h"
 #include "framework/core/sql_parser.h"
 #include "framework/core/sql_text_splitter.h"
+#include "framework/interfaces/iblock_stream_channel_descriptor.h"
 #include "framework/interfaces/iblock_stream_factory.h"
 #include "framework/interfaces/iblock_stream_manager.h"
 #include "framework/interfaces/iblock_stream_operator.h"
@@ -339,7 +340,8 @@ int32_t SchedulerPlugin::HandleSqlClassify(const std::string&, const std::string
 
     std::string task_kind;
     std::string err_rsp;
-    const int32_t rc = ClassifySqlTaskKind(doc["sql"].GetString(), &task_kind, &err_rsp);
+    bool requires_async = false;
+    const int32_t rc = ClassifySqlTaskKind(doc["sql"].GetString(), &task_kind, &err_rsp, &requires_async);
     if (rc != error::OK) {
         rsp = err_rsp.empty() ? BuildErrorJson("sql classify failed") : err_rsp;
         return rc;
@@ -350,6 +352,8 @@ int32_t SchedulerPlugin::HandleSqlClassify(const std::string&, const std::string
     w.StartObject();
     w.Key("task_kind");
     w.String(task_kind.c_str());
+    w.Key("requires_async");
+    w.Bool(requires_async);
     w.EndObject();
     rsp = buf.GetString();
     return error::OK;
@@ -1581,9 +1585,7 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
 }
 
 // --- HandleQueryStreamChannelDefinitions ---
-int32_t SchedulerPlugin::HandleQueryStreamChannelDefinitions(const std::string&,
-                                                             const std::string&,
-                                                             std::string& rsp) {
+int32_t SchedulerPlugin::HandleQueryStreamChannelDefinitions(const std::string&, const std::string&, std::string& rsp) {
     auto* builtin_registry = querier_ ? static_cast<IBuiltinRegistry*>(querier_->First(IID_BUILTIN_REGISTRY)) : nullptr;
     if (!builtin_registry) {
         rsp = BuildErrorJson("builtin registry unavailable");
@@ -1596,7 +1598,8 @@ int32_t SchedulerPlugin::HandleQueryStreamChannelDefinitions(const std::string&,
     w.Key("definitions");
     w.StartArray();
 
-    builtin_registry->ListStreamChannelTypes([&w](const StreamChannelTypeDescriptor& def) {
+    const auto write_definition = [&w](const StreamChannelTypeDescriptor& def,
+                                       const BlockStreamChannelTypeDescriptorV1* block = nullptr) {
         w.StartObject();
         w.Key("channel_type");
         w.String(def.type.c_str());
@@ -1641,7 +1644,25 @@ int32_t SchedulerPlugin::HandleQueryStreamChannelDefinitions(const std::string&,
             w.EndObject();
         }
         w.EndArray();
+        if (block) {
+            w.Key("is_finite");
+            w.Bool(block->is_finite);
+            w.Key("supports_reset");
+            w.Bool(block->supports_reset);
+        }
         w.EndObject();
+    };
+    builtin_registry->ListStreamChannelTypes([&](const auto& def) { write_definition(def); });
+    querier_->Traverse(IID_BLOCK_STREAM_CHANNEL_DESCRIPTOR_V1, [&](void* value) {
+        static_cast<IBlockStreamChannelDescriptorV1*>(value)->DescribeChannelTypes([&](const auto& block) {
+            StreamChannelTypeDescriptor def;
+            def.type = block.channel_type;
+            def.display_name = block.display_name;
+            def.allowed_roles = block.allowed_roles;
+            def.option_schema = block.option_schema;
+            write_definition(def, &block);
+        });
+        return 0;
     });
 
     w.EndArray();
@@ -1758,28 +1779,46 @@ int32_t SchedulerPlugin::HandleQueryStreamChannels(const std::string&,
         });
     }
 
-    TraverseBlockManagers([&w](IBlockStreamManager* manager) -> int {
-        manager->QueryChannels([&w](const std::string& type,
-                                    const std::string& name,
-                                    const std::string& option,
-                                    const std::string& status) {
+    std::map<std::string, BlockStreamChannelTypeDescriptorV1> block_types;
+    if (querier_)
+        querier_->Traverse(IID_BLOCK_STREAM_CHANNEL_DESCRIPTOR_V1, [&](void* value) {
+            static_cast<IBlockStreamChannelDescriptorV1*>(value)->DescribeChannelTypes(
+                [&](const auto& def) { block_types.emplace(def.channel_type, def); });
+            return 0;
+        });
+    TraverseBlockManagers([&w, &block_types](IBlockStreamManager* manager) -> int {
+        manager->QueryChannels([&w, &block_types](const std::string& type, const std::string& name,
+                                                  const std::string& option, const std::string& status) {
             w.StartObject();
-            w.Key("type"); w.String(type.c_str());
-            w.Key("name"); w.String(name.c_str());
-            w.Key("role"); w.String("source");
-            w.Key("option"); w.String(option.c_str());
+            w.Key("type");
+            w.String(type.c_str());
+            w.Key("name");
+            w.String(name.c_str());
+            w.Key("role");
+            w.String("source");
+            w.Key("option");
+            w.String(option.c_str());
             w.Key("option_json");
             rapidjson::Document option_doc;
             option_doc.Parse(option.c_str());
             if (!option_doc.HasParseError() && option_doc.IsObject()) {
                 w.RawValue(option.c_str(), option.size(), rapidjson::kObjectType);
             } else {
-                w.StartObject(); w.EndObject();
+                w.StartObject();
+                w.EndObject();
             }
-            w.Key("status"); w.String(status.c_str());
-            w.Key("in_use"); w.Bool(false);
-            w.Key("is_finite"); w.Bool(true);
-            w.Key("is_finished"); w.Bool(status != "running");
+            w.Key("status");
+            w.String(status.c_str());
+            const auto definition = block_types.find(type);
+            const bool finite = definition == block_types.end() || definition->second.is_finite;
+            w.Key("in_use");
+            w.Bool(status == "busy");
+            w.Key("is_finite");
+            w.Bool(finite);
+            w.Key("is_finished");
+            w.Bool(finite && status != "running");
+            w.Key("supports_reset");
+            w.Bool(definition != block_types.end() && definition->second.supports_reset);
             w.EndObject();
         });
         return 0;
@@ -1868,8 +1907,11 @@ int32_t SchedulerPlugin::HandleAddStreamChannel(const std::string&,
         }
         if (route.accepted_count == 1) {
             if (route.accepted_rc != 0) {
-                rsp = BuildErrorJson("add block stream channel failed: " + type + "." + name);
-                return MapStreamManagerErrorToStatus(route.accepted_rc);
+                rsp = BuildErrorJson((route.accepted_rc == ENODEV ? "channel backend unavailable: "
+                                                                  : "add block stream channel failed: ") +
+                                     type + "." + name);
+                return route.accepted_rc == ENODEV ? error::UNAVAILABLE
+                                                   : MapStreamManagerErrorToStatus(route.accepted_rc);
             }
             rsp = R"({"ok":true})";
             return error::OK;
@@ -2023,8 +2065,10 @@ int32_t SchedulerPlugin::HandleModifyStreamChannel(const std::string&,
         if (!owners.empty()) {
             const int rc = owners.front()->ModifyChannel(ToLowerAscii(type), name, option);
             if (rc != 0) {
-                rsp = BuildErrorJson("modify block stream channel failed: " + type + "." + name);
-                return MapStreamManagerErrorToStatus(rc);
+                rsp = BuildErrorJson(
+                    (rc == ENODEV ? "channel backend unavailable: " : "modify block stream channel failed: ") + type +
+                    "." + name);
+                return rc == ENODEV ? error::UNAVAILABLE : MapStreamManagerErrorToStatus(rc);
             }
             rsp = R"({"ok":true})";
             return error::OK;
@@ -2042,7 +2086,8 @@ int32_t SchedulerPlugin::HandleModifyStreamChannel(const std::string&,
             if (route.accepted_count == 1) {
                 if (route.accepted_rc != 0) {
                     rsp = BuildErrorJson("modify block stream channel failed: " + type + "." + name);
-                    return MapStreamManagerErrorToStatus(route.accepted_rc);
+                    return route.accepted_rc == ENODEV ? error::UNAVAILABLE
+                                                       : MapStreamManagerErrorToStatus(route.accepted_rc);
                 }
                 rsp = R"({"ok":true})";
                 return error::OK;
@@ -2253,7 +2298,8 @@ int32_t SchedulerPlugin::HandleRemoveStreamChannel(const std::string&,
         if (route.accepted_count == 1) {
             if (route.accepted_rc != 0) {
                 rsp = BuildErrorJson("remove block stream channel failed: " + type + "." + name);
-                return MapStreamManagerErrorToStatus(route.accepted_rc);
+                return route.accepted_rc == ENODEV ? error::UNAVAILABLE
+                                                   : MapStreamManagerErrorToStatus(route.accepted_rc);
             }
             rsp = R"({"ok":true})";
             return error::OK;

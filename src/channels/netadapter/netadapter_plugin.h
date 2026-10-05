@@ -4,6 +4,7 @@
 #define FLOWSQL_CHANNELS_NETADAPTER_PLUGIN_H_
 #include <channels/pcapfile/packet_filter_domain.h>
 #include <common/iplugin.h>
+#include <framework/interfaces/iblock_stream_channel_descriptor.h>
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_manager.h>
 #include <framework/interfaces/iblock_stream_reader.h>
@@ -14,6 +15,7 @@ namespace flowsql::channels::netadapter {
 class NetAdapterPlugin final : public IPlugin,
                                public IBlockStreamFactory,
                                public IBlockStreamManager,
+                               public IBlockStreamChannelDescriptorV1,
                                public IBlockStreamReaderFactoryV1,
                                public IFilterDomainResolverV1,
                                public IFilterPushdownV1 {
@@ -31,6 +33,7 @@ class NetAdapterPlugin final : public IPlugin,
     void QueryChannels(
         std::function<void(const std::string&, const std::string&, const std::string&, const std::string&)> callback)
         override;
+    void DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptorV1&)> callback) const override;
     int CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** reader) override;
     void ReleaseReader(IBlockStreamChannel* reader) override;
     int Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const override;

@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_TASK_TASK_PLUGIN_H_
 #define _FLOWSQL_SERVICES_TASK_TASK_PLUGIN_H_
@@ -110,9 +105,8 @@ class __attribute__((visibility("default"))) TaskPlugin : public IPlugin, public
     int32_t HandleStreamStatus(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleStreamList(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleRuntimeGraphQuery(const std::string& uri, const std::string& req, std::string& rsp);
-    int32_t ClassifySqlTaskKindViaScheduler(const std::string& sql,
-                                            std::string* task_kind_out,
-                                            std::string* err_rsp);
+    int32_t ClassifySqlTaskKindViaScheduler(const std::string& sql, std::string* task_kind_out, std::string* err_rsp,
+                                            bool* requires_async = nullptr);
     int SyncBatchRuntimeTask(TaskRecord* rec);
 
     IQuerier* querier_ = nullptr;

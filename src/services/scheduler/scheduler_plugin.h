@@ -257,7 +257,8 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
     void StopStreamGroupNodeRuntime(StreamGroupCallbackContext* ctx,
                                     const std::string& node_runtime_task_id);
     void StopStreamGroupShareSetHubs(const std::string& group_runtime_task_id);
-    int32_t ClassifySqlTaskKind(const std::string& sql_text, std::string* task_kind, std::string* err_rsp);
+    int32_t ClassifySqlTaskKind(const std::string& sql_text, std::string* task_kind, std::string* err_rsp,
+                                bool* requires_async = nullptr);
     int QueryStreamTaskSnapshotByRuntimeId(const std::string& runtime_task_id, TaskSnapshot* snapshot_out);
     int QueryRuntimeSharedHubSnapshot(const std::string& runtime_task_id, SharedHubSnapshot* snapshot_out);
     void RequestStopStreamTaskByRuntimeId(const std::string& runtime_task_id);

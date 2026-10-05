@@ -68,6 +68,27 @@ std::string BuildConfigError(const NpmBasicTaskConfigStatus& status) {
     return error;
 }
 
+std::string BuildRuntimeOpenError(const NpmBasicTaskRuntimeStatus& status) {
+    if (!status.consumer_error.empty()) return status.consumer_error;
+    std::string error(kRuntimeOpenError);
+    if (status.module_status.error == NpmProtocolContractErrorV1::kNone) return error;
+
+    if (status.module_status.error == NpmProtocolContractErrorV1::kUnavailableCapability) {
+        error += ": required module capability is unavailable";
+    } else if (status.module_status.error == NpmProtocolContractErrorV1::kInvalidLabelSelection) {
+        error += ": invalid primary label selection";
+    } else if (status.error == NpmBasicTaskRuntimeError::kModuleCreateError) {
+        error += ": module initialization failed";
+    } else {
+        error += ": invalid module configuration";
+    }
+    if (!status.module_status.field.empty()) {
+        error += " at /";
+        error += status.module_status.field;
+    }
+    return error;
+}
+
 std::string BuildLabelingProviderError(const FlowLabelingDiagnosticV1& diagnostic) {
     std::string error(kLabelingProviderError);
     if (diagnostic.path != nullptr && diagnostic.path[0] != '\0') {
@@ -495,8 +516,13 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
         matcher, ProductionNpmModuleCatalogV1(), {}, task_id_, managed_consumer_factory.get());
     if (runtime_status.error != NpmBasicTaskRuntimeError::kNone) {
         expected = State::kOpening;
-        if (!runtime_status.consumer_error.empty()) config_error_ = runtime_status.consumer_error;
-        expected = Fail(expected, config_error_.empty() ? kRuntimeOpenError : config_error_.c_str());
+        const char* error = kRuntimeOpenError;
+        try {
+            config_error_ = BuildRuntimeOpenError(runtime_status);
+            error = config_error_.c_str();
+        } catch (const std::bad_alloc&) {
+        }
+        expected = Fail(expected, error);
         return expected == State::kCancelled ? ECANCELED : EINVAL;
     }
 

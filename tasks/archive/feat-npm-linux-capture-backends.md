@@ -1,14 +1,14 @@
 # Feature: NetAdapter 常规网卡采集通道
 
 标识：`npm-linux-capture-backends`（沿用现有 Feature 标识）
-状态：`[x]` 已完成；2026-10-05 完整DoD通过，T0～T5全部完成
+状态：`[x]` 已完成；2026-10-05 T0～T6全部完成，Web通道配置补充通过完整DoD
 优先级：P1
 前置 Feature：`npm-capture-contract`、`npm-basic-realtime-integration`；本 Feature 统一升级采集契约，并同步迁移其单输入实现。
 关联 Feature：[npm-basic-periodic-stats](../archive/feat-npm-basic-periodic-stats.md) 负责统一周期统计、默认模式与新结果 Schema；真实 SQL 周期联验需该 Feature 完成，采集契约/后端本身可独立实施。
 
 ## 业务意图
 
-让 Linux 镜像口、网卡和虚拟网卡上的 NPM 用户，用一个具名 `netadapter` 通道采集同一观测域中的一张或多张网卡，并交给同一个生产 SQL 分析任务。采集技术在创建配置中选择，SQL 无需暴露 AF_PACKET、PF_RING 或 AF_XDP 名称。运维者可以查询实际采集范围、生效配置、时间戳来源及逐输入丢包/吞吐，三种后端复用通道管理和有界 reader 运行逻辑。
+让 Linux 镜像口、网卡和虚拟网卡上的 NPM 用户，在Web通道管理页面创建、编辑、查看和删除具名 `netadapter` 通道，配置同一观测域中的一张或多张网卡，并交给同一个生产 SQL 分析任务。采集技术在创建配置中选择，SQL 无需暴露 AF_PACKET、PF_RING 或 AF_XDP 名称。运维者可以查询实际采集范围、生效配置、时间戳来源及逐输入丢包/吞吐，三种后端复用通道管理和有界 reader 运行逻辑。
 
 ## Non-Goals
 
@@ -70,6 +70,16 @@ source residual 的额外副本属于消费阶段，在既有 NPM 输入批次�
 公共逻辑生成批次包数、捕获字节、等待、outstanding 与每次 Poll 检查包数/字节、处理时间预算的有界默认值，并查询报告全部生效值。T0 冻结默认值、分配规则与测试边界：每批 256 包/1 MiB，最大等待 10 ms、outstanding=1；每 Poll 检查 1024 包/4 MiB、非阻塞工作 2 ms；每输入轮转 16 包/64 KiB。共享封装最低 2 MiB、每输入后端最低 1 MiB，按实际队列/分配粒度复检全部预算；兼顾输入服务间隔和批次处理耗时；它们不是额外创建参数，也不以增加 outstanding 默认值代替实际消费能力验证。
 
 ### 共享运行逻辑与后端职责
+
+Web配置沿用`/api/channels/stream/{definitions/query,query,add,modify,remove}`及Scheduler对应路由。
+新增独立`IBlockStreamChannelDescriptorV1`公共IID，描述类型、显示名称、source角色、五项配置Schema、有限性和重置能力；不修改既有管理器ABI。
+NetAdapter描述使用现有`StreamOptionField`，配置校验仍以`ParseNetAdapterConfig`为准；页面预选AF_PACKET不改变backend必填契约。
+页面显示后端枚举、网卡名称数组、混杂开关、snaplen和全通道buffer_mib，默认值与既有配置一致。
+“新增网卡采集通道”与“新增Stream通道”并列，直接打开netadapter表单；通用Stream新增类型列表排除netadapter。
+创建/编辑只提交Schema中的五项options；观测域、额度及reader诊断只读，不能回填为创建参数。
+编辑固定通道类型和名称；使用中禁用编辑/删除并保留服务端busy校验，连续源不显示重置操作。
+默认单/多进程部署在Scheduler进程加载NetAdapter及三后端provider；缺依赖仍明确失败，不自动切换后端。
+保存配置不打开设备；实际设备、权限及驱动检查发生在采集任务启动时，页面保存失败保留草稿。
 
 一个通道管理入口提供 `IBlockStreamFactory`、`IBlockStreamManager` 和 `IBlockStreamReaderFactoryV1`；Scheduler 按公共 IID 发现它。后端通过公共 IID 提供收包能力，可按依赖独立构建/加载，不分别复制完整通道管理器。所有 C++ 服务仍由框架加载 `IPlugin`，遵守批次 `Option/Load/Start` 生命周期。
 
@@ -173,7 +183,7 @@ runner 完成对应 batch 的 source residual、分析、下游输出和 Release
 
 ## 主链路
 
-1. 用户创建 `netadapter.<name>` 并查询生效配置；Scheduler 创建任务独占 reader，后端打开全部接口及所需队列，返回 source set、限额与 PacketSchema；实时任务自动绑定描述后 Open，公平轮询交付 packet batch 及逐输入事实。
+1. 用户通过Web发现NetAdapter类型与五项配置，创建/查看/编辑具名通道；Web经HTTP转发Scheduler，由公共管理器校验并持久化，使用中修改/删除明确拒绝；Scheduler 创建任务独占 reader，后端打开全部接口及所需队列，返回 source set、限额与 PacketSchema；实时任务自动绑定描述后 Open，公平轮询交付 packet batch 及逐输入事实。
 2. runner 处理并归还 batch，提交整组事实，按所有输入安全进度推进事件维护；关联统计 Feature 按采集时间分桶并在共同水位跨过边界后输出周期增量/累计记录，单调 deadline 负责唤醒；正常停止、取消或任一输入错误走对应终结路径，全部资源归还后释放租约。
 
 ## Feature Tasks
@@ -184,8 +194,15 @@ runner 完成对应 batch 的 source residual、分析、下游输出和 Release
 - [x] T3：交付 PF_RING Classic 多网卡收包和依赖/故障诊断，使 Classic 部署可复用同一通道与分析链路。
 - [x] T4：交付 AF_XDP copy/generic-SKB 的接口/队列覆盖、UMEM 管理与回收，使支持 XDP 的环境可按明确模式取得完整声明范围的流量。
 - [x] T5：交付三后端契约测试、真实网卡 SQL 联验及分阶段性能基线，使身份与诊断可复核，并证明声明负载内的公平消费、水位活性、周期封闭延迟和过载恢复。
+- [x] T6：交付Web通道配置管理与部署接线，使用户可创建、编辑、查看和删除可供生产SQL使用的NetAdapter源，且配置持久化、占用保护和失败反馈可验证。
+  - [x] T6.1：交付可发现的配置描述、准确的连续源/占用状态和默认部署接线，使Web取得五项参数及真实操作能力。
+  - [x] T6.2：交付五项参数表单、配置查看和操作保护，使用户可完成配置管理，保存仅包含可写参数且失败保留草稿。
+  - [x] T6.3：交付Web到Scheduler到管理器的HTTP联验及前端行为回归，使创建、修改、持久化、占用拒绝和释放后删除形成可复核闭环。
 
 ## Feature 验收
+
+- Web管理：HTTP查询提供NetAdapter五项Schema与source角色；创建/编辑/重启后配置与观测域一致；非法参数、后端未加载及busy明确失败且不修改原配置；释放后可删除。连续源状态和重置能力准确。
+- 前端行为：类型可选、三后端枚举与默认值正确、多网卡数组及整数范围校验、编辑仅回填可写字段、busy保护、配置查看及失败草稿保留；既有Stream/PCAP操作回归，前端构建通过。
 
 - 配置 GTest：两必填、三可选字段、默认值、未知/非法字段、重复网卡、非以太网、预算不足和后端 unavailable；确认仅公开 `netadapter` 类别，无静默后端切换或输入遗漏。
 - 契约 GTest：source set 版本/身份、source_id 到网卡/队列映射、同域限制、reader 全局 sequence、PacketSchema、原始字节、截断、批次与缓冲上限；单/多输入共用接口与自动来源绑定，显式配置冲突和不满足新版采集契约的旧插件均明确失败。
@@ -379,3 +396,27 @@ tracked峰值≤9566字节、pending≤15552字节；可用source与reader丢包
 AF_XDP旧三周期一致性3/3、后端smoke/四RX队列证据、完整DoD和工具/二进制SHA256。
 历史负载/并发/权限失败保持原样；可持续声明限定本WSL2隔离Ethernet环境与25tick/s选定工况，
 不声称物理网卡高速吞吐或同接口/同目标并发支持。T5完整目标已达，勾选完成、规格归档，未提交/推送。
+
+
+2026-10-05 T6补充完成：新增独立IBlockStreamChannelDescriptorV1公共IID，NetAdapter提供source角色、
+五项参数Schema及连续源/无reset操作能力；Scheduler沿既有definitions/query及管理路由发现描述，
+管理查询正确报告busy占用和连续源状态，后端未加载返回unavailable。既有管理器/采集运行ABI保持原契约。
+Web表单支持后端选择、多网卡、混杂、snaplen和buffer_mib；只提交可写Schema字段，观测域和reader诊断不进入保存请求；
+配置查看、类型/名称固定、busy操作保护、失败保留草稿完成。默认单/多进程部署加载管理器及三provider。
+HTTP管理联验验证创建/重复名称/非法输入/后端未加载/busy拒绝/释放后修改/重启持久化/稳定观测域/删除。
+测试加载生产NetAdapter、Builtin、Scheduler、Web插件；受控provider仅提供管理租约，不代替真实收包性能证据。
+前端专项4/4、完整前端行为回归26/26通过；Vite构建通过，现有Rollup纯注释及大chunk提示保留，未扩展打包优化范围。
+配置及目标构建通过；首次沙箱目标CTest3/5（两项本地socket被禁止），按权限流程复验5/5（3.11秒）通过。
+最终全量构建无Error/Warning，完整CTest49/49（66.04秒）通过，5个C++文件及Scheduler本片改动行格式检查通过。
+规格完成证据前153个非空行、7个一级Feature Task、编号最多两级；Markdown链接/围栏及diff检查通过。
+本片原始日志build/netadapter-validation/web-{configure,target-build,target-build-2,target-ctest,target-ctest-unrestricted,
+frontend-tests,frontend-build,full-build,full-ctest-unrestricted}.log；失败构建与沙箱日志保留。
+T6及子任务勾选完成，Feature重新归档；本片未提交或推送。
+
+
+2026-10-05 T6.2入口调整完成：“新增网卡采集通道”与“新增Stream通道”并列，
+网卡入口直接预设netadapter/source并打开五项参数表单；普通Stream新增类型列表排除netadapter。
+网卡新增/编辑使用专用标题且不再展示类型选择；服务未提供NetAdapter元数据时提示并保持表单关闭。
+已有页面行为验收覆盖两入口默认选择、source角色、编辑/保存/草稿与busy保护，前端完整回归26/26通过。
+npm生产构建通过（25.52秒；保留既有打包提示）；日志web-entry-frontend-{tests,build}.log。
+本片仅前端与入口文档，无后端变更；前序完整CTest49/49为历史证据，本片未重跑C++回归。

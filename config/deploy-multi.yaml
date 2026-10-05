@@ -31,6 +31,11 @@ services:
         option: '{"ldfile":"./config/protocols.yml"}'
       - name: libflowsql_pcapfile.so
         option: "db_path=./meta/flowsql_meta.db"
+      - name: libflowsql_netadapter.so
+        option: '{"db_path":"./meta/netadapter.db"}'
+      - libflowsql_capture_af_packet.so
+      - libflowsql_capture_pfring.so
+      - libflowsql_capture_af_xdp.so
       - name: libflowsql_config_channel.so
         option: "db_path=./meta/flowsql_meta.db"
       - name: libflowsql_flow_labeling.so

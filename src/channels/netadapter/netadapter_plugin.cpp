@@ -237,6 +237,30 @@ void NetAdapterPlugin::QueryChannels(
     }
     for (const auto& row : rows) callback("netadapter", row.name, row.option, row.status);
 }
+void NetAdapterPlugin::DescribeChannelTypes(
+    std::function<void(const BlockStreamChannelTypeDescriptorV1&)> callback) const {
+    BlockStreamChannelTypeDescriptorV1 descriptor;
+    descriptor.channel_type = "netadapter";
+    descriptor.display_name = "NetAdapter 网卡采集";
+    descriptor.allowed_roles = {"source"};
+    descriptor.option_schema = {
+        {"backend",
+         "enum",
+         true,
+         "af_packet",
+         {"af_packet", "pfring_classic", "af_xdp_copy_skb"},
+         0,
+         0,
+         false,
+         false,
+         "采集后端"},
+        {"interfaces", "array", true, "[]", {}, 0, 0, false, false, "采集网卡"},
+        {"promiscuous", "bool", false, "true", {}, 0, 0, false, false, "混杂模式"},
+        {"snaplen", "int", false, "65535", {}, 1, 65535, true, false, "截断长度（字节）"},
+        {"buffer_mib", "int", false, "64", {}, 1, 4294967295LL, true, false, "采集缓冲（MiB）"},
+    };
+    callback(descriptor);
+}
 int NetAdapterPlugin::CreateReader(const BlockStreamReaderConfigV1& request, IBlockStreamChannel** output) {
     if (!output) return EINVAL;
     *output = nullptr;

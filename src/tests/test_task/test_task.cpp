@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include <cassert>
 #include <atomic>
@@ -81,7 +76,11 @@ static RouteItem MakeSqlClassifyRoute() {
                 const bool is_stream = (sql.find("_stream") != std::string::npos) ||
                                        (sql.find("tcp_session_mock.") != std::string::npos) ||
                                        (sql.find("stream.") != std::string::npos);
-                rsp = is_stream ? R"({"task_kind":"stream"})" : R"({"task_kind":"batch"})";
+                if (sql.find("netadapter.") != std::string::npos) {
+                    rsp = R"({"task_kind":"batch","requires_async":true})";
+                } else {
+                    rsp = is_stream ? R"({"task_kind":"stream"})" : R"({"task_kind":"batch"})";
+                }
                 return error::OK;
             }};
 }
@@ -706,6 +705,69 @@ class MockSchedulerControlService : public ISchedulerControlService {
 };
 
 int main() {
+    {
+        const std::string policy_dir = MakeTempDir("execution_policy");
+        MockRouterHandle scheduler({
+            MakeSqlClassifyRoute(),
+            {"POST", "/scheduler/batch/execute",
+             [](const std::string&, const std::string&, std::string& rsp) {
+                 rsp = R"({"status":"completed","result_row_count":0,"data":[]})";
+                 return error::OK;
+             }},
+        });
+        MockQuerier querier;
+        querier.AddHandle(&scheduler);
+        TaskPlugin plugin;
+        ASSERT_EQ(plugin.Option(("db_dir=" + policy_dir + ";disable_worker=1").c_str()), 0);
+        ASSERT_EQ(plugin.Load(&querier), 0);
+        ASSERT_EQ(plugin.Start(), 0);
+        auto policy_routes = CollectRoutes(&plugin);
+        std::string response;
+        ASSERT_EQ(
+            policy_routes["POST:/tasks/sql/analyze"]("", R"({"sql_text":"SELECT * FROM netadapter.eth0"})", response),
+            error::OK);
+        rapidjson::Document analysis;
+        analysis.Parse(response.c_str());
+        ASSERT_TRUE(analysis.HasMember("requires_async") && analysis["requires_async"].GetBool());
+        ASSERT_EQ(std::string(analysis["task_kind"].GetString()), "batch");
+        ASSERT_EQ(policy_routes["POST:/tasks/batch/execute"](
+                      "", R"({"sql_text":"SELECT * FROM netadapter.eth0","mode":"sync"})", response),
+                  error::BAD_REQUEST);
+        rapidjson::Document rejected;
+        rejected.Parse(response.c_str());
+        ASSERT_EQ(std::string(rejected["error_code"].GetString()), "ASYNC_EXECUTION_REQUIRED");
+        ASSERT_EQ(rejected["sql_index"].GetUint(), 0u);
+        ASSERT_TRUE(std::string(rejected["error"].GetString()).find("async") != std::string::npos);
+        ASSERT_EQ(CountTasks(policy_dir + "/task_store.db"), 0);
+        ASSERT_EQ(
+            policy_routes["POST:/tasks/sql/analyze"]("", R"({"sql_text":"SELECT * FROM pcapfile.input"})", response),
+            error::OK);
+        analysis.Parse(response.c_str());
+        ASSERT_TRUE(!analysis["requires_async"].GetBool());
+        ASSERT_EQ(policy_routes["POST:/tasks/batch/execute"](
+                      "", R"({"sql_text":"SELECT * FROM pcapfile.input","mode":"sync"})", response),
+                  error::OK);
+        ASSERT_EQ(policy_routes["POST:/tasks/sql/analyze"](
+                      "", R"({"sql_text":"SELECT 1;SELECT * FROM netadapter.eth0"})", response),
+                  error::OK);
+        analysis.Parse(response.c_str());
+        ASSERT_TRUE(analysis["requires_async"].GetBool());
+        ASSERT_EQ(policy_routes["POST:/tasks/batch/execute"](
+                      "", R"({"sql_text":"SELECT 1;SELECT * FROM netadapter.eth0","mode":"sync"})", response),
+                  error::BAD_REQUEST);
+        rejected.Parse(response.c_str());
+        ASSERT_EQ(rejected["sql_index"].GetUint(), 1u);
+        ASSERT_EQ(CountTasks(policy_dir + "/task_store.db"), 1);
+        ASSERT_EQ(policy_routes["POST:/tasks/batch/execute"](
+                      "", R"({"sql_text":"SELECT * FROM netadapter.eth0","mode":"async"})", response),
+                  error::OK);
+        rapidjson::Document submitted;
+        submitted.Parse(response.c_str());
+        ASSERT_TRUE(submitted.HasMember("runtime_task_id") &&
+                    !std::string(submitted["runtime_task_id"].GetString()).empty());
+        ASSERT_EQ(std::string(submitted["status"].GetString()), "pending");
+        ASSERT_EQ(plugin.Stop(), 0);
+    }
     std::puts("=== TaskPlugin Tests ===");
     const std::string dir = MakeTempDir("basic");
 

@@ -97,3 +97,12 @@ set_target_properties(test_pcap_web_e2e PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
 add_test(NAME test_pcap_web_e2e COMMAND ${CMAKE_BINARY_DIR}/output/test_pcap_web_e2e)
+
+add_executable(test_netadapter_web_e2e test_netadapter_web_e2e.cpp)
+target_include_directories(test_netadapter_web_e2e PRIVATE ${CMAKE_SOURCE_DIR})
+add_thirddepen(test_netadapter_web_e2e arrow httplib rapidjson)
+add_dependencies(test_netadapter_web_e2e flowsql_common flowsql_netadapter flowsql_builtin flowsql_scheduler flowsql_web)
+target_link_libraries(test_netadapter_web_e2e flowsql_common)
+target_compile_options(test_netadapter_web_e2e PRIVATE -UNDEBUG)
+set_target_properties(test_netadapter_web_e2e PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_netadapter_web_e2e COMMAND ${CMAKE_BINARY_DIR}/output/test_netadapter_web_e2e)

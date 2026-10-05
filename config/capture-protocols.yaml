@@ -1,0 +1,95 @@
+# Common-port analysis scope for npm.basic DNS, HTTP/1 and TLS modules.
+# Rules match both directions and IPv4/IPv6. Ports select candidate traffic;
+# protocol parsers still determine whether the payload is DNS, HTTP/1 or TLS.
+api_version: flowsql.io/flow-labeling/v1alpha1
+kind: FlowLabelingSet
+
+metadata:
+  name: capture-protocols
+  display_name: Common capture protocol scopes
+  description: DNS TCP/UDP 53, HTTP TCP 80/8080, and TLS TCP 443.
+
+spec:
+  engine:
+    type: dpdk-acl
+    categories: 1
+    algorithm: default
+    numa_socket_id: any
+    max_runtime_bytes: 33554432
+    limits:
+      max_labels: 10000
+      max_logical_rules: 50000
+      max_compiled_rules: 100000
+      max_expanded_fields: 64
+      reject_duplicate_label_priorities: true
+
+  labels:
+    - id: 1001
+      priority: 3000
+      name: dns
+      display_name: DNS scope
+      description: TCP or UDP traffic involving port 53.
+    - id: 1002
+      priority: 2000
+      name: http1
+      display_name: HTTP/1 scope
+      description: TCP traffic involving port 80 or 8080.
+    - id: 1003
+      priority: 1000
+      name: tls
+      display_name: TLS scope
+      description: TCP traffic involving port 443.
+
+  # A single primary label is selected. For overlapping endpoint ports,
+  # priority resolves the scope in the order DNS > HTTP > TLS.
+  rules:
+    - id: dns-udp-53
+      label_id: 1001
+      direction: bidirectional
+      matches:
+        - field: transport_protocol
+          value: 17
+          mask: 255
+        - field: destination_port
+          min: 53
+          max: 53
+    - id: dns-tcp-53
+      label_id: 1001
+      direction: bidirectional
+      matches:
+        - field: transport_protocol
+          value: 6
+          mask: 255
+        - field: destination_port
+          min: 53
+          max: 53
+    - id: http-tcp-80
+      label_id: 1002
+      direction: bidirectional
+      matches:
+        - field: transport_protocol
+          value: 6
+          mask: 255
+        - field: destination_port
+          min: 80
+          max: 80
+    - id: http-tcp-8080
+      label_id: 1002
+      direction: bidirectional
+      matches:
+        - field: transport_protocol
+          value: 6
+          mask: 255
+        - field: destination_port
+          min: 8080
+          max: 8080
+    - id: tls-tcp-443
+      label_id: 1003
+      direction: bidirectional
+      matches:
+        - field: transport_protocol
+          value: 6
+          mask: 255
+        - field: destination_port
+          min: 443
+          max: 443
