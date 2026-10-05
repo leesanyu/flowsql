@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <services/gateway/config.h>
+#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -190,6 +191,19 @@ bool TestRuntimeAssets() {
     return ok;
 }
 
+bool TestNoDefaultDatabaseChannels() {
+    const auto config_root = std::filesystem::path(FLOWSQL_DEPLOY_SINGLE_PATH).parent_path();
+    bool ok = true;
+    for (const auto& path : {config_root / "flowsql.yml", config_root / "docker/flowsql.yml"}) {
+        const auto config = YAML::LoadFile(path.string());
+        const auto channels = config["channels"]["database_channels"];
+        ok = Expect(channels && channels.IsSequence() && channels.size() == 0,
+                    path.string() + " must start without database channels") &&
+             ok;
+    }
+    return ok;
+}
+
 bool TestStartScriptRuntimeLayout() {
     const std::filesystem::path repository_root =
         std::filesystem::path(FLOWSQL_DEPLOY_SINGLE_PATH).parent_path().parent_path();
@@ -301,6 +315,7 @@ int main() {
     bool ok = TestSingleProcessConfig();
     ok = TestGuardianConfig() && ok;
     ok = TestRuntimeAssets() && ok;
+    ok = TestNoDefaultDatabaseChannels() && ok;
     ok = TestStartScriptRuntimeLayout() && ok;
     ok = TestStartScriptFrontendBuildOption() && ok;
     ok = TestPcapFilePersistenceDocumentation() && ok;

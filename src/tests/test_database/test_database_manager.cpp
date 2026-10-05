@@ -15,9 +15,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <arrow/api.h>
+#include <arrow/io/memory.h>
+#include <arrow/ipc/reader.h>
 
 #include <services/database/database_plugin.h>
 
@@ -34,6 +42,116 @@ static std::string TmpYaml(const char* suffix) {
 // 删除文件（忽略错误）
 static void RemoveFile(const std::string& path) {
     remove(path.c_str());
+}
+
+static void AssertSingleRow(IDatabaseChannel* channel, const char* sql, const std::vector<std::string>& values) {
+    IBatchReader* raw_reader = nullptr;
+    assert(channel->CreateReader(sql, &raw_reader) == 0);
+    assert(raw_reader != nullptr);
+    auto release_reader = [](IBatchReader* reader) {
+        reader->Close();
+        reader->Release();
+    };
+    std::unique_ptr<IBatchReader, decltype(release_reader)> reader(raw_reader, release_reader);
+    const uint8_t* data = nullptr;
+    size_t size = 0;
+    assert(reader->Next(&data, &size) == 0);
+    {
+        auto input = std::make_shared<arrow::io::BufferReader>(arrow::Buffer::Wrap(data, size));
+        auto stream = arrow::ipc::RecordBatchStreamReader::Open(input).ValueOrDie();
+        std::shared_ptr<arrow::RecordBatch> batch;
+        assert(stream->ReadNext(&batch).ok());
+        assert(batch && batch->num_rows() == 1 && batch->num_columns() == values.size());
+        for (size_t i = 0; i < values.size(); ++i) {
+            auto value = batch->column(i)->GetScalar(0).ValueOrDie();
+            assert(value->is_valid && value->ToString() == values[i]);
+        }
+    }
+    assert(reader->Next(&data, &size) == 1);
+}
+
+static void InitializeRuntimeConfig(const std::string& source, const std::string& destination) {
+    const std::string source_arg = "-DSOURCE=" + source;
+    const std::string destination_arg = "-DDESTINATION=" + destination;
+    const pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        execl(FLOWSQL_CMAKE_COMMAND, FLOWSQL_CMAKE_COMMAND, source_arg.c_str(), destination_arg.c_str(), "-P",
+              FLOWSQL_RUNTIME_CONFIG_INITIALIZER, static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    int status = 0;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+void test_runtime_initialization_preserves_saved_channels() {
+    printf("[TEST] runtime initialization preserves saved channels across rebuild and restart...\n");
+    const std::string source = TmpYaml("runtime_seed");
+    const std::string destination = TmpYaml("runtime_saved");
+    RemoveFile(source);
+    RemoveFile(destination);
+    const std::string initial =
+        "channels:\n  database_channels:\n"
+        "    - type: sqlite\n      name: seed\n      path: ':memory:'\n"
+        "other_section:\n  key: preserved_value\n";
+    {
+        std::ofstream file(source);
+        file << initial;
+    }
+    InitializeRuntimeConfig(source, destination);
+    {
+        std::ifstream file(destination);
+        assert(std::string((std::istreambuf_iterator<char>(file)), {}) == initial);
+    }
+    {
+        DatabasePlugin plugin;
+        plugin.Option(("config_file=" + destination).c_str());
+        plugin.Load(nullptr);
+        assert(plugin.Start() == 0);
+        assert(plugin.AddChannel("type=sqlite;name=userdb;path=:memory:") == 0);
+        assert(plugin.AddChannel("type=sqlite;name=deleted;path=:memory:") == 0);
+        assert(plugin.UpdateChannel(
+                   "type=sqlite;name=userdb;path=:memory:;password=restart-probe-secret;custom=changed") == 0);
+        assert(plugin.RemoveChannel("sqlite", "seed") == 0);
+        assert(plugin.RemoveChannel("sqlite", "deleted") == 0);
+    }
+    std::ifstream saved_file(destination);
+    const std::string saved((std::istreambuf_iterator<char>(saved_file)), {});
+    assert(saved.find("ENC:") != std::string::npos);
+    assert(saved.find("restart-probe-secret") == std::string::npos);
+    assert(saved.find("preserved_value") != std::string::npos);
+    {
+        std::ofstream file(source);
+        file << "channels:\n  database_channels: []\n";
+    }
+    InitializeRuntimeConfig(source, destination);
+    InitializeRuntimeConfig(source, destination);
+    {
+        std::ifstream file(destination);
+        assert(std::string((std::istreambuf_iterator<char>(file)), {}) == saved);
+    }
+    {
+        DatabasePlugin recovered;
+        recovered.Option(("config_file=" + destination).c_str());
+        recovered.Load(nullptr);
+        assert(recovered.Start() == 0);
+        int count = 0;
+        recovered.List([&](const char* type, const char* name, const char* config) {
+            assert(std::string(type) == "sqlite" && std::string(name) == "userdb");
+            assert(std::string(config).find("changed") != std::string::npos);
+            ++count;
+        });
+        assert(count == 1);
+        auto* channel = recovered.Get("sqlite", "userdb");
+        assert(channel != nullptr);
+        AssertSingleRow(channel, "SELECT 42", {"42"});
+        recovered.Stop();
+    }
+    RemoveFile(source);
+    RemoveFile(destination);
+    g_passed++;
+    printf("[PASS] runtime initialization preserves saved channels across rebuild and restart\n");
 }
 
 // ============================================================
@@ -516,12 +634,8 @@ void test_password_restart_decrypt_mysql() {
         }
         assert(ch->IsConnected());
 
-        // 执行一条 SQL 验证连接真实可用（不只是 IsConnected 标志）
-        // ExecuteSql 对 SELECT 返回结果集行数（>=0），对 DDL/DML 返回受影响行数
-        int rc = ch->ExecuteSql("SELECT 1");
-        printf("  ExecuteSql('SELECT 1') rc=%d err=%s\n", rc, ch->GetLastError());
-        assert(rc >= 0);
-        printf("  Get() + ExecuteSql('SELECT 1') succeeded after restart\n");
+        AssertSingleRow(ch, "SELECT DATABASE(), 1", {db, "1"});
+        printf("  Database selection and query result verified after restart\n");
     }
 
     RemoveFile(yml);
@@ -951,6 +1065,7 @@ int main() {
     test_update_channel();
     test_update_channel_not_found();
     test_restart_recovery();
+    test_runtime_initialization_preserves_saved_channels();
     test_list_password_masked();
     test_password_encrypted_in_yaml();
     test_add_channel_invalid_config();
@@ -965,6 +1080,6 @@ int main() {
     test_add_channel_then_get();
     test_channel_lease_protects_lifecycle();
 
-    printf("\n=== Results: %d/21 passed ===\n", g_passed);
-    return (g_passed == 21) ? 0 : 1;
+    printf("\n=== Results: %d/22 passed ===\n", g_passed);
+    return (g_passed == 22) ? 0 : 1;
 }

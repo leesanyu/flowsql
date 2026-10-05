@@ -1,11 +1,5 @@
 channels:
-  database_channels:
-    - type: mysql
-      name: flowsql_db
-      password: ENC:4citQw1HG2sjqQJtnX0B5EnaZQzUNbgUa+K9rR4o4pIWZtNuUugFUQ==
-      user: flowsql_user
-      host: 127.0.0.1
-      port: 3306
+  database_channels: []
   stream_channels:
     - type: ring
       name: demo

@@ -77,6 +77,10 @@ set_target_properties(test_postgres PROPERTIES
 add_executable(test_database_manager test_database_manager.cpp)
 target_include_directories(test_database_manager PUBLIC ${CMAKE_SOURCE_DIR})
 add_thirddepen(test_database_manager arrow rapidjson yaml-cpp)
+target_compile_definitions(test_database_manager PRIVATE
+    FLOWSQL_CMAKE_COMMAND="${CMAKE_COMMAND}"
+    FLOWSQL_RUNTIME_CONFIG_INITIALIZER="${CMAKE_BINARY_DIR}/app/initialize_runtime_config.cmake"
+)
 add_dependencies(test_database_manager flowsql_common flowsql_database)
 target_link_libraries(test_database_manager flowsql_common flowsql_database)
 find_package(OpenSSL REQUIRED)

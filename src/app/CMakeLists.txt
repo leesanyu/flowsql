@@ -14,12 +14,20 @@ set_target_properties(flowsql PROPERTIES
 set(FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR ${CMAKE_SOURCE_DIR}/../config)
 set(FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR ${CMAKE_BINARY_DIR}/output/config)
 set(FLOWSQL_NPI_PROTOCOLS_SOURCE ${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml)
+set(FLOWSQL_RUNTIME_CONFIG_INITIALIZER ${CMAKE_CURRENT_BINARY_DIR}/initialize_runtime_config.cmake)
+# flowsql.yml contains user-managed channels; initialize it once instead of syncing it on every build.
+file(GENERATE OUTPUT ${FLOWSQL_RUNTIME_CONFIG_INITIALIZER} CONTENT [=[
+if(NOT EXISTS "${DESTINATION}")
+    configure_file("${SOURCE}" "${DESTINATION}" COPYONLY)
+endif()
+]=])
 add_custom_target(flowsql_runtime_config
     COMMAND ${CMAKE_COMMAND} -E make_directory
         ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/flowsql.yml
-        ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/flowsql.yml
+    COMMAND ${CMAKE_COMMAND}
+        "-DSOURCE=${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/flowsql.yml"
+        "-DDESTINATION=${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/flowsql.yml"
+        -P ${FLOWSQL_RUNTIME_CONFIG_INITIALIZER}
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/deploy-single.yaml
         ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/deploy-single.yaml
@@ -30,11 +38,12 @@ add_custom_target(flowsql_runtime_config
         ${FLOWSQL_NPI_PROTOCOLS_SOURCE}
         ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/protocols.yml
     DEPENDS
+        ${FLOWSQL_RUNTIME_CONFIG_INITIALIZER}
         ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/flowsql.yml
         ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/deploy-single.yaml
         ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/deploy-multi.yaml
         ${FLOWSQL_NPI_PROTOCOLS_SOURCE}
-    COMMENT "Syncing runtime config files to output/config"
+    COMMENT "Initializing channel config and syncing runtime assets to output/config"
     VERBATIM
 )
 add_dependencies(flowsql flowsql_runtime_config)

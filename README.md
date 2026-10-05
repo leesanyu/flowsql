@@ -140,9 +140,9 @@ docker compose -f docker-compose.yml -f docker-compose.databases.yml up -d
 docker compose -f docker-compose.yml -f docker-compose.databases.yml ps
 ```
 
-两种方式的 Web 入口都是 `http://部署主机:8081`。基础编排不启动 MySQL，而镜像内的初始数据库通道指向
-`mysql:3306`；只用基础编排时，需要将数据库通道改为实际可达的数据库地址。数据库叠加文件使用示例密码，
-正式部署前应同步修改数据库服务密码与初始 MySQL 通道配置 `config/docker/flowsql.yml`，并按需要调整对宿主机开放的端口。
+两种方式的 Web 入口都是 `http://部署主机:8081`。首次部署不预置数据库通道，请在 Web 通道管理中按实际
+连接参数创建通道。基础编排不启动 MySQL；使用数据库叠加文件时，容器内 MySQL 地址为 `mysql:3306`。
+数据库叠加文件使用示例密码，正式部署前应修改数据库服务密码，并按需要调整对宿主机开放的端口。
 
 **通过镜像仓库跨机器发布**：将镜像推送到镜像仓库，并把所用的 Compose 文件复制到部署机器；使用数据库叠加文件时还需复制 ClickHouse XML 文件。
 两份 Compose 文件目前都引用 `flowsql:latest`，所以拉取带版本号的镜像后需在部署机器标记为该名称：
