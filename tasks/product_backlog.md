@@ -10,6 +10,7 @@
 
 | 状态 | Feature | 优先级 | 目标 | 规格 |
 | --- | --- | --- | --- | --- |
+| [x] | NPM 运行时检视修复 (`npm-runtime-review-fixes`) | P1 | 为离线批处理和实时终态分析修复已复现的超时顺序、输出内存放大、周期空扫描与标签预算未归还问题，使目标流超时结果稳定、默认预算可交付三万会话结果且资源账目随生命周期归零。 | [归档](archive/feat-npm-runtime-review-fixes.md) |
 | [x] | NPM 数据包契约与解析基础 (`npm-packet-contract`) | P0 | 定义统一的 packet 数据实体、采集元数据、Arrow Schema 及截断/畸形报文语义，并复用现有 NPI 分层与协议识别能力。 | [归档](archive/feat-npm-packet-contract.md) |
 | [x] | NPM 离线数据包全量导入 (`npm-offline-import`) | P0 | 提供 pcap/pcapng 文件的有限流读取与回放，保留原始时间戳、捕获长度、线速长度和报文顺序，接入现有流批任务运行时。 | [归档](archive/feat-npm-offline-import.md) |
 | [x] | NPM 离线文件上传与通道管理 (`npm-offline-import-web`) | P0 | 支持用户在 Web 页面上传 pcap/pcapng 文件并原子创建可执行的 `pcapfile` source 通道。 | [归档](archive/feat-npm-offline-import-web.md) |

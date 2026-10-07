@@ -3,6 +3,7 @@
 #pragma once
 
 #include <arrow/memory_pool.h>
+#include <arrow/table_builder.h>
 #include <operators/npm_basic/npm_protocol_contract.h>
 #include <atomic>
 #include <functional>
@@ -38,7 +39,7 @@ class NpmResultRouter final {
     std::shared_ptr<arrow::MemoryPool> pool_;
     std::unique_ptr<INpmResultConsumerV1> consumer_;
     Invoke invoke_;
-    std::vector<std::shared_ptr<arrow::RecordBatch>> pending_;
+    std::unique_ptr<arrow::RecordBatchBuilder> pending_;
     size_t pending_rows_ = 0;
     int error_code_ = 0;
     std::string error_;

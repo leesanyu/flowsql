@@ -119,20 +119,22 @@ struct NpmBasicRealtimeMaintenanceStatus {
 /** Fully initialized task-private state published atomically by Create(). */
 class NpmBasicTaskRuntime final {
  public:
+    // Transfers matcher ownership, plus matcher_reserved_bytes already reserved in the supplied budget.
+    // A nonzero reservation requires both matcher and budget; callers without a reservation pass zero.
     static NpmBasicTaskRuntimeStatus Create(
         const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
         std::shared_ptr<arrow::Schema>* output_schema, std::unique_ptr<NpmBasicTaskRuntime>* output,
         std::shared_ptr<NpmTaskBudget> budget = {}, IFlowLabelMatcherV1* matcher = nullptr,
         const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1(),
         std::unique_ptr<INpmResultConsumerV1> consumer = {}, std::string task_id = {},
-        INpmResultConsumerFactoryV1* consumer_factory = nullptr);
+        INpmResultConsumerFactoryV1* consumer_factory = nullptr, uint64_t matcher_reserved_bytes = 0);
     static NpmBasicTaskRuntimeStatus CreateWithTimeCapabilities(
         const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
         const NpmTimeCapabilities& time_capabilities, std::shared_ptr<arrow::Schema>* output_schema,
         std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget = {},
         IFlowLabelMatcherV1* matcher = nullptr, const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1(),
         std::unique_ptr<INpmResultConsumerV1> consumer = {}, std::string task_id = {},
-        INpmResultConsumerFactoryV1* consumer_factory = nullptr);
+        INpmResultConsumerFactoryV1* consumer_factory = nullptr, uint64_t matcher_reserved_bytes = 0);
 
     ~NpmBasicTaskRuntime();
     const NpmResultContextV1& ResultContext() const { return router_->Context(); }
@@ -164,8 +166,11 @@ class NpmBasicTaskRuntime final {
 
  private:
     struct MatcherReleaser {
+        std::shared_ptr<INpmTaskBudget> budget;
+        uint64_t reserved_bytes = 0;
         void operator()(IFlowLabelMatcherV1* matcher) const noexcept {
-            if (matcher != nullptr) matcher->Release();
+            matcher->Release();
+            if (reserved_bytes != 0) budget->Release(NpmBudgetCategory::kModuleState, reserved_bytes);
         }
     };
     using MatcherLease = std::unique_ptr<IFlowLabelMatcherV1, MatcherReleaser>;

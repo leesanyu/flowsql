@@ -445,8 +445,9 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
     }
     std::shared_ptr<NpmTaskBudget> labeling_budget;
     IFlowLabelMatcherV1* matcher = nullptr;
+    uint64_t labeling_memory_bytes = 0;
     if (parsed.features.labeling_enabled) {
-        const uint64_t labeling_memory_bytes = static_cast<uint64_t>(parsed.labeling_memory_mib) * kNpmMebibyte;
+        labeling_memory_bytes = static_cast<uint64_t>(parsed.labeling_memory_mib) * kNpmMebibyte;
         if (parsed.labeling_reference.empty()) {
             expected = State::kOpening;
             expected = Fail(expected, kLabelingConfigMissingError);
@@ -499,6 +500,8 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
         FlowLabelingDiagnosticV1 diagnostic;
         const auto matcher_status = labeling_provider->CreateMatcher(request, &matcher, &diagnostic);
         if (matcher_status != FlowLabelingErrorV1::kNone || matcher == nullptr) {
+            if (matcher) matcher->Release();
+            labeling_budget->Release(NpmBudgetCategory::kModuleState, labeling_memory_bytes);
             const char* error = kLabelingMatcherError;
             try {
                 config_error_ = BuildLabelingError(kLabelingMatcherError, diagnostic.path, diagnostic.detail);
@@ -513,7 +516,7 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
 
     const auto runtime_status = NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         parsed, querier_, input_schema, time_capabilities, &next_schema, &next_runtime, std::move(labeling_budget),
-        matcher, ProductionNpmModuleCatalogV1(), {}, task_id_, managed_consumer_factory.get());
+        matcher, ProductionNpmModuleCatalogV1(), {}, task_id_, managed_consumer_factory.get(), labeling_memory_bytes);
     if (runtime_status.error != NpmBasicTaskRuntimeError::kNone) {
         expected = State::kOpening;
         const char* error = kRuntimeOpenError;

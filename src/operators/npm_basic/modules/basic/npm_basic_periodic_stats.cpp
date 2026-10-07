@@ -34,6 +34,11 @@ void NpmBasicPeriodicStats::Release(State& state) {
     budget_->Release(NpmBudgetCategory::kModuleState, state.charge);
     state.charge = 0;
 }
+void NpmBasicPeriodicStats::Schedule(const State& state) {
+    int64_t due = End(state.next_start_ns, config_.output_interval_ns);
+    if (state.end_ns) due = std::min(due, *state.end_ns);
+    if (!next_due_ns_ || due < *next_due_ns_) next_due_ns_ = due;
+}
 int NpmBasicPeriodicStats::RetainMetadata(State& state, const NpmSessionView& view) {
     state.snapshot.session_id = view.session_id;
     state.snapshot.primary_label_id = view.primary_label_id;
@@ -74,6 +79,7 @@ int NpmBasicPeriodicStats::OnPacket(const NpmPacketView& packet, const NpmSessio
             return Fail("Basic packet entered a closed session/period");
         RetainMetadata(state, view);
         if (!state.last_period) state.next_start_ns = std::min(state.next_start_ns, start);
+        Schedule(state);
         auto bucket = state.buckets.find(start);
         if (bucket == state.buckets.end()) {
             if (budget_->Reserve(NpmBudgetCategory::kModuleState, kBucketCharge) != NpmBudgetError::kNone)
@@ -181,12 +187,15 @@ int NpmBasicPeriodicStats::OnSessionEnd(const NpmSessionView& view, NpmSessionEn
     } else {
         state.end_ns = view.last_ns;
     }
+    Schedule(state);
     return 0;
 }
 int NpmBasicPeriodicStats::OnTime(int64_t watermark, int64_t observed_at, INpmResultWriter& writer) {
     if (watermark_ns_ && watermark < *watermark_ns_) return 0;
     watermark_ns_ = watermark;
     input_end_ns_ = std::max(input_end_ns_.value_or(watermark), End(watermark, config_.out_of_order_tolerance_ns));
+    if (!next_due_ns_ || watermark < *next_due_ns_) return 0;
+    next_due_ns_.reset();
     for (auto it = states_.begin(); it != states_.end();) {
         auto& state = it->second;
         const bool final = state.end_ns && *state.end_ns <= watermark;
@@ -195,8 +204,10 @@ int NpmBasicPeriodicStats::OnTime(int64_t watermark, int64_t observed_at, INpmRe
         if (final) {
             Release(state);
             it = states_.erase(it);
-        } else
+        } else {
+            Schedule(state);
             ++it;
+        }
     }
     return 0;
 }
@@ -209,6 +220,7 @@ int NpmBasicPeriodicStats::OnFinish(int64_t observed_at, INpmResultWriter& write
         Release(state);
     }
     states_.clear();
+    next_due_ns_.reset();
     return 0;
 }
 }  // namespace flowsql::npm

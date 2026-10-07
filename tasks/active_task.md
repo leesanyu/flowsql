@@ -1,61 +1,51 @@
 # 即时工作台
 
-关联 Feature Task：数据库平台配置维护；规格 [数据库平台](archive/feat-database-platform.md)。
-当前 Atomic Slice：取消预置数据库通道。
-状态：已完成；WIP=0。用户明确要求删除默认 flowsql_db，已验收并停止本片。
+关联 Feature Task：[NPM 运行时检视修复](archive/feat-npm-runtime-review-fixes.md) T4 与 Feature 整体验收。
+当前 Atomic Slice：恢复中断的标签预算修复与整体验收；状态：已完成，WIP=0。
 
-## 业务意图
+## 业务意图与 Non-Goals
 
-原生和 Docker 新部署从空数据库通道列表开始，由用户按真实连接参数创建通道，避免展示不存在的默认连接。
+完成用户已授权的四项修复，核对中断点并补齐验收证据。不实施其他协议/结构优化，不提交/推送。
 
-## Non-Goals
+## 冻结契约
 
-不删除真实数据库，不改驱动或连接参数解析，不改 Stream 通道，不重启用户服务，不提交/推送。
-当前运行配置无默认 flowsql_db，已有 flowsql-mysql 配置逐字节保留；保留前序构建持久化修复及其他未提交工作。
-
-## 冻结契约与主链路
-
-原生 config/flowsql.yml 和 Docker config/docker/flowsql.yml 的 channels.database_channels 为 []。
-调整现有部署回归断言，校验两份模板均为空序列；同步 README 的首次部署说明。
-首次构建初始化空数据库通道列表；现有运行配置继续由上一切片的初始化保护保留。
+内部 Create / CreateWithTimeCapabilities 末尾的 matcher_reserved_bytes 默认为 0；非零时调用者转移同一 budget 中实际预留的 matcher 额度。MatcherReleaser 释放 matcher 后归还自身额度一次。未预留的 mock 不误释放其他模块预算；外部 Arrow 输出保有其预算生命周期。T1/T2/T3 的离线截止、紧凑累积和周期门槛契约见归档。
 
 ## 允许修改文件
 
 - tasks/active_task.md
-- config/flowsql.yml
-- config/docker/flowsql.yml
-- src/tests/test_framework/test_native_deploy_config.cpp
-- README.md
-- build/**（标准构建生成物；build/output/config/flowsql.yml 不得改变）
-- /tmp/flowsql-remove-default-db-20261005/**（基线及验证证据）
+- tasks/product_backlog.md（仅本 Feature 状态与归档链接）
+- tasks/specs/feat-npm-runtime-review-fixes.md → tasks/archive/feat-npm-runtime-review-fixes.md（仅移动文件）
+- src/operators/npm_basic/core/npm_basic_task_runtime.h
+- src/operators/npm_basic/core/npm_basic_task_runtime.cpp
+- src/operators/npm_basic/npm_basic_operator.cpp
+- src/tests/test_npm_basic/test_npm_basic.cpp
+- build/**（构建及验收证据，现有运行配置保持）
+- /tmp/flowsql-npm-fixes/**（独立 Sanitizer 构建，复用主仓第三方缓存）
 
-基线 /tmp/flowsql-remove-default-db-20261005/baseline.json；前序工作台和允许文件均有快照。
-每次 patch 后 git diff --name-only，核对相对本轮基线只修改允许文件。
+T1/T2/T3 已完成源码和用户原有 Backlog 修改保留；恢复后未新增源码修改。
 
 ## 验收命令
 
 ```bash
-cmake --build build --target test_native_deploy_config test_docker_deploy_config -j8
-ctest --test-dir build -R '^(test_native_deploy_config|test_docker_deploy_config)$' --output-on-failure
+cmake --build build -j8
+ctest --test-dir build --output-on-failure
+cmake -B /tmp/flowsql-npm-fixes/asan src -DFLOWSQL_NPM_PERIODIC_SANITIZERS=ON -DFLOWSQL_FLOW_LABELING=ON
+cmake --build /tmp/flowsql-npm-fixes/asan --target test_npm_basic test_npm_periodic_contract test_npm_periodic_stats -j8
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir /tmp/flowsql-npm-fixes/asan -R '^(test_npm_basic|test_npm_periodic_runtime|test_npm_tcp_stream_runtime|test_npm_periodic_contract|test_npm_periodic_stats)$' --output-on-failure
 git diff --check
 ```
 
-同时验证空目录首次初始化得到空数据库通道列表，以及构建后用户运行配置 SHA256 与本轮基线一致。
-修改 C++ 行符合 src/.clang-format；只审查本轮 diff。
-
 ## 时间盒与停止条件
 
-2026-10-05 09:01UTC 起 15 分钟，09:16UTC 截止。
-验收通过后 WIP=0 并停止；到期只记录完成、检查点通过、当前错误或明确阻塞，不扩展范围。
+沿用 T4，不新增 Feature Task。05:53 UTC 开始恢复核查；因恢复后的大小写路径沙箱映射只读，权限等待至 06:27 UTC 后恢复写入和完整验收。实际实现反馈时间盒 06:27–06:57 UTC，30 分钟；验收完成后 WIP=0，停止，不开始其余优化。
 
 ## 完成证据
 
-- 2026-10-05 09:04UTC 完成；验收后停止，不启动下一切片。
-- 原生及 Docker 模板均改为 database_channels: []；其他 Stream 配置保持原值。
-- 部署回归断言校验两份模板不预置数据库通道，README 改为由用户在 Web 中创建真实连接。
-- 所列两个 CMake target 构建通过，最终日志零 warning/error；相关 CTest 2/2 通过。
-- 两份模板在新路径首次初始化后均为空数据库通道列表，且文件字节与模板一致。
-- 当前运行配置已无默认 flowsql_db；现有 flowsql-mysql 的文件 SHA256 在构建前后保持一致。
-- 修改行 clang-format-18 检查零替换，git diff --check 通过；相对本轮基线无越界修改。
-- 前序配置持久化修复、数据库管理测试及用户 Backlog 修改保留；未重启服务、未写数据库、未提交/推送。
-- 证据位于 /tmp/flowsql-remove-default-db-20261005：baseline.json、build.log、tests.log 和首次初始化配置。
+- 四项修复及关键边界断言全部通过，全仓构建零 warning/error，完整 CTest 49/49，ASan+UBSan 5/5。
+- 中断前的真实 DPDK 路径异常在恢复后的 GDB 与完整 CTest 中未复现；MySQL/PostgreSQL/ClickHouse 集成当前均通过，未修改无关插件或测试来规避失败。
+- 三万会话四场景成功交付，pending 峰值 7,421,952 / 7,290,816 字节；准确 matcher 预算及外部 Arrow 生命周期断言通过。
+- 修改行格式零替换、版权和 diff 检查通过，用户原有 Backlog 内容与运行配置保留，未提交/推送。
+- 本轮新证据：build/npm-review-evidence；归档包含各项验收结果及历史证据边界。
+
+完成时间：2026-10-07 06:36 UTC。

@@ -88,10 +88,11 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::Create(
     const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
     std::shared_ptr<arrow::Schema>* output_schema, std::unique_ptr<NpmBasicTaskRuntime>* output,
     std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcherV1* matcher, const NpmModuleCatalogV1& catalog,
-    std::unique_ptr<INpmResultConsumerV1> consumer, std::string task_id,
-    INpmResultConsumerFactoryV1* consumer_factory) {
+    std::unique_ptr<INpmResultConsumerV1> consumer, std::string task_id, INpmResultConsumerFactoryV1* consumer_factory,
+    uint64_t matcher_reserved_bytes) {
     return CreateWithTimeCapabilities(config, querier, input_schema, {}, output_schema, output, std::move(budget),
-                                      matcher, catalog, std::move(consumer), std::move(task_id), consumer_factory);
+                                      matcher, catalog, std::move(consumer), std::move(task_id), consumer_factory,
+                                      matcher_reserved_bytes);
 }
 
 NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
@@ -99,14 +100,14 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
     const NpmTimeCapabilities& time_capabilities, std::shared_ptr<arrow::Schema>* output_schema,
     std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcherV1* matcher,
     const NpmModuleCatalogV1& catalog, std::unique_ptr<INpmResultConsumerV1> consumer, std::string task_id,
-    INpmResultConsumerFactoryV1* consumer_factory) {
+    INpmResultConsumerFactoryV1* consumer_factory, uint64_t matcher_reserved_bytes) {
     struct ConsumerGuard {
         std::unique_ptr<INpmResultConsumerV1>& consumer;
         ~ConsumerGuard() {
             if (consumer) consumer->Cancel();
         }
     } consumer_guard{consumer};
-    MatcherLease matcher_lease(matcher);
+    MatcherLease matcher_lease(matcher, MatcherReleaser{budget, matcher_reserved_bytes});
     NpmBasicTaskRuntimeStatus status;
     if (!input_schema) {
         status.error = NpmBasicTaskRuntimeError::kNullInputSchema;

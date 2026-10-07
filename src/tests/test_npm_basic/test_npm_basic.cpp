@@ -3901,7 +3901,7 @@ void TestProcessNpmOfflinePacketBatchOrderAndWatermark() {
     assert(status.error == npm::NpmPacketBatchProcessError::kNone && status.row == -1);
     assert(status.progress_disposition == npm::NpmCaptureProgressDisposition::kAdvanced);
     assert((events == std::vector<uint64_t>{2011, 2012, 2021, 2022, 1021, 1022, 2031, 2032, 2031, 2032, 1031, 1032,
-                                            2041, 2042, 1011, 1012}));
+                                            1011, 1012, 2041, 2042}));
     assert((first_module.packet_sequences == std::vector<uint64_t>{100, 101, 102, 103, 104}));
     assert((first_module.packet_timestamps ==
             std::vector<int64_t>{second, 11 * second / 10, 12 * second / 10, 13 * second / 10, 3 * second}));
@@ -3981,7 +3981,7 @@ void TestProcessNpmOfflinePacketBatchErrorsAndAtomicOutput() {
     assert(status.error == npm::NpmPacketBatchProcessError::kProgressDeferred && status.row == 0);
     assert(status.progress_disposition == npm::NpmCaptureProgressDisposition::kDeferredBacklogUnknown);
     assert(ended_events.size() == 1 && ended_events[0].snapshot.session_id == 998);
-    assert((events == std::vector<uint64_t>{2011, 2012}));
+    assert(events.empty() && realtime_table.size() == 0);
 
     npm::NpmSessionTable live_table(realtime_config);
     std::vector<npm::NpmSessionEndEvent> live_ended;
@@ -4014,8 +4014,9 @@ void TestProcessNpmOfflinePacketBatchErrorsAndAtomicOutput() {
     assert(status.error == npm::NpmPacketBatchProcessError::kModuleError && status.row == 1);
     assert(status.module_error == EBUSY);
     assert(ended_events.size() == 1 && ended_events[0].snapshot.session_id == 998);
-    assert((events == std::vector<uint64_t>{2011, 2012, 2021, 2022, 1011}));
-    assert(idle_error_table.size() == 1);
+    // The failed timeout callback prevents delivery of the current packet.
+    assert((events == std::vector<uint64_t>{2011, 2012, 1011}));
+    assert(idle_error_table.size() == 0);
 }
 
 void TestFlowLabelingAdmissionBatchSessionReuseAndFailureAtomicity() {
@@ -11922,7 +11923,7 @@ void TestProtocolLifecycleTupleReuseAndBudgetFailureCleanup() {
     std::shared_ptr<arrow::RecordBatch> output;
     assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
     assert(trace.peak_entities == 2 && trace.live_entities == 2);
-    assert(trace.order[0] == "input:1" && trace.order[2] == "end:1" && trace.order[3] == "input:2");
+    assert(trace.order[1] == "input:1" && trace.order[3] == "end:1" && trace.order[4] == "input:2");
     runtime->Cancel();
     runtime->Cancel();
     assert(trace.finish_calls == 0 && trace.abort_calls == 1 && trace.live_entities == 0);
@@ -13880,7 +13881,354 @@ void TestTlsT3RuntimeRouting() {
     }
 }
 
+// The same target packets must have the same timeout semantics with/without unrelated traffic.
+void TestOfflineDeadlinesBeforePacketAdmission() {
+    constexpr int64_t second = npm::kNpmNanosecondsPerSecond;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    for (bool udp : {false, true})
+        for (bool labeling : {false, true})
+            for (bool split : {false, true})
+                for (bool background : {false, true})
+                    for (int64_t tolerance : {int64_t{0}, second / 2})
+                        for (int64_t delta : {-1, 0, 1}) {
+                            auto config = MakeRuntimeTaskConfig();
+                            config.analysis.tcp_idle_timeout_ns = second;
+                            config.analysis.udp_idle_timeout_ns = second;
+                            config.analysis.out_of_order_tolerance_ns = tolerance;
+                            config.features.labeling_enabled = labeling;
+                            LabelingMatcherStats labels;
+                            std::shared_ptr<arrow::Schema> schema;
+                            std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+                            assert(npm::NpmBasicTaskRuntime::Create(
+                                       config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
+                                       labeling ? new RecordingLabelMatcher(&labels) : nullptr)
+                                       .error == npm::NpmBasicTaskRuntimeError::kNone);
+                            auto target =
+                                udp ? MakeIpv6UdpPacket("2001:db8::1", 40000, "2001:db8::2", 443, {})
+                                    : MakeIpv4TcpPacket("192.0.2.1", 40000, "192.0.2.2", 443, {}, kTcpAck, 100);
+                            auto other = MakeIpv4TcpPacket("192.0.2.3", 40001, "192.0.2.4", 80, {}, kTcpAck, 100);
+                            const int64_t next = 2 * second + tolerance + delta;
+                            std::vector<flowsql::packet::PacketRecord> records{
+                                MakeBatchPacketRecord(target, 0, second, 1)};
+                            if (background) records.push_back(MakeBatchPacketRecord(other, 0, next, 2));
+                            records.push_back(MakeBatchPacketRecord(target, 0, next, 3));
+                            std::vector<uint64_t> counts;
+                            std::vector<std::string> reasons;
+                            const auto collect = [&](const std::shared_ptr<arrow::RecordBatch>& rows) {
+                                auto ports =
+                                    std::static_pointer_cast<arrow::UInt16Array>(rows->GetColumnByName("a_port"));
+                                auto packets =
+                                    std::static_pointer_cast<arrow::UInt64Array>(rows->GetColumnByName("packets_ab"));
+                                auto ends =
+                                    std::static_pointer_cast<arrow::StringArray>(rows->GetColumnByName("end_reason"));
+                                for (int64_t i = 0; i < rows->num_rows(); ++i) {
+                                    if (ports->Value(i) != 40000) continue;
+                                    counts.push_back(packets->Value(i));
+                                    reasons.push_back(ends->GetString(i));
+                                    if (labeling)
+                                        assert(std::static_pointer_cast<arrow::UInt32Array>(
+                                                   rows->GetColumnByName("primary_label_id"))
+                                                   ->Value(i) == 1001);
+                                }
+                            };
+                            std::shared_ptr<arrow::RecordBatch> output;
+                            if (split) {
+                                for (const auto& record : records) {
+                                    output.reset();
+                                    assert(
+                                        runtime->ProcessOfflineBatch(MakeEncodedPacketBatch({record}), &output).error ==
+                                        npm::NpmBasicOfflineBatchError::kNone);
+                                    collect(output);
+                                }
+                            } else {
+                                assert(runtime->ProcessOfflineBatch(MakeEncodedPacketBatch(records), &output).error ==
+                                       npm::NpmBasicOfflineBatchError::kNone);
+                                collect(output);
+                            }
+                            output.reset();
+                            assert(runtime->FlushOffline(next, &output).error == npm::NpmEofFlushError::kNone);
+                            collect(output);
+                            assert(counts == (delta < 0 ? std::vector<uint64_t>{2} : std::vector<uint64_t>{1, 1}));
+                            assert(reasons == (delta < 0 ? std::vector<std::string>{"eof"}
+                                                         : std::vector<std::string>{"idle_timeout", "eof"}));
+                            if (labeling) {
+                                assert(labels.facts.size() == (delta < 0 ? 1U : 2U) + background);
+                                assert(labels.release_calls == 1);
+                            }
+                        }
+}
+
+void TestOfflineIcmpDeadlinesBeforeReply() {
+    constexpr int64_t second = npm::kNpmNanosecondsPerSecond;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    for (bool labeling : {false, true})
+        for (bool split : {false, true})
+            for (bool background : {false, true})
+                for (int64_t tolerance : {int64_t{0}, second / 2})
+                    for (int64_t delta : {-1, 0, 1}) {
+                        npm::NpmBasicTaskConfig config;
+                        assert(
+                            npm::ParseNpmBasicTaskConfig(
+                                R"({"input_namespace":"capture","source_domains":"1:77","features":"icmp","observing":"icmp_event","out_of_order_tolerance_ns":"0"})",
+                                &config)
+                                .error == npm::NpmBasicTaskConfigError::kNone);
+                        config.analysis.out_of_order_tolerance_ns = tolerance;
+                        config.features.labeling_enabled = labeling;
+                        LabelingMatcherStats labels;
+                        std::shared_ptr<arrow::Schema> schema;
+                        std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+                        assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(),
+                                                                &schema, &runtime, {},
+                                                                labeling ? new RecordingLabelMatcher(&labels) : nullptr)
+                                   .error == npm::NpmBasicTaskRuntimeError::kNone);
+                        auto request = MakeControlPacket();
+                        request.bytes[20] = 8;
+                        request.bytes[21] = 0;
+                        request.bytes[24] = 0x12;
+                        request.bytes[25] = 0x34;
+                        request.bytes[26] = 0;
+                        request.bytes[27] = 9;
+                        auto reply = request;
+                        reply.bytes[20] = 0;
+                        auto* ip = reinterpret_cast<flowsql::Ipv4Header*>(reply.bytes.data());
+                        std::swap(ip->src_addr, ip->dst_addr);
+                        std::swap(reply.layer.src_ip, reply.layer.dst_ip);
+                        auto other = MakeIpv4TcpPacket("192.0.2.3", 40000, "192.0.2.4", 80, {}, kTcpAck, 100);
+                        const int64_t next = 6 * second + tolerance + delta;
+                        std::vector<flowsql::packet::PacketRecord> records{
+                            MakeBatchPacketRecord(request, 1, second, 1)};
+                        if (background) records.push_back(MakeBatchPacketRecord(other, 1, next, 2));
+                        records.push_back(MakeBatchPacketRecord(reply, 1, next, 3));
+                        std::vector<std::string> outcomes;
+                        const auto collect = [&](const std::shared_ptr<arrow::RecordBatch>& rows) {
+                            auto values =
+                                std::static_pointer_cast<arrow::StringArray>(rows->GetColumnByName("outcome"));
+                            for (int64_t i = 0; i < rows->num_rows(); ++i) outcomes.push_back(values->GetString(i));
+                        };
+                        std::shared_ptr<arrow::RecordBatch> output;
+                        if (split) {
+                            for (const auto& record : records) {
+                                output.reset();
+                                assert(runtime->ProcessOfflineBatch(MakeEncodedPacketBatch({record}), &output).error ==
+                                       npm::NpmBasicOfflineBatchError::kNone);
+                                collect(output);
+                            }
+                        } else {
+                            assert(runtime->ProcessOfflineBatch(MakeEncodedPacketBatch(records), &output).error ==
+                                   npm::NpmBasicOfflineBatchError::kNone);
+                            collect(output);
+                        }
+                        output.reset();
+                        assert(runtime->FlushOffline(next, &output).error == npm::NpmEofFlushError::kNone);
+                        collect(output);
+                        assert(outcomes == (delta < 0
+                                                ? std::vector<std::string>{"echo_matched"}
+                                                : std::vector<std::string>{"echo_request_only", "echo_reply_only"}));
+                    }
+}
+
+void TestResultRouterPreservesSlicedNullableColumns() {
+    auto config = MakeRuntimeTaskConfig();
+    auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+    auto invoke = [](const std::function<int()>& fn) { return fn(); };
+    npm::NpmResultRouter router({npm::NpmBasicEntityDescriptorV1()}, "basic", npm::MakeNpmResultContext("slice"),
+                                budget, {}, invoke);
+    auto first = MakeBasicEncodingResult(1);
+    auto second = MakeBasicEncodingResult(2);
+    second.protocol_status = npm::NpmProtocolStatus::kUnknown;
+    second.protocol_id.reset();
+    second.protocol_sub_id.reset();
+    std::shared_ptr<arrow::RecordBatch> rows, expected, output;
+    assert(npm::EncodeNpmBasicResults({first, second}, &rows) == npm::NpmBasicEncodeError::kNone);
+    assert(npm::EncodeNpmBasicResults({second, first}, &expected) == npm::NpmBasicEncodeError::kNone);
+    assert(router.Emit("basic", "basic", *rows->Slice(1, 1)) == 0);
+    assert(router.Emit("basic", "basic", *rows->Slice(0, 1)) == 0);
+    rows.reset();
+    assert(router.Drain(&output) == 0 && output->Equals(*expected));
+    output.reset();
+    assert(budget->Usage().pending_output_bytes == 0);
+}
+
+void TestPeriodicDeadlineTracksReorderedAndClosedSessions() {
+    constexpr int64_t second = npm::kNpmNanosecondsPerSecond;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    auto config = MakeRuntimeTaskConfig();
+    config.analysis.result_mode = npm::NpmResultMode::kPeriodicSnapshot;
+    config.analysis.output_interval_ns = 15 * second;
+    config.analysis.out_of_order_tolerance_ns = 40 * second;
+    auto runtime = CreateRuntimeForTest(config, &querier);
+    auto target = MakeIpv4TcpPacket("192.0.2.1", 40000, "192.0.2.2", 80, {}, kTcpAck, 100);
+    auto close = MakeIpv4TcpPacket("192.0.2.1", 40000, "192.0.2.2", 80, {}, kTcpRst | kTcpAck, 100);
+    auto other = MakeIpv4TcpPacket("192.0.2.3", 40001, "192.0.2.4", 80, {}, kTcpAck, 100);
+    std::shared_ptr<arrow::RecordBatch> output;
+    const auto send = [&](const PacketFixture& packet, int64_t timestamp) {
+        output.reset();
+        assert(
+            runtime
+                ->ProcessOfflineBatch(MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, timestamp, 1)}), &output)
+                .error == npm::NpmBasicOfflineBatchError::kNone);
+    };
+    send(target, 31 * second);
+    assert(output->num_rows() == 0);
+    // A valid out-of-order packet moves the first pending window from [30,45) to [15,30).
+    send(target, 16 * second);
+    assert(output->num_rows() == 0);
+    send(other, 70 * second);
+    assert(output->num_rows() == 1 && PeriodicUInt(output, "revision") == 1);
+    assert(PeriodicInt(output, "period_start_ns") == 15 * second);
+    assert(PeriodicInt(output, "period_end_ns") == 30 * second);
+    assert(PeriodicUInt(output, "interval_packets_ab") == 1 && PeriodicFlag(output, "period_complete"));
+    // RST ends the remaining window before its grid boundary; watermark 32 must deliver it.
+    send(close, 32 * second);
+    assert(output->num_rows() == 0);
+    send(other, 72 * second);
+    assert(output->num_rows() == 1 && PeriodicUInt(output, "revision") == 2);
+    assert(PeriodicInt(output, "period_start_ns") == 30 * second);
+    assert(PeriodicUInt(output, "interval_packets_ab") == 2 && PeriodicUInt(output, "packets_ab") == 3);
+    assert(PeriodicFlag(output, "is_final") && !PeriodicFlag(output, "period_complete"));
+    auto budget = runtime->Budget();
+    output.reset();
+    runtime->Cancel();
+    assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+}
+
+void TestMatcherReservationFollowsOwnership() {
+    for (uint64_t reserved : {uint64_t{0}, uint64_t{3} * npm::kNpmMebibyte, uint64_t{64} * npm::kNpmMebibyte}) {
+        for (int scenario = 0; scenario < 6; ++scenario) {
+            auto config = MakeRuntimeTaskConfig();
+            config.features.labeling_enabled = true;
+            auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+            constexpr uint64_t unrelated = 128;
+            assert(budget->Reserve(npm::NpmBudgetCategory::kModuleState, unrelated + reserved) ==
+                   npm::NpmBudgetError::kNone);
+            ContextDictionary dictionary;
+            ContextProtocol protocol(&dictionary);
+            ContextPool pool(&protocol, scenario == 3 ? flowsql::ProtocolPipelinePoolError::kExhausted
+                                                      : flowsql::ProtocolPipelinePoolError::kNone);
+            SinglePoolQuerier querier(&pool);
+            LabelingMatcherStats labels;
+            UnexpectedManagedFactory failing_factory;
+            std::shared_ptr<arrow::Schema> schema;
+            std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+            const auto created = npm::NpmBasicTaskRuntime::Create(
+                config, &querier, scenario == 2 ? nullptr : flowsql::packet::PacketSchema(), &schema, &runtime, budget,
+                new RecordingLabelMatcher(&labels), npm::ProductionNpmModuleCatalogV1(), {}, {},
+                scenario == 4 ? &failing_factory : nullptr, reserved);
+            std::shared_ptr<arrow::RecordBatch> output;
+            if (scenario >= 2 && scenario <= 4) {
+                assert(created.error != npm::NpmBasicTaskRuntimeError::kNone && !runtime);
+                if (scenario == 4) assert(failing_factory.create_calls == 1);
+            } else {
+                assert(created.error == npm::NpmBasicTaskRuntimeError::kNone);
+                assert(budget->Usage().module_state_bytes == unrelated + reserved);
+                const auto packet = MakeIpv4TcpPacket("192.0.2.1", 40000, "192.0.2.2", 443, {}, kTcpAck, 100);
+                const auto processed = runtime->ProcessOfflineBatch(
+                    MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, scenario == 5 ? 99 : 0, 1, 1)}), &output);
+                if (scenario == 5) {
+                    assert(processed.error == npm::NpmBasicOfflineBatchError::kBatchProcessError);
+                } else {
+                    assert(processed.error == npm::NpmBasicOfflineBatchError::kNone);
+                    output.reset();
+                    if (scenario == 0) {
+                        assert(runtime->FlushOffline(1, &output).error == npm::NpmEofFlushError::kNone);
+                        assert(output && output->num_rows() == 1 && budget->Usage().pending_output_bytes > 0);
+                    } else {
+                        runtime->Cancel();
+                        runtime->Cancel();
+                    }
+                }
+            }
+            assert(labels.release_calls == 1 && budget->Usage().module_state_bytes == unrelated);
+            runtime.reset();
+            assert(labels.release_calls == 1);
+            output.reset();
+            assert(budget->Release(npm::NpmBudgetCategory::kModuleState, unrelated) == npm::NpmBudgetError::kNone);
+            assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+        }
+    }
+}
+
+void TestLargeResultDeliveryWithinDefaultBudget() {
+    constexpr int count = 30000;
+    constexpr int64_t second = npm::kNpmNanosecondsPerSecond;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    // EOF final, EOF periodic, normal realtime terminal Flush, and a common periodic deadline.
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        const bool realtime = scenario == 2;
+        auto config = MakeRuntimeTaskConfig(realtime ? npm::NpmRunMode::kRealtime : npm::NpmRunMode::kOffline);
+        if (scenario != 0) config.analysis.result_mode = npm::NpmResultMode::kPeriodicSnapshot;
+        config.analysis.out_of_order_tolerance_ns = 0;
+        auto runtime =
+            realtime ? CreateRealtimeRuntimeForTest(config, &querier) : CreateRuntimeForTest(config, &querier);
+        auto budget = std::static_pointer_cast<npm::NpmTaskBudget>(runtime->Budget());
+        std::shared_ptr<arrow::RecordBatch> output;
+        for (int begin = 0; begin < count; begin += 512) {
+            std::vector<flowsql::packet::PacketRecord> records;
+            for (int index = begin; index < std::min(begin + 512, count); ++index) {
+                auto packet = MakeIpv4TcpPacket("192.0.2.1", index + 1, "192.0.2.2", 80, {}, kTcpAck, 100);
+                records.push_back(MakeBatchPacketRecord(packet, 0, second, index + 1));
+            }
+            output.reset();
+            assert(runtime->ProcessOfflineBatch(MakeEncodedPacketBatch(records), &output).error ==
+                   npm::NpmBasicOfflineBatchError::kNone);
+            assert(output && output->num_rows() == 0);
+        }
+        output.reset();
+        if (scenario == 3) {
+            auto other = MakeIpv4TcpPacket("192.0.2.3", 40000, "192.0.2.4", 80, {}, kTcpAck, 100);
+            assert(runtime
+                       ->ProcessOfflineBatch(MakeEncodedPacketBatch({MakeBatchPacketRecord(
+                                                 other, 0, config.analysis.output_interval_ns, count + 1)}),
+                                             &output)
+                       .error == npm::NpmBasicOfflineBatchError::kNone);
+        } else {
+            assert(runtime->FlushOffline(second, &output).error == npm::NpmEofFlushError::kNone);
+        }
+        assert(output && output->num_rows() == count && output->ValidateFull().ok());
+        for (int row = 0; row < count; ++row) {
+            assert(PeriodicUInt(output, "session_id", row) == static_cast<uint64_t>(row + 1));
+            assert(PeriodicUInt(output, "revision", row) == 1);
+            assert(PeriodicUInt(output, "packets_ab", row) == 1);
+            assert(PeriodicUInt(output, "wire_bytes_total", row) == 40);
+            assert(PeriodicFlag(output, "is_final", row) == (scenario != 3));
+        }
+        assert(budget->HighWaterMarks().pending_output_bytes < config.analysis.max_pending_output_bytes);
+        printf("large result scenario=%d rows=%d pending_peak=%lu\n", scenario, count,
+               budget->HighWaterMarks().pending_output_bytes);
+        auto retained = output->GetColumnByName("session_id")->Slice(count - 1, 1);
+        output.reset();
+        if (scenario == 3) runtime->Cancel();
+        runtime.reset();
+        assert(budget->Usage().session_state_bytes == 0 && budget->Usage().module_state_bytes == 0);
+        assert(budget->Usage().pending_output_bytes > 0);
+        assert(std::static_pointer_cast<arrow::UInt64Array>(retained)->Value(0) == count);
+        retained.reset();
+        assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+    }
+}
+
 int main(int argc, char** argv) {
+    if (argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--review-fixes-only")) {
+        TestOfflineDeadlinesBeforePacketAdmission();
+        TestOfflineIcmpDeadlinesBeforeReply();
+        TestResultRouterPreservesSlicedNullableColumns();
+        TestPeriodicDeadlineTracksReorderedAndClosedSessions();
+        TestMatcherReservationFollowsOwnership();
+        TestLargeResultDeliveryWithinDefaultBudget();
+        if (argc == 2) return 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--periodic-only") {
         TestNpmBasicTaskPreservesLatePacketDiagnostic();
         TestNpmBasicFinalUsesGenerationTime();

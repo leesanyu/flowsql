@@ -183,7 +183,7 @@ class NpmSessionAdmissionPlanner {
 
     NpmSessionTableError AdvanceControl(int64_t timestamp_ns);
 
-    /** Mirrors Observe followed by offline capture progress for admission decisions only. */
+    /** Mirrors offline capture progress followed by Observe for admission decisions only. */
     NpmSessionTableError ObserveAndAdvance(const NpmSessionPacketBinding& binding, const packet::PacketMeta& meta,
                                            bool* requires_admission);
 

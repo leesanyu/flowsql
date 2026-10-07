@@ -376,9 +376,8 @@ NpmSessionTableError NpmSessionAdmissionPlanner::ObserveAndAdvance(const NpmSess
     if (binding.direction != NpmPacketDirection::kAToB && binding.direction != NpmPacketDirection::kBToA) {
         return NpmSessionTableError::kInvalidDirection;
     }
-    if (watermark_initialized_ && meta.timestamp_ns < watermark_ns_) {
-        return NpmSessionTableError::kLatePacket;
-    }
+    const auto progress_error = AdvanceControl(meta.timestamp_ns);
+    if (progress_error != NpmSessionTableError::kNone) return progress_error;
 
     try {
         auto [iterator, inserted] = states_.try_emplace(binding.key);
@@ -438,7 +437,7 @@ NpmSessionTableError NpmSessionAdmissionPlanner::ObserveAndAdvance(const NpmSess
 
         if (is_tcp && (tcp.rst || (state.fin_ab && state.fin_ba))) state = {};
 
-        return AdvanceControl(meta.timestamp_ns);
+        return NpmSessionTableError::kNone;
     } catch (const std::bad_alloc&) {
         return NpmSessionTableError::kAllocationFailed;
     }

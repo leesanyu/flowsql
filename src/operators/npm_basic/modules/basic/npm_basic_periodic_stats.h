@@ -43,11 +43,13 @@ class NpmBasicPeriodicStats final : public INpmAnalysisModule {
     int Emit(State&, bool complete, bool final, int64_t observed_at_ns, INpmResultWriter&);
     int Fail(std::string message);
     void Release(State&);
+    void Schedule(const State&);
     NpmAnalysisConfig config_;
     std::shared_ptr<INpmTaskBudget> budget_;
     NpmBasicResultProjector& projector_;
     std::map<uint64_t, State> states_;
     std::optional<int64_t> watermark_ns_, input_end_ns_;
+    std::optional<int64_t> next_due_ns_;
     std::string error_;
 };
 

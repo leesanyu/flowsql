@@ -2,9 +2,7 @@
 // Licensed under the MIT License.
 #include "npm_result_router.h"
 #include <arrow/api.h>
-#include <arrow/array/concatenate.h>
 #include <cerrno>
-#include <cstring>
 #include <iomanip>
 #include <random>
 #include <sstream>
@@ -60,24 +58,6 @@ void LeaseBuffers(const std::shared_ptr<arrow::ArrayData>& data, const std::shar
     for (auto& child : data->child_data) LeaseBuffers(child, pool);
     if (data->dictionary) LeaseBuffers(data->dictionary, pool);
 }
-arrow::Result<std::shared_ptr<arrow::ArrayData>> CopyData(const std::shared_ptr<arrow::ArrayData>& data,
-                                                          const std::shared_ptr<arrow::MemoryPool>& pool) {
-    auto copy = data->Copy();
-    for (auto& buffer : copy->buffers) {
-        if (!buffer) continue;
-        ARROW_ASSIGN_OR_RAISE(auto next, arrow::AllocateBuffer(buffer->size(), pool.get()));
-        if (buffer->size()) std::memcpy(next->mutable_data(), buffer->data(), buffer->size());
-        auto owner = std::make_shared<BufferOwner>(BufferOwner{pool, std::move(next)});
-        buffer = std::shared_ptr<arrow::Buffer>(owner, owner->buffer.get());
-    }
-    for (auto& child : copy->child_data) {
-        ARROW_ASSIGN_OR_RAISE(child, CopyData(child, pool));
-    }
-    if (copy->dictionary) {
-        ARROW_ASSIGN_OR_RAISE(copy->dictionary, CopyData(copy->dictionary, pool));
-    }
-    return copy;
-}
 }  // namespace
 
 NpmResultContextV1 MakeNpmResultContext(std::string task_id) {
@@ -118,13 +98,16 @@ int NpmResultRouter::Emit(std::string_view module, std::string_view entity_id, c
         return Fail(EINVAL, entity->entity_id + "/" + status.field + ": invalid entity/Schema/rows");
     if (rows.num_rows() == 0) return 0;
     if (entity_id == observing_) {
-        std::vector<std::shared_ptr<arrow::Array>> columns;
-        for (const auto& column : rows.columns()) {
-            auto copy = CopyData(column->data(), pool_);
-            if (!copy.ok()) return Fail(ENOMEM, entity->entity_id + ": " + copy.status().ToString());
-            columns.push_back(arrow::MakeArray(*copy));
+        if (!pending_) {
+            auto builder = arrow::RecordBatchBuilder::Make(entity->schema, pool_.get(), 0);
+            if (!builder.ok()) return Fail(ENOMEM, entity->entity_id + ": " + builder.status().ToString());
+            pending_ = std::move(*builder);
         }
-        pending_.push_back(arrow::RecordBatch::Make(entity->schema, rows.num_rows(), std::move(columns)));
+        for (int index = 0; index < rows.num_columns(); ++index) {
+            const auto appended = pending_->GetField(index)->AppendArraySlice(
+                arrow::ArraySpan(*rows.column(index)->data()), 0, rows.num_rows());
+            if (!appended.ok()) return Fail(ENOMEM, entity->entity_id + ": " + appended.ToString());
+        }
         pending_rows_ += rows.num_rows();
     }
     if (consumer_) {
@@ -136,34 +119,26 @@ int NpmResultRouter::Emit(std::string_view module, std::string_view entity_id, c
 int NpmResultRouter::Drain(std::shared_ptr<arrow::RecordBatch>* output) {
     if (cancelled_) return ECANCELED;
     if (error_code_) return error_code_;
-    if (pending_.size() == 1) {
-        *output = std::move(pending_.front());
-        Discard();
-        return 0;
-    }
     std::shared_ptr<arrow::Schema> schema;
     for (const auto& entity : entities_)
         if (entity.entity_id == observing_) schema = entity.schema;
-    if (pending_.empty()) {
-        auto empty = arrow::RecordBatch::MakeEmpty(schema, pool_.get());
-        if (!empty.ok()) return Fail(ENOMEM, empty.status().ToString());
-        for (const auto& column : (*empty)->columns()) LeaseBuffers(column->data(), pool_);
-        *output = *empty;
-        return 0;
+    std::shared_ptr<arrow::RecordBatch> rows;
+    if (pending_) {
+        // Finish transfers the compact column buffers; there is no second full-result concatenation.
+        auto result = pending_->Flush(false);
+        if (!result.ok()) return Fail(ENOMEM, result.status().ToString());
+        rows = arrow::RecordBatch::Make(schema, (*result)->num_rows(), (*result)->columns());
+    } else {
+        auto result = arrow::RecordBatch::MakeEmpty(schema, pool_.get());
+        if (!result.ok()) return Fail(ENOMEM, result.status().ToString());
+        rows = std::move(*result);
     }
-    std::vector<std::shared_ptr<arrow::Array>> columns;
-    for (int index = 0; index < schema->num_fields(); ++index) {
-        arrow::ArrayVector arrays;
-        for (const auto& batch : pending_) arrays.push_back(batch->column(index));
-        auto combined = arrow::Concatenate(arrays, pool_.get());
-        if (!combined.ok()) return Fail(ENOMEM, combined.status().ToString());
-        LeaseBuffers((*combined)->data(), pool_);
-        columns.push_back(*combined);
-    }
-    *output = arrow::RecordBatch::Make(schema, pending_rows_, std::move(columns));
+    for (const auto& column : rows->columns()) LeaseBuffers(column->data(), pool_);
+    *output = std::move(rows);
     Discard();
     return 0;
 }
+
 int NpmResultRouter::Finish() {
     if (cancelled_) return ECANCELED;
     if (error_code_) return error_code_;
@@ -196,7 +171,7 @@ void NpmResultRouter::Cancel() noexcept {
     if (!finished_ && !cancelled_.exchange(true) && consumer_) consumer_->Cancel();
 }
 void NpmResultRouter::Discard() noexcept {
-    pending_.clear();
+    pending_.reset();
     pending_rows_ = 0;
 }
 }  // namespace flowsql::npm
