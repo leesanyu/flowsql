@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_PLUGINS_BASELINE_ROLLING_ROLLING_TASK_RUNNER_H_
 #define _FLOWSQL_PLUGINS_BASELINE_ROLLING_ROLLING_TASK_RUNNER_H_
@@ -14,39 +9,41 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
-#include "plugins/baseline/task/bootstrap_task_store.h"
+#include "plugins/baseline/model/event_calendar_matcher.h"
 #include "plugins/baseline/rolling/rolling_state.h"
+#include "plugins/baseline/task/bootstrap_task_store.h"
 
 namespace flowsql {
 namespace baseline {
 
 using RollingStateMap = std::unordered_map<std::string, RollingState>;
 
-RollingBaselineResult RunValueRollingSubmit(const BaselineTaskSpec& spec,
-                                            const BootstrapSeedStore& seeds,
-                                            RollingStateMap* states,
-                                            const ValueRollingObservation& obs,
-                                            const RollingSubmitOptions& options);
+// One bucket per Submit; Relation shares this lazy lookup across its routed children.
+struct RollingEventContext {
+    explicit RollingEventContext(const CompiledEventCalendar* event_calendar = nullptr) : calendar(event_calendar) {}
+    const CompiledEventCalendar* calendar = nullptr;
+    bool resolved = false;
+    std::unordered_set<std::string> hit_codes;
+};
 
-RollingBaselineResult RunRatioRollingSubmit(const BaselineTaskSpec& spec,
-                                            const BootstrapSeedStore& seeds,
-                                            RollingStateMap* states,
-                                            const RatioRollingObservation& obs,
-                                            const RollingSubmitOptions& options);
+RollingBaselineResult RunValueRollingSubmit(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
+                                            RollingStateMap* states, const ValueRollingObservation& obs,
+                                            const RollingSubmitOptions& options, RollingEventContext* events = nullptr);
 
-RollingPrediction PredictRollingForSeries(const BaselineTaskSpec& spec,
-                                          const BootstrapSeedStore& seeds,
-                                          const RollingStateMap& states,
-                                          std::string_view series_key,
-                                          int64_t bucket_id);
+RollingBaselineResult RunRatioRollingSubmit(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
+                                            RollingStateMap* states, const RatioRollingObservation& obs,
+                                            const RollingSubmitOptions& options, RollingEventContext* events = nullptr);
 
-RollingPredictionSequence PredictRollingSequenceForSeries(const BaselineTaskSpec& spec,
-                                                          const BootstrapSeedStore& seeds,
-                                                          const RollingStateMap& states,
-                                                          std::string_view series_key,
-                                                          int64_t start_bucket_id,
-                                                          uint32_t point_count);
+RollingPrediction PredictRollingForSeries(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
+                                          const RollingStateMap& states, std::string_view series_key, int64_t bucket_id,
+                                          const CompiledEventCalendar* calendar = nullptr);
+
+RollingPredictionSequence PredictRollingSequenceForSeries(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
+                                                          const RollingStateMap& states, std::string_view series_key,
+                                                          int64_t start_bucket_id, uint32_t point_count,
+                                                          const CompiledEventCalendar* calendar = nullptr);
 
 struct RollingWarmupStats {
     uint64_t success_count = 0;
@@ -54,9 +51,8 @@ struct RollingWarmupStats {
     uint64_t skipped_existing_count = 0;
 };
 
-RollingWarmupStats WarmupRollingStatesFromBootstrapSeeds(const BaselineTaskSpec& spec,
-                                                         const BootstrapSeedStore& seeds,
-                                                         RollingStateMap* states);
+RollingWarmupStats WarmupRollingStatesFromBootstrapSeeds(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
+                                                         RollingStateMap* states, std::string_view target_series = {});
 
 BaselineSerializationResult QueryRollingTaskSnapshot(const BaselineTaskSpec& spec,
                                                      const RollingStateMap& states,

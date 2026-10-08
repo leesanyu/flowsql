@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "plugins/baseline/config/runtime_config.h"
 
@@ -1124,6 +1119,7 @@ bool TryGetBaselineRollingConfigOverride(BaselineRollingConfig* out) {
     if (!out) return false;
     const auto snapshot = Snapshot();
     *out = snapshot->rolling_config;
+    out->ratio_eps_logit = snapshot->ratio_global.eps_logit;
     return true;
 }
 

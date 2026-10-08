@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "plugins/baseline/rolling/rolling_task_runner.h"
 
@@ -50,6 +45,7 @@ double Sigmoid(double value) {
 
 double ModelToObservedValue(const BaselineTaskSpec& spec, double value) {
     if (spec.feature_type == "ratio") return Sigmoid(value);
+    if (spec.value_identity_transform) return std::max(0.0, value);
     return std::max(0.0, std::expm1(value));
 }
 
@@ -155,6 +151,11 @@ void FillResultFromDetectionBand(const BaselineTaskSpec& spec,
     FillB3StateFields(state, can_alert, result);
 }
 
+void CacheSubmitView(const RollingBaselineResult& result, RollingState* state) {
+    state->last_submit = {result.baseline_mu, result.baseline_lower, result.baseline_upper, result.update_weight, true,
+                          result.can_score,   result.can_update,     result.can_alert};
+}
+
 void FillColdStartBand(const BaselineTaskSpec& spec,
                        const ObservedModelPoint& point,
                        const BaselineRollingConfig& config,
@@ -197,6 +198,30 @@ BaselineStatus ResolveConfigOrStatus(const BaselineTaskSpec& spec,
 const BootstrapSeed* FindSeed(const BootstrapSeedStore& seeds, const std::string& series_key) {
     const auto it = seeds.find(series_key);
     return it == seeds.end() ? nullptr : &it->second;
+}
+
+double EventEffect(const BaselineTaskSpec& spec, const BootstrapSeed* seed, int64_t bucket_id,
+                   RollingEventContext* events) {
+    if (!events || !events->calendar || !seed) return 0.0;
+    const auto& hint = seed->event_hint;
+    const auto& calendar = *events->calendar;
+    if (!hint.available || hint.active_event_codes.empty() || hint.coeff.empty() ||
+        calendar.bound_bucket_seconds != spec.delta || hint.calendar_id != calendar.calendar_id ||
+        hint.calendar_version != calendar.calendar_version || spec.calendar_ref.calendar_id != calendar.calendar_id ||
+        spec.calendar_ref.calendar_version != calendar.calendar_version) {
+        return 0.0;
+    }
+    if (!events->resolved) {
+        const auto hits = ResolveBucketEvents(calendar, spec, bucket_id);
+        events->hit_codes.insert(hits.begin(), hits.end());
+        events->resolved = true;
+    }
+    double effect = 0.0;
+    const auto size = std::min(hint.active_event_codes.size(), hint.coeff.size());
+    for (std::size_t i = 0; i < size; ++i) {
+        if (events->hit_codes.find(hint.active_event_codes[i]) != events->hit_codes.end()) effect += hint.coeff[i];
+    }
+    return effect;
 }
 
 uint64_t EstimateStateBytes(const RollingState& state) {
@@ -378,20 +403,16 @@ RollingPrediction MakeRollingPredictionStatus(const std::string& key,
     return result;
 }
 
-RollingPrediction PredictRollingForStateWithFeature(const BaselineTaskSpec& spec,
-                                                    const RollingState& state,
-                                                    const BootstrapSeed* seed,
-                                                    const std::string& key,
-                                                    int64_t bucket_id,
-                                                    const BaselineRollingConfig& config,
-                                                    const RollingFeatureView& feature);
+RollingPrediction PredictRollingForStateWithFeature(const BaselineTaskSpec& spec, const RollingState& state,
+                                                    const BootstrapSeed* seed, const std::string& key,
+                                                    int64_t bucket_id, const BaselineRollingConfig& config,
+                                                    const RollingFeatureView& feature,
+                                                    const CompiledEventCalendar* event_calendar);
 
-RollingPrediction PredictRollingForState(const BaselineTaskSpec& spec,
-                                         const RollingState& state,
-                                         const BootstrapSeed* seed,
-                                         const std::string& key,
-                                         int64_t bucket_id,
-                                         const BaselineRollingConfig& config) {
+RollingPrediction PredictRollingForState(const BaselineTaskSpec& spec, const RollingState& state,
+                                         const BootstrapSeed* seed, const std::string& key, int64_t bucket_id,
+                                         const BaselineRollingConfig& config,
+                                         const CompiledEventCalendar* event_calendar) {
     RollingFeatureVector feature;
     const BaselineStatus feature_status =
         BuildRollingFeatureVector(bucket_id, config, &feature);
@@ -403,16 +424,14 @@ RollingPrediction PredictRollingForState(const BaselineTaskSpec& spec,
     if (ResolveOneLocalCalendarFeature(bucket_id, config.bucket_seconds, config.timezone, &calendar)) {
         view.calendar = &calendar;
     }
-    return PredictRollingForStateWithFeature(spec, state, seed, key, bucket_id, config, view);
+    return PredictRollingForStateWithFeature(spec, state, seed, key, bucket_id, config, view, event_calendar);
 }
 
-RollingPrediction PredictRollingForStateWithFeature(const BaselineTaskSpec& spec,
-                                                    const RollingState& state,
-                                                    const BootstrapSeed* seed,
-                                                    const std::string& key,
-                                                    int64_t bucket_id,
-                                                    const BaselineRollingConfig& config,
-                                                    const RollingFeatureView& feature) {
+RollingPrediction PredictRollingForStateWithFeature(const BaselineTaskSpec& spec, const RollingState& state,
+                                                    const BootstrapSeed* seed, const std::string& key,
+                                                    int64_t bucket_id, const BaselineRollingConfig& config,
+                                                    const RollingFeatureView& feature,
+                                                    const CompiledEventCalendar* event_calendar) {
     RollingPrediction result;
     result.series_key = key;
     result.bucket_id = bucket_id;
@@ -438,7 +457,9 @@ RollingPrediction PredictRollingForStateWithFeature(const BaselineTaskSpec& spec
         monthpos_ready && feature.calendar
             ? EvaluateRollingMonthposWithFeature(state, *feature.calendar)
             : 0.0;
-    const double forecast_model_mu = estimator.model_mu + active_monthpos_effect;
+    RollingEventContext events{event_calendar};
+    const double forecast_model_mu =
+        estimator.model_mu + active_monthpos_effect + EventEffect(spec, seed, bucket_id, &events);
     const double forecast_model_lower =
         forecast_model_mu - config.forecast_band_z * estimator.band_std;
     const double forecast_model_upper =
@@ -515,12 +536,10 @@ void WriteComponentReadinessObject(Writer* writer, const std::vector<std::string
     writer->EndObject();
 }
 
-RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec,
-                                          const BootstrapSeedStore& seeds,
-                                          RollingStateMap* states,
-                                          const ObservedModelPoint& point,
-                                          const RollingSubmitOptions& options,
-                                          const BaselineRollingConfig& config) {
+RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
+                                          RollingStateMap* states, const ObservedModelPoint& point,
+                                          const RollingSubmitOptions& options, const BaselineRollingConfig& config,
+                                          RollingEventContext* events) {
     RollingBaselineResult result = BaseResultFromPoint(point);
     if (!states || point.series_key.empty()) {
         result.status = BaselineStatus::kInvalidArgument;
@@ -528,11 +547,12 @@ RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec,
     }
     if (point.status != BaselineStatus::kOk) return result;
 
+    const BootstrapSeed* seed = events && events->calendar ? FindSeed(seeds, point.series_key) : nullptr;
     auto state_it = states->find(point.series_key);
     if (state_it == states->end()) {
         bool initialized_from_bootstrap = false;
         if (options.allow_auto_init_from_bootstrap) {
-            const BootstrapSeed* seed = FindSeed(seeds, point.series_key);
+            if (!seed) seed = FindSeed(seeds, point.series_key);
             if (seed) {
                 RollingState state;
                 std::string diagnostics;
@@ -541,6 +561,10 @@ RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec,
                 if (status != BaselineStatus::kOk) {
                     result.status = status;
                     result.diagnostics = diagnostics;
+                    return result;
+                }
+                if (point.bucket_id <= state.last_processed_bucket) {
+                    result.status = BaselineStatus::kInvalidArgument;
                     return result;
                 }
                 state_it = states->emplace(point.series_key, std::move(state)).first;
@@ -569,20 +593,35 @@ RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec,
                 result.status = status;
                 return result;
             }
-            status = InitializeEmptyRollingStateFromObservation(point, config, &state);
+            const double initial_effect = EventEffect(spec, seed, point.bucket_id, events);
+            if (initial_effect == 0.0) {
+                status = InitializeEmptyRollingStateFromObservation(point, config, &state);
+            } else {
+                ObservedModelPoint initial = point;
+                initial.y_model -= initial_effect;
+                status = InitializeEmptyRollingStateFromObservation(initial, config, &state);
+            }
             if (status != BaselineStatus::kOk) {
                 result.status = status;
                 return result;
             }
             state_it = states->emplace(point.series_key, std::move(state)).first;
             FillColdStartBand(spec, point, config, state_it->second, &result);
+            CacheSubmitView(result, &state_it->second);
             return result;
         }
     }
 
     RollingState& state = state_it->second;
+    if (point.bucket_id <= std::max(state.last_seen_bucket, state.last_processed_bucket)) {
+        result.status = BaselineStatus::kInvalidArgument;
+        return result;
+    }
+    const double event_effect = EventEffect(spec, seed, point.bucket_id, events);
+    ObservedModelPoint weighted = point;
+    weighted.y_model -= event_effect;
     RollingEstimatorResult estimator;
-    BaselineStatus status = PredictRollingState(state, point, config, &estimator);
+    BaselineStatus status = PredictRollingState(state, weighted, config, &estimator);
     if (status != BaselineStatus::kOk) {
         result.status = status;
         return result;
@@ -592,8 +631,8 @@ RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec,
     const double active_monthpos_effect =
         monthpos_ready ? EvaluateRollingMonthpos(state, point.bucket_id, config) : 0.0;
     DetectionBandResult detection_band;
-    status = BuildDetectionBand(
-        state, point, estimator, config, active_monthpos_effect, &detection_band);
+    status =
+        BuildDetectionBand(state, point, estimator, config, active_monthpos_effect + event_effect, &detection_band);
     if (status != BaselineStatus::kOk) {
         result.status = status;
         return result;
@@ -627,7 +666,6 @@ RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec,
     const RollingState result_state = state;
 
     UpdateGateResult gate = ComputeUpdateGate(estimator.z_score, drift.adapt_boost, config);
-    ObservedModelPoint weighted = point;
     if (monthpos_ready) {
         weighted.y_model -= active_monthpos_effect;
     }
@@ -665,6 +703,7 @@ RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec,
         }
     }
 
+    state.last_processed_bucket = point.bucket_id;
     FillResultFromDetectionBand(spec,
                                 point,
                                 detection_band,
@@ -679,16 +718,15 @@ RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec,
     } else if (gate.downweight_update) {
         result.uncertainty_source.push_back("anomaly_downweight_update");
     }
+    CacheSubmitView(result, &state);
     return result;
 }
 
 }  // namespace
 
-RollingBaselineResult RunValueRollingSubmit(const BaselineTaskSpec& spec,
-                                            const BootstrapSeedStore& seeds,
-                                            RollingStateMap* states,
-                                            const ValueRollingObservation& obs,
-                                            const RollingSubmitOptions& options) {
+RollingBaselineResult RunValueRollingSubmit(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
+                                            RollingStateMap* states, const ValueRollingObservation& obs,
+                                            const RollingSubmitOptions& options, RollingEventContext* events) {
     BaselineRollingConfig config;
     std::string diagnostics;
     RollingBaselineResult result;
@@ -704,14 +742,12 @@ RollingBaselineResult RunValueRollingSubmit(const BaselineTaskSpec& spec,
     }
 
     const ObservedModelPoint point = AdaptValueRollingObservation(spec, config, obs);
-    return SubmitObservedPoint(spec, seeds, states, point, options, config);
+    return SubmitObservedPoint(spec, seeds, states, point, options, config, events);
 }
 
-RollingBaselineResult RunRatioRollingSubmit(const BaselineTaskSpec& spec,
-                                            const BootstrapSeedStore& seeds,
-                                            RollingStateMap* states,
-                                            const RatioRollingObservation& obs,
-                                            const RollingSubmitOptions& options) {
+RollingBaselineResult RunRatioRollingSubmit(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
+                                            RollingStateMap* states, const RatioRollingObservation& obs,
+                                            const RollingSubmitOptions& options, RollingEventContext* events) {
     BaselineRollingConfig config;
     std::string diagnostics;
     RollingBaselineResult result;
@@ -727,14 +763,12 @@ RollingBaselineResult RunRatioRollingSubmit(const BaselineTaskSpec& spec,
     }
 
     const ObservedModelPoint point = AdaptRatioRollingObservation(spec, config, obs);
-    return SubmitObservedPoint(spec, seeds, states, point, options, config);
+    return SubmitObservedPoint(spec, seeds, states, point, options, config, events);
 }
 
-RollingPrediction PredictRollingForSeries(const BaselineTaskSpec& spec,
-                                          const BootstrapSeedStore& seeds,
-                                          const RollingStateMap& states,
-                                          std::string_view series_key,
-                                          int64_t bucket_id) {
+RollingPrediction PredictRollingForSeries(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
+                                          const RollingStateMap& states, std::string_view series_key, int64_t bucket_id,
+                                          const CompiledEventCalendar* calendar) {
     RollingPrediction result;
     const std::string key(series_key);
     result.series_key = key;
@@ -762,15 +796,13 @@ RollingPrediction PredictRollingForSeries(const BaselineTaskSpec& spec,
     }
 
     const BootstrapSeed* seed = FindSeed(seeds, key);
-    return PredictRollingForState(spec, it->second, seed, key, bucket_id, config);
+    return PredictRollingForState(spec, it->second, seed, key, bucket_id, config, calendar);
 }
 
-RollingPredictionSequence PredictRollingSequenceForSeries(const BaselineTaskSpec& spec,
-                                                          const BootstrapSeedStore& seeds,
-                                                          const RollingStateMap& states,
-                                                          std::string_view series_key,
-                                                          int64_t start_bucket_id,
-                                                          uint32_t point_count) {
+RollingPredictionSequence PredictRollingSequenceForSeries(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
+                                                          const RollingStateMap& states, std::string_view series_key,
+                                                          int64_t start_bucket_id, uint32_t point_count,
+                                                          const CompiledEventCalendar* calendar) {
     RollingPredictionSequence sequence;
     const std::string key(series_key);
     sequence.series_key = key;
@@ -857,13 +889,8 @@ RollingPredictionSequence PredictRollingSequenceForSeries(const BaselineTaskSpec
             if (batch_status != BaselineStatus::kOk) {
                 prediction = MakeRollingPredictionStatus(key, current_bucket, batch_status);
             } else {
-                prediction = PredictRollingForStateWithFeature(spec,
-                                                               it->second,
-                                                               seed,
-                                                               key,
-                                                               current_bucket,
-                                                               config,
-                                                               batch.View(j));
+                prediction = PredictRollingForStateWithFeature(spec, it->second, seed, key, current_bucket, config,
+                                                               batch.View(j), calendar);
             }
             if (sequence.status == BaselineStatus::kOk &&
                 prediction.status != BaselineStatus::kOk) {
@@ -876,23 +903,23 @@ RollingPredictionSequence PredictRollingSequenceForSeries(const BaselineTaskSpec
     return sequence;
 }
 
-RollingWarmupStats WarmupRollingStatesFromBootstrapSeeds(const BaselineTaskSpec& spec,
-                                                         const BootstrapSeedStore& seeds,
-                                                         RollingStateMap* states) {
+RollingWarmupStats WarmupRollingStatesFromBootstrapSeeds(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
+                                                         RollingStateMap* states, std::string_view target_series) {
     RollingWarmupStats stats;
     if (!states || seeds.empty()) return stats;
 
     BaselineRollingConfig config;
     std::string diagnostics;
     if (ResolveBaselineRollingConfig(spec, &config, &diagnostics) != BaselineStatus::kOk) {
-        stats.failure_count += static_cast<uint64_t>(seeds.size());
+        stats.failure_count = target_series.empty() ? static_cast<uint64_t>(seeds.size())
+                                                    : static_cast<uint64_t>(seeds.count(std::string(target_series)));
         return stats;
     }
 
-    for (const auto& entry : seeds) {
+    auto warmup = [&](const auto& entry) {
         if (states->find(entry.first) != states->end()) {
             ++stats.skipped_existing_count;
-            continue;
+            return;
         }
         RollingState state;
         const BaselineStatus status = InitializeRollingStateFromBootstrapSeed(
@@ -903,6 +930,12 @@ RollingWarmupStats WarmupRollingStatesFromBootstrapSeeds(const BaselineTaskSpec&
         } else {
             ++stats.failure_count;
         }
+    };
+    if (!target_series.empty()) {
+        const auto it = seeds.find(std::string(target_series));
+        if (it != seeds.end()) warmup(*it);
+    } else {
+        for (const auto& entry : seeds) warmup(entry);
     }
     return stats;
 }
@@ -1010,13 +1043,26 @@ BaselineSerializationResult QueryRollingSeriesSnapshot(const BaselineTaskSpec& s
     if (it == states.end()) return {BaselineStatus::kNotTrained, ""};
     const RollingState& state = it->second;
 
-    const double band_std = std::max(state.sigma, 0.0);
-    const double model_lower = state.theta.level - 3.0 * band_std;
-    const double model_upper = state.theta.level + 3.0 * band_std;
-    const double baseline_mu = ModelToObservedValue(spec, state.theta.level);
-    double baseline_lower = ModelToObservedValue(spec, model_lower);
-    double baseline_upper = ModelToObservedValue(spec, model_upper);
-    if (baseline_upper < baseline_lower) std::swap(baseline_upper, baseline_lower);
+    const auto& last = state.last_submit;
+    double baseline_mu = last.baseline_mu;
+    double baseline_lower = last.baseline_lower;
+    double baseline_upper = last.baseline_upper;
+    std::string diagnostics = state.diagnostics + ";snapshot_state_view=current_state;";
+    if (last.valid) {
+        diagnostics +=
+            "snapshot_band_view=last_submit;snapshot_control_view=last_submit;"
+            "snapshot_alert_view=last_submit;snapshot_bucket=" +
+            std::to_string(state.last_processed_bucket) + ";";
+    } else {
+        const double band_std = std::max(state.sigma, 0.0);
+        baseline_mu = ModelToObservedValue(spec, state.theta.level);
+        baseline_lower = ModelToObservedValue(spec, state.theta.level - 3.0 * band_std);
+        baseline_upper = ModelToObservedValue(spec, state.theta.level + 3.0 * band_std);
+        if (baseline_upper < baseline_lower) std::swap(baseline_upper, baseline_lower);
+        diagnostics +=
+            "snapshot_band_view=bootstrap_parameter;snapshot_control_view=no_online_submit;"
+            "snapshot_alert_view=no_online_submit;";
+    }
 
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buf);
@@ -1061,11 +1107,11 @@ BaselineSerializationResult QueryRollingSeriesSnapshot(const BaselineTaskSpec& s
     writer.Key("control");
     writer.StartObject();
     writer.Key("can_score");
-    writer.Bool(state.has_seen_observation);
+    writer.Bool(last.can_score);
     writer.Key("can_update");
-    writer.Bool(state.has_seen_observation);
+    writer.Bool(last.can_update);
     writer.Key("update_weight");
-    writer.Double(0.0);
+    writer.Double(last.update_weight);
     writer.Key("drift_evidence");
     writer.Double(state.drift_evidence);
     writer.Key("level_shift_evidence");
@@ -1098,8 +1144,7 @@ BaselineSerializationResult QueryRollingSeriesSnapshot(const BaselineTaskSpec& s
     writer.Key("score_confidence");
     writer.Double(state.score_confidence);
     writer.Key("can_alert");
-    writer.Bool(state.score_trust_status == ScoreTrustStatus::kScoreReady &&
-                MaturityAtLeast(state.maturity_status, RollingMaturityStatus::kDailyReady));
+    writer.Bool(last.can_alert);
     WriteStringField(&writer, "reason", state.degradation_reason);
     writer.EndObject();
     writer.Key("calibration");
@@ -1128,7 +1173,7 @@ BaselineSerializationResult QueryRollingSeriesSnapshot(const BaselineTaskSpec& s
     writer.EndObject();
     writer.Key("state_size_bytes");
     writer.Uint64(EstimateStateBytes(state));
-    WriteStringField(&writer, "diagnostics", state.diagnostics);
+    WriteStringField(&writer, "diagnostics", diagnostics);
     writer.EndObject();
     return {BaselineStatus::kOk, buf.GetString()};
 }

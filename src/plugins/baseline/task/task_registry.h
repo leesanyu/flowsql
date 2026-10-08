@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_PLUGINS_BASELINE_TASK_TASK_REGISTRY_H_
 #define _FLOWSQL_PLUGINS_BASELINE_TASK_TASK_REGISTRY_H_
@@ -38,6 +33,7 @@ class TaskRegistry {
                                  const char* task_name,
                                  BaselineTaskKind kind)> cb) const;
     size_t Size() const;
+    bool Owns(const BaselineTaskBase* task) const;
 
  private:
     static const char* KindPrefix(BaselineTaskKind kind);

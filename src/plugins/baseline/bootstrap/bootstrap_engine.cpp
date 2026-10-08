@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "bootstrap_engine.h"
 
@@ -23,10 +18,11 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
-#include "plugins/baseline/config/runtime_config.h"
-#include "plugins/baseline/model/profile_config.h"
-#include "plugins/baseline/model/formal_predictor.h"
 #include "plugins/baseline/bootstrap/formal_model_trainer.h"
+#include "plugins/baseline/config/runtime_config.h"
+#include "plugins/baseline/model/formal_predictor.h"
+#include "plugins/baseline/model/observation_validation.h"
+#include "plugins/baseline/model/profile_config.h"
 #include "plugins/baseline/relation/relation_basis.h"
 #include "plugins/baseline/relation/relation_summary.h"
 #include "plugins/baseline/relation/routed_summary.h"
@@ -167,8 +163,24 @@ double ZValue(double confidence_level) {
     return 1.0;
 }
 
-double Clamp01(double value) {
-    return std::max(0.0, std::min(1.0, value));
+double Clamp01(double value) { return std::max(0.0, std::min(1.0, value)); }
+
+void ApplyRatioPredictionBand(double p, double effective_n, double sigma_ref, double z,
+                              BootstrapPrediction* prediction) {
+    const double sigma_p = std::max(std::sqrt(std::max(p * (1.0 - p), 0.0) / effective_n), 1.0e-4);
+    const double probability_half_width = z * sigma_p;
+    // Formal Ratio prediction already clips p inside (0, 1); sigma_ref is in logit space.
+    const double eta = std::log(p / (1.0 - p));
+    const double residual_half_width = z * std::max(sigma_ref, 1.0e-3);
+    const auto sigmoid = [](double value) {
+        const double exp_value = std::exp(value >= 0.0 ? -value : value);
+        return value >= 0.0 ? 1.0 / (1.0 + exp_value) : exp_value / (1.0 + exp_value);
+    };
+    // Preserve the probability interval as a minimum range for quiet histories.
+    prediction->baseline_lower = std::min(Clamp01(p - probability_half_width), sigmoid(eta - residual_half_width));
+    prediction->baseline_upper = std::max(Clamp01(p + probability_half_width), sigmoid(eta + residual_half_width));
+    prediction->band_width = prediction->baseline_upper - prediction->baseline_lower;
+    prediction->uncertainty_source = {"ratio_probability_variance", "ratio_logit_sigma_ref"};
 }
 
 template <typename TModel>
@@ -1186,7 +1198,7 @@ ValueReplaySeries BuildNormalizedValueReplay(const ValueBootstrapInput& input,
     std::unordered_map<int64_t, ValueBucketAggregate> by_bucket;
     by_bucket.reserve(input.observations.size());
     for (const auto& point : input.observations) {
-        if (!std::isfinite(point.value)) {
+        if (!IsValidValueObservation(point.value) || (profile.is_sampled && point.sample_count == 0)) {
             if (rejected_count) ++(*rejected_count);
             continue;
         }
@@ -1211,7 +1223,7 @@ ValueReplaySeries BuildNormalizedValueReplay(const ValueBootstrapInput& input,
         point.bucket_id = entry.first;
         point.value = aggregate.weighted_value_sum / aggregate.weight_sum;
         point.sample_count = aggregate.sample_count;
-        if (profile.is_sampled && point.sample_count < profile.n_train_min) {
+        if (!IsValidValueObservation(point.value) || (profile.is_sampled && point.sample_count < profile.n_train_min)) {
             if (rejected_count) ++(*rejected_count);
             continue;
         }
@@ -1242,8 +1254,7 @@ RatioReplaySeries BuildNormalizedRatioReplay(const RatioBootstrapInput& input,
     std::unordered_map<int64_t, RatioBucketAggregate> by_bucket;
     by_bucket.reserve(input.observations.size());
     for (const auto& point : input.observations) {
-        if (!std::isfinite(point.numerator) || !std::isfinite(point.denominator) ||
-            point.numerator < 0.0 || point.denominator <= 0.0) {
+        if (!IsValidRatioObservation(point.numerator, point.denominator)) {
             if (rejected_count) ++(*rejected_count);
             continue;
         }
@@ -1257,7 +1268,8 @@ RatioReplaySeries BuildNormalizedRatioReplay(const RatioBootstrapInput& input,
     replay.points.reserve(by_bucket.size());
     for (const auto& entry : by_bucket) {
         const auto& aggregate = entry.second;
-        if (aggregate.denominator < static_cast<double>(profile.d_min_train)) {
+        if (!IsValidRatioObservation(aggregate.numerator, aggregate.denominator) ||
+            aggregate.denominator < static_cast<double>(profile.d_min_train)) {
             if (rejected_count) ++(*rejected_count);
             continue;
         }
@@ -1302,20 +1314,7 @@ std::vector<RelationBootstrapBlock> BuildNormalizedRelationBlocks(
                 continue;
             }
             const auto& metric = block.metrics[metric_index];
-            if (!std::isfinite(metric.total) || metric.total <= 0.0 ||
-                metric.values_by_group.size() < block.group_idx.size()) {
-                if (rejected_count) ++(*rejected_count);
-                continue;
-            }
-
-            bool values_finite = true;
-            for (std::size_t group_pos = 0; group_pos < block.group_idx.size(); ++group_pos) {
-                if (!std::isfinite(metric.values_by_group[group_pos])) {
-                    values_finite = false;
-                    break;
-                }
-            }
-            if (!values_finite) {
+            if (!IsValidRelationMetric(metric, block.group_idx.size(), metric_names[metric_index])) {
                 if (rejected_count) ++(*rejected_count);
                 continue;
             }
@@ -1357,6 +1356,7 @@ std::vector<RelationBootstrapBlock> BuildNormalizedRelationBlocks(
         block.group_idx.assign(group_set.begin(), group_set.end());
         std::sort(block.group_idx.begin(), block.group_idx.end());
         block.metrics.reserve(metric_count);
+        bool has_valid_metric = false;
         for (std::size_t metric_index = 0; metric_index < metric_count; ++metric_index) {
             RelationBootstrapMetric metric;
             metric.metric = metric_names[metric_index];
@@ -1372,10 +1372,18 @@ std::vector<RelationBootstrapBlock> BuildNormalizedRelationBlocks(
                     if (value > 0.0) ++metric.active_count;
                     metric.values_by_group.push_back(value);
                 }
+                if (metric_aggregate.total != 0.0 &&
+                    !IsValidRelationMetric(metric, block.group_idx.size(), metric_names[metric_index])) {
+                    if (rejected_count) ++(*rejected_count);
+                    metric.total = 0.0;
+                    metric.active_count = 0;
+                    std::fill(metric.values_by_group.begin(), metric.values_by_group.end(), 0.0);
+                }
             }
+            has_valid_metric = has_valid_metric || metric.total > 0.0;
             block.metrics.push_back(std::move(metric));
         }
-        blocks.push_back(std::move(block));
+        if (has_valid_metric) blocks.push_back(std::move(block));
     }
     return blocks;
 }
@@ -2385,14 +2393,16 @@ BootstrapPrediction BootstrapEngine::PredictValue(
     const double model_mu = formal_prediction.value;
     const double model_lower = model_mu - z * sigma;
     const double model_upper = model_mu + z * sigma;
+    const bool identity_transform = artifact.value_model->transform_name == "identity";
 
     BootstrapPrediction prediction;
     prediction.status = BaselineStatus::kOk;
     prediction.series_key = artifact.series_key;
     prediction.bucket_id = bucket_id;
-    prediction.baseline_mu = std::max(0.0, std::expm1(model_mu));
-    prediction.baseline_lower = std::max(0.0, std::expm1(model_lower));
-    prediction.baseline_upper = std::max(prediction.baseline_lower, std::expm1(model_upper));
+    prediction.baseline_mu = std::max(0.0, identity_transform ? model_mu : std::expm1(model_mu));
+    prediction.baseline_lower = std::max(0.0, identity_transform ? model_lower : std::expm1(model_lower));
+    prediction.baseline_upper =
+        std::max(prediction.baseline_lower, identity_transform ? model_upper : std::expm1(model_upper));
     prediction.band_width = prediction.baseline_upper - prediction.baseline_lower;
     prediction.confidence = formal_prediction.confidence_base;
     prediction.uncertainty_source.push_back("value_sigma_ref");
@@ -2449,6 +2459,7 @@ BootstrapPredictionSequence BootstrapEngine::PredictValueSequence(
     const std::string timezone = ResolvePredictTimezone(*artifact.value_model, task_spec);
     const BaselineRollingConfig feature_config =
         MakeFormalFeatureConfig(artifact.value_model->core_block, delta, timezone);
+    const bool identity_transform = artifact.value_model->transform_name == "identity";
     const uint32_t chunk_size =
         delta > 0
             ? ComputeRollingFeatureChunkSize(feature_config.daily_harmonic_order,
@@ -2499,10 +2510,10 @@ BootstrapPredictionSequence BootstrapEngine::PredictValueSequence(
             prediction.status = BaselineStatus::kOk;
             prediction.series_key = artifact.series_key;
             prediction.bucket_id = bucket_id;
-            prediction.baseline_mu = std::max(0.0, std::expm1(model_mu));
-            prediction.baseline_lower = std::max(0.0, std::expm1(model_lower));
+            prediction.baseline_mu = std::max(0.0, identity_transform ? model_mu : std::expm1(model_mu));
+            prediction.baseline_lower = std::max(0.0, identity_transform ? model_lower : std::expm1(model_lower));
             prediction.baseline_upper =
-                std::max(prediction.baseline_lower, std::expm1(model_upper));
+                std::max(prediction.baseline_lower, identity_transform ? model_upper : std::expm1(model_upper));
             prediction.band_width = prediction.baseline_upper - prediction.baseline_lower;
             prediction.confidence = formal_prediction.confidence_base;
             prediction.uncertainty_source.push_back("value_sigma_ref");
@@ -2554,20 +2565,14 @@ BootstrapPrediction BootstrapEngine::PredictRatio(
         1.0,
         static_cast<double>(artifact.coverage_report.accepted_count) +
             artifact.ratio_model->alpha0 + artifact.ratio_model->beta0);
-    const double sigma = std::max(std::sqrt(std::max(p * (1.0 - p), 0.0) / effective_n),
-                                  1.0e-4);
-    const double half_width = ZValue(options.confidence_level) * sigma;
-
     BootstrapPrediction prediction;
     prediction.status = BaselineStatus::kOk;
     prediction.series_key = artifact.series_key;
     prediction.bucket_id = bucket_id;
     prediction.baseline_mu = p;
-    prediction.baseline_lower = Clamp01(p - half_width);
-    prediction.baseline_upper = Clamp01(p + half_width);
-    prediction.band_width = prediction.baseline_upper - prediction.baseline_lower;
     prediction.confidence = formal_prediction.confidence_base;
-    prediction.uncertainty_source.push_back("ratio_probability_variance");
+    ApplyRatioPredictionBand(p, effective_n, artifact.ratio_model->sigma_ref, ZValue(options.confidence_level),
+                             &prediction);
     return prediction;
 }
 
@@ -2661,20 +2666,13 @@ BootstrapPredictionSequence BootstrapEngine::PredictRatioSequence(
             }
 
             const double p = Clamp01(formal_prediction.value);
-            const double sigma = std::max(
-                std::sqrt(std::max(p * (1.0 - p), 0.0) / effective_n), 1.0e-4);
-            const double half_width = z * sigma;
-
             BootstrapPrediction prediction;
             prediction.status = BaselineStatus::kOk;
             prediction.series_key = artifact.series_key;
             prediction.bucket_id = bucket_id;
             prediction.baseline_mu = p;
-            prediction.baseline_lower = Clamp01(p - half_width);
-            prediction.baseline_upper = Clamp01(p + half_width);
-            prediction.band_width = prediction.baseline_upper - prediction.baseline_lower;
             prediction.confidence = formal_prediction.confidence_base;
-            prediction.uncertainty_source.push_back("ratio_probability_variance");
+            ApplyRatioPredictionBand(p, effective_n, artifact.ratio_model->sigma_ref, z, &prediction);
             sequence.predictions.push_back(std::move(prediction));
         }
     }
@@ -3008,6 +3006,10 @@ BaselineStatus BootstrapEngine::ValidateArtifactCompatibility(
     const BaselineTaskSpec& spec,
     BootstrapArtifactKind expected_kind) const {
     if (artifact.artifact_kind != expected_kind) return BaselineStatus::kIncompatibleArtifact;
+    if (expected_kind == BootstrapArtifactKind::kValue && artifact.value_model &&
+        artifact.value_model->transform_name != (spec.value_identity_transform ? "identity" : "log1p")) {
+        return BaselineStatus::kIncompatibleArtifact;
+    }
     const BootstrapTaskIdentity expected_identity = MakeIdentity(spec);
     if (artifact.task_identity.task_id != expected_identity.task_id ||
         artifact.task_identity.task_kind != expected_identity.task_kind ||
@@ -3052,12 +3054,58 @@ BaselineStatus BootstrapEngine::ValidateArtifactCompatibility(
         artifact.calendar_ref.calendar_version != expected_calendar.calendar_version) {
         return BaselineStatus::kIncompatibleArtifact;
     }
+    const auto& task = spec.task_spec;
+    const std::string& feature_base = task.feature_base.empty() ? task.feature_id : task.feature_base;
+    const auto has_metric = [&](const std::string& metric) {
+        return std::find(task.metrics.begin(), task.metrics.end(), metric) != task.metrics.end();
+    };
+    const auto& fusion = artifact.relation_fusion_metadata;
+    // Older artifacts used the task feature id as the fusion metadata fallback.
+    if (fusion.feature_base != feature_base && fusion.feature_base != task.feature_id) {
+        return BaselineStatus::kIncompatibleArtifact;
+    }
+    for (const auto& summary : fusion.summary_metadata) {
+        if (!has_metric(summary.metric_name)) return BaselineStatus::kIncompatibleArtifact;
+    }
+    for (const auto& pattern : fusion.pattern_metadata) {
+        for (const auto& metric : pattern.metrics) {
+            if (!has_metric(metric)) return BaselineStatus::kIncompatibleArtifact;
+        }
+    }
+    std::unordered_set<std::string> basis_metrics;
+    for (const auto& basis : artifact.relation_basis_by_metric) {
+        if (basis.group_space_id != task.group_space_id ||
+            basis.group_space_version != task.group_space_version.value_or("") || basis.feature_base != feature_base ||
+            basis.k_head != task.summary_policy.k_head || basis.other_group_idxs != task.other_group_idxs ||
+            !has_metric(basis.metric_name) || !basis_metrics.insert(basis.metric_name).second) {
+            return BaselineStatus::kIncompatibleArtifact;
+        }
+    }
+    for (const auto& routed : artifact.relation_routed_summary_artifacts) {
+        if (!has_metric(routed.metric_name)) {
+            return BaselineStatus::kIncompatibleArtifact;
+        }
+        const BaselineTaskSpec routed_spec =
+            MakeRoutedSummaryTaskSpec(spec, routed.metric_name, routed.summary_name, routed.task_kind);
+        BootstrapArtifact routed_artifact;
+        routed_artifact.artifact_kind = routed.task_kind == BaselineTaskKind::kRatio ? BootstrapArtifactKind::kRatio
+                                                                                     : BootstrapArtifactKind::kValue;
+        routed_artifact.task_identity = routed.task_identity;
+        routed_artifact.clock_spec = routed.clock_spec;
+        routed_artifact.calendar_ref = routed.calendar_ref;
+        if (ValidateArtifactCompatibility(routed_artifact, routed_spec, routed_artifact.artifact_kind) !=
+            BaselineStatus::kOk) {
+            return BaselineStatus::kIncompatibleArtifact;
+        }
+        if (routed.basis_scoped && basis_metrics.find(routed.metric_name) == basis_metrics.end()) {
+            return BaselineStatus::kIncompatibleArtifact;
+        }
+    }
     return BaselineStatus::kOk;
 }
 
-BaselineSerializationResult BootstrapEngine::ExportSeed(
-    const BootstrapSeed& seed,
-    BaselineSerializationFormat format) const {
+BaselineSerializationResult BootstrapEngine::ExportSeed(const BootstrapSeed& seed,
+                                                        BaselineSerializationFormat format) const {
     if (format != BaselineSerializationFormat::kJson) {
         return {BaselineStatus::kUnsupportedFormat, ""};
     }

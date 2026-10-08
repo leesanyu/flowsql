@@ -1,12 +1,8 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "relation_basis_state.h"
+#include "plugins/baseline/model/observation_validation.h"
 
 #include <common/error_code.h>
 
@@ -88,7 +84,7 @@ BaselineStatus ObserveImpl(RelationStreamBasisAccumulator* accumulator,
     if (!accumulator) return BaselineStatus::kInvalidArgument;
     if (metric_index >= block.metrics.size()) return BaselineStatus::kInvalidArgument;
     const RelationBootstrapMetric& metric = block.metrics[metric_index];
-    if (metric.total <= 0.0 || metric.values_by_group.size() < block.group_idx.size()) {
+    if (!IsValidRelationMetric(metric, block.group_idx.size())) {
         return BaselineStatus::kInvalidArgument;
     }
     return BaselineStatus::kOk;
@@ -158,8 +154,15 @@ void RelationStreamBasisAccumulator::ObserveMass(uint32_t group_idx,
 
 BaselineStatus RelationStreamBasisAccumulator::Observe(const RelationRollingObservation& obs,
                                                        std::size_t metric_index) {
+    if (valid_bucket_count_ > 0 && obs.bucket_id <= last_bucket_id_) return BaselineStatus::kInvalidArgument;
     const BaselineStatus validation = ObserveImpl(this, obs, metric_index);
     if (validation != BaselineStatus::kOk) return validation;
+    return ObserveValidated(obs, metric_index);
+}
+
+BaselineStatus RelationStreamBasisAccumulator::ObserveValidated(const RelationRollingObservation& obs,
+                                                                std::size_t metric_index) {
+    if (valid_bucket_count_ > 0 && obs.bucket_id <= last_bucket_id_) return BaselineStatus::kInvalidArgument;
 
     const RelationBootstrapMetric& metric = obs.metrics[metric_index];
     if (valid_bucket_count_ == 0) first_bucket_id_ = obs.bucket_id;
@@ -174,6 +177,7 @@ BaselineStatus RelationStreamBasisAccumulator::Observe(const RelationRollingObse
 
 BaselineStatus RelationStreamBasisAccumulator::Observe(const RelationBootstrapBlock& block,
                                                        std::size_t metric_index) {
+    if (valid_bucket_count_ > 0 && block.bucket_id <= last_bucket_id_) return BaselineStatus::kInvalidArgument;
     const BaselineStatus validation = ObserveImpl(this, block, metric_index);
     if (validation != BaselineStatus::kOk) return validation;
 
@@ -261,6 +265,15 @@ BaselineStatus RelationBasisRuntimeState::Observe(const RelationRollingObservati
 BaselineStatus RelationBasisRuntimeState::Observe(const RelationBootstrapBlock& block,
                                                   std::size_t metric_index) {
     const BaselineStatus status = accumulator_.Observe(block, metric_index);
+    if (status == BaselineStatus::kOk && !has_active_basis_) {
+        basis_status_ = RelationBasisStatus::kCollecting;
+    }
+    return status;
+}
+
+BaselineStatus RelationBasisRuntimeState::ObserveValidated(const RelationRollingObservation& obs,
+                                                           std::size_t metric_index) {
+    const BaselineStatus status = accumulator_.ObserveValidated(obs, metric_index);
     if (status == BaselineStatus::kOk && !has_active_basis_) {
         basis_status_ = RelationBasisStatus::kCollecting;
     }

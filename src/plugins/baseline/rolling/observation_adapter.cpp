@@ -1,16 +1,12 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "plugins/baseline/rolling/observation_adapter.h"
 
 #include <algorithm>
 #include <cmath>
 
+#include "plugins/baseline/model/observation_validation.h"
 #include "plugins/baseline/model/profile_config.h"
 
 namespace flowsql {
@@ -40,9 +36,8 @@ void EnableWeightedUpdate(double weight, ObservedModelPoint* point) {
     point->update_weight = weight;
 }
 
-double SafeLogit(double probability) {
-    const double clipped =
-        std::max(kRatioEpsLogit, std::min(1.0 - kRatioEpsLogit, probability));
+double SafeLogit(double probability, double eps_logit) {
+    const double clipped = std::max(eps_logit, std::min(1.0 - eps_logit, probability));
     return std::log(clipped / (1.0 - clipped));
 }
 
@@ -54,7 +49,7 @@ ObservedModelPoint AdaptValueRollingObservation(const BaselineTaskSpec& spec,
     if (obs.series_key.empty()) {
         return InvalidPoint(obs.series_key, obs.bucket_id, "series_key must not be empty");
     }
-    if (obs.value < 0.0 || !std::isfinite(obs.value)) {
+    if (!IsValidValueObservation(obs.value)) {
         return InvalidPoint(obs.series_key, obs.bucket_id, "value must be finite and non-negative");
     }
     if (spec.feature_type != "value_basic" && spec.feature_type != "value_sampled") {
@@ -65,7 +60,7 @@ ObservedModelPoint AdaptValueRollingObservation(const BaselineTaskSpec& spec,
     point.series_key = obs.series_key;
     point.bucket_id = obs.bucket_id;
     point.observed = obs.value;
-    point.y_model = std::log1p(obs.value);
+    point.y_model = spec.value_identity_transform ? obs.value : std::log1p(obs.value);
     point.sample_count = obs.sample_count;
 
     if (spec.feature_type == "value_basic") {
@@ -103,9 +98,7 @@ ObservedModelPoint AdaptRatioRollingObservation(const BaselineTaskSpec& spec,
     if (spec.feature_type != "ratio") {
         return InvalidPoint(obs.series_key, obs.bucket_id, "unsupported ratio feature_type");
     }
-    if (!std::isfinite(obs.numerator) || !std::isfinite(obs.denominator) ||
-        obs.denominator <= 0.0 || obs.numerator < 0.0 ||
-        obs.numerator > obs.denominator) {
+    if (!IsValidRatioObservation(obs.numerator, obs.denominator)) {
         return InvalidPoint(obs.series_key, obs.bucket_id,
                             "ratio requires denominator > 0 and 0 <= numerator <= denominator");
     }
@@ -116,7 +109,7 @@ ObservedModelPoint AdaptRatioRollingObservation(const BaselineTaskSpec& spec,
     point.numerator = obs.numerator;
     point.denominator = obs.denominator;
     point.observed = obs.numerator / obs.denominator;
-    point.y_model = SafeLogit(point.observed);
+    point.y_model = SafeLogit(point.observed, config.ratio_eps_logit);
 
     if (obs.denominator < static_cast<double>(config.d_min_score)) {
         point.skipped_low_denominator = true;
@@ -131,7 +124,7 @@ ObservedModelPoint AdaptRatioRollingObservation(const BaselineTaskSpec& spec,
     if (obs.denominator < static_cast<double>(config.d_min_update)) {
         point.uncertainty_source.push_back("low_denominator_weight");
     }
-    if (point.observed <= kRatioEpsLogit || point.observed >= 1.0 - kRatioEpsLogit) {
+    if (point.observed <= config.ratio_eps_logit || point.observed >= 1.0 - config.ratio_eps_logit) {
         point.uncertainty_source.push_back("ratio_clip");
     }
     return point;

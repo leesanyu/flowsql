@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include <cassert>
 #include <cmath>
@@ -211,6 +206,22 @@ void TestBootstrapSeedRejectsInvalidInputs() {
 }  // namespace
 
 int main() {
+    auto spec = BuildValueSpec();
+    spec.feature_type = "value_sampled";
+    spec.profile = "cont_core";
+    spec.value_identity_transform = true;
+    auto seed = BuildValueSeed();
+    seed.task_identity.feature_type = spec.feature_type;
+    seed.task_identity.profile = spec.profile;
+    seed.theta_init.model_space = "identity";
+    seed.sigma_init.model_space = "identity";
+    RollingState state;
+    assert(InitializeRollingStateFromBootstrapSeed(spec, seed.series_key, seed, BuildConfig(), &state) ==
+           BaselineStatus::kOk);
+    seed.theta_init.model_space = "log1p";
+    seed.sigma_init.model_space = "log1p";
+    assert(InitializeRollingStateFromBootstrapSeed(spec, seed.series_key, seed, BuildConfig(), &state) ==
+           BaselineStatus::kIncompatibleArtifact);
     TestBuildEmptyRollingState();
     TestEmptyStateFirstObservation();
     TestBootstrapSeedInitialization();

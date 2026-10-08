@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "relation_fusion.h"
 
@@ -687,12 +682,23 @@ BaselineStatus UpdateRelationFusion(const RelationFusionUpdateInput& input,
 
     std::vector<RelationFusionSingleEvidence> evidence;
     evidence.reserve(expected_by_key.size());
+    std::size_t retained_keys = 0;
+    const auto cap = input.config.fusion_persistence_max_keys_per_source;
+    // expected_by_key already has a stable lexicographic order; retain its first cap keys without sorting.
+    auto remember = [&](const std::string& key, uint32_t persistence) {
+        if (cap == 0 || retained_keys < cap) {
+            state->persistence_by_evidence_dir.insert_or_assign(key, persistence);
+            ++retained_keys;
+        } else {
+            evicted_keys += state->persistence_by_evidence_dir.erase(key);
+        }
+    };
     for (const auto& entry : expected_by_key) {
         const std::string& key = entry.first;
         const ExpectedEvidence& expected = entry.second;
         const auto routed_it = routed_by_key.find(key);
         if (routed_it == routed_by_key.end()) {
-            state->persistence_by_evidence_dir[key] = 0;
+            remember(key, 0);
             RelationFusionSingleEvidence missing = EmptyEvidence(expected);
             missing.persistence = 0;
             evidence.push_back(std::move(missing));
@@ -708,11 +714,11 @@ BaselineStatus UpdateRelationFusion(const RelationFusionUpdateInput& input,
         std::string unavailable_reason;
         (void)TrustFactor(routed, expected.direction, input.config, &unavailable_reason);
         const bool available = unavailable_reason.empty();
+        const auto previous_it = previous.find(key);
+        const uint32_t previous_persistence = previous_it == previous.end() ? 0 : previous_it->second;
         const uint32_t next_persistence =
-            available && normalized >= input.config.fusion_min_evidence_score
-                ? state->persistence_by_evidence_dir[key] + 1
-                : 0;
-        state->persistence_by_evidence_dir[key] = next_persistence;
+            available && normalized >= input.config.fusion_min_evidence_score ? previous_persistence + 1 : 0;
+        remember(key, next_persistence);
         evidence.push_back(BuildEvidence(routed,
                                          expected.direction,
                                          input.config,
@@ -731,9 +737,7 @@ BaselineStatus UpdateRelationFusion(const RelationFusionUpdateInput& input,
     if (result.single_risk == 0.0 && result.pattern_risk == 0.0) {
         AppendDiagnostic("relation_fusion_no_available_evidence", &result.diagnostics);
     }
-    if (input.config.fusion_persistence_max_keys_per_source > 0 &&
-        state->persistence_by_evidence_dir.size() >
-            input.config.fusion_persistence_max_keys_per_source) {
+    if (cap > 0 && expected_by_key.size() > cap) {
         AppendDiagnostic("relation_fusion_persistence_key_cap_reached",
                          &result.diagnostics);
     }

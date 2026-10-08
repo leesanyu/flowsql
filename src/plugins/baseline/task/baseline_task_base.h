@@ -1,17 +1,14 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_PLUGINS_BASELINE_TASK_BASELINE_TASK_BASE_H_
 #define _FLOWSQL_PLUGINS_BASELINE_TASK_BASELINE_TASK_BASE_H_
 
 #include <framework/interfaces/ibaseline_service.h>
+#include <framework/interfaces/ibaseline_state_control.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -39,12 +36,19 @@ class BaselineTaskBase : public std::enable_shared_from_this<BaselineTaskBase> {
     BaselineSerializationResult QuerySeriesSnapshot(std::string_view series_key,
                                                     BaselineSerializationFormat format) const;
     BaselineStatus Close();
+    BaselineStatus BindStateLimits(const BaselineStateLimitsV1& limits);
+    BaselineStatus ReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope);
+    std::pair<BaselineStatus, BaselineStateUsageV1> QueryStateUsage() const;
 
  protected:
     BaselineStatus EnsureOpen() const;
     static BaselineSerializationResult UnsupportedFormatResult(
         BaselineSerializationFormat format);
     virtual void OnClosing();
+    virtual BaselineStatus DoReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) = 0;
+    virtual BaselineStateUsageV1 DoQueryStateUsage() const = 0;
+    const BaselineStateLimitsV1* StateLimits() const { return state_limits_ ? &*state_limits_ : nullptr; }
+    void MarkStateOperation() { state_operations_started_ = true; }
 
  private:
     static const char* KindName(BaselineTaskKind kind);
@@ -55,6 +59,8 @@ class BaselineTaskBase : public std::enable_shared_from_this<BaselineTaskBase> {
     std::string task_name_;
     std::string config_json_;
     bool closed_ = false;
+    bool state_operations_started_ = false;
+    std::optional<BaselineStateLimitsV1> state_limits_;
 };
 
 }  // namespace baseline

@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_PLUGINS_BASELINE_ROLLING_ROLLING_STATE_H_
 #define _FLOWSQL_PLUGINS_BASELINE_ROLLING_ROLLING_STATE_H_
@@ -93,6 +88,18 @@ struct RollingThetaState {
     RollingHarmonicState weekly;
 };
 
+// Minimal last-successful-Submit diagnostics; the bucket uses last_processed_bucket.
+struct RollingLastSubmitView {
+    double baseline_mu = 0.0;
+    double baseline_lower = 0.0;
+    double baseline_upper = 0.0;
+    double update_weight = 0.0;
+    bool valid = false;
+    bool can_score = false;
+    bool can_update = false;
+    bool can_alert = false;
+};
+
 struct RollingState {
     std::string series_key;
     RollingThetaState theta;
@@ -121,6 +128,9 @@ struct RollingState {
     RollingMonthposStatus monthpos_status = RollingMonthposStatus::kDisabled;
     bool has_seen_observation = false;
     int64_t last_seen_bucket = 0;
+    // Observation order is independent of the last model update's time anchor.
+    int64_t last_processed_bucket = 0;
+    RollingLastSubmitView last_submit;
     uint64_t accepted_update_count = 0;
     uint64_t maturity_prior_update_count = 0;
     double learning_confidence = 0.0;

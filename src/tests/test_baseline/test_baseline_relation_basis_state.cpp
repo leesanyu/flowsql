@@ -1,13 +1,9 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include <cassert>
 #include <cstdio>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -113,11 +109,39 @@ void TestStreamAccumulatorBuildsConservativeInput() {
     assert(accumulator.group_count() <= 2);
     assert(accumulator.valid_bucket_count() == 1);
     assert(accumulator.total_mass() == 100.0);
+    assert(accumulator.Observe(MakeObservation(), 0) == BaselineStatus::kInvalidArgument);
+    auto older = MakeObservation();
+    older.bucket_id = 99;
+    assert(accumulator.Observe(older, 0) == BaselineStatus::kInvalidArgument);
+    RelationBootstrapBlock block;
+    block.bucket_id = 100;
+    block.group_idx = older.group_idx;
+    block.metrics = older.metrics;
+    assert(accumulator.Observe(block, 0) == BaselineStatus::kInvalidArgument);
+    assert(accumulator.total_mass() == 100.0 && accumulator.valid_bucket_count() == 1);
+    for (double mass : {-1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        auto invalid = MakeObservation();
+        invalid.bucket_id = 101;
+        invalid.metrics[0].values_by_group[1] = mass;
+        assert(accumulator.Observe(invalid, 0) == BaselineStatus::kInvalidArgument);
+        block.bucket_id = invalid.bucket_id;
+        block.metrics = invalid.metrics;
+        assert(accumulator.Observe(block, 0) == BaselineStatus::kInvalidArgument);
+        assert(accumulator.total_mass() == 100.0 && accumulator.valid_bucket_count() == 1);
+    }
+    auto misaligned = MakeObservation();
+    misaligned.bucket_id = 101;
+    misaligned.metrics[0].values_by_group.push_back(0.0);
+    assert(accumulator.Observe(misaligned, 0) == BaselineStatus::kInvalidArgument);
+    misaligned = MakeObservation();
+    misaligned.bucket_id = 101;
+    misaligned.metrics[0].total = 200.0;
+    assert(accumulator.Observe(misaligned, 0) == BaselineStatus::kOk);
 
     RelationBasisBuildInput input = MakeBuildInput();
     input.support_policy.min_hist_share = 0.2;
     assert(accumulator.BuildConservativeInput(input, &input) == BaselineStatus::kOk);
-    assert(input.total_hist_mass_denominator == 100.0);
+    assert(input.total_hist_mass_denominator == 300.0);
     assert(input.group_stats.size() <= 2);
 
     RelationServiceBasis basis;

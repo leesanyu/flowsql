@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "config_parser.h"
 
@@ -186,6 +181,7 @@ int ParseCommonTask(const char* config_json,
                 if (err) *err = "value_sampled requires a value_sampled_profiles profile";
                 return error::BAD_REQUEST;
             }
+            spec.value_identity_transform = sampled_profile.transform_name_override == "identity";
         } else {
             if (err) *err = "value task feature_type must be value_basic or value_sampled";
             return error::BAD_REQUEST;

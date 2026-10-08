@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "baseline_task_base.h"
 
@@ -103,6 +98,29 @@ BaselineSerializationResult BaselineTaskBase::UnsupportedFormatResult(
 }
 
 void BaselineTaskBase::OnClosing() {}
+
+BaselineStatus BaselineTaskBase::BindStateLimits(const BaselineStateLimitsV1& limits) {
+    if (closed_ || state_operations_started_ || state_limits_ || limits.max_runtime_identities == 0 ||
+        limits.max_model_identities == 0 || limits.max_basis_versions_per_metric == 0 ||
+        (kind_ == BaselineTaskKind::kRelation && limits.max_basis_versions_per_metric < 2)) {
+        return BaselineStatus::kInvalidArgument;
+    }
+    state_limits_ = limits;
+    return BaselineStatus::kOk;
+}
+
+BaselineStatus BaselineTaskBase::ReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) {
+    if (closed_ || !state_limits_ || key.empty() ||
+        (scope != BaselineStateReleaseScopeV1::kRuntimeOnly && scope != BaselineStateReleaseScopeV1::kAllState)) {
+        return BaselineStatus::kInvalidArgument;
+    }
+    return DoReleaseIdentity(key, scope);
+}
+
+std::pair<BaselineStatus, BaselineStateUsageV1> BaselineTaskBase::QueryStateUsage() const {
+    if (closed_ || !state_limits_) return {BaselineStatus::kInvalidArgument, {}};
+    return {BaselineStatus::kOk, DoQueryStateUsage()};
+}
 
 const char* BaselineTaskBase::KindName(BaselineTaskKind kind) {
     switch (kind) {

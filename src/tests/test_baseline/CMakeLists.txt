@@ -3,6 +3,9 @@ find_package(ICU REQUIRED COMPONENTS uc i18n)
 
 add_executable(${PROJECT_NAME} test_baseline_plugin.cpp)
 add_executable(test_baseline_task_headers test_baseline_task_headers.cpp)
+# Reuse the plugin's exact objects so resource regressions can call hidden task implementations.
+target_sources(test_baseline_task_headers PRIVATE $<TARGET_OBJECTS:flowsql_baseline>)
+target_compile_definitions(test_baseline_task_headers PRIVATE FLOWSQL_BASELINE_CLOSE_RESOURCE_TEST)
 add_executable(test_baseline_link_bootstrap_eval test_baseline_link_bootstrap_eval.cpp)
 add_executable(test_baseline_link_rolling_eval test_baseline_link_rolling_eval.cpp)
 add_executable(test_baseline_rolling_config test_baseline_rolling_config.cpp)
@@ -194,3 +197,27 @@ set_target_properties(test_baseline_rolling_b3 PROPERTIES
 set_target_properties(test_baseline_batch_prediction_perf PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
+
+# Evaluation and performance programs remain independent of the regular regression suite.
+if(BUILD_TESTING)
+    foreach(baseline_test IN ITEMS
+        test_baseline
+        test_baseline_task_headers
+        test_baseline_rolling_config
+        test_baseline_rolling_feature_batch
+        test_baseline_relation_summary
+        test_baseline_relation_basis_state
+        test_baseline_relation_fusion
+        test_baseline_observation_adapter
+        test_baseline_rolling_state
+        test_baseline_rolling_estimator
+        test_baseline_rolling_gate_scale
+        test_baseline_rolling_b3
+    )
+        add_test(NAME ${baseline_test} COMMAND ${baseline_test})
+        set_tests_properties(${baseline_test} PROPERTIES
+            LABELS baseline
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output
+        )
+    endforeach()
+endif()

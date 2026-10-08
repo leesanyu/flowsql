@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include <cassert>
 #include <cmath>
@@ -491,6 +486,42 @@ void TestPersistencePrunesStaleEvidenceUniverse() {
     std::printf("[PASS] Relation fusion prunes stale evidence universe\n");
 }
 
+void TestPersistenceCapacityIsEnforced() {
+    RelationFusionRuntimeState state;
+    auto input = BaseUpdate(100);
+    input.config.fusion_persistence_max_keys_per_source = 3;
+    input.config.dominant_single_cap = 20;
+    input.routed_inputs.push_back(RoutedInput(input.source_series_key, input.feature_base, "bps", "top1_share", 5, 5));
+    RelationFusionResult result;
+    uint64_t evicted = 0;
+    assert(UpdateRelationFusion(input, &state, &result, &evicted) == BaselineStatus::kOk);
+    assert(state.persistence_by_evidence_dir.size() == 3);
+    assert(result.diagnostics.find("persistence_key_cap_reached") != std::string::npos);
+    const auto retained = state.persistence_by_evidence_dir;
+    const auto last = state.last_bucket_id;
+    assert(UpdateRelationFusion(input, &state, &result) == BaselineStatus::kOk);
+    assert(state.persistence_by_evidence_dir == retained && state.last_bucket_id == last);
+    input.bucket_id = 101;
+    assert(UpdateRelationFusion(input, &state, &result) == BaselineStatus::kOk);
+    assert(state.persistence_by_evidence_dir.size() == 3);
+    for (const auto& entry : retained) assert(state.persistence_by_evidence_dir.count(entry.first) == 1);
+    input.bucket_id = 104;
+    input.routed_inputs.clear();
+    assert(UpdateRelationFusion(input, &state, &result) == BaselineStatus::kOk);
+    assert(state.persistence_by_evidence_dir.size() == 3);
+    for (const auto& entry : state.persistence_by_evidence_dir) assert(entry.second == 0);
+    // Zero preserves the pre-existing unlimited internal configuration semantics.
+    input.config.fusion_persistence_max_keys_per_source = 0;
+    input.bucket_id = 105;
+    assert(UpdateRelationFusion(input, &state, &result) == BaselineStatus::kOk);
+    assert(state.persistence_by_evidence_dir.size() > 3);
+    input.config.fusion_persistence_max_keys_per_source = 2;
+    input.bucket_id = 106;
+    assert(UpdateRelationFusion(input, &state, &result, &evicted) == BaselineStatus::kOk);
+    assert(state.persistence_by_evidence_dir.size() == 2 && evicted > 0);
+    std::printf("[PASS] Relation fusion enforces persistence capacity\n");
+}
+
 }  // namespace
 
 int main() {
@@ -501,5 +532,6 @@ int main() {
     TestNegativeEvidenceDrivesLegacyAndHeadPatterns();
     TestRoutedInputsOutsideMetricUniverseAreIgnored();
     TestPersistencePrunesStaleEvidenceUniverse();
+    TestPersistenceCapacityIsEnforced();
     return 0;
 }

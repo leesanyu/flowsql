@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "ratio_task.h"
 
@@ -56,6 +51,36 @@ BaselineSerializationResult BaselineRatioTask::QuerySeriesSnapshot(
 
 BaselineStatus BaselineRatioTask::Close() { return BaselineTaskBase::Close(); }
 
+BaselineStatus BaselineRatioTask::DoReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) {
+    const std::string identity(key);
+    rolling_states_.erase(identity);
+    if (scope == BaselineStateReleaseScopeV1::kAllState) {
+        seeds_by_series_.erase(identity);
+        artifacts_by_series_.erase(identity);
+    }
+    return BaselineStatus::kOk;
+}
+
+BaselineStateUsageV1 BaselineRatioTask::DoQueryStateUsage() const {
+    return {static_cast<uint64_t>(rolling_states_.size()), static_cast<uint64_t>(artifacts_by_series_.size()), 0, 0};
+}
+
+bool BaselineRatioTask::HasIdentityCapacity(const std::string& key, bool include_model) const {
+    const auto* limits = StateLimits();
+    if (!limits) return true;
+    return (rolling_states_.find(key) != rolling_states_.end() ||
+            rolling_states_.size() < limits->max_runtime_identities) &&
+           (!include_model || artifacts_by_series_.find(key) != artifacts_by_series_.end() ||
+            artifacts_by_series_.size() < limits->max_model_identities);
+}
+
+void BaselineRatioTask::OnClosing() {
+    decltype(rolling_states_){}.swap(rolling_states_);
+    BootstrapSeedStore{}.swap(seeds_by_series_);
+    BootstrapArtifactStore{}.swap(artifacts_by_series_);
+    compiled_event_calendar_.reset();
+}
+
 RollingBaselineResult BaselineRatioTask::SubmitObservation(
     const RatioRollingObservation& obs,
     const RollingSubmitOptions& options) {
@@ -69,8 +94,17 @@ RollingBaselineResult BaselineRatioTask::SubmitObservation(
         result.denominator = obs.denominator;
         return result;
     }
-    return RunRatioRollingSubmit(
-        spec_, seeds_by_series_, &rolling_states_, obs, options);
+    RollingEventContext events{compiled_event_calendar_.get()};
+    MarkStateOperation();
+    const bool may_initialize =
+        options.allow_auto_init_from_empty ||
+        (options.allow_auto_init_from_bootstrap && seeds_by_series_.find(obs.series_key) != seeds_by_series_.end());
+    if (may_initialize && !HasIdentityCapacity(obs.series_key, false)) {
+        result.status = BaselineStatus::kInvalidArgument;
+        result.diagnostics = "baseline_state_capacity_reached";
+        return result;
+    }
+    return RunRatioRollingSubmit(spec_, seeds_by_series_, &rolling_states_, obs, options, &events);
 }
 
 RollingPrediction BaselineRatioTask::PredictRolling(std::string_view series_key,
@@ -83,7 +117,8 @@ RollingPrediction BaselineRatioTask::PredictRolling(std::string_view series_key,
         result.status = status;
         return result;
     }
-    return PredictRollingForSeries(spec_, seeds_by_series_, rolling_states_, series_key, bucket_id);
+    return PredictRollingForSeries(spec_, seeds_by_series_, rolling_states_, series_key, bucket_id,
+                                   compiled_event_calendar_.get());
 }
 
 RollingPredictionSequence BaselineRatioTask::PredictRolling(
@@ -117,20 +152,26 @@ RollingPredictionSequence BaselineRatioTask::PredictRolling(
         }
         return sequence;
     }
-    return PredictRollingSequenceForSeries(
-        spec_, seeds_by_series_, rolling_states_, series_key, start_bucket_id, point_count);
+    return PredictRollingSequenceForSeries(spec_, seeds_by_series_, rolling_states_, series_key, start_bucket_id,
+                                           point_count, compiled_event_calendar_.get());
 }
 
 BootstrapTrainResult BaselineRatioTask::Bootstrap(const RatioBootstrapInput& input) {
     BootstrapTrainResult result;
     result.status = EnsureOpen();
     if (result.status != BaselineStatus::kOk) return result;
+    MarkStateOperation();
     if (!input.options.force_replace_existing_artifact &&
         FindBootstrapArtifact(artifacts_by_series_, input.series_key)) {
         result.status = BaselineStatus::kInvalidArgument;
         if (input.options.include_diagnostics) {
             result.diagnostics = "bootstrap artifact already exists for series_key";
         }
+        return result;
+    }
+    if (!HasIdentityCapacity(input.series_key, true)) {
+        result.status = BaselineStatus::kInvalidArgument;
+        if (input.options.include_diagnostics) result.diagnostics = "baseline_state_capacity_reached";
         return result;
     }
     BootstrapArtifact artifact;
@@ -147,7 +188,10 @@ BootstrapTrainResult BaselineRatioTask::Bootstrap(const RatioBootstrapInput& inp
             result.status = seed_status;
             return result;
         }
-        (void)WarmupRollingStatesFromBootstrapSeeds(spec_, seeds_by_series_, &rolling_states_);
+        rolling_states_.erase(input.series_key);
+        (void)WarmupRollingStatesFromBootstrapSeeds(
+            spec_, seeds_by_series_, &rolling_states_,
+            StateLimits() ? std::string_view(input.series_key) : std::string_view{});
     }
     return result;
 }
@@ -243,15 +287,20 @@ BaselineStatus BaselineRatioTask::LoadBootstrapArtifact(
     BaselineSerializationFormat format) {
     const BaselineStatus status = EnsureOpen();
     if (status != BaselineStatus::kOk) return status;
-    const BaselineStatus load_status =
-        LoadBootstrapArtifactStore(content,
-                                   format,
-                                   bootstrap_engine_,
-                                   spec_,
-                                   BootstrapArtifactKind::kRatio,
-                                   &artifacts_by_series_,
-                                   &seeds_by_series_);
+    MarkStateOperation();
+    BootstrapArtifactStore loaded_artifacts;
+    BootstrapSeedStore loaded_seeds;
+    const BaselineStatus load_status = LoadBootstrapArtifactStore(
+        content, format, bootstrap_engine_, spec_, BootstrapArtifactKind::kRatio, &loaded_artifacts, &loaded_seeds);
     if (load_status == BaselineStatus::kOk) {
+        const auto* limits = StateLimits();
+        if (limits && (loaded_artifacts.size() > limits->max_model_identities ||
+                       loaded_seeds.size() > limits->max_runtime_identities)) {
+            return BaselineStatus::kInvalidArgument;
+        }
+        artifacts_by_series_.swap(loaded_artifacts);
+        seeds_by_series_.swap(loaded_seeds);
+        rolling_states_.clear();
         (void)WarmupRollingStatesFromBootstrapSeeds(spec_, seeds_by_series_, &rolling_states_);
     }
     return load_status;

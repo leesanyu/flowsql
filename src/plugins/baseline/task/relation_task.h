@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_PLUGINS_BASELINE_TASK_RELATION_TASK_H_
 #define _FLOWSQL_PLUGINS_BASELINE_TASK_RELATION_TASK_H_
@@ -83,8 +78,32 @@ class BaselineRelationTask final : public IBaselineRelationTask, public Baseline
     using RelationBasisStateMap =
         std::unordered_map<std::string, RelationBasisRuntimeState>;
 
+    struct ManagedRoutedStateRef {
+        const std::string* key = nullptr;  // Stable key owned by the shard's spec map, including across rehash.
+        std::size_t shard = 0;
+        std::size_t metric_index = 0;
+        uint64_t basis_version = 0;
+    };
+    struct ManagedSourceRuntimeIndex {
+        std::vector<ManagedRoutedStateRef> routed;
+        std::vector<std::vector<uint64_t>> versions_by_metric;
+    };
+
+    void OnClosing() override;
+    BaselineStatus DoReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) override;
+    BaselineStateUsageV1 DoQueryStateUsage() const override;
+    bool HasIdentityCapacity(const std::string& source, bool include_model) const;
+    bool SeedsFitRuntimeLimits(const BootstrapSeedStore& seeds) const;
+    ManagedSourceRuntimeIndex& TrackManagedSource(const std::string& source);
+    void TrackManagedVersion(const std::string& source, std::size_t metric_index, uint64_t version);
+    void TrackManagedRouted(const std::string& source, std::size_t metric_index, uint64_t version, std::size_t shard,
+                            const std::string& key);
+    void ReleaseRuntimeForSource(const std::string& source);
+    void RetireManagedVersions(const std::string& source);
     std::size_t RoutedShardIndex(std::string_view routed_series_key) const;
     void RebuildRuntimeFromRelationSeeds();
+    void RebuildRuntimeForSource(std::string_view source_series_key);
+    void InitializeRuntimeFromRelationSeed(const BootstrapSeed& seed);
     RelationBasisRuntimeConfig MakeBasisRuntimeConfig() const;
     RelationFusionRuntimeConfig MakeFusionRuntimeConfig() const;
     bool IsFusionStateExpired(const RelationFusionRuntimeState& state) const;
@@ -101,7 +120,9 @@ class BaselineRelationTask final : public IBaselineRelationTask, public Baseline
     std::size_t runtime_shard_count_ = 16;
     std::vector<std::unique_ptr<RelationRoutedRuntimeShard>> routed_shards_;
     RelationBasisStateMap basis_states_;
+    std::unordered_map<std::string, int64_t> last_processed_by_source_;
     std::unordered_map<std::string, RelationFusionRuntimeState> fusion_states_;
+    std::unordered_map<std::string, ManagedSourceRuntimeIndex> managed_sources_;
     uint64_t fusion_update_seq_ = 0;
     std::size_t fusion_cleanup_bucket_cursor_ = 0;
     uint64_t fusion_state_evicted_total_ = 0;

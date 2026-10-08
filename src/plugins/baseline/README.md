@@ -97,6 +97,51 @@ Task 由 `std::shared_ptr<IBaseline*Task>` 持有。`Close()` 会关闭 task 并
 2. 排在 `Close()` 之后的调用应看到 closed 状态并拒绝。
 3. `Close()` 后不应继续把该 task 暴露给新的业务调用链。
 
+### 3.1.1 可选状态管理
+
+可选状态管理通过独立头 `framework/interfaces/ibaseline_state_control.h` 和
+`IID_BASELINE_STATE_CONTROL_SERVICE_V1` 提供，不改变原服务、task 虚表或序列化格式。
+创建 task 后、首次 `SubmitObservation` / `Bootstrap` / `LoadBootstrapArtifact` 前可绑定：
+
+```cpp
+auto* management = static_cast<flowsql::IBaselineStateControlServiceV1*>(
+    querier->First(flowsql::IID_BASELINE_STATE_CONTROL_SERVICE_V1));
+auto [bind_status, control] = management->Bind(task, {1024, 1024, 2});
+```
+
+三个限额分别为 runtime 身份、父模型身份、每 source×metric 的 basis 版本数，必须为正值；
+Relation 的版本数至少为 2，Value/Ratio 忽略该正值。限额绑定后固定，原 task 入口也执行容量检查。
+未绑定任务保留原准入和历史行为。控制句柄拥有 task，任务、句柄及产物须先于插件库销毁。
+
+`ReleaseIdentity(key, scope)` 的 key 在 Value/Ratio 中是 series，在 Relation 中是 source，
+不能用已存在的 routed 子 key 代替 source。不存在的身份幂等成功；两种 scope 的行为为：
+
+| scope | 释放结果 |
+| --- | --- |
+| `kRuntimeOnly` | 清除 rolling、消费游标和最近 Submit 视图；Relation 同时清除 basis、fusion/persistence、routed spec/seed/rolling 与 source 索引。保留父 artifact/seed，下一条合法观测可恢复模型。 |
+| `kAllState` | 在上述基础上清除该身份的父 artifact/seed，下一条观测按无模型冷启动。 |
+
+两种释放均结束当前在线生命周期，允许下一生命周期重新处理此前消费过的 bucket；
+保留 seed 时仍拒绝不晚于其训练末尾的 bucket。跨生命周期的旧数据过滤由调用方的水位/恢复策略保证。
+RuntimeOnly 后在线快照返回 `kNotTrained`，Value/Ratio 的 Bootstrap 预测继续有效。
+
+`QueryUsage()` 独立返回 runtime 身份、父模型身份、routed 子身份和保留版本数量。
+routed 子身份包括仅有 spec/seed、尚未生成 rolling 的预热对象，同一个子身份计一次；
+Relation 的 cursor-only source 也占 runtime 额度。它是对象数量口径，不是精确字节预算。
+容量满时拒绝新增身份，返回既有 `kInvalidArgument`；已有身份继续处理，不自动淘汰其他身份。
+超限 Bootstrap / Load 在提交资产前拒绝，单源重训不复活其他已释放 runtime。
+受管 Relation 导入同时核对 basis 的 support/stable 大小和每 metric、每版本的预热子模型扇出：
+universal 至多 4 个，basis scoped 至多 `3 + k_stable` 个，防止导入文档绕过固定配置的对象数量边界。
+
+受管 Relation 在成功提交点清理最旧且不受 active/handover 保护的在线历史版本，
+同时删除对应 routed spec/seed/rolling；精确查询/预测退休版本返回 `kNotTrained`，父 artifact 保留。
+fusion 的 `fusion_persistence_max_keys_per_source` 实际约束保存的历史键数；
+超过上限时复用既有证据表的字典序保留前若干键，其余证据继续参与当条计算但不累计跨条 persistence。
+内部 cap=0 保留原不限量语义，通常配置使用有限正值。
+
+`Close()` / 插件 `Stop()` 释放全部模型、runtime 容器及其容量和日历引用，外部句柄仍存续也不保留这些资源。
+关闭后的管理调用拒绝，重复 Close 仍幂等；不保证 allocator 立即向操作系统归还 RSS。
+
 ### 3.2 同 task 非并发调用契约
 
 Baseline task 实例按外部串行化状态机理解。调用方 / 上游调度必须保证：
@@ -107,6 +152,10 @@ Baseline task 实例按外部串行化状态机理解。调用方 / 上游调度
 4. 不同 task 可以并行调用。
 
 当前实现按上述契约收敛 task 内部 runtime 锁。调用方不得直接并发访问同一个 task，也不得依赖 Baseline 在 task 内部为重叠调用提供互斥保护。
+
+Bind、ReleaseIdentity 和 QueryUsage 也遵守同 task 的串行契约；本能力不增加维护线程或 runtime 锁。
+插件不判断业务不活跃、不读取业务超时 wall clock，也不连接 Scheduler。
+业务活动判断、时间触发和维护调用的串行化由后续封装算子承担。
 
 ### 3.3 Immutable identity getter
 
@@ -153,3 +202,16 @@ Snapshot 用于观测和调试，不应被调用方当成热路径状态传递�
 5. 本 README
 
 新增配置项必须同步更新 C++ 默认值、YAML 模板、strict schema 和配置测试。新增 public 字段必须保持 append-only 兼容策略，除非阶段设计明确允许破坏性迁移。
+
+常规回归共 12 个 CTest，统一标记为 `baseline`，测试工作目录为 `build/output`：
+
+```bash
+cmake -B build src
+cmake --build build -j4
+ctest --test-dir build -L baseline --output-on-failure
+ctest --test-dir build --output-on-failure
+```
+
+`test_baseline_task_headers` 复用插件的精确编译对象，自动运行隐藏 task 实现的 Close/Stop 资源回归；不需要手工链接。既有 `-UNDEBUG` 保证 Release 构建也执行测试断言。
+
+`test_baseline_link_bootstrap_eval`、`test_baseline_link_rolling_eval` 和 `test_baseline_batch_prediction_perf` 用于独立评估或性能测量，不注册到常规 CTest。

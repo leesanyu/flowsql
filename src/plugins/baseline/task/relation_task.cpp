@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "relation_task.h"
 
@@ -19,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "plugins/baseline/model/observation_validation.h"
 #include "plugins/baseline/relation/routed_summary.h"
 #include "plugins/baseline/rolling/rolling_config.h"
 #include "plugins/baseline/serialization/json_serialization.h"
@@ -572,13 +568,173 @@ BaselineSerializationResult BaselineRelationTask::QuerySeriesSnapshot(
 
 BaselineStatus BaselineRelationTask::Close() { return BaselineTaskBase::Close(); }
 
+BaselineStateUsageV1 BaselineRelationTask::DoQueryStateUsage() const {
+    BaselineStateUsageV1 usage;
+    usage.runtime_identities = static_cast<uint64_t>(managed_sources_.size());
+    usage.model_identities = static_cast<uint64_t>(artifacts_by_series_.size());
+    for (const auto& source : managed_sources_) {
+        for (const auto& versions : source.second.versions_by_metric) usage.retained_basis_versions += versions.size();
+    }
+    // Specs own every routed identity, including seed-only children not yet materialized as rolling states.
+    for (const auto& shard : routed_shards_) usage.routed_states += shard->routed_specs_by_series.size();
+    return usage;
+}
+
+bool BaselineRelationTask::HasIdentityCapacity(const std::string& source, bool include_model) const {
+    const auto* limits = StateLimits();
+    if (!limits) return true;
+    return (managed_sources_.find(source) != managed_sources_.end() ||
+            managed_sources_.size() < limits->max_runtime_identities) &&
+           (!include_model || artifacts_by_series_.find(source) != artifacts_by_series_.end() ||
+            artifacts_by_series_.size() < limits->max_model_identities);
+}
+
+BaselineRelationTask::ManagedSourceRuntimeIndex& BaselineRelationTask::TrackManagedSource(const std::string& source) {
+    auto inserted = managed_sources_.try_emplace(source);
+    if (inserted.second) inserted.first->second.versions_by_metric.resize(spec_.task_spec.metrics.size());
+    return inserted.first->second;
+}
+
+bool BaselineRelationTask::SeedsFitRuntimeLimits(const BootstrapSeedStore& seeds) const {
+    const auto* limits = StateLimits();
+    if (!limits) return true;
+    for (const auto& entry : seeds) {
+        for (const auto& basis : entry.second.relation_basis_by_metric) {
+            if (basis.support_explicit.size() > static_cast<uint64_t>(spec_.task_spec.support_policy.k_support) ||
+                basis.stable_head.size() > static_cast<uint64_t>(spec_.task_spec.summary_policy.k_stable))
+                return false;
+        }
+        for (const auto& metric : spec_.task_spec.metrics) {
+            std::unordered_set<uint64_t> versions;
+            std::unordered_map<uint64_t, uint64_t> children_by_version;
+            const uint64_t fallback = BasisVersionForMetric(entry.second, metric);
+            if (fallback > 0) versions.insert(fallback);
+            if (relation_rolling_config_.enable_routed_rolling) {
+                for (const auto& routed : entry.second.relation_routed_summary_seeds) {
+                    if (routed.metric_name != metric) continue;
+                    const uint64_t version = IsBasisScopedRelationSummary(routed.summary_name)
+                                                 ? (routed.basis_version > 0 ? routed.basis_version : fallback)
+                                                 : 0;
+                    // Four universal summaries; each scoped version adds three plus k_stable group shares.
+                    const uint64_t fanout =
+                        version == 0 ? 4 : 3 + static_cast<uint64_t>(spec_.task_spec.summary_policy.k_stable);
+                    if (++children_by_version[version] > fanout) return false;
+                    if (version > 0) versions.insert(version);
+                    if (versions.size() > limits->max_basis_versions_per_metric) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+void BaselineRelationTask::TrackManagedVersion(const std::string& source, std::size_t metric_index, uint64_t version) {
+    if (!StateLimits()) return;
+    auto& index = TrackManagedSource(source);
+    if (version == 0) return;
+    auto& versions = index.versions_by_metric[metric_index];
+    if (std::find(versions.begin(), versions.end(), version) == versions.end()) versions.push_back(version);
+}
+
+void BaselineRelationTask::TrackManagedRouted(const std::string& source, std::size_t metric_index, uint64_t version,
+                                              std::size_t shard, const std::string& key) {
+    if (!StateLimits()) return;
+    TrackManagedVersion(source, metric_index, version);
+    TrackManagedSource(source).routed.push_back({&key, shard, metric_index, version});
+}
+
+void BaselineRelationTask::ReleaseRuntimeForSource(const std::string& source) {
+    const auto index = managed_sources_.find(source);
+    if (index == managed_sources_.end()) return;
+    for (const auto& child : index->second.routed) {
+        auto& shard = *routed_shards_[child.shard];
+        shard.routed_rolling_states.erase(*child.key);
+        shard.routed_seeds_by_series.erase(*child.key);
+        shard.routed_specs_by_series.erase(*child.key);  // The key reference is no longer used after this erase.
+    }
+    for (const auto& metric : spec_.task_spec.metrics) basis_states_.erase(BasisStateKey(source, metric));
+    fusion_states_.erase(source);
+    last_processed_by_source_.erase(source);
+    managed_sources_.erase(index);
+}
+
+BaselineStatus BaselineRelationTask::DoReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) {
+    const std::string source(key);
+    if (managed_sources_.find(source) == managed_sources_.end() &&
+        artifacts_by_series_.find(source) == artifacts_by_series_.end()) {
+        const auto& shard = *routed_shards_[RoutedShardIndex(source)];
+        if (shard.routed_specs_by_series.find(source) != shard.routed_specs_by_series.end()) {
+            return BaselineStatus::kInvalidArgument;
+        }
+    }
+    ReleaseRuntimeForSource(source);
+    if (scope == BaselineStateReleaseScopeV1::kAllState) {
+        seeds_by_series_.erase(source);
+        artifacts_by_series_.erase(source);
+    }
+    return BaselineStatus::kOk;
+}
+
+void BaselineRelationTask::RetireManagedVersions(const std::string& source) {
+    const auto* limits = StateLimits();
+    if (!limits) return;
+    auto found = managed_sources_.find(source);
+    if (found == managed_sources_.end()) return;
+    auto& index = found->second;
+    for (std::size_t metric_index = 0; metric_index < index.versions_by_metric.size(); ++metric_index) {
+        auto& versions = index.versions_by_metric[metric_index];
+        if (versions.size() <= limits->max_basis_versions_per_metric) continue;
+        const auto basis = basis_states_.find(BasisStateKey(source, spec_.task_spec.metrics[metric_index]));
+        const uint64_t active = basis != basis_states_.end() && basis->second.active_basis()
+                                    ? basis->second.active_basis()->basis_version
+                                    : 0;
+        // The runtime holds only its active basis. Keep its immediately preceding version throughout handover.
+        uint64_t previous = 0;
+        if (basis != basis_states_.end() && basis->second.basis_status() == RelationBasisStatus::kHandoverWarming) {
+            for (const auto version : versions)
+                if (version < active) previous = std::max(previous, version);
+        }
+        while (versions.size() > limits->max_basis_versions_per_metric) {
+            auto oldest = versions.end();
+            for (auto it = versions.begin(); it != versions.end(); ++it) {
+                if (*it != active && *it != previous && (oldest == versions.end() || *it < *oldest)) oldest = it;
+            }
+            // At most active and previous are protected; Bind requires a limit of at least two.
+            const uint64_t retired = *oldest;
+            const auto removed = std::remove_if(index.routed.begin(), index.routed.end(), [&](const auto& child) {
+                if (child.metric_index != metric_index || child.basis_version != retired) return false;
+                auto& shard = *routed_shards_[child.shard];
+                shard.routed_rolling_states.erase(*child.key);
+                shard.routed_seeds_by_series.erase(*child.key);
+                shard.routed_specs_by_series.erase(*child.key);
+                return true;
+            });
+            index.routed.erase(removed, index.routed.end());
+            versions.erase(oldest);
+        }
+    }
+}
+
+void BaselineRelationTask::OnClosing() {
+    decltype(managed_sources_){}.swap(managed_sources_);
+    decltype(routed_shards_){}.swap(routed_shards_);
+    RelationBasisStateMap{}.swap(basis_states_);
+    decltype(last_processed_by_source_){}.swap(last_processed_by_source_);
+    decltype(fusion_states_){}.swap(fusion_states_);
+    BootstrapSeedStore{}.swap(seeds_by_series_);
+    BootstrapArtifactStore{}.swap(artifacts_by_series_);
+    compiled_event_calendar_.reset();
+}
+
 std::size_t BaselineRelationTask::RoutedShardIndex(
     std::string_view routed_series_key) const {
     return std::hash<std::string_view>{}(routed_series_key) % runtime_shard_count_;
 }
 
 void BaselineRelationTask::RebuildRuntimeFromRelationSeeds() {
+    managed_sources_.clear();
     basis_states_.clear();
+    last_processed_by_source_.clear();
     for (auto& shard_ptr : routed_shards_) {
         RelationRoutedRuntimeShard& shard = *shard_ptr;
         shard.routed_seeds_by_series.clear();
@@ -588,36 +744,74 @@ void BaselineRelationTask::RebuildRuntimeFromRelationSeeds() {
     fusion_states_.clear();
     ResetFusionCleanupRuntime();
 
-    for (const auto& entry : seeds_by_series_) {
-        const BootstrapSeed& seed = entry.second;
-        for (const auto& basis_seed : seed.relation_basis_by_metric) {
-            RelationBasisRuntimeState runtime(MakeBasisRuntimeConfig());
-            (void)runtime.LoadSeedBasis(BasisFromSeed(basis_seed),
-                                        BasisStatusFromSeedStatus(seed.seed_status));
-            basis_states_.insert_or_assign(BasisStateKey(seed.series_key, basis_seed.metric_name),
-                                           std::move(runtime));
-        }
+    for (const auto& entry : seeds_by_series_) InitializeRuntimeFromRelationSeed(entry.second);
+}
 
-        if (!relation_rolling_config_.enable_routed_rolling) continue;
+void BaselineRelationTask::RebuildRuntimeForSource(std::string_view source_series_key) {
+    const std::string source(source_series_key);
+    if (StateLimits()) {
+        ReleaseRuntimeForSource(source);
+        const auto seed = seeds_by_series_.find(source);
+        if (seed != seeds_by_series_.end()) InitializeRuntimeFromRelationSeed(seed->second);
+        return;
+    }
+    for (const std::string& metric : spec_.task_spec.metrics) basis_states_.erase(BasisStateKey(source, metric));
+    for (auto& shard_ptr : routed_shards_) {
+        auto erase_source = [&](auto& states) {
+            for (auto it = states.begin(); it != states.end();) {
+                ParsedRoutedSeriesKey parsed;
+                if (ParseRoutedSeriesKeyForSource(it->first, source, &parsed)) {
+                    it = states.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        };
+        erase_source(shard_ptr->routed_seeds_by_series);
+        erase_source(shard_ptr->routed_specs_by_series);
+        erase_source(shard_ptr->routed_rolling_states);
+    }
+    fusion_states_.erase(source);
+    last_processed_by_source_.erase(source);
+    const auto seed_it = seeds_by_series_.find(source);
+    if (seed_it != seeds_by_series_.end()) InitializeRuntimeFromRelationSeed(seed_it->second);
+}
 
-        for (const auto& routed_seed : seed.relation_routed_summary_seeds) {
-            const uint64_t fallback_basis_version =
-                BasisVersionForMetric(seed, routed_seed.metric_name);
-            RelationRoutedBootstrapSeedMaterialization materialized;
-            const BaselineStatus status =
-                MaterializeRelationRoutedBootstrapSeed(spec_,
-                                                       seed.series_key,
-                                                       routed_seed,
-                                                       fallback_basis_version,
-                                                       &materialized);
-            if (status != BaselineStatus::kOk) continue;
+void BaselineRelationTask::InitializeRuntimeFromRelationSeed(const BootstrapSeed& seed) {
+    if (StateLimits()) TrackManagedSource(seed.series_key);
+    last_processed_by_source_.insert_or_assign(seed.series_key, seed.coverage_report.train_end_bucket);
+    for (const auto& basis_seed : seed.relation_basis_by_metric) {
+        RelationBasisRuntimeState runtime(MakeBasisRuntimeConfig());
+        (void)runtime.LoadSeedBasis(BasisFromSeed(basis_seed), BasisStatusFromSeedStatus(seed.seed_status));
+        basis_states_.insert_or_assign(BasisStateKey(seed.series_key, basis_seed.metric_name), std::move(runtime));
+        const auto metric =
+            std::find(spec_.task_spec.metrics.begin(), spec_.task_spec.metrics.end(), basis_seed.metric_name);
+        TrackManagedVersion(seed.series_key, static_cast<std::size_t>(metric - spec_.task_spec.metrics.begin()),
+                            basis_seed.basis_version);
+    }
 
-            RelationRoutedRuntimeShard& shard =
-                *routed_shards_[RoutedShardIndex(materialized.routed_series_key)];
-            shard.routed_seeds_by_series.insert_or_assign(
-                materialized.routed_series_key, std::move(materialized.seed));
-            shard.routed_specs_by_series.insert_or_assign(
-                materialized.routed_series_key, std::move(materialized.task_spec));
+    if (!relation_rolling_config_.enable_routed_rolling) return;
+
+    for (const auto& routed_seed : seed.relation_routed_summary_seeds) {
+        const uint64_t fallback_basis_version = BasisVersionForMetric(seed, routed_seed.metric_name);
+        RelationRoutedBootstrapSeedMaterialization materialized;
+        const BaselineStatus status = MaterializeRelationRoutedBootstrapSeed(spec_, seed.series_key, routed_seed,
+                                                                             fallback_basis_version, &materialized);
+        if (status != BaselineStatus::kOk) continue;
+
+        RelationRoutedRuntimeShard& shard = *routed_shards_[RoutedShardIndex(materialized.routed_series_key)];
+        shard.routed_seeds_by_series.insert_or_assign(materialized.routed_series_key, std::move(materialized.seed));
+        const auto inserted = shard.routed_specs_by_series.insert_or_assign(materialized.routed_series_key,
+                                                                            std::move(materialized.task_spec));
+        if (inserted.second) {
+            const auto metric =
+                std::find(spec_.task_spec.metrics.begin(), spec_.task_spec.metrics.end(), routed_seed.metric_name);
+            TrackManagedRouted(
+                seed.series_key, static_cast<std::size_t>(metric - spec_.task_spec.metrics.begin()),
+                IsBasisScopedRelationSummary(routed_seed.summary_name)
+                    ? (routed_seed.basis_version > 0 ? routed_seed.basis_version : fallback_basis_version)
+                    : 0,
+                RoutedShardIndex(materialized.routed_series_key), inserted.first->first);
         }
     }
 }
@@ -625,18 +819,14 @@ void BaselineRelationTask::RebuildRuntimeFromRelationSeeds() {
 RelationBasisRuntimeConfig BaselineRelationTask::MakeBasisRuntimeConfig() const {
     RelationBasisRuntimeConfig config;
     const int64_t delta = spec_.clock_spec.delta > 0 ? spec_.clock_spec.delta : 60;
-    const uint64_t day_buckets =
-        static_cast<uint64_t>(std::max<int64_t>(1, 86400 / delta));
+    const uint64_t day_buckets = static_cast<uint64_t>(std::max<int64_t>(1, 86400 / delta));
     const auto& relation_config = relation_rolling_config_;
-    config.stream.max_groups =
-        static_cast<std::size_t>(relation_config.basis_stats_max_groups);
+    config.stream.max_groups = static_cast<std::size_t>(relation_config.basis_stats_max_groups);
     config.stream.threshold_margin = relation_config.basis_threshold_margin;
-    config.collect_min_buckets = relation_config.basis_collect_min_buckets == 0
-                                     ? day_buckets
-                                     : relation_config.basis_collect_min_buckets;
-    config.ready_min_buckets = relation_config.basis_ready_min_buckets == 0
-                                   ? 3 * day_buckets
-                                   : relation_config.basis_ready_min_buckets;
+    config.collect_min_buckets =
+        relation_config.basis_collect_min_buckets == 0 ? day_buckets : relation_config.basis_collect_min_buckets;
+    config.ready_min_buckets =
+        relation_config.basis_ready_min_buckets == 0 ? 3 * day_buckets : relation_config.basis_ready_min_buckets;
     config.refresh_interval_buckets =
         relation_config.basis_refresh_interval_buckets == 0
             ? day_buckets
@@ -769,12 +959,37 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
     RelationRollingResult result;
     result.series_key = obs.series_key;
     result.bucket_id = obs.bucket_id;
+    result.status = EnsureOpen();
+    if (result.status != BaselineStatus::kOk) return result;
+    MarkStateOperation();
     if (obs.series_key.empty()) {
         result.status = BaselineStatus::kInvalidArgument;
         return result;
     }
-    result.status = EnsureOpen();
-    if (result.status != BaselineStatus::kOk) return result;
+
+    if (!HasIdentityCapacity(obs.series_key, false)) {
+        result.status = BaselineStatus::kInvalidArgument;
+        AppendDiagnostic(options.include_diagnostics, "baseline_state_capacity_reached", &result.diagnostics);
+        return result;
+    }
+
+    auto cursor_it = last_processed_by_source_.find(obs.series_key);
+    if (cursor_it != last_processed_by_source_.end() && obs.bucket_id <= cursor_it->second) {
+        result.status = BaselineStatus::kInvalidArgument;
+        return result;
+    }
+
+    const BootstrapSeed* restore_seed = nullptr;
+    if (StateLimits() && cursor_it == last_processed_by_source_.end()) {
+        const auto seed = seeds_by_series_.find(obs.series_key);
+        if (seed != seeds_by_series_.end()) {
+            restore_seed = &seed->second;
+            if (obs.bucket_id <= restore_seed->coverage_report.train_end_bucket) {
+                result.status = BaselineStatus::kInvalidArgument;
+                return result;
+            }
+        }
+    }
 
     const RelationBasisRuntimeConfig runtime_config = MakeBasisRuntimeConfig();
     const bool routed_enabled = relation_rolling_config_.enable_routed_rolling;
@@ -783,13 +998,24 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
     bool saw_ok_routed_result = false;
     bool saw_ok_basis_result = false;
     bool saw_valid_metric = false;
+    bool advanced_fusion = false;
+    bool versions_changed = false;
     const std::string feature_base = spec_.task_spec.feature_base.empty()
                                          ? spec_.task_spec.feature_id
                                          : spec_.task_spec.feature_base;
     std::vector<RelationFusionMetricContext> fusion_metric_contexts;
     std::vector<RelationFusionRoutedInput> fusion_inputs;
 
+    struct PreparedRelationMetric {
+        std::size_t metric_index;
+        std::string metric_name;
+        RelationBasisStatus basis_status;
+        uint64_t basis_version;
+        std::vector<RelationProjectedSummary> summaries;
+    };
     const std::size_t metric_count = spec_.task_spec.metrics.size();
+    std::vector<PreparedRelationMetric> prepared_metrics;
+    prepared_metrics.reserve(metric_count);
     fusion_metric_contexts.reserve(metric_count);
     for (std::size_t metric_index = 0; metric_index < metric_count; ++metric_index) {
         const bool metric_present = metric_index < obs.metrics.size();
@@ -801,10 +1027,7 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
         RelationFusionMetricContext fusion_metric;
         fusion_metric.metric = metric_name;
         fusion_metric.present = metric_present;
-        fusion_metric.valid =
-            metric_present && metric->total > 0.0 &&
-            metric->values_by_group.size() >= obs.group_idx.size() &&
-            (metric->metric.empty() || metric->metric == metric_name);
+        fusion_metric.valid = metric_present && IsValidRelationMetricHeader(*metric, obs.group_idx.size(), metric_name);
         fusion_metric.active_count_from_upstream =
             metric_present && metric->active_count > 0;
         if (!fusion_metric.present) {
@@ -813,12 +1036,8 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
             continue;
         }
         if (!fusion_metric.valid) {
-            fusion_metric.unavailable_reason =
-                metric && !metric->metric.empty() && metric->metric != metric_name
-                    ? "metric_name_mismatch"
-                    : "metric_invalid";
-            fusion_metric_contexts.push_back(std::move(fusion_metric));
-            continue;
+            result.status = BaselineStatus::kInvalidArgument;
+            return result;
         }
         saw_valid_metric = true;
 
@@ -831,6 +1050,14 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
             if (const RelationServiceBasis* basis = basis_it->second.active_basis()) {
                 active_basis = *basis;
                 active_basis_version = basis->basis_version;
+            }
+        } else if (restore_seed) {
+            for (const auto& basis_seed : restore_seed->relation_basis_by_metric) {
+                if (basis_seed.metric_name != metric_name) continue;
+                active_basis = BasisFromSeed(basis_seed);
+                active_basis_version = basis_seed.basis_version;
+                basis_status = BasisStatusFromSeedStatus(restore_seed->seed_status);
+                break;
             }
         }
         fusion_metric.has_active_basis = active_basis.has_value();
@@ -848,6 +1075,7 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
             result.basis_version = active_basis_version;
         }
 
+        PreparedRelationMetric prepared{metric_index, metric_name, basis_status, active_basis_version, {}};
         if (routed_enabled &&
             (active_basis ||
              relation_rolling_config_.include_universal_summaries_without_basis)) {
@@ -856,16 +1084,35 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
             summary_options.other_group_idxs = spec_.task_spec.other_group_idxs;
             summary_options.basis = active_basis ? &(*active_basis) : nullptr;
             summary_options.include_basis_scoped = active_basis.has_value();
-            std::vector<RelationProjectedSummary> summaries;
-            if (!ProjectRelationMetricSummaries(obs,
-                                                metric_index,
-                                                metric_name,
-                                                summary_options,
-                                                &summaries)) {
-                continue;
+            if (!ProjectRelationMetricSummaries(obs, metric_index, metric_name, summary_options, &prepared.summaries)) {
+                result.status = BaselineStatus::kInvalidArgument;
+                return result;
             }
+        } else if (!IsValidRelationMetric(*metric, obs.group_idx.size(), metric_name)) {
+            result.status = BaselineStatus::kInvalidArgument;
+            return result;
+        }
+        prepared_metrics.push_back(std::move(prepared));
+    }
 
-            for (const RelationProjectedSummary& summary : summaries) {
+    RollingEventContext events{compiled_event_calendar_.get()};
+    // Every present metric has passed validation before any child state changes.
+    if (restore_seed && prepared_metrics.empty() &&
+        !(routed_enabled && MakeFusionRuntimeConfig().enable_relation_fusion)) {
+        result.status = BaselineStatus::kInvalidArgument;
+        return result;
+    }
+    if (restore_seed) {
+        InitializeRuntimeFromRelationSeed(*restore_seed);
+        cursor_it = last_processed_by_source_.find(obs.series_key);
+    }
+    for (const auto& prepared : prepared_metrics) {
+        const std::size_t metric_index = prepared.metric_index;
+        const std::string& metric_name = prepared.metric_name;
+        const RelationBasisStatus basis_status = prepared.basis_status;
+        const uint64_t active_basis_version = prepared.basis_version;
+        if (!prepared.summaries.empty()) {
+            for (const RelationProjectedSummary& summary : prepared.summaries) {
                 const RelationRoutedSummaryIdentity identity =
                     MakeRelationRoutedSummaryIdentity(obs.series_key,
                                                       metric_name,
@@ -883,6 +1130,9 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
                                                                     summary.summary_name,
                                                                     summary.task_kind))
                                   .first;
+                    TrackManagedRouted(obs.series_key, metric_index, identity.basis_version,
+                                       RoutedShardIndex(identity.routed_series_key), spec_it->first);
+                    versions_changed = true;
                 }
 
                 RollingBaselineResult rolling;
@@ -892,22 +1142,18 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
                     routed_obs.bucket_id = obs.bucket_id;
                     routed_obs.value = summary.value;
                     routed_obs.sample_count = 1;
-                    rolling = RunValueRollingSubmit(spec_it->second,
-                                                    shard.routed_seeds_by_series,
-                                                    &shard.routed_rolling_states,
-                                                    routed_obs,
-                                                    options.routed_options);
+                    rolling = RunValueRollingSubmit(spec_it->second, shard.routed_seeds_by_series,
+                                                    &shard.routed_rolling_states, routed_obs, options.routed_options,
+                                                    &events);
                 } else if (summary.task_kind == BaselineTaskKind::kRatio) {
                     RatioRollingObservation routed_obs;
                     routed_obs.series_key = identity.routed_series_key;
                     routed_obs.bucket_id = obs.bucket_id;
                     routed_obs.numerator = summary.numerator;
                     routed_obs.denominator = summary.denominator;
-                    rolling = RunRatioRollingSubmit(spec_it->second,
-                                                    shard.routed_seeds_by_series,
-                                                    &shard.routed_rolling_states,
-                                                    routed_obs,
-                                                    options.routed_options);
+                    rolling = RunRatioRollingSubmit(spec_it->second, shard.routed_seeds_by_series,
+                                                    &shard.routed_rolling_states, routed_obs, options.routed_options,
+                                                    &events);
                 } else {
                     continue;
                 }
@@ -955,8 +1201,9 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
                 auto inserted = basis_states_.emplace(
                     state_key, RelationBasisRuntimeState(runtime_config));
                 basis_it = inserted.first;
+                if (StateLimits()) TrackManagedSource(obs.series_key);
             }
-            const BaselineStatus observe_status = basis_it->second.Observe(obs, metric_index);
+            const BaselineStatus observe_status = basis_it->second.ObserveValidated(obs, metric_index);
             if (observe_status == BaselineStatus::kOk) {
                 saw_ok_basis_result = true;
                 RelationBasisBuildInput build_input =
@@ -964,6 +1211,10 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
                 const RelationBasisRefreshDecision decision =
                     basis_it->second.MaybeRefresh(build_input, obs.bucket_id);
                 if (decision.status == BaselineStatus::kOk) {
+                    if (decision.basis_updated) {
+                        TrackManagedVersion(obs.series_key, metric_index, decision.basis_version);
+                        versions_changed = true;
+                    }
                     result.basis_updated = result.basis_updated || decision.basis_updated;
                     result.handover_active =
                         result.handover_active ||
@@ -1035,6 +1286,7 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
                              &result.diagnostics);
         } else if (fusion_state.has_last_bucket &&
                    fusion_state.last_bucket_id == obs.bucket_id) {
+            advanced_fusion = true;
             fusion_state.last_touched_bucket_id = obs.bucket_id;
             fusion_state.last_touched_update_seq = ++fusion_update_seq_;
             const bool over_capacity =
@@ -1062,6 +1314,15 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
         result.status = BaselineStatus::kInvalidArgument;
     } else {
         result.status = BaselineStatus::kOk;
+    }
+    if (result.status == BaselineStatus::kOk || advanced_fusion) {
+        if (StateLimits() && cursor_it == last_processed_by_source_.end()) TrackManagedSource(obs.series_key);
+        if (cursor_it != last_processed_by_source_.end()) {
+            cursor_it->second = obs.bucket_id;
+        } else {
+            last_processed_by_source_.emplace(obs.series_key, obs.bucket_id);
+        }
+        if (versions_changed) RetireManagedVersions(obs.series_key);
     }
     return result;
 }
@@ -1101,11 +1362,8 @@ RollingPrediction BaselineRelationTask::PredictRoutedSummary(
         prediction.status = BaselineStatus::kNotTrained;
         return prediction;
     }
-    return PredictRollingForSeries(spec_it->second,
-                                   shard.routed_seeds_by_series,
-                                   shard.routed_rolling_states,
-                                   identity.routed_series_key,
-                                   bucket_id);
+    return PredictRollingForSeries(spec_it->second, shard.routed_seeds_by_series, shard.routed_rolling_states,
+                                   identity.routed_series_key, bucket_id, compiled_event_calendar_.get());
 }
 
 BaselineSerializationResult BaselineRelationTask::QueryRoutedSummarySnapshot(
@@ -1152,6 +1410,12 @@ BootstrapTrainResult BaselineRelationTask::Bootstrap(const RelationBootstrapInpu
     BootstrapTrainResult result;
     result.status = EnsureOpen();
     if (result.status != BaselineStatus::kOk) return result;
+    MarkStateOperation();
+    if (!HasIdentityCapacity(input.series_key, true)) {
+        result.status = BaselineStatus::kInvalidArgument;
+        if (input.options.include_diagnostics) result.diagnostics = "baseline_state_capacity_reached";
+        return result;
+    }
     if (!input.options.force_replace_existing_artifact &&
         FindBootstrapArtifact(artifacts_by_series_, input.series_key)) {
         result.status = BaselineStatus::kInvalidArgument;
@@ -1174,7 +1438,7 @@ BootstrapTrainResult BaselineRelationTask::Bootstrap(const RelationBootstrapInpu
             result.status = seed_status;
             return result;
         }
-        RebuildRuntimeFromRelationSeeds();
+        RebuildRuntimeForSource(input.series_key);
     }
     return result;
 }
@@ -1191,14 +1455,19 @@ BaselineStatus BaselineRelationTask::LoadBootstrapArtifact(
     BaselineSerializationFormat format) {
     const BaselineStatus status = EnsureOpen();
     if (status != BaselineStatus::kOk) return status;
+    MarkStateOperation();
+    BootstrapArtifactStore loaded_artifacts;
+    BootstrapSeedStore loaded_seeds;
     const BaselineStatus load_status =
-        LoadRelationBootstrapArtifactStore(content,
-                                           format,
-                                           bootstrap_engine_,
-                                           spec_,
-                                           &artifacts_by_series_,
-                                           &seeds_by_series_);
+        LoadRelationBootstrapArtifactStore(content, format, bootstrap_engine_, spec_, &loaded_artifacts, &loaded_seeds);
     if (load_status == BaselineStatus::kOk) {
+        const auto* limits = StateLimits();
+        if (limits && (loaded_artifacts.size() > limits->max_model_identities ||
+                       loaded_seeds.size() > limits->max_runtime_identities || !SeedsFitRuntimeLimits(loaded_seeds))) {
+            return BaselineStatus::kInvalidArgument;
+        }
+        artifacts_by_series_.swap(loaded_artifacts);
+        seeds_by_series_.swap(loaded_seeds);
         RebuildRuntimeFromRelationSeeds();
     }
     return load_status;

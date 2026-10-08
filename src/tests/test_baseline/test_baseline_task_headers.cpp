@@ -1,13 +1,9 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
-#include <cassert>
 #include <algorithm>
+#include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -18,8 +14,9 @@
 #include <framework/interfaces/ibaseline_service.h>
 #include <plugins/baseline/bootstrap/bootstrap_engine.h>
 #include <plugins/baseline/task/baseline_task_base.h>
-#include <plugins/baseline/task/relation_task.h>
 #include <plugins/baseline/task/ratio_task.h>
+#include <plugins/baseline/task/relation_task.h>
+#include <plugins/baseline/task/task_registry.h>
 #include <plugins/baseline/task/value_task.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -438,6 +435,129 @@ void TestTaskHeaderContracts() {
 
     std::printf("[PASS] Task header contracts\n");
 }
+
+#ifdef FLOWSQL_BASELINE_CLOSE_RESOURCE_TEST
+// Resource ownership regressions link the plugin's exact objects, including its hidden task implementations.
+void TestCloseReleasesResourcesWhileTaskHandlesRemainAlive() {
+    std::printf("[TEST] Close releases resources while task handles remain alive...\n");
+    for (const bool through_registry : {false, true}) {
+        TaskRegistry registry;
+        std::vector<std::weak_ptr<const CompiledEventCalendar>> calendars;
+        auto make_calendar = [&] {
+            auto calendar = std::make_shared<CompiledEventCalendar>();
+            calendar->bucket_ranges.reserve(128);
+            calendars.emplace_back(calendar);
+            return calendar;
+        };
+
+        BaselineTaskSpec value_spec;
+        value_spec.task_id = "close-value";
+        value_spec.task_kind = "value";
+        value_spec.feature_id = "bps";
+        value_spec.feature_type = "value_basic";
+        value_spec.profile = "default";
+        value_spec.delta = value_spec.clock_spec.bucket_seconds = 60;
+        value_spec.tz = value_spec.clock_spec.timezone = "UTC";
+        auto value = std::make_shared<BaselineValueTask>(&registry, "close-value", "value", "value-config", value_spec,
+                                                         make_calendar());
+        BaselineTaskSpec ratio_spec = value_spec;
+        ratio_spec.task_id = "close-ratio";
+        ratio_spec.task_kind = "ratio";
+        ratio_spec.feature_type = "ratio";
+        ratio_spec.profile = "rate_core";
+        auto ratio = std::make_shared<BaselineRatioTask>(&registry, "close-ratio", "ratio", "ratio-config", ratio_spec,
+                                                         make_calendar());
+        RelationTaskCreateSpec relation_spec;
+        relation_spec.task_spec.task_id = "close-relation";
+        relation_spec.task_spec.task_kind = "relation";
+        relation_spec.task_spec.feature_id = relation_spec.task_spec.feature_base = "client_mix";
+        relation_spec.task_spec.group_space_id = "client_group";
+        relation_spec.task_spec.group_space_version = "v1";
+        relation_spec.task_spec.metrics = {"bps"};
+        relation_spec.task_spec.support_policy = {2, 0.01, 0.1};
+        relation_spec.task_spec.summary_policy = {2, 1};
+        relation_spec.clock_spec.delta = 60;
+        relation_spec.clock_spec.tz = "UTC";
+        auto relation = std::make_shared<BaselineRelationTask>(&registry, "close-relation", "relation",
+                                                               "relation-config", relation_spec, make_calendar());
+        assert(registry.Register(value) == 0);
+        assert(registry.Register(ratio) == 0);
+        assert(registry.Register(relation) == 0);
+
+        ValueBootstrapInput value_input;
+        RatioBootstrapInput ratio_input;
+        RelationBootstrapInput relation_input;
+        value_input.series_key = ratio_input.series_key = relation_input.series_key = "trained";
+        for (int64_t bucket = 0; bucket < 10; ++bucket) {
+            value_input.observations.push_back({bucket, 100.0 + bucket, 1});
+            ratio_input.observations.push_back({bucket, 50.0 + bucket, 100.0});
+            RelationBootstrapBlock block;
+            block.bucket_id = bucket;
+            block.group_idx = {1, 2};
+            RelationBootstrapMetric metric;
+            metric.metric = "bps";
+            metric.total = 100.0;
+            metric.active_count = 2;
+            metric.values_by_group = {80.0, 20.0};
+            block.metrics.push_back(std::move(metric));
+            relation_input.blocks.push_back(std::move(block));
+        }
+        assert(value->Bootstrap(value_input).status == BaselineStatus::kOk);
+        assert(ratio->Bootstrap(ratio_input).status == BaselineStatus::kOk);
+        assert(relation->Bootstrap(relation_input).status == BaselineStatus::kOk);
+        for (int i = 0; i < 32; ++i) {
+            const std::string key = "online-" + std::to_string(i);
+            assert(value->SubmitObservation({key, 100, 100.0, 1}, {}).status == BaselineStatus::kOk);
+            assert(ratio->SubmitObservation({key, 100, 50.0, 100.0}, {}).status == BaselineStatus::kOk);
+            RelationRollingObservation observation;
+            observation.series_key = key;
+            observation.bucket_id = 100;
+            observation.group_idx = {1, 2};
+            observation.metrics = relation_input.blocks.back().metrics;
+            assert(relation->SubmitObservation(observation, {}).status == BaselineStatus::kOk);
+        }
+
+        std::vector<std::shared_ptr<IBaselineTask>> tasks{value, ratio, relation};
+        for (const auto& weak : calendars) assert(!weak.expired());
+        if (through_registry) {
+            // Stop uses these base handles, so cleanup must run through OnClosing.
+            for (const auto& task : registry.Snapshot()) assert(task->Close() == BaselineStatus::kOk);
+        }
+        for (std::size_t i = 0; i < tasks.size(); ++i) {
+            const std::string id = tasks[i]->Id();
+            const std::string name = tasks[i]->Name();
+            const auto kind = tasks[i]->Kind();
+            const auto config = tasks[i]->ExportConfig(BaselineSerializationFormat::kJson);
+            assert(tasks[i]->Close() == BaselineStatus::kOk);
+            assert(calendars[i].expired());
+            assert(tasks[i]->Close() == BaselineStatus::kOk);
+            assert(tasks[i]->Id() == id);
+            assert(tasks[i]->Name() == name);
+            assert(tasks[i]->Kind() == kind);
+            assert(tasks[i]->ExportConfig(BaselineSerializationFormat::kJson) == config);
+            assert(tasks[i]->QueryTaskSnapshot(BaselineSerializationFormat::kJson).first != BaselineStatus::kOk);
+            if (!through_registry) {
+                assert(registry.Size() == tasks.size() - i - 1);
+                for (std::size_t j = i + 1; j < tasks.size(); ++j) {
+                    assert(!calendars[j].expired());
+                    assert(tasks[j]->QuerySeriesSnapshot("trained", BaselineSerializationFormat::kJson).first ==
+                           BaselineStatus::kOk);
+                }
+            }
+        }
+        assert(registry.Size() == 0);
+        assert(value->SubmitObservation({"trained", 101, 100.0, 1}, {}).status != BaselineStatus::kOk);
+        assert(ratio->SubmitObservation({"trained", 101, 50.0, 100.0}, {}).status != BaselineStatus::kOk);
+        RelationRollingObservation observation;
+        observation.series_key = "trained";
+        observation.bucket_id = 101;
+        observation.group_idx = {1, 2};
+        observation.metrics = relation_input.blocks.back().metrics;
+        assert(relation->SubmitObservation(observation, {}).status != BaselineStatus::kOk);
+    }
+    std::printf("[PASS] Close releases resources through public and registry base handles\n");
+}
+#endif
 
 void TestBootstrapEngineTrainsValueAndRatio() {
     std::printf("[TEST] Bootstrap engine trains value and ratio...\n");
@@ -1067,11 +1187,156 @@ void TestBootstrapEngineTrainsRelationBasis() {
     std::printf("[PASS] Bootstrap engine trains relation basis\n");
 }
 
+void TestRatioBootstrapBandIncludesHistoricalResiduals() {
+    BootstrapEngine engine;
+    BaselineTaskSpec spec;
+    spec.task_id = "ratio-residual-band";
+    spec.task_kind = "ratio";
+    spec.feature_id = "rate";
+    spec.feature_type = "ratio";
+    spec.profile = "rate_core";
+    spec.clock_spec.bucket_seconds = 60;
+    spec.clock_spec.timezone = "UTC";
+
+    BootstrapArtifact low_noise;
+    BootstrapArtifact high_noise;
+    for (int mode = 0; mode < 2; ++mode) {
+        RatioBootstrapInput input;
+        input.series_key = "svc-band";
+        const double amplitude = mode == 0 ? 0.01 : 0.4;
+        for (int64_t bucket = 0; bucket < 200; ++bucket) {
+            const double p = 0.5 + (bucket % 2 == 0 ? amplitude : -amplitude);
+            input.observations.push_back({bucket, p * 100.0, 100.0});
+        }
+        auto& artifact = mode == 0 ? low_noise : high_noise;
+        const auto result = engine.TrainRatio(spec, input, &artifact);
+        assert(result.status == BaselineStatus::kOk && result.accepted_count == 200);
+        assert(artifact.ratio_model != nullptr);
+    }
+    assert(high_noise.ratio_model->sigma_ref > low_noise.ratio_model->sigma_ref);
+
+    BootstrapPredictionOptions options;
+    options.confidence_level = 0.95;
+    const auto quiet = engine.PredictRatio(low_noise, 220, options);
+    const auto noisy = engine.PredictRatio(high_noise, 220, options);
+    assert(quiet.status == BaselineStatus::kOk && noisy.status == BaselineStatus::kOk);
+    assert(noisy.band_width > quiet.band_width);
+
+    const double low_sigma = low_noise.ratio_model->sigma_ref;
+    auto sigma_only = low_noise;
+    sigma_only.ratio_model = std::make_shared<RatioFormalModel>(*low_noise.ratio_model);
+    sigma_only.ratio_model->sigma_ref = high_noise.ratio_model->sigma_ref;
+    const auto widened = engine.PredictRatio(sigma_only, 220, options);
+    AssertNear(widened.baseline_mu, quiet.baseline_mu);
+    AssertNear(widened.confidence, quiet.confidence);
+    assert(widened.baseline_lower < quiet.baseline_lower);
+    assert(widened.baseline_upper > quiet.baseline_upper);
+    AssertNear(low_noise.ratio_model->sigma_ref, low_sigma);
+
+    auto more_coverage = sigma_only;
+    more_coverage.coverage_report.accepted_count *= 10;
+    const auto covered = engine.PredictRatio(more_coverage, 220, options);
+    AssertNear(covered.baseline_mu, widened.baseline_mu);
+    AssertNear(covered.baseline_lower, widened.baseline_lower);
+    AssertNear(covered.baseline_upper, widened.baseline_upper);
+
+    // Check the envelope contract and agreement at every sequence point.
+    const auto check_band = [&](const BootstrapArtifact& artifact, double confidence_level, double z) {
+        BootstrapPredictionOptions local_options;
+        local_options.confidence_level = confidence_level;
+        const auto sequence = engine.PredictRatioSequence(artifact, 220, 8, local_options);
+        assert(sequence.status == BaselineStatus::kOk && sequence.predictions.size() == 8);
+        for (std::size_t i = 0; i < sequence.predictions.size(); ++i) {
+            const auto point = engine.PredictRatio(artifact, 220 + static_cast<int64_t>(i), local_options);
+            assert(point.status == BaselineStatus::kOk);
+            assert(point.series_key == artifact.series_key);
+            assert(std::isfinite(point.baseline_lower) && std::isfinite(point.baseline_upper));
+            assert(point.baseline_lower >= 0.0 && point.baseline_upper <= 1.0);
+            assert(point.baseline_lower <= point.baseline_mu && point.baseline_upper >= point.baseline_mu);
+            const double p = point.baseline_mu;
+            const double n = std::max(1.0, static_cast<double>(artifact.coverage_report.accepted_count) +
+                                               artifact.ratio_model->alpha0 + artifact.ratio_model->beta0);
+            const double probability_half_width = z * std::max(std::sqrt(p * (1.0 - p) / n), 1e-4);
+            const double old_lower = std::max(0.0, p - probability_half_width);
+            const double old_upper = std::min(1.0, p + probability_half_width);
+            const double eta = std::log(p / (1.0 - p));
+            const double residual_half_width = z * std::max(artifact.ratio_model->sigma_ref, 1e-3);
+            const double residual_lower = 1.0 / (1.0 + std::exp(-eta + residual_half_width));
+            const double residual_upper = 1.0 / (1.0 + std::exp(-eta - residual_half_width));
+            AssertNear(point.baseline_lower, std::min(old_lower, residual_lower));
+            AssertNear(point.baseline_upper, std::max(old_upper, residual_upper));
+            AssertNear(point.band_width, point.baseline_upper - point.baseline_lower);
+            assert(point.baseline_lower <= old_lower && point.baseline_upper >= old_upper);
+            assert(ContainsString(point.uncertainty_source, "ratio_probability_variance"));
+            assert(ContainsString(point.uncertainty_source, "ratio_logit_sigma_ref"));
+            const auto& batched = sequence.predictions[i];
+            assert(batched.status == point.status && batched.bucket_id == point.bucket_id);
+            AssertNear(batched.baseline_mu, point.baseline_mu);
+            AssertNear(batched.baseline_lower, point.baseline_lower);
+            AssertNear(batched.baseline_upper, point.baseline_upper);
+            AssertNear(batched.band_width, point.band_width);
+            AssertNear(batched.confidence, point.confidence);
+            assert(batched.uncertainty_source == point.uncertainty_source);
+            if (&artifact == &low_noise) {
+                AssertNear(point.baseline_lower, old_lower);
+                AssertNear(point.baseline_upper, old_upper);
+            }
+        }
+    };
+    for (const auto* artifact : {&low_noise, &high_noise, &sigma_only, &more_coverage}) {
+        check_band(*artifact, 0.95, 1.96);
+    }
+    check_band(sigma_only, 0.80, 1.0);
+    check_band(sigma_only, 0.90, 1.645);
+    check_band(sigma_only, 0.99, 2.576);
+    options.confidence_level = 0.90;
+    const auto narrower = engine.PredictRatio(sigma_only, 220, options);
+    options.confidence_level = 0.99;
+    const auto wider = engine.PredictRatio(sigma_only, 220, options);
+    assert(narrower.baseline_lower > wider.baseline_lower);
+    assert(narrower.baseline_upper < wider.baseline_upper);
+
+    auto boundary = low_noise;
+    boundary.ratio_model = std::make_shared<RatioFormalModel>(*low_noise.ratio_model);
+    boundary.ratio_model->core_block = CoreBlock{};
+    boundary.ratio_model->monthpos_block.enabled = false;
+    boundary.ratio_model->event_block.enabled = false;
+    boundary.coverage_report.accepted_count = 1000000000000ULL;
+    for (double sigma : {0.0, 1000.0}) {
+        boundary.ratio_model->sigma_ref = sigma;
+        for (double eta : {-40.0, 0.0, 40.0}) {
+            boundary.ratio_model->core_block.beta0 = eta;
+            check_band(boundary, 0.95, 1.96);
+        }
+    }
+
+    auto [export_status, json] = engine.ExportArtifact(high_noise, BaselineSerializationFormat::kJson);
+    assert(export_status == BaselineStatus::kOk);
+    BootstrapArtifact loaded;
+    assert(engine.LoadArtifact(json, BaselineSerializationFormat::kJson, &loaded) == BaselineStatus::kOk);
+    AssertNear(loaded.ratio_model->sigma_ref, high_noise.ratio_model->sigma_ref);
+    options.confidence_level = 0.95;
+    const auto restored = engine.PredictRatio(loaded, 220, options);
+    assert(restored.status == BaselineStatus::kOk);
+    AssertNear(restored.baseline_mu, noisy.baseline_mu);
+    AssertNear(restored.baseline_lower, noisy.baseline_lower);
+    AssertNear(restored.baseline_upper, noisy.baseline_upper);
+    AssertNear(restored.band_width, noisy.band_width);
+    AssertNear(restored.confidence, noisy.confidence);
+    check_band(loaded, 0.95, 1.96);
+    std::printf("[PASS] Ratio Bootstrap residual envelope: quiet=[%.9f,%.9f], noisy=[%.9f,%.9f]\n",
+                quiet.baseline_lower, quiet.baseline_upper, noisy.baseline_lower, noisy.baseline_upper);
+}
+
 }  // namespace
 
 int main() {
     TestTaskHeaderContracts();
+#ifdef FLOWSQL_BASELINE_CLOSE_RESOURCE_TEST
+    TestCloseReleasesResourcesWhileTaskHandlesRemainAlive();
+#endif
     TestBootstrapEngineTrainsValueAndRatio();
+    TestRatioBootstrapBandIncludesHistoricalResiduals();
     TestBootstrapEngineNormalizesHistoryBeforeTraining();
     TestBootstrapSeedQualityStatusIsEvaluatedFromCoverage();
     TestBootstrapEnginePreservesMonthposArtifactAndSeed();

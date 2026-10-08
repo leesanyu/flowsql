@@ -1,14 +1,10 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -269,6 +265,21 @@ void TestRoutedSeedMaterializationUsesFallbackBasisVersion() {
 }  // namespace
 
 int main() {
+    for (double mass : {-1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        auto block = MakeBlock();
+        block.metrics[0].values_by_group[1] = mass;
+        std::vector<RelationProjectedSummary> summaries(1);
+        assert(!ProjectRelationMetricSummaries(block, 0, "bps", {}, &summaries));
+        assert(summaries.empty());
+    }
+    auto block = MakeBlock();
+    std::vector<RelationProjectedSummary> summaries;
+    assert(!ProjectRelationMetricSummaries(block, 0, "wrong", {}, &summaries));
+    block.metrics[0].values_by_group.push_back(0.0);
+    assert(!ProjectRelationMetricSummaries(block, 0, "bps", {}, &summaries));
+    block = MakeBlock();
+    block.metrics[0].total = 200.0;
+    assert(ProjectRelationMetricSummaries(block, 0, "bps", {}, &summaries));
     TestCommonSummariesDoNotRequireBasis();
     TestBasisScopedSummariesRequireBasis();
     TestRoutedSummaryIdentityUsesFixedScope();

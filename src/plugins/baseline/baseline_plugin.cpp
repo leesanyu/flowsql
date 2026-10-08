@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "baseline_plugin.h"
 
@@ -31,6 +26,18 @@ namespace baseline {
 
 namespace {
 
+class BaselineTaskStateControl final : public IBaselineTaskStateControlV1 {
+ public:
+    explicit BaselineTaskStateControl(std::shared_ptr<BaselineTaskBase> task) : task_(std::move(task)) {}
+    BaselineStatus ReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) override {
+        return task_->ReleaseIdentity(key, scope);
+    }
+    std::pair<BaselineStatus, BaselineStateUsageV1> QueryUsage() const override { return task_->QueryStateUsage(); }
+
+ private:
+    std::shared_ptr<BaselineTaskBase> task_;
+};
+
 BaselineStatus ValidateCreateFormat(BaselineSerializationFormat format) {
     return format == BaselineSerializationFormat::kJson
                ? BaselineStatus::kOk
@@ -43,6 +50,21 @@ std::string MakeConfigCopy(std::string_view config_content) {
 
 BaselineStatus ParseFailureStatus(int rc) {
     return rc == error::OK ? BaselineStatus::kOk : BaselineStatus::kParseFailed;
+}
+
+BaselineStatus BindTaskCalendar(int64_t delta, const std::string& timezone,
+                                std::shared_ptr<const CompiledEventCalendar>* calendar) {
+    if (!*calendar) return BaselineStatus::kOk;
+    BaselineTaskSpec clock;
+    clock.delta = delta;
+    clock.tz = timezone;
+    auto bound = std::make_shared<CompiledEventCalendar>();
+    std::string diagnostics;
+    if (BindEventCalendar(**calendar, clock, bound.get(), &diagnostics) != error::OK) {
+        return BaselineStatus::kInvalidArgument;
+    }
+    *calendar = std::move(bound);
+    return BaselineStatus::kOk;
 }
 
 }  // namespace
@@ -114,6 +136,18 @@ int BaselinePlugin::Unload() {
 
 int BaselinePlugin::Start() { return error::OK; }
 
+std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControlV1>> BaselinePlugin::Bind(
+    std::shared_ptr<IBaselineTask> task, const BaselineStateLimitsV1& limits) {
+    auto implementation = std::dynamic_pointer_cast<BaselineTaskBase>(task);
+    if (!task_registry_ || !implementation || !task_registry_->Owns(implementation.get())) {
+        return {BaselineStatus::kInvalidArgument, nullptr};
+    }
+    auto control = std::make_shared<BaselineTaskStateControl>(implementation);
+    const auto status = implementation->BindStateLimits(limits);
+    if (status != BaselineStatus::kOk) return {status, nullptr};
+    return {BaselineStatus::kOk, std::move(control)};
+}
+
 int BaselinePlugin::Stop() {
     if (task_registry_) {
         const auto tasks = task_registry_->Snapshot();
@@ -139,6 +173,8 @@ BaselinePlugin::CreateValueTask(std::string_view config_content,
     if (parse_status != BaselineStatus::kOk) return {parse_status, nullptr};
 
     auto calendar = FindBaselineEventCalendar(spec.calendar_ref);
+    const BaselineStatus calendar_status = BindTaskCalendar(spec.delta, spec.tz, &calendar);
+    if (calendar_status != BaselineStatus::kOk) return {calendar_status, nullptr};
     auto task = std::make_shared<BaselineValueTask>(
         task_registry_.get(), spec.task_id, spec.name, config, spec, std::move(calendar));
     if (task_registry_->Register(task) != error::OK) {
@@ -162,6 +198,8 @@ BaselinePlugin::CreateRatioTask(std::string_view config_content,
     if (parse_status != BaselineStatus::kOk) return {parse_status, nullptr};
 
     auto calendar = FindBaselineEventCalendar(spec.calendar_ref);
+    const BaselineStatus calendar_status = BindTaskCalendar(spec.delta, spec.tz, &calendar);
+    if (calendar_status != BaselineStatus::kOk) return {calendar_status, nullptr};
     auto task = std::make_shared<BaselineRatioTask>(
         task_registry_.get(), spec.task_id, spec.name, config, spec, std::move(calendar));
     if (task_registry_->Register(task) != error::OK) {
@@ -185,6 +223,9 @@ BaselinePlugin::CreateRelationTask(std::string_view config_content,
     if (parse_status != BaselineStatus::kOk) return {parse_status, nullptr};
 
     auto calendar = FindBaselineEventCalendar(create_spec.task_spec.calendar_ref);
+    const BaselineStatus calendar_status =
+        BindTaskCalendar(create_spec.clock_spec.delta, create_spec.clock_spec.tz, &calendar);
+    if (calendar_status != BaselineStatus::kOk) return {calendar_status, nullptr};
     auto task = std::make_shared<BaselineRelationTask>(
         task_registry_.get(),
         create_spec.task_spec.task_id,
@@ -246,4 +287,5 @@ BaselineSerializationResult BaselinePlugin::QueryServiceSnapshot(
 BEGIN_PLUGIN_REGIST(flowsql::baseline::BaselinePlugin)
     ____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
     ____INTERFACE(flowsql::IID_BASELINE_SERVICE, flowsql::IBaselineService)
-END_PLUGIN_REGIST()
+    ____INTERFACE(flowsql::IID_BASELINE_STATE_CONTROL_SERVICE_V1, flowsql::IBaselineStateControlServiceV1)
+    END_PLUGIN_REGIST()

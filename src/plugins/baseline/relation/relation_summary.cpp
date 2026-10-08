@@ -1,12 +1,8 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "relation_summary.h"
+#include "plugins/baseline/model/observation_validation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -89,7 +85,7 @@ bool ProjectRelationMetricSummariesImpl(
     if (metric_index >= block.metrics.size()) return false;
 
     const RelationBootstrapMetric& metric = block.metrics[metric_index];
-    if (metric.total <= 0.0 || metric.values_by_group.size() < block.group_idx.size()) {
+    if (!IsValidRelationMetricHeader(metric, block.group_idx.size(), requested_metric_name)) {
         return false;
     }
 
@@ -106,6 +102,7 @@ bool ProjectRelationMetricSummariesImpl(
 
     for (std::size_t group_pos = 0; group_pos < block.group_idx.size(); ++group_pos) {
         const double mass = metric.values_by_group[group_pos];
+        if (!IsValidRelationMass(mass)) return false;
         if (!(mass > 0.0)) continue;
         ++active_count;
 

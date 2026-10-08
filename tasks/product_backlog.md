@@ -24,6 +24,7 @@
 | [x] | C++ 算子源码目录归位 (`operator-source-layout`) | P1 | 建立独立的 C++ 业务算子源码根目录，将 `npm_basic` 与通用能力插件分离，同时保持内置算子和运行时契约不变。 | [归档](archive/feat-operator-source-layout.md) |
 | [x] | NPM 基础分析算子插件生命周期 (`npm-basic-operator-plugin-lifecycle`) | P0 | 让 `npm.basic` 作为按功能命名的 C++ 算子，通过统一多算子插件 ABI 完成上传、激活、任务租约、去激活和重启恢复。 | [归档](archive/feat-npm-basic-operator-plugin-lifecycle.md) |
 | [x] | 流式算子时间驱动 (`stream-time-drive`) | P0 | 让实时有状态算子在暂时无包、持续繁忙及输出背压期间仍能获得版本化时间通知并按期维护；正常 EOF 单次终结且错误/取消不伪装成 EOF，使 `npm.basic` 可按最早截止时间驱动同一任务内全部已启用模块而不受当前观察结果影响。 | [归档](archive/feat-stream-time-drive.md) |
+| [ ] | Baseline 封装算子 (`baseline-operator`) | P1 | 为使用 Value、Ratio、Relation 持续检测上游数据的 FlowSQL 用户补齐类型化接入与在线不活跃处理；交付串行的数据/时间驱动、显式超时与容量策略、完整状态释放和可观察结果，使无数据到达时仍可维护资源且通用算法插件无需产品接线或新增维护线程；依赖 baseline-review-fixes 的插件状态管理能力。 | [规格](specs/feat-baseline-operator.md) |
 | [x] | NPM TCP/UDP 会话性能分析 (`npm-session-analysis`) | P1 | 让流量分析用户在同一 `npm.basic` 任务内按 `features` 启用 Session 模块、以独立的 `observing` 选择是否前台查看类型化会话性能结果；模块复用唯一会话、方向、协议识别结果、生命周期与预算，提供带有效性依据的连接、传输时延、重传和吞吐指标，不重复会话化或把序列缺口直接宣称为网络丢包。 | [归档](archive/feat-npm-session-analysis.md) |
 | [x] | NPM 通用参数入口 (`npm-basic-parameters`) | P1 | 让同一 `npm.basic` 任务既需要共享配置又组合多个模块的用户，不再为每类能力增加专用顶层 `WITH` 参数或承受配置归属冲突；交付单一 `parameters` JSON 字符串入口，以 `core` 承载流量标签化引用等任务共享配置、以扁平模块 ID 承载私有配置，严格校验信封、共享字段及已启用模块，自动忽略未启用、未加载或未知模块节点，并在任务打开时冻结拥有型配置；保留旧 Basic/Session SQL 兼容，不交付具体配置内容的业务解释。 | [归档](archive/feat-npm-basic-parameters.md) |
 | [x] | 流量标签化 (`flow-labeling`) | P1 | 依赖 `config-channel` 与 `npm-basic-parameters`；让网络性能、安全等分析场景中需要按 MAC、VLAN、IP/CIDR、传输协议和端口确定会话流主归属的用户，不再由各消费模块重复匹配规则或面对多结果冲突；交付通用同进程能力插件 `libflowsql_flow_labeling.so`，当前由显式启用 `labeling` 的 `npm.basic` 任务通过固定 IID 绑定精确配置快照和任务私有 DPDK ACL matcher，为每个双向会话流产生零或一个唯一具名主标签；插件统一拥有进程级 EAL 与 DPDK 依赖，未部署插件或未启用标签化不影响其他任务，启用但 provider/运行环境不可用则在任务打开前明确失败。 | [归档](archive/feat-flow-labeling.md) |
@@ -61,6 +62,7 @@
 | [x] | C++ 算子插件 (`cpp-operators`) | P1 | 支持 C++ 算子插件独立编译、动态激活、去激活和安全卸载。 | [归档](archive/feat-cpp-operators.md) |
 | [x] | 流式运行时 (`stream-runtime`) | P2 | 提供流式通道、流式算子、共享 source 和 Group DAG 执行能力。 | [归档](archive/feat-stream-runtime.md) |
 | [x] | 通用基线检测 (`baseline`) | P1 | 提供 Value、Ratio、Relation 三类基线的 bootstrap、在线 rolling、可信度和风险融合能力。 | [归档](archive/feat-baseline.md) |
+| [x] | Baseline 插件检视修复 (`baseline-review-fixes`) | P1 | 为使用 Value、Ratio、Relation 进行历史预热和在线检测的调用方，修复观测顺序、训练兼容、检测口径及资源累积问题；交付一致的历史/在线处理、隔离的状态替换、完整状态释放与可选容量约束，以及纳入常规 CTest 的回归保证，保持既有公共接口和数据格式。 | [归档](archive/feat-baseline-review-fixes.md) |
 
 ---
 

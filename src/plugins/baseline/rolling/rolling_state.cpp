@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "plugins/baseline/rolling/rolling_state.h"
 
@@ -56,7 +51,7 @@ BaselineStatus Insufficient(std::string* diagnostics, const char* message) {
 std::string ExpectedModelSpace(const BaselineTaskSpec& spec) {
     if (spec.feature_type == "ratio") return "logit";
     if (spec.feature_type == "value_basic" || spec.feature_type == "value_sampled") {
-        return "log1p";
+        return spec.value_identity_transform ? "identity" : "log1p";
     }
     return "";
 }
@@ -407,6 +402,7 @@ BaselineStatus InitializeEmptyRollingStateFromObservation(const ObservedModelPoi
     next.theta.trend = 0.0;
     next.has_seen_observation = true;
     next.last_seen_bucket = point.bucket_id;
+    next.last_processed_bucket = point.bucket_id;
     next.accepted_update_count = 1;
     next.maturity_prior_update_count = 0;
     next.state_status = StatusFromAcceptedUpdateCount(next.accepted_update_count, config);
@@ -491,6 +487,7 @@ BaselineStatus InitializeRollingStateFromBootstrapSeed(const BaselineTaskSpec& s
 
     state.has_seen_observation = true;
     state.last_seen_bucket = anchor_bucket;
+    state.last_processed_bucket = anchor_bucket;
     state.accepted_update_count =
         std::min(seed.maturity_init.accepted_count, ReadyHintThreshold(config));
     state.maturity_prior_update_count =

@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_PLUGINS_BASELINE_BASELINE_PLUGIN_H_
 #define _FLOWSQL_PLUGINS_BASELINE_BASELINE_PLUGIN_H_
@@ -12,6 +7,7 @@
 #include <common/error_code.h>
 #include <common/iplugin.h>
 #include <framework/interfaces/ibaseline_service.h>
+#include <framework/interfaces/ibaseline_state_control.h>
 
 #include <memory>
 #include <string>
@@ -22,7 +18,9 @@ namespace baseline {
 
 class TaskRegistry;
 
-class __attribute__((visibility("default"))) BaselinePlugin : public IPlugin, public IBaselineService {
+class __attribute__((visibility("default"))) BaselinePlugin : public IPlugin,
+                                                              public IBaselineService,
+                                                              public IBaselineStateControlServiceV1 {
  public:
     BaselinePlugin();
     ~BaselinePlugin() override;
@@ -47,6 +45,9 @@ class __attribute__((visibility("default"))) BaselinePlugin : public IPlugin, pu
 
     BaselineSerializationResult QueryServiceSnapshot(
         BaselineSerializationFormat format) const override;
+
+    std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControlV1>> Bind(
+        std::shared_ptr<IBaselineTask> task, const BaselineStateLimitsV1& limits) override;
 
  private:
     IQuerier* querier_ = nullptr;

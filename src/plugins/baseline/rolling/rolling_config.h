@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_PLUGINS_BASELINE_ROLLING_ROLLING_CONFIG_H_
 #define _FLOWSQL_PLUGINS_BASELINE_ROLLING_ROLLING_CONFIG_H_
@@ -14,6 +9,7 @@
 #include <cstdint>
 #include <string>
 
+#include "plugins/baseline/model/profile_config.h"
 #include "plugins/baseline/model/task_spec.h"
 
 namespace flowsql {
@@ -182,6 +178,8 @@ struct BaselineRollingConfig {
     uint64_t day_buckets = 1440;
     uint64_t week_buckets = 10080;
     BaselineRelationRollingConfig relation_rolling;
+    // Derived from ratio_profiles.global in the same runtime configuration snapshot.
+    double ratio_eps_logit = kRatioEpsLogit;
 };
 
 BaselineRollingConfig DefaultBaselineRollingConfig();

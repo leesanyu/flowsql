@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_PLUGINS_BASELINE_TASK_RATIO_TASK_H_
 #define _FLOWSQL_PLUGINS_BASELINE_TASK_RATIO_TASK_H_
@@ -77,6 +72,11 @@ class BaselineRatioTask final : public IBaselineRatioTask, public BaselineTaskBa
         BaselineSerializationFormat format) const override;
 
  private:
+    void OnClosing() override;
+    BaselineStatus DoReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) override;
+    BaselineStateUsageV1 DoQueryStateUsage() const override;
+    bool HasIdentityCapacity(const std::string& key, bool include_model) const;
+
     BaselineTaskSpec spec_;
     std::shared_ptr<const CompiledEventCalendar> compiled_event_calendar_;
     BootstrapArtifactStore artifacts_by_series_;

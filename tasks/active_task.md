@@ -1,51 +1,39 @@
 # 即时工作台
 
-关联 Feature Task：[NPM 运行时检视修复](archive/feat-npm-runtime-review-fixes.md) T4 与 Feature 整体验收。
-当前 Atomic Slice：恢复中断的标签预算修复与整体验收；状态：已完成，WIP=0。
+关联 Feature：[Baseline 检视修复](archive/feat-baseline-review-fixes.md)，T1～T5 已验收完成。
+当前 Atomic Slice：baseline 提交前规范与范围验收；状态：已完成，WIP=0。
+用户已明确要求“提交代码”，本轮授权本地 Git 提交。
 
 ## 业务意图与 Non-Goals
 
-完成用户已授权的四项修复，核对中断点并补齐验收证据。不实施其他协议/结构优化，不提交/推送。
+将已验收的 B01～B11 修复、回归、文档、完成记录及后续算子规格登记保存为可追溯的本地提交。
+不实施封装算子、不改算法或接口、不推送；Backlog 的 AF_XDP 和 DPDK 采集通道原有描述改动保留在工作区。
 
-## 冻结契约
+## 允许修改与暂存范围
 
-内部 Create / CreateWithTimeCapabilities 末尾的 matcher_reserved_bytes 默认为 0；非零时调用者转移同一 budget 中实际预留的 matcher 额度。MatcherReleaser 释放 matcher 后归还自身额度一次。未预留的 mock 不误释放其他模块预算；外部 Arrow 输出保有其预算生命周期。T1/T2/T3 的离线截止、紧凑累积和周期门槛契约见归档。
+- src/tests/test_baseline/test_baseline_relation_fusion.cpp：仅将旧版权块替换为统一两行注释，代码保持。
+- tasks/active_task.md：本轮范围、验证和提交准备记录。
+- 暂存清单冻结为 /tmp/baseline-commit/scope-paths.json 的 43 个已核实路径：baseline 插件/测试、独立状态控制头、README、工作台、归档规格、后续算子规格及 Backlog。
+- tasks/product_backlog.md 仅暂存 baseline-review-fixes 和 baseline-operator 两项新增记录；用独立 staged 文本和 patch 保留另两项用户改动，工作文件不覆盖。
+- /tmp/baseline-commit/**：范围、hash、提交消息、局部补充验收及暂存审计。
 
-## 允许修改文件
+每次 patch 后 git diff --name-only，按 before_hashes.json 检查本轮文件内容修改仅允许上述测试注释和工作台。
 
-- tasks/active_task.md
-- tasks/product_backlog.md（仅本 Feature 状态与归档链接）
-- tasks/specs/feat-npm-runtime-review-fixes.md → tasks/archive/feat-npm-runtime-review-fixes.md（仅移动文件）
-- src/operators/npm_basic/core/npm_basic_task_runtime.h
-- src/operators/npm_basic/core/npm_basic_task_runtime.cpp
-- src/operators/npm_basic/npm_basic_operator.cpp
-- src/tests/test_npm_basic/test_npm_basic.cpp
-- build/**（构建及验收证据，现有运行配置保持）
-- /tmp/flowsql-npm-fixes/**（独立 Sanitizer 构建，复用主仓第三方缓存）
+## 验收命令与步骤
 
-T1/T2/T3 已完成源码和用户原有 Backlog 修改保留；恢复后未新增源码修改。
-
-## 验收命令
-
-```bash
-cmake --build build -j8
-ctest --test-dir build --output-on-failure
-cmake -B /tmp/flowsql-npm-fixes/asan src -DFLOWSQL_NPM_PERIODIC_SANITIZERS=ON -DFLOWSQL_FLOW_LABELING=ON
-cmake --build /tmp/flowsql-npm-fixes/asan --target test_npm_basic test_npm_periodic_contract test_npm_periodic_stats -j8
-ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir /tmp/flowsql-npm-fixes/asan -R '^(test_npm_basic|test_npm_periodic_runtime|test_npm_tcp_stream_runtime|test_npm_periodic_contract|test_npm_periodic_stats)$' --output-on-failure
-git diff --check
-```
+1. 已确认所有提交源码与 T5 全量构建及 61/61 CTest 的版本 hashes 一致；git diff --check 通过。
+2. 版权补齐后 clang-format-18 --dry-run --Werror --lines=1:2 检查，构建 test_baseline_relation_fusion 并运行对应 CTest。
+3. 精确 git add 暂存 42 个完整文件，再 git apply --cached 只加入 Backlog 两项记录。
+4. git diff --cached --check 与 staged 路径/hash/Backlog 文本断言；审核 staged diff 和统计。
+5. 验收/暂存准备结束置 WIP=0，执行用户授权 git commit；核对新提交内容、暂存区清空及剩余 Backlog 改动。
 
 ## 时间盒与停止条件
 
-沿用 T4，不新增 Feature Task。05:53 UTC 开始恢复核查；因恢复后的大小写路径沙箱映射只读，权限等待至 06:27 UTC 后恢复写入和完整验收。实际实现反馈时间盒 06:27–06:57 UTC，30 分钟；验收完成后 WIP=0，停止，不开始其余优化。
+2026-10-08 06:55～07:15 UTC，20 分钟；提交失败自主核查，只有明确不可恢复阻塞才中止。
+本地提交成功、内容核对通过即停止，不推送。源码未发生语义变化，不重复已通过的全量验收。
 
-## 完成证据
+## 检查点
 
-- 四项修复及关键边界断言全部通过，全仓构建零 warning/error，完整 CTest 49/49，ASan+UBSan 5/5。
-- 中断前的真实 DPDK 路径异常在恢复后的 GDB 与完整 CTest 中未复现；MySQL/PostgreSQL/ClickHouse 集成当前均通过，未修改无关插件或测试来规避失败。
-- 三万会话四场景成功交付，pending 峰值 7,421,952 / 7,290,816 字节；准确 matcher 预算及外部 Arrow 生命周期断言通过。
-- 修改行格式零替换、版权和 diff 检查通过，用户原有 Backlog 内容与运行配置保留，未提交/推送。
-- 本轮新证据：build/npm-review-evidence；归档包含各项验收结果及历史证据边界。
-
-完成时间：2026-10-07 06:36 UTC。
+43 个路径范围已冻结；现有暂存区为空，源码与 T5 验收 hash 全部吻合。唯一遗漏的版权声明位于 fusion 回归测试，补齐后局部验证。
+提交准备已完成：37 个 C++ 文件版权声明符合规范；fusion 仅头部注释变化，格式检查和目标构建通过，对应 CTest 1/1、8 PASS。其余源码与 T5 全量构建及 61/61 CTest 的版本保持。
+43 个暂存路径及完整文件内容已逐一核对，Backlog 只暂存两个 baseline 记录，另两项采集通道描述保留未暂存；staged diff --check 通过。用户已授权执行本地提交，实际提交结果以 Git 记录为准；不推送。

@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_PLUGINS_BASELINE_RELATION_RELATION_BASIS_STATE_H_
 #define _FLOWSQL_PLUGINS_BASELINE_RELATION_RELATION_BASIS_STATE_H_
@@ -68,6 +63,8 @@ class RelationStreamBasisAccumulator {
     explicit RelationStreamBasisAccumulator(RelationStreamBasisConfig config);
 
     BaselineStatus Observe(const RelationRollingObservation& obs, std::size_t metric_index);
+    // Caller must validate the complete metric before updating any runtime state.
+    BaselineStatus ObserveValidated(const RelationRollingObservation& obs, std::size_t metric_index);
     BaselineStatus Observe(const RelationBootstrapBlock& block, std::size_t metric_index);
 
     BaselineStatus BuildConservativeInput(const RelationBasisBuildInput& base_input,
@@ -94,6 +91,7 @@ class RelationBasisRuntimeState {
     explicit RelationBasisRuntimeState(RelationBasisRuntimeConfig config);
 
     BaselineStatus Observe(const RelationRollingObservation& obs, std::size_t metric_index);
+    BaselineStatus ObserveValidated(const RelationRollingObservation& obs, std::size_t metric_index);
     BaselineStatus Observe(const RelationBootstrapBlock& block, std::size_t metric_index);
     BaselineStatus LoadSeedBasis(RelationServiceBasis basis, RelationBasisStatus status);
     RelationBasisRefreshDecision MaybeRefresh(const RelationBasisBuildInput& base_input,

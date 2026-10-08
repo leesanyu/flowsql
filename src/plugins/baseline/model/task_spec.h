@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_PLUGINS_BASELINE_MODEL_TASK_SPEC_H_
 #define _FLOWSQL_PLUGINS_BASELINE_MODEL_TASK_SPEC_H_
@@ -42,6 +37,8 @@ struct BaselineTaskSpec {
     int64_t delta = 0;
     std::string tz;
     std::string config_json;
+    // Resolved by the existing sampled profile lookup when parsing task configuration.
+    bool value_identity_transform = false;
 };
 
 struct RelationSupportPolicySpec {

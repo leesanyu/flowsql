@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "task_registry.h"
 
@@ -65,6 +60,13 @@ void TaskRegistry::List(std::function<void(const char* task_id,
 size_t TaskRegistry::Size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return tasks_.size();
+}
+
+bool TaskRegistry::Owns(const BaselineTaskBase* task) const {
+    if (!task) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = tasks_.find(task->TaskId());
+    return it != tasks_.end() && it->second.get() == task;
 }
 
 const char* TaskRegistry::KindPrefix(BaselineTaskKind kind) {

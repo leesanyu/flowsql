@@ -1,11 +1,7 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 
@@ -187,6 +183,18 @@ void TestRatioSupportBucketsAndLogit() {
 }  // namespace
 
 int main() {
+    auto identity_spec = BuildValueSpec("value_sampled");
+    identity_spec.value_identity_transform = true;
+    BaselineRollingConfig config;
+    const auto identity = AdaptValueRollingObservation(identity_spec, config, {"identity", 1, 100.0, 50});
+    assert(identity.status == BaselineStatus::kOk);
+    AssertNear(identity.y_model, 100.0);
+    config.ratio_eps_logit = 0.1;
+    const auto clipped = AdaptRatioRollingObservation(BuildRatioSpec(), config, {"ratio", 1, 5.0, 100.0});
+    assert(clipped.status == BaselineStatus::kOk);
+    AssertNear(clipped.y_model, std::log(0.1 / 0.9));
+    assert(std::find(clipped.uncertainty_source.begin(), clipped.uncertainty_source.end(), "ratio_clip") !=
+           clipped.uncertainty_source.end());
     TestValueBasicObservation();
     TestValueRejectsInvalidInput();
     TestSampledValueSupportBuckets();
