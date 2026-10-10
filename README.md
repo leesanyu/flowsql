@@ -21,6 +21,7 @@ FlowSQL 是一个全栈式实时数据处理与分析平台，通过扩展的 SQ
 - **NPM 结果存储与查询**：SQLite、MySQL、PostgreSQL、ClickHouse 托管多实体结果，按运行实例查询历史、最新快照和终态
 - **配置资源版本化**：JSON/YAML/XML 配置通道持久化，消费者通过精确 revision 冻结任务配置
 - **在线基线检测**：Baseline 插件通过 `IBaselineService` 提供 `Optional Bootstrap`、在线 rolling、基线 band、maturity / score trust 和 Relation fusion 能力
+- **SQL 基线分析**：`explore.baseliner` 分析已落库数据或 DataFrame，支持 Value/Ratio/Relation 评估、未来预测和独立的最终模型参数输出
 - **Web 管理**：Vue.js 前端 + REST API，支持通道/算子/任务管理
 
 ## 快速开始
@@ -975,6 +976,96 @@ packets,batch_rows,iterations,wall_ms,packets_per_second,output_rows
 行数、session ID、最终 revision/结束语义或 Schema 校验失败时返回非零；机器相关吞吐不设硬阈值，也不加入
 CTest。比较结果时应保持相同机器、编译配置和输入规模。
 
+## explore.baseliner 基线分析
+
+`explore.baseliner` 读取已落库的 NPM 数据、普通业务表或已注册的 DataFrame，按时间桶计算实际值、
+预期值、上下界与偏离结果，并按配置生成未来预测。Value（数值）、Ratio（比例）和 Relation（关系分布）
+可在同一任务配置中组合；算法由 Baseline 插件提供，算子负责输入聚合、调度接线和结果输出。
+
+### 运行准备与输入输出
+
+完成构建后，在执行任务的 Scheduler **同一进程**插件列表中加载 `libflowsql_baseline.so`。
+通过 Web「算子管理 → C++ 插件」上传并激活 `build/output/libflowsql_baseliner.so`，随后按
+`USING explore.baseliner` 调用。数据库通道应预先配置；CSV 需先按既有导入流程注册为 DataFrame。
+
+| SQL 位置 | 用途 | 示例 |
+| --- | --- | --- |
+| `FROM` | 指定数据库、数据库表或 DataFrame 来源 | `mysql.npm`、`mysql.npm.samples`、`dataframe.samples` |
+| `WITH parameters` / `WITH config` | 二选一，使用 JSON 原文或配置通道的精确版本 | `parameters='<JSON>'`、`config='config.link_baseline@1'` |
+| `WITH model_output` | 可选，指定最终模型参数的输出位置 | `mysql.analysis.final_models`、`dataframe.final_models` |
+| `INTO` | 指定评估和预测结果的输出位置 | `mysql.analysis.predictions`、`dataframe.predictions`；两段 `mysql.baseline` 使用托管模式 |
+
+数据库来源支持 SQLite、MySQL、PostgreSQL、ClickHouse；数据库结果与模型目标支持 SQLite、MySQL、PostgreSQL。
+指定结果表或 DataFrame、导出最终模型参数均用于有限 `snapshot` 分析。两段数据库托管出口支持
+多 dataset、持续 `poll` 及模型/checkpoint/消费位置联合恢复；指定表和 DataFrame 出口不自动提供联合恢复。
+
+### 单表与 DataFrame 示例
+
+以下配置按 `link` 汇总每个 60 秒桶的 `bytes`，并生成未来两个桶的预测。来源需具有
+`bucket`（int64 桶编号）、`link`（utf8）和 `bytes`（float64）字段；`begin_bucket` 包含边界、
+`end_bucket` 不包含边界。实际使用时按来源字段、桶宽和分析范围调整配置。
+
+```json
+{
+  "task_key": "samples-baseline",
+  "clock": {"bucket_seconds": 60, "timezone": "UTC"},
+  "calendar": {"calendar_id": "cn-holiday", "calendar_version": "2026.1"},
+  "forecast": {"horizon_buckets": 2},
+  "dataset": {
+    "fields": {"bucket": "int64", "link": "utf8", "bytes": "float64"},
+    "scope": {"begin_bucket": 0, "end_bucket": 120, "consistency": "consistent_snapshot"},
+    "series_keys": ["link"],
+    "deduplicate": {"keys": ["bucket", "link"], "on_duplicate": "require_equal"},
+    "bucket": {"column": "bucket", "unit": "bucket_id"},
+    "metrics": [{"id": "bytes", "kind": "value", "column": "bytes", "aggregate": "sum",
+                 "feature_type": "value_basic", "profile": "default"}]
+  }
+}
+```
+
+将 SQL 中的 JSON 占位符替换为上面的 JSON 原文；内容中的单引号按 SQL 规则写成 `''`。
+数据库单表分析使用上述配置：
+
+```sql
+SELECT * FROM mysql.npm.samples
+USING explore.baseliner WITH parameters='<上述 JSON 原文>',
+     model_output='mysql.analysis.final_models'
+INTO mysql.analysis.predictions
+```
+
+CSV 注册为 `dataframe.samples` 后，删除配置中的 `dataset.scope`，分析整个 DataFrame 快照：
+
+```sql
+SELECT * FROM dataframe.samples
+USING explore.baseliner WITH parameters='<删除 dataset.scope 后的 JSON 原文>',
+     model_output='dataframe.final_models'
+INTO dataframe.predictions
+```
+
+`INTO` 接收当前桶评估和未来预测；`model_output` 接收任务结束时的最终模型参数，可以省略。
+当前桶先用学习前模型评估，再按策略更新；冷启动时保留 `observed`，`expected`、`lower`、`upper` 为 NULL。
+未来预测没有实际值，保留预测发布时间和模型依据。最终模型参数不代表所有历史评估所使用的模型。
+来源保持原始内容，结果与模型写入独立目标；目标不能覆盖来源，模型和结果也不能使用同一目标。
+
+### 已落库 NPM 与持续分析
+
+先用 `npm.basic` 将数据写入数据库，再通过完整配置指定结果表、字段映射、run 范围和指标。
+将配置发布为 `baseliner.task.v1` 资源后，使用精确版本引用：
+
+```sql
+SELECT * FROM mysql.npm
+USING explore.baseliner WITH config='config.link_baseline@1'
+INTO mysql.baseline
+```
+
+有限数据使用 `snapshot`；持续分析使用配置中的 `mode="poll"`，通过异步 Batch 入口提交
+（`POST /api/tasks/batch/execute`，`mode='async'`）。poll 来源必须提供真实的 epoch、已提交位置、
+不可变前缀与桶关闭证据；普通业务表或有限 PCAP 落库不会自动满足这些条件。
+NPM 按 `interval_*` 增量字段建模，基线桶宽必须是 NPM 统计周期的正整数倍。
+
+完整配置、结果查询与恢复方式见 [Baseliner 使用说明](docs/baseliner.md)；
+验证范围和成本测量见 [Baseliner 验收记录](docs/baseliner-acceptance.md)。
+
 ## SQL 任务能力矩阵（当前）
 
 | 任务类型 | SQL 数量 | 当前支持 | 提交入口 | 关键约束 | 未来规划 |
@@ -1191,6 +1282,8 @@ flowSQL/
 - [NetAdapter 采集与隔离真实联验](docs/netadapter.md)
 - [NPM TLS 握手分析规格](tasks/archive/feat-npm-tls-handshake-analysis.md)
 - [Baseline 插件说明](src/plugins/baseline/README.md)
+- [Baseliner 算子使用说明](docs/baseliner.md)
+- [Baseliner 验收记录](docs/baseliner-acceptance.md)
 - [C++ 算子插件 Sample](samples/cpp_operator/README.md)
 - [产品需求与当前进度](tasks/product_backlog.md)
 

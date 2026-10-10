@@ -1,5 +1,31 @@
 # 即时工作台
 
+WIP=0。Baseliner README 使用说明补充已完成；baseliner-contract-safety T1～T4 仍待实施。
+
+## 当前 Atomic Slice
+
+- 关联 Feature：[baseliner-single-source](archive/feat-baseliner-single-source.md)，已交付能力的 README 文档补充；不新增 Feature Task。
+- 当前切片：在 README 补充 explore.baseliner 运行准备、单表/DataFrame 示例、配置与输出选择、snapshot/poll 边界及详细文档链接。
+- 业务意图：用户从项目入口即可了解如何提交基线分析，并选择预测结果与最终模型参数的输出位置。
+- Non-Goals：不修改运行代码、部署配置或详细使用文档；不实施两项 P1 与 readiness 修复；不提交/推送。
+- 契约依据：以当前源码、docs/baseliner.md 和已归档规格为准；示例沿用已交付 JSON/SQL，不描述待实施的新能力。
+- 允许文件：`README.md`、`tasks/active_task.md`；临时核对证据 `/tmp/baseliner-readme-update/`。
+- 验收命令：每次 patch 后 `git diff --name-only`；`git diff --check`；文档相对链接、JSON 解析及与详细文档配置一致性检查。本切片不新增测试或运行构建/CTest。
+- 时间盒：10 分钟，从 2026-10-10 21:43（Asia/Shanghai）开始。
+- 停止条件：README 示例、边界与文档入口补齐并通过检查，更新 WIP=0 后停止，不自动进入运行代码修复。
+- 起始状态：本地提交 `253d505`，工作区干净；README 与旧工作台原文保存于上述证据目录。
+
+## README 文档切片完成证据
+
+状态：已完成。README 新增基线分析特性、独立使用章节与文档索引，包含运行准备、输入/输出选择、
+单表与 DataFrame 的 JSON/SQL、NPM 精确配置引用、snapshot/poll 和恢复边界。
+三组 SQL 示例与 JSON 解析检查通过；JSON 与 docs/baseliner.md 的单表配置完全一致，新增相对链接有效，
+begin/end 桶范围已核对当前 reader 的半开区间实现；`git diff --check` 通过。
+本轮只修改 README.md 和 tasks/active_task.md，未运行构建/CTest，未提交/推送。
+证据：`/tmp/baseliner-readme-update/verification.json` 与原文快照。切片完成即停，未开始运行代码修复。
+
+## 前一切片工作台（历史：baseliner-contract-safety 规格）
+
 WIP=0。baseliner-contract-safety 规格切片已完成并停止；T1～T4 尚未实施，已有运行代码及其他未提交改动保持。
 
 ## 当前 Atomic Slice
