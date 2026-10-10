@@ -561,7 +561,17 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
         }
 
         const bool should_emit = !progress.ended_sessions.empty() || collector_->pending_results() != 0;
+        const auto publish_progress = [&]() {
+            if (!periodic_ || progress.disposition != NpmCaptureProgressDisposition::kAdvanced) return 0;
+            NpmResultProgressV1 published;
+            published.period_ns = config_.analysis.output_interval_ns;
+            published.closed_before_ns =
+                std::max<int64_t>(0, progress.watermark_ns - progress.watermark_ns % published.period_ns);
+            return router_->PublishProgress(published);
+        };
         if (!should_emit) {
+            if (publish_progress() != 0)
+                return fail(NpmBasicRealtimeMaintenanceError::kWriterError, "NPM progress publication failed");
             finish_success();
             return status;
         }
@@ -580,6 +590,8 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
             return fail(NpmBasicRealtimeMaintenanceError::kDrainError, kRealtimeDrainError);
         }
 
+        if (publish_progress() != 0)
+            return fail(NpmBasicRealtimeMaintenanceError::kWriterError, "NPM progress publication failed");
         if (finish_success()) return status;
         *output = std::move(next_output);
         status.emitted = true;

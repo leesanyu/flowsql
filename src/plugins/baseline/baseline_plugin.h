@@ -6,6 +6,7 @@
 
 #include <common/error_code.h>
 #include <common/iplugin.h>
+#include <framework/interfaces/ibaseline_checkpoint.h>
 #include <framework/interfaces/ibaseline_service.h>
 #include <framework/interfaces/ibaseline_state_control.h>
 
@@ -20,7 +21,8 @@ class TaskRegistry;
 
 class __attribute__((visibility("default"))) BaselinePlugin : public IPlugin,
                                                               public IBaselineService,
-                                                              public IBaselineStateControlServiceV1 {
+                                                              public IBaselineStateControlServiceV1,
+                                                              public IBaselineCheckpointServiceV1 {
  public:
     BaselinePlugin();
     ~BaselinePlugin() override;
@@ -31,23 +33,22 @@ class __attribute__((visibility("default"))) BaselinePlugin : public IPlugin,
     int Start() override;
     int Stop() override;
 
-    std::pair<BaselineStatus, std::shared_ptr<IBaselineValueTask>>
-    CreateValueTask(std::string_view config_content,
-                    BaselineSerializationFormat format) override;
+    std::pair<BaselineStatus, std::shared_ptr<IBaselineValueTask>> CreateValueTask(
+        std::string_view config_content, BaselineSerializationFormat format) override;
 
-    std::pair<BaselineStatus, std::shared_ptr<IBaselineRatioTask>>
-    CreateRatioTask(std::string_view config_content,
-                    BaselineSerializationFormat format) override;
+    std::pair<BaselineStatus, std::shared_ptr<IBaselineRatioTask>> CreateRatioTask(
+        std::string_view config_content, BaselineSerializationFormat format) override;
 
-    std::pair<BaselineStatus, std::shared_ptr<IBaselineRelationTask>>
-    CreateRelationTask(std::string_view config_content,
-                       BaselineSerializationFormat format) override;
+    std::pair<BaselineStatus, std::shared_ptr<IBaselineRelationTask>> CreateRelationTask(
+        std::string_view config_content, BaselineSerializationFormat format) override;
 
-    BaselineSerializationResult QueryServiceSnapshot(
-        BaselineSerializationFormat format) const override;
+    BaselineSerializationResult QueryServiceSnapshot(BaselineSerializationFormat format) const override;
 
     std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControlV1>> Bind(
         std::shared_ptr<IBaselineTask> task, const BaselineStateLimitsV1& limits) override;
+    std::pair<BaselineStatus, std::shared_ptr<IBaselineCheckpointV1>> Bind(
+        std::shared_ptr<IBaselineTask> task, std::shared_ptr<IBaselineTaskStateControlV1> state_control,
+        const BaselineCheckpointBindingV1& binding) override;
 
  private:
     IQuerier* querier_ = nullptr;

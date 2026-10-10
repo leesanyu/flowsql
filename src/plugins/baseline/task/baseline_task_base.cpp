@@ -13,11 +13,8 @@
 namespace flowsql {
 namespace baseline {
 
-BaselineTaskBase::BaselineTaskBase(TaskRegistry* registry,
-                                   std::string task_id,
-                                   BaselineTaskKind kind,
-                                   std::string task_name,
-                                   std::string config_json)
+BaselineTaskBase::BaselineTaskBase(TaskRegistry* registry, std::string task_id, BaselineTaskKind kind,
+                                   std::string task_name, std::string config_json)
     : registry_(registry),
       task_id_(std::move(task_id)),
       kind_(kind),
@@ -29,8 +26,7 @@ const char* BaselineTaskBase::Name() const { return task_name_.c_str(); }
 BaselineTaskKind BaselineTaskBase::Kind() const { return kind_; }
 const std::string& BaselineTaskBase::TaskId() const { return task_id_; }
 
-BaselineSerializationResult BaselineTaskBase::ExportConfig(
-    BaselineSerializationFormat format) const {
+BaselineSerializationResult BaselineTaskBase::ExportConfig(BaselineSerializationFormat format) const {
     if (format != BaselineSerializationFormat::kJson) {
         return UnsupportedFormatResult(format);
     }
@@ -38,8 +34,7 @@ BaselineSerializationResult BaselineTaskBase::ExportConfig(
     return {BaselineStatus::kOk, config_json_};
 }
 
-BaselineSerializationResult BaselineTaskBase::QueryTaskSnapshot(
-    BaselineSerializationFormat format) const {
+BaselineSerializationResult BaselineTaskBase::QueryTaskSnapshot(BaselineSerializationFormat format) const {
     if (format != BaselineSerializationFormat::kJson) {
         return UnsupportedFormatResult(format);
     }
@@ -58,9 +53,8 @@ BaselineSerializationResult BaselineTaskBase::QueryTaskSnapshot(
     return {BaselineStatus::kOk, buf.GetString()};
 }
 
-BaselineSerializationResult BaselineTaskBase::QuerySeriesSnapshot(
-    std::string_view series_key,
-    BaselineSerializationFormat format) const {
+BaselineSerializationResult BaselineTaskBase::QuerySeriesSnapshot(std::string_view series_key,
+                                                                  BaselineSerializationFormat format) const {
     if (format != BaselineSerializationFormat::kJson) {
         return UnsupportedFormatResult(format);
     }
@@ -92,8 +86,7 @@ BaselineStatus BaselineTaskBase::EnsureOpen() const {
     return closed_ ? BaselineStatus::kInvalidArgument : BaselineStatus::kOk;
 }
 
-BaselineSerializationResult BaselineTaskBase::UnsupportedFormatResult(
-    BaselineSerializationFormat) {
+BaselineSerializationResult BaselineTaskBase::UnsupportedFormatResult(BaselineSerializationFormat) {
     return {BaselineStatus::kUnsupportedFormat, ""};
 }
 
@@ -114,6 +107,7 @@ BaselineStatus BaselineTaskBase::ReleaseIdentity(std::string_view key, BaselineS
         (scope != BaselineStateReleaseScopeV1::kRuntimeOnly && scope != BaselineStateReleaseScopeV1::kAllState)) {
         return BaselineStatus::kInvalidArgument;
     }
+    MarkStateOperation();
     return DoReleaseIdentity(key, scope);
 }
 

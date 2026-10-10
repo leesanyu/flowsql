@@ -26,11 +26,11 @@ namespace baseline {
 class TaskRegistry;
 
 class BaselineRelationTask final : public IBaselineRelationTask, public BaselineTaskBase {
+    friend class CheckpointAccess;
+    friend struct checkpoint::Fields<BaselineRelationTask>;
+
  public:
-    BaselineRelationTask(TaskRegistry* registry,
-                         std::string task_id,
-                         std::string task_name,
-                         std::string config_content,
+    BaselineRelationTask(TaskRegistry* registry, std::string task_id, std::string task_name, std::string config_content,
                          RelationTaskCreateSpec spec,
                          std::shared_ptr<const CompiledEventCalendar> compiled_event_calendar);
 
@@ -38,35 +38,23 @@ class BaselineRelationTask final : public IBaselineRelationTask, public Baseline
     const char* Name() const override;
     BaselineTaskKind Kind() const override;
 
-    BaselineSerializationResult ExportConfig(
-        BaselineSerializationFormat format) const override;
-    BaselineSerializationResult QueryTaskSnapshot(
-        BaselineSerializationFormat format) const override;
-    BaselineSerializationResult QuerySeriesSnapshot(
-        std::string_view series_key,
-        BaselineSerializationFormat format) const override;
+    BaselineSerializationResult ExportConfig(BaselineSerializationFormat format) const override;
+    BaselineSerializationResult QueryTaskSnapshot(BaselineSerializationFormat format) const override;
+    BaselineSerializationResult QuerySeriesSnapshot(std::string_view series_key,
+                                                    BaselineSerializationFormat format) const override;
     BaselineStatus Close() override;
 
-    RelationRollingResult SubmitObservation(
-        const RelationRollingObservation& obs,
-        const RelationRollingSubmitOptions& options) override;
-    RollingPrediction PredictRoutedSummary(
-        const RelationRoutedSummaryQuery& query,
-        int64_t bucket_id) const override;
-    BaselineSerializationResult QueryRoutedSummarySnapshot(
-        const RelationRoutedSummaryQuery& query,
-        BaselineSerializationFormat format) const override;
+    RelationRollingResult SubmitObservation(const RelationRollingObservation& obs,
+                                            const RelationRollingSubmitOptions& options) override;
+    RollingPrediction PredictRoutedSummary(const RelationRoutedSummaryQuery& query, int64_t bucket_id) const override;
+    BaselineSerializationResult QueryRoutedSummarySnapshot(const RelationRoutedSummaryQuery& query,
+                                                           BaselineSerializationFormat format) const override;
 
     BootstrapTrainResult Bootstrap(const RelationBootstrapInput& input) override;
-    BaselineSerializationResult ExportBootstrapArtifact(
-        BaselineSerializationFormat format) const override;
-    BaselineStatus LoadBootstrapArtifact(
-        std::string_view content,
-        BaselineSerializationFormat format) override;
-    BaselineSerializationResult ExportBootstrapSeed(
-        BaselineSerializationFormat format) const override;
-    BaselineSerializationResult QueryBootstrapBasis(
-        BaselineSerializationFormat format) const override;
+    BaselineSerializationResult ExportBootstrapArtifact(BaselineSerializationFormat format) const override;
+    BaselineStatus LoadBootstrapArtifact(std::string_view content, BaselineSerializationFormat format) override;
+    BaselineSerializationResult ExportBootstrapSeed(BaselineSerializationFormat format) const override;
+    BaselineSerializationResult QueryBootstrapBasis(BaselineSerializationFormat format) const override;
 
  private:
     struct RelationRoutedRuntimeShard {
@@ -75,8 +63,7 @@ class BaselineRelationTask final : public IBaselineRelationTask, public Baseline
         RollingStateMap routed_rolling_states;
     };
 
-    using RelationBasisStateMap =
-        std::unordered_map<std::string, RelationBasisRuntimeState>;
+    using RelationBasisStateMap = std::unordered_map<std::string, RelationBasisRuntimeState>;
 
     struct ManagedRoutedStateRef {
         const std::string* key = nullptr;  // Stable key owned by the shard's spec map, including across rehash.
@@ -107,8 +94,7 @@ class BaselineRelationTask final : public IBaselineRelationTask, public Baseline
     RelationBasisRuntimeConfig MakeBasisRuntimeConfig() const;
     RelationFusionRuntimeConfig MakeFusionRuntimeConfig() const;
     bool IsFusionStateExpired(const RelationFusionRuntimeState& state) const;
-    void MaybeCleanupFusionStates(std::string_view current_source,
-                                  bool make_room_for_current_source);
+    void MaybeCleanupFusionStates(std::string_view current_source, bool make_room_for_current_source);
     void ResetFusionCleanupRuntime();
 
     RelationTaskCreateSpec spec_;

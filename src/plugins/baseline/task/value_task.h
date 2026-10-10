@@ -21,55 +21,37 @@ namespace baseline {
 class TaskRegistry;
 
 class BaselineValueTask final : public IBaselineValueTask, public BaselineTaskBase {
+    friend class CheckpointAccess;
+
  public:
-    BaselineValueTask(TaskRegistry* registry,
-                      std::string task_id,
-                      std::string task_name,
-                      std::string config_content,
-                      BaselineTaskSpec spec,
-                      std::shared_ptr<const CompiledEventCalendar> compiled_event_calendar);
+    BaselineValueTask(TaskRegistry* registry, std::string task_id, std::string task_name, std::string config_content,
+                      BaselineTaskSpec spec, std::shared_ptr<const CompiledEventCalendar> compiled_event_calendar);
 
     const char* Id() const override;
     const char* Name() const override;
     BaselineTaskKind Kind() const override;
 
-    BaselineSerializationResult ExportConfig(
-        BaselineSerializationFormat format) const override;
-    BaselineSerializationResult QueryTaskSnapshot(
-        BaselineSerializationFormat format) const override;
-    BaselineSerializationResult QuerySeriesSnapshot(
-        std::string_view series_key,
-        BaselineSerializationFormat format) const override;
+    BaselineSerializationResult ExportConfig(BaselineSerializationFormat format) const override;
+    BaselineSerializationResult QueryTaskSnapshot(BaselineSerializationFormat format) const override;
+    BaselineSerializationResult QuerySeriesSnapshot(std::string_view series_key,
+                                                    BaselineSerializationFormat format) const override;
     BaselineStatus Close() override;
 
-    RollingBaselineResult SubmitObservation(
-        const ValueRollingObservation& obs,
-        const RollingSubmitOptions& options) override;
-    RollingPrediction PredictRolling(
-        std::string_view series_key,
-        int64_t bucket_id) const override;
-    RollingPredictionSequence PredictRolling(
-        std::string_view series_key,
-        int64_t start_bucket_id,
-        uint32_t point_count) const override;
+    RollingBaselineResult SubmitObservation(const ValueRollingObservation& obs,
+                                            const RollingSubmitOptions& options) override;
+    RollingPrediction PredictRolling(std::string_view series_key, int64_t bucket_id) const override;
+    RollingPredictionSequence PredictRolling(std::string_view series_key, int64_t start_bucket_id,
+                                             uint32_t point_count) const override;
 
     BootstrapTrainResult Bootstrap(const ValueBootstrapInput& input) override;
-    BootstrapPrediction PredictBootstrap(
-        std::string_view series_key,
-        int64_t bucket_id,
-        const BootstrapPredictionOptions& options) const override;
-    BootstrapPredictionSequence PredictBootstrap(
-        std::string_view series_key,
-        int64_t start_bucket_id,
-        uint32_t point_count,
-        const BootstrapPredictionOptions& options) const override;
-    BaselineSerializationResult ExportBootstrapArtifact(
-        BaselineSerializationFormat format) const override;
-    BaselineStatus LoadBootstrapArtifact(
-        std::string_view content,
-        BaselineSerializationFormat format) override;
-    BaselineSerializationResult ExportBootstrapSeed(
-        BaselineSerializationFormat format) const override;
+    BootstrapPrediction PredictBootstrap(std::string_view series_key, int64_t bucket_id,
+                                         const BootstrapPredictionOptions& options) const override;
+    BootstrapPredictionSequence PredictBootstrap(std::string_view series_key, int64_t start_bucket_id,
+                                                 uint32_t point_count,
+                                                 const BootstrapPredictionOptions& options) const override;
+    BaselineSerializationResult ExportBootstrapArtifact(BaselineSerializationFormat format) const override;
+    BaselineStatus LoadBootstrapArtifact(std::string_view content, BaselineSerializationFormat format) override;
+    BaselineSerializationResult ExportBootstrapSeed(BaselineSerializationFormat format) const override;
 
  private:
     void OnClosing() override;

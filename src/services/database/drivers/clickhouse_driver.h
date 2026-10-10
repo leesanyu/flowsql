@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_DATABASE_DRIVERS_CLICKHOUSE_DRIVER_H_
 #define _FLOWSQL_SERVICES_DATABASE_DRIVERS_CLICKHOUSE_DRIVER_H_
@@ -17,6 +12,11 @@
 #include "../capability_interfaces.h"
 #include "../db_session.h"
 #include "../idb_driver.h"
+#include "../snapshot_read.h"
+
+namespace httplib {
+class Client;
+}
 
 namespace flowsql {
 namespace database {
@@ -57,12 +57,17 @@ class __attribute__((visibility("default"))) ClickHouseDriver : public IDbDriver
 // 直接继承 IDbSession，覆盖 Arrow 方法
 // 同时继承 IArrowReadable + IArrowWritable，供 DatabaseChannel::CreateArrowReader/Writer 的 dynamic_cast 检查
 // 不继承 RelationDbSessionBase（ClickHouse 是列式数据库，不走行式路径）
-class ClickHouseSession : public IDbSession, public IArrowReadable, public IArrowWritable {
+class ClickHouseSession : public IDbSession, public IArrowReadable, public IArrowWritable, public IDbSnapshotSession {
  public:
     ClickHouseSession(const std::string& host, int port, const std::string& user, const std::string& password,
                       const std::string& database);
     ~ClickHouseSession() override = default;
 
+    int BeginSnapshot(const DatabaseSnapshotOptionsV1& options) override;
+    int SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+                     std::shared_ptr<arrow::Schema> expected, uint32_t rows, uint64_t bytes,
+                     std::shared_ptr<arrow::RecordBatch>* output) override;
+    void CancelSnapshot() override;
     // ==================== 列式接口（核心实现）====================
 
     // 执行 Arrow 查询：构造 "{sql} FORMAT ArrowStream"，POST，解析响应体
@@ -108,6 +113,7 @@ class ClickHouseSession : public IDbSession, public IArrowReadable, public IArro
 
     int ExecuteParameterizedHttp(const std::string& sql, const DatabaseParameterV1* parameters, size_t parameter_count);
 
+    std::shared_ptr<httplib::Client> snapshot_client_;
     std::string host_;
     int port_;
     std::string user_;

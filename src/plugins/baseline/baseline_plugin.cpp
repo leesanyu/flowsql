@@ -12,12 +12,13 @@
 #include <cstdio>
 #include <utility>
 
+#include "checkpoint/checkpoint.h"
 #include "config/runtime_config.h"
 #include "config_parser.h"
 #include "model/task_spec.h"
 #include "solver/solver_backend.h"
-#include "task/relation_task.h"
 #include "task/ratio_task.h"
+#include "task/relation_task.h"
 #include "task/task_registry.h"
 #include "task/value_task.h"
 
@@ -33,15 +34,14 @@ class BaselineTaskStateControl final : public IBaselineTaskStateControlV1 {
         return task_->ReleaseIdentity(key, scope);
     }
     std::pair<BaselineStatus, BaselineStateUsageV1> QueryUsage() const override { return task_->QueryStateUsage(); }
+    const BaselineTaskBase* Task() const { return task_.get(); }
 
  private:
     std::shared_ptr<BaselineTaskBase> task_;
 };
 
 BaselineStatus ValidateCreateFormat(BaselineSerializationFormat format) {
-    return format == BaselineSerializationFormat::kJson
-               ? BaselineStatus::kOk
-               : BaselineStatus::kUnsupportedFormat;
+    return format == BaselineSerializationFormat::kJson ? BaselineStatus::kOk : BaselineStatus::kUnsupportedFormat;
 }
 
 std::string MakeConfigCopy(std::string_view config_content) {
@@ -69,8 +69,7 @@ BaselineStatus BindTaskCalendar(int64_t delta, const std::string& timezone,
 
 }  // namespace
 
-BaselinePlugin::BaselinePlugin()
-    : task_registry_(std::make_unique<TaskRegistry>()) {}
+BaselinePlugin::BaselinePlugin() : task_registry_(std::make_unique<TaskRegistry>()) {}
 
 BaselinePlugin::~BaselinePlugin() = default;
 
@@ -93,9 +92,7 @@ int BaselinePlugin::Option(const char* arg) {
             config_file_ = value;
         } else if (key == "strict") {
             std::string lowered = value;
-            std::transform(lowered.begin(),
-                           lowered.end(),
-                           lowered.begin(),
+            std::transform(lowered.begin(), lowered.end(), lowered.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if (lowered == "1" || lowered == "true" || lowered == "yes") {
                 config_strict_ = true;
@@ -112,8 +109,7 @@ int BaselinePlugin::Option(const char* arg) {
 
 int BaselinePlugin::Load(IQuerier* querier) {
     std::string err;
-    const int rc =
-        LoadBaselineRuntimeConfigFromYaml(config_file_, config_strict_, &err);
+    const int rc = LoadBaselineRuntimeConfigFromYaml(config_file_, config_strict_, &err);
     if (rc != error::OK) {
         if (!err.empty()) {
             std::fprintf(stderr, "[baseline] load runtime config failed: %s\n", err.c_str());
@@ -148,6 +144,21 @@ std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControlV1>> Baseline
     return {BaselineStatus::kOk, std::move(control)};
 }
 
+std::pair<BaselineStatus, std::shared_ptr<IBaselineCheckpointV1>> BaselinePlugin::Bind(
+    std::shared_ptr<IBaselineTask> task, std::shared_ptr<IBaselineTaskStateControlV1> state_control,
+    const BaselineCheckpointBindingV1& binding) {
+    auto implementation = std::dynamic_pointer_cast<BaselineTaskBase>(task);
+    auto control = std::dynamic_pointer_cast<BaselineTaskStateControl>(state_control);
+    if (!ValidBaselineCheckpointBindingV1(binding) || !task_registry_ || !implementation || !control ||
+        control->Task() != implementation.get() || !task_registry_->Owns(implementation.get()))
+        return {BaselineStatus::kInvalidArgument, nullptr};
+    auto handle =
+        std::make_shared<BaselineCheckpoint>(implementation, std::move(state_control), binding.max_payload_bytes);
+    const auto status = CheckpointAccess::Bind(*implementation);
+    if (status != BaselineStatus::kOk) return {status, nullptr};
+    return {BaselineStatus::kOk, std::move(handle)};
+}
+
 int BaselinePlugin::Stop() {
     if (task_registry_) {
         const auto tasks = task_registry_->Snapshot();
@@ -158,9 +169,8 @@ int BaselinePlugin::Stop() {
     return error::OK;
 }
 
-std::pair<BaselineStatus, std::shared_ptr<IBaselineValueTask>>
-BaselinePlugin::CreateValueTask(std::string_view config_content,
-                                BaselineSerializationFormat format) {
+std::pair<BaselineStatus, std::shared_ptr<IBaselineValueTask>> BaselinePlugin::CreateValueTask(
+    std::string_view config_content, BaselineSerializationFormat format) {
     const BaselineStatus format_status = ValidateCreateFormat(format);
     if (format_status != BaselineStatus::kOk) return {format_status, nullptr};
     if (!task_registry_) return {BaselineStatus::kInvalidArgument, nullptr};
@@ -168,24 +178,22 @@ BaselinePlugin::CreateValueTask(std::string_view config_content,
     const std::string config = MakeConfigCopy(config_content);
     BaselineTaskSpec spec;
     std::string err;
-    const BaselineStatus parse_status =
-        ParseFailureStatus(ConfigParser::ParseValueTask(config.c_str(), &spec, &err));
+    const BaselineStatus parse_status = ParseFailureStatus(ConfigParser::ParseValueTask(config.c_str(), &spec, &err));
     if (parse_status != BaselineStatus::kOk) return {parse_status, nullptr};
 
     auto calendar = FindBaselineEventCalendar(spec.calendar_ref);
     const BaselineStatus calendar_status = BindTaskCalendar(spec.delta, spec.tz, &calendar);
     if (calendar_status != BaselineStatus::kOk) return {calendar_status, nullptr};
-    auto task = std::make_shared<BaselineValueTask>(
-        task_registry_.get(), spec.task_id, spec.name, config, spec, std::move(calendar));
+    auto task = std::make_shared<BaselineValueTask>(task_registry_.get(), spec.task_id, spec.name, config, spec,
+                                                    std::move(calendar));
     if (task_registry_->Register(task) != error::OK) {
         return {BaselineStatus::kInvalidArgument, nullptr};
     }
     return {BaselineStatus::kOk, task};
 }
 
-std::pair<BaselineStatus, std::shared_ptr<IBaselineRatioTask>>
-BaselinePlugin::CreateRatioTask(std::string_view config_content,
-                                BaselineSerializationFormat format) {
+std::pair<BaselineStatus, std::shared_ptr<IBaselineRatioTask>> BaselinePlugin::CreateRatioTask(
+    std::string_view config_content, BaselineSerializationFormat format) {
     const BaselineStatus format_status = ValidateCreateFormat(format);
     if (format_status != BaselineStatus::kOk) return {format_status, nullptr};
     if (!task_registry_) return {BaselineStatus::kInvalidArgument, nullptr};
@@ -193,24 +201,22 @@ BaselinePlugin::CreateRatioTask(std::string_view config_content,
     const std::string config = MakeConfigCopy(config_content);
     BaselineTaskSpec spec;
     std::string err;
-    const BaselineStatus parse_status =
-        ParseFailureStatus(ConfigParser::ParseRatioTask(config.c_str(), &spec, &err));
+    const BaselineStatus parse_status = ParseFailureStatus(ConfigParser::ParseRatioTask(config.c_str(), &spec, &err));
     if (parse_status != BaselineStatus::kOk) return {parse_status, nullptr};
 
     auto calendar = FindBaselineEventCalendar(spec.calendar_ref);
     const BaselineStatus calendar_status = BindTaskCalendar(spec.delta, spec.tz, &calendar);
     if (calendar_status != BaselineStatus::kOk) return {calendar_status, nullptr};
-    auto task = std::make_shared<BaselineRatioTask>(
-        task_registry_.get(), spec.task_id, spec.name, config, spec, std::move(calendar));
+    auto task = std::make_shared<BaselineRatioTask>(task_registry_.get(), spec.task_id, spec.name, config, spec,
+                                                    std::move(calendar));
     if (task_registry_->Register(task) != error::OK) {
         return {BaselineStatus::kInvalidArgument, nullptr};
     }
     return {BaselineStatus::kOk, task};
 }
 
-std::pair<BaselineStatus, std::shared_ptr<IBaselineRelationTask>>
-BaselinePlugin::CreateRelationTask(std::string_view config_content,
-                                   BaselineSerializationFormat format) {
+std::pair<BaselineStatus, std::shared_ptr<IBaselineRelationTask>> BaselinePlugin::CreateRelationTask(
+    std::string_view config_content, BaselineSerializationFormat format) {
     const BaselineStatus format_status = ValidateCreateFormat(format);
     if (format_status != BaselineStatus::kOk) return {format_status, nullptr};
     if (!task_registry_) return {BaselineStatus::kInvalidArgument, nullptr};
@@ -226,21 +232,16 @@ BaselinePlugin::CreateRelationTask(std::string_view config_content,
     const BaselineStatus calendar_status =
         BindTaskCalendar(create_spec.clock_spec.delta, create_spec.clock_spec.tz, &calendar);
     if (calendar_status != BaselineStatus::kOk) return {calendar_status, nullptr};
-    auto task = std::make_shared<BaselineRelationTask>(
-        task_registry_.get(),
-        create_spec.task_spec.task_id,
-        create_spec.task_spec.name,
-        config,
-        create_spec,
-        std::move(calendar));
+    auto task =
+        std::make_shared<BaselineRelationTask>(task_registry_.get(), create_spec.task_spec.task_id,
+                                               create_spec.task_spec.name, config, create_spec, std::move(calendar));
     if (task_registry_->Register(task) != error::OK) {
         return {BaselineStatus::kInvalidArgument, nullptr};
     }
     return {BaselineStatus::kOk, task};
 }
 
-BaselineSerializationResult BaselinePlugin::QueryServiceSnapshot(
-    BaselineSerializationFormat format) const {
+BaselineSerializationResult BaselinePlugin::QueryServiceSnapshot(BaselineSerializationFormat format) const {
     if (format != BaselineSerializationFormat::kJson) {
         return {BaselineStatus::kUnsupportedFormat, ""};
     }
@@ -285,7 +286,8 @@ BaselineSerializationResult BaselinePlugin::QueryServiceSnapshot(
 }  // namespace flowsql
 
 BEGIN_PLUGIN_REGIST(flowsql::baseline::BaselinePlugin)
-    ____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
-    ____INTERFACE(flowsql::IID_BASELINE_SERVICE, flowsql::IBaselineService)
-    ____INTERFACE(flowsql::IID_BASELINE_STATE_CONTROL_SERVICE_V1, flowsql::IBaselineStateControlServiceV1)
-    END_PLUGIN_REGIST()
+____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
+____INTERFACE(flowsql::IID_BASELINE_SERVICE, flowsql::IBaselineService)
+____INTERFACE(flowsql::IID_BASELINE_STATE_CONTROL_SERVICE_V1, flowsql::IBaselineStateControlServiceV1)
+____INTERFACE(flowsql::IID_BASELINE_CHECKPOINT_SERVICE_V1, flowsql::IBaselineCheckpointServiceV1)
+END_PLUGIN_REGIST()

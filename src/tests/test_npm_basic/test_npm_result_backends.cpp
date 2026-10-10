@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <operators/npm_basic/npm_basic_result_consumer.h>
+#include <operators/npm_basic/npm_result_progress.h>
 #include <operators/npm_basic/output/npm_basic_result_encoder.h>
 #include <services/database/database_plugin.h>
 
@@ -286,9 +287,9 @@ void Cleanup(const Backend& backend) {
         Execute(backend.channel.get(), "DROP VIEW IF EXISTS " + std::string(relation));
         Execute(backend.channel.get(), "DROP TABLE IF EXISTS " + std::string(relation));
     }
-    for (const char* table :
-         {"npm_basic_v1_data", "npm_session_v1_data", "npm_basic_v2_data", "npm_conflict_v9_data",
-          "npm_t3_parameter_probe", "npm_t3_atomic_probe", "npm_result_entities", "npm_result_runs"}) {
+    for (const char* table : {"npm_basic_v1_data", "npm_session_v1_data", "npm_basic_v2_data", "npm_conflict_v9_data",
+                              "npm_t3_parameter_probe", "npm_t3_atomic_probe", "npm_result_progress_v1",
+                              "npm_result_entities", "npm_result_runs"}) {
         Execute(backend.channel.get(), "DROP TABLE IF EXISTS " + std::string(table));
     }
 }
@@ -418,6 +419,14 @@ void TestRelations(const Backend& backend, const std::vector<NpmEntityDescriptor
         const std::string periodic_run = prefix + "-periodic-" + std::to_string(labels);
         auto periodic = CreateConsumer(backend.channel.get(), "pcapfile.periodic", {"task-periodic", periodic_run},
                                        {labeled_basic});
+        {
+            auto duplicate_factory =
+                flowsql::npm::MakeNpmDatabaseResultConsumerFactory(backend.channel.get(), "pcapfile.periodic");
+            std::unique_ptr<INpmManagedResultConsumerV1> duplicate;
+            assert(duplicate_factory->Create({"task-periodic", periodic_run}, {labeled_basic},
+                                             std::make_shared<TestBudget>(), &duplicate) == EEXIST);
+            assert(!duplicate);
+        }
         flowsql::npm::NpmBasicResult row;
         row.session_id = 101;
         row.revision = 1;
@@ -444,6 +453,20 @@ void TestRelations(const Backend& backend, const std::vector<NpmEntityDescriptor
         assert(flowsql::npm::EncodeNpmBasicResults(records, &encoded, nullptr, labels != 0) ==
                flowsql::npm::NpmBasicEncodeError::kNone);
         assert(periodic->Consume({"task-periodic", periodic_run}, labeled_basic, *encoded) == 0);
+        auto* publisher = dynamic_cast<flowsql::npm::INpmResultProgressConsumerV1*>(periodic.get());
+        assert(publisher);
+        flowsql::npm::NpmResultProgressV1 progress;
+        progress.period_ns = 30000000000LL;
+        progress.closed_before_ns = 60000000000LL;
+        assert(publisher->PublishProgress({"task-periodic", periodic_run}, progress) == 0);
+        assert(publisher->PublishProgress({"task-periodic", periodic_run}, progress) == 0);  // idempotent boundary
+        assert(publisher->PublishProgress({"other-task", periodic_run}, progress) == EINVAL);
+        progress.closed_before_ns = 90000000000LL;
+        assert(publisher->PublishProgress({"task-periodic", periodic_run}, progress) == 0);  // no data progression
+        const auto published = Query(
+            backend.channel.get(), backend.category,
+            "SELECT epoch,position,closed_before_ns FROM npm_result_progress_v1 WHERE run_id='" + periodic_run + "'");
+        assert(RowCount(published) == 2);
         assert(periodic->Finish() == 0);
         const auto stored =
             Query(backend.channel.get(), backend.category,

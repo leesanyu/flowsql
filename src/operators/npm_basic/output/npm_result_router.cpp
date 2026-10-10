@@ -139,6 +139,22 @@ int NpmResultRouter::Drain(std::shared_ptr<arrow::RecordBatch>* output) {
     return 0;
 }
 
+int NpmResultRouter::PublishProgress(const NpmResultProgressV1& progress) {
+    if (cancelled_) return ECANCELED;
+    if (error_code_) return error_code_;
+    if (finished_) return EPIPE;
+    if (progress.contract_version != 1 || progress.entity_id != "basic" || progress.period_ns <= 0 ||
+        progress.closed_before_ns < 0 || progress.closed_before_ns % progress.period_ns != 0 || pending_rows_ != 0)
+        return Fail(EINVAL, "invalid or undrained NPM result progress");
+    if (progress.closed_before_ns < closed_before_ns_) return Fail(EINVAL, "regressing NPM result progress");
+    if (progress.closed_before_ns == closed_before_ns_) return 0;
+    auto* publisher = dynamic_cast<INpmResultProgressConsumerV1*>(consumer_.get());
+    const int rc = publisher ? invoke_([&] { return publisher->PublishProgress(context_, progress); }) : 0;
+    if (rc) return Fail(rc, "consumer progress publication failed");
+    if (cancelled_) return ECANCELED;
+    closed_before_ns_ = progress.closed_before_ns;
+    return 0;
+}
 int NpmResultRouter::Finish() {
     if (cancelled_) return ECANCELED;
     if (error_code_) return error_code_;

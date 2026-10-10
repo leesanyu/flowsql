@@ -24,6 +24,11 @@
 #include <type_traits>
 #include <unordered_set>
 
+#include <framework/interfaces/iblock_transform_dataframe_input.h>
+#include <framework/interfaces/iblock_transform_execution_policy.h>
+#include <framework/interfaces/iblock_transform_model_output.h>
+#include <framework/interfaces/iblock_transform_result_output.h>
+#include <framework/interfaces/iblock_transform_source_config.h>
 #include "framework/core/channel_adapter.h"
 #include "framework/core/dataframe.h"
 #include "framework/core/dataframe_channel.h"
@@ -892,19 +897,18 @@ static int BindBlockTransformInputSource(IBlockTransformTaskV1* task, const std:
     }
 }
 
-int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* source,
-                                                         BlockTransformProviderRef provider, IDataFrameChannel* sink,
-                                                         const BlockTransformManagedSinkBindingV1* managed_sink,
-                                                         const SqlStatement& stmt,
-                                                         const std::shared_ptr<const BoundFilterExpr>& source_residual,
-                                                         BlockExecutionTerminal* terminal, int64_t* rows_affected,
-                                                         std::string* managed_result_json, std::string* error) {
+int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
+    IBlockStreamChannel* source, BlockTransformProviderRef provider, IDataFrameChannel* sink,
+    const BlockTransformManagedSinkBindingV1* managed_sink, const SqlStatement& stmt,
+    const std::shared_ptr<const BoundFilterExpr>& source_residual, BlockExecutionTerminal* terminal,
+    int64_t* rows_affected, std::string* managed_result_json, std::string* error,
+    std::shared_ptr<IDatabaseChannel> database_source, std::shared_ptr<IDataFrameChannel> dataframe_source) {
     if (terminal) *terminal = BlockExecutionTerminal::kFailed;
     if (rows_affected) *rows_affected = 0;
     if (managed_result_json) managed_result_json->clear();
     if (error) error->clear();
-    if (!source || !provider || (provider.v1 && provider.v2) || (sink == nullptr) == (managed_sink == nullptr) ||
-        stmt.operators.size() != 1) {
+    if ((!source && !database_source && !dataframe_source) || !provider || (provider.v1 && provider.v2) ||
+        (sink == nullptr) == (managed_sink == nullptr) || stmt.operators.size() != 1) {
         if (error) *error = "block transform pipeline requires one source, provider, operator, and sink";
         return EINVAL;
     }
@@ -936,10 +940,24 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
         return EINVAL;
     }
 
-    const auto source_schema = packet::PacketSchema();
+    if ((database_source || dataframe_source) &&
+        (!provider.v2 || !stmt.columns.empty() || !stmt.stage_filters.empty())) {
+        if (error) *error = "database block input requires one V2 operator, SELECT *, and no WHERE";
+        return EINVAL;
+    }
+    auto source_schema =
+        (database_source || dataframe_source) ? std::shared_ptr<arrow::Schema>{} : packet::PacketSchema();
 
     const auto& params = !stmt.operator_with_params.empty() ? stmt.operator_with_params.front() : stmt.with_params;
-    const std::string with_params_json = MakeWithParamsJson(params);
+    std::string with_params_json = MakeWithParamsJson(params);
+    auto* source_config = provider.v2 ? dynamic_cast<IBlockTransformSourceConfigProviderV1*>(provider.v2) : nullptr;
+    if (source_config) {
+        std::string normalized;
+        const int rc =
+            source_config->NormalizeSourceConfig(with_params_json.c_str(), stmt.source.c_str(), &normalized, error);
+        if (rc != 0) return rc;
+        with_params_json = std::move(normalized);
+    }
     auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV2*>(source);
     if (capture_reader && !stmt.operators.empty() && stmt.operators.front().category == "npm" &&
         stmt.operators.front().name == "basic" && !managed_sink) {
@@ -1126,6 +1144,21 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
         return EIO;
     }
     auto execution = make_task_holder(execution_raw);
+    BlockDatabaseInputV1 database_input;
+    BlockDataFrameInputV1 dataframe_input;
+    std::unique_ptr<void, std::function<void(void*)>> input_guard(nullptr, [](void*) {});
+    // Cover target binding and input initialization, before the runner owns the wake lease.
+    const auto creation_control = SchedulerBatchRuntime::CurrentControl();
+    struct CreationWakeLease {
+        std::shared_ptr<BlockTransformRunControl> control;
+        ~CreationWakeLease() {
+            if (control) control->BindWake({});
+        }
+    } creation_wake{creation_control};
+    if (creation_control)
+        creation_control->BindWake([creation_control, task = execution.get()] {
+            if (creation_control->cancel_requested.load()) task->Cancel();
+        });
     const int input_bind_rc = BindBlockTransformInputSource(execution.get(), stmt.source, error);
     if (input_bind_rc != 0) return input_bind_rc;
     if (capture_reader) {
@@ -1136,7 +1169,73 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
         }
     }
     auto* managed_task = dynamic_cast<IBlockTransformManagedSinkTaskV1*>(execution.get());
-    if (managed_sink) {
+    auto* model_task = dynamic_cast<IBlockTransformModelOutputTaskV1*>(execution.get());
+    const auto model_target = model_task ? model_task->ModelOutputTarget() : std::string{};
+    std::shared_ptr<DataFrameChannel> model_dataframe;
+    IChannelRegistry* model_registry = nullptr;
+    std::string model_name;
+    if (!model_target.empty()) {
+        BlockModelOutputBindingV1 binding;
+        binding.primary_target = stmt.dest.c_str();
+        if (model_target.compare(0, 10, "dataframe.") == 0) {
+            model_name = model_target.substr(10);
+            model_registry = querier_ ? static_cast<IChannelRegistry*>(querier_->First(IID_CHANNEL_REGISTRY)) : nullptr;
+            if (!model_registry) {
+                if (error) *error = "model channel registry unavailable";
+                return EINVAL;
+            }
+            model_dataframe = std::make_shared<DataFrameChannel>("dataframe", model_name);
+            if (model_dataframe->Open() != 0) {
+                if (error) *error = "model staging channel open failed";
+                return EIO;
+            }
+            binding.dataframe = model_dataframe;
+        } else {
+            std::string category, name, relation;
+            if (!ParseDatabaseDestination(model_target, &category, &name, &relation) || relation.empty()) {
+                if (error) *error = "invalid model table target";
+                return EINVAL;
+            }
+            auto* leases = querier_ ? static_cast<IDatabaseChannelLeaseProviderV1*>(
+                                          querier_->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1))
+                                    : nullptr;
+            if (!leases) {
+                if (error) *error = "model database lease provider unavailable";
+                return EINVAL;
+            }
+            binding.database = leases->AcquireChannel(category.c_str(), name.c_str());
+        }
+        const int rc = model_task->BindModelOutput(binding);
+        if (rc != 0) {
+            if (managed_task && managed_result_json) *managed_result_json = managed_task->ManagedSinkResultJson();
+            if (error) *error = "model target binding failed: " + SafeBlockTransformLastError(execution.get());
+            return rc;
+        }
+    }
+    auto* result_task = dynamic_cast<IBlockTransformResultOutputTaskV1*>(execution.get());
+    const bool specified_table = managed_sink && managed_sink->relation && managed_sink->relation[0];
+    const bool specified_result = result_task && (!managed_sink || specified_table);
+    if (specified_table && !result_task) {
+        if (error) *error = "operator lacks specified result output capability";
+        return EINVAL;
+    }
+    if (specified_result) {
+        BlockResultOutputBindingV1 binding;
+        binding.target = stmt.dest.c_str();
+        if (specified_table) {
+            auto* leases = querier_ ? static_cast<IDatabaseChannelLeaseProviderV1*>(
+                                          querier_->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1))
+                                    : nullptr;
+            binding.database = leases ? leases->AcquireChannel(managed_sink->category, managed_sink->name) : nullptr;
+        }
+        const int rc = result_task->BindResultOutput(binding);
+        if (rc != 0) {
+            if (managed_task && managed_result_json) *managed_result_json = managed_task->ManagedSinkResultJson();
+            if (error) *error = "result target binding failed: " + SafeBlockTransformLastError(execution.get());
+            return rc;
+        }
+    }
+    if (managed_sink && !specified_table) {
         if (!managed_task) {
             if (error) *error = "block transform task does not support managed sink";
             return EINVAL;
@@ -1147,6 +1246,70 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
             return bind_rc;
         }
     }
+    if (database_source) {
+        auto* input_task = dynamic_cast<IBlockTransformDatabaseInputTaskV1*>(execution.get());
+        if (!input_task) {
+            if (error) *error = "operator lacks database input capability";
+            return EINVAL;
+        }
+        BlockDatabaseInputBindingV1 binding;
+        binding.source = std::move(database_source);
+        binding.exact_source = stmt.source.c_str();
+        const int rc = input_task->CreateDatabaseInput(binding, &database_input);
+        if (rc != 0) {
+            if (managed_task && managed_result_json) *managed_result_json = managed_task->ManagedSinkResultJson();
+            if (error) *error = "database input creation failed: " + SafeBlockTransformLastError(execution.get());
+            return rc;
+        }
+        input_guard = std::unique_ptr<void, std::function<void(void*)>>(
+            reinterpret_cast<void*>(1), [input_task, &database_input](void*) {
+                try {
+                    input_task->ReleaseDatabaseInput(database_input.input);
+                } catch (...) {
+                }
+                database_input.schema.reset();
+            });
+        if (database_input.struct_size != sizeof(database_input) ||
+            database_input.contract_version != kBlockDatabaseInputVersionV1 || !database_input.input ||
+            !database_input.schema) {
+            if (error) *error = "invalid database input contract";
+            return EINVAL;
+        }
+        source = database_input.input;
+        source_schema = database_input.schema;
+    }
+    if (dataframe_source) {
+        auto* input_task = dynamic_cast<IBlockTransformDataFrameInputTaskV1*>(execution.get());
+        if (!input_task) {
+            if (error) *error = "operator lacks DataFrame input capability";
+            return EINVAL;
+        }
+        BlockDataFrameInputBindingV1 binding;
+        binding.source = std::move(dataframe_source);
+        binding.exact_source = stmt.source.c_str();
+        const int rc = input_task->CreateDataFrameInput(binding, &dataframe_input);
+        if (rc != 0) {
+            if (managed_task && managed_result_json) *managed_result_json = managed_task->ManagedSinkResultJson();
+            if (error) *error = "DataFrame input creation failed: " + SafeBlockTransformLastError(execution.get());
+            return rc;
+        }
+        input_guard = std::unique_ptr<void, std::function<void(void*)>>(
+            reinterpret_cast<void*>(1), [input_task, &dataframe_input](void*) {
+                try {
+                    input_task->ReleaseDataFrameInput(dataframe_input.input);
+                } catch (...) {
+                }
+                dataframe_input.schema.reset();
+            });
+        if (dataframe_input.struct_size != sizeof(dataframe_input) ||
+            dataframe_input.contract_version != kBlockDataFrameInputVersionV1 || !dataframe_input.input ||
+            !dataframe_input.schema || dataframe_input.source_fingerprint.empty()) {
+            if (error) *error = "invalid DataFrame input contract";
+            return EINVAL;
+        }
+        source = dataframe_input.input;
+        source_schema = dataframe_input.schema;
+    }
     SchemaCheckingBlockTransformTask checked_execution(execution.get(), planned_output_schema);
     IBlockTransformTaskV1* runner_task =
         planned_output_schema ? static_cast<IBlockTransformTaskV1*>(&checked_execution) : execution.get();
@@ -1155,6 +1318,7 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
     config.source = source;
     config.source_schema = source_schema;
     config.transform = runner_task;
+    config.input_progress_task = dynamic_cast<IBlockTransformInputProgressTaskV1*>(execution.get());
     config.time_transform = execution_time;
     config.capture_fact_task =
         capture_reader ? dynamic_cast<IBlockTransformCaptureFactTaskV2*>(execution.get()) : nullptr;
@@ -1178,6 +1342,37 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* so
     BlockTransformPipelineResult result;
     std::string runner_error;
     const auto runner_rc = runner.Run(&result, &runner_error);
+    if (runner_rc == BlockTransformPipelineError::kNone &&
+        result.terminal == BlockTransformPipelineTerminal::kCompleted && specified_result && !specified_table) {
+        bool published = stmt.dest.empty();
+        if (!stmt.dest.empty()) {
+            auto* registry = querier_ ? static_cast<IChannelRegistry*>(querier_->First(IID_CHANNEL_REGISTRY)) : nullptr;
+            const auto name = DataframeNamePart(stmt.dest);
+            auto staged = std::make_shared<DataFrameChannel>("dataframe", name);
+            DataFrame frame;
+            if (registry && staged->Open() == 0 && sink->Read(&frame) == 0 && staged->Write(&frame) == 0) {
+                if (registry->Get(name.c_str())) (void)registry->Unregister(name.c_str());
+                published = registry->Register(name.c_str(), staged) == 0;
+            }
+        }
+        if (result_task->CompleteResultOutputPublication(published) != 0) {
+            if (model_dataframe) (void)model_task->CompleteModelOutputPublication(false);
+            if (managed_task && managed_result_json) *managed_result_json = managed_task->ManagedSinkResultJson();
+            if (error) *error = "result publication failed: " + SafeBlockTransformLastError(execution.get());
+            return EIO;
+        }
+    }
+    if (runner_rc == BlockTransformPipelineError::kNone &&
+        result.terminal == BlockTransformPipelineTerminal::kCompleted && model_dataframe) {
+        if (model_registry->Get(model_name.c_str())) (void)model_registry->Unregister(model_name.c_str());
+        const bool published =
+            model_registry->Register(model_name.c_str(), std::static_pointer_cast<IChannel>(model_dataframe)) == 0;
+        if (model_task->CompleteModelOutputPublication(published) != 0) {
+            if (managed_task && managed_result_json) *managed_result_json = managed_task->ManagedSinkResultJson();
+            if (error) *error = "model publication failed: " + SafeBlockTransformLastError(execution.get());
+            return EIO;
+        }
+    }
     if (managed_task) {
         const auto result_json = managed_task->ManagedSinkResultJson();
         if (managed_result_json) *managed_result_json = result_json;
@@ -1202,10 +1397,16 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     IBlockStreamChannel* source, const std::vector<BlockTransformProviderRef>& providers, IDataFrameChannel* sink,
     const BlockTransformManagedSinkBindingV1* managed_sink, const SqlStatement& stmt,
     const std::shared_ptr<const BoundFilterExpr>& source_residual, BlockExecutionTerminal* terminal,
-    int64_t* rows_affected, std::string* managed_result_json, std::string* error) {
+    int64_t* rows_affected, std::string* managed_result_json, std::string* error,
+    std::shared_ptr<IDatabaseChannel> database_source, std::shared_ptr<IDataFrameChannel> dataframe_source) {
     if (providers.size() == 1) {
         return ExecuteSingleBlockTransformPipeline(source, providers.front(), sink, managed_sink, stmt, source_residual,
-                                                   terminal, rows_affected, managed_result_json, error);
+                                                   terminal, rows_affected, managed_result_json, error,
+                                                   std::move(database_source), std::move(dataframe_source));
+    }
+    if (database_source || dataframe_source) {
+        if (error) *error = "snapshot block input requires one operator";
+        return EINVAL;
     }
     if (managed_sink) {
         if (error) *error = "managed sink requires exactly one block transform operator";
@@ -1957,7 +2158,21 @@ int32_t SchedulerPlugin::ResolveSourceBindings(const SqlStatement& stmt, SourceR
 
         std::shared_ptr<IChannel> source_owner;
         bool source_ambiguous = false;
-        IChannel* source_ch = FindChannel(ref.base, &source_owner, &source_ambiguous);
+        IChannel* source_ch = nullptr;
+        std::string database_category, database_name, database_relation;
+        const bool database_ref =
+            ParseDatabaseDestination(ref.base, &database_category, &database_name, &database_relation) &&
+            (database_category == "sqlite" || database_category == "mysql" || database_category == "postgres" ||
+             database_category == "clickhouse");
+        auto* database_leases =
+            database_ref && querier_
+                ? static_cast<IDatabaseChannelLeaseProviderV1*>(querier_->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1))
+                : nullptr;
+        if (database_leases) {
+            source_owner = database_leases->AcquireChannel(database_category.c_str(), database_name.c_str());
+            source_ch = source_owner.get();
+        } else
+            source_ch = FindChannel(ref.base, &source_owner, &source_ambiguous);
         if (source_ambiguous) {
             return fail(error::CONFLICT, "multiple block stream sources matched: " + ref.base);
         }
@@ -2771,9 +2986,31 @@ int32_t SchedulerPlugin::ClassifySqlTaskKind(const std::string& sql_text, std::s
         return error::BAD_REQUEST;
     }
 
+    bool operator_requires_async = false;
+    if (stmt.operators.size() == 1) {
+        CppOperatorCapabilityLeaseV1 lease;
+        bool ambiguous = false;
+        int traversal = 0;
+        auto provider = FindBlockTransformOperator(stmt.operators[0].category, stmt.operators[0].name, &lease,
+                                                   &ambiguous, &traversal);
+        if (ambiguous || traversal != 0) {
+            *err_rsp = BuildErrorJson("operator policy lookup failed");
+            return error::BAD_REQUEST;
+        }
+        auto* policy = provider.v2 ? dynamic_cast<IBlockTransformExecutionPolicyProviderV1*>(provider.v2) : nullptr;
+        if (policy) {
+            const auto& params =
+                !stmt.operator_with_params.empty() ? stmt.operator_with_params.front() : stmt.with_params;
+            const auto with = MakeWithParamsJson(params);
+            if (policy->RequiresAsyncExecution(with.c_str(), stmt.source.c_str(), &operator_requires_async) != 0) {
+                *err_rsp = BuildErrorJson("operator execution policy invalid");
+                return error::BAD_REQUEST;
+            }
+        }
+    }
     *task_kind = source_resolved.has_stream_source ? "stream" : "batch";
     if (requires_async) {
-        *requires_async = source_resolved.has_stream_source;
+        *requires_async = source_resolved.has_stream_source || operator_requires_async;
         if (querier_ && !source_resolved.block_channels.empty()) {
             querier_->Traverse(IID_BLOCK_STREAM_CHANNEL_DESCRIPTOR_V1, [&](void* value) {
                 static_cast<IBlockStreamChannelDescriptorV1*>(value)->DescribeChannelTypes([&](const auto& type) {

@@ -1,12 +1,9 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "mysql_driver.h"
+#include <sys/socket.h>
+#include <array>
 
 #include "../relation_adapters.h"
 
@@ -135,6 +132,20 @@ MysqlSession::MysqlSession(MysqlDriver* driver, MYSQL* conn) : RelationDbSession
 
 MysqlSession::~MysqlSession() {
     if (conn_) {
+        if (snapshot_cancelled_) {
+            static_cast<MysqlDriver*>(driver_)->DiscardSnapshot(conn_);
+            conn_ = nullptr;
+            return;
+        }
+        if (snapshot_transaction_) {
+            if (mysql_query(conn_, "ROLLBACK") != 0) {
+                static_cast<MysqlDriver*>(driver_)->DiscardSnapshot(conn_);
+                conn_ = nullptr;
+                return;
+            }
+            timeval timeout{};
+            setsockopt(conn_->net.fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        }
         ReturnConnection(conn_);
         conn_ = nullptr;
     }
@@ -525,6 +536,7 @@ IBatchWriter* MysqlSession::CreateBatchWriter(const char* table) {
 MysqlDriver::~MysqlDriver() = default;
 
 int MysqlDriver::Connect(const std::unordered_map<std::string, std::string>& params) {
+    atomic_parameters = params;
     ConnectionPoolConfig config;
     config.max_connections = 10;
     config.min_connections = 0;
@@ -618,6 +630,137 @@ void MysqlDriver::ReturnToPool(MYSQL* conn) {
     if (pool_ && conn) {
         pool_->Return(conn);
     }
+}
+
+void MysqlDriver::DiscardSnapshot(MYSQL* conn) {
+    if (pool_) pool_->Discard(conn);
+}
+int MysqlSession::BeginSnapshot(const DatabaseSnapshotOptionsV1& options) {
+    snapshot_timeout_ms_ = options.operation_timeout_ms;
+    snapshot_socket_ = conn_->net.fd;
+    timeval timeout{static_cast<long>(snapshot_timeout_ms_ / 1000),
+                    static_cast<long>((snapshot_timeout_ms_ % 1000) * 1000)};
+    setsockopt(snapshot_socket_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    if (ExecuteSql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ") < 0 ||
+        ExecuteSql("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY") < 0)
+        return -1;
+    snapshot_transaction_ = true;
+    return 0;
+}
+void MysqlSession::CancelSnapshot() {
+    snapshot_cancelled_ = true;
+    const int socket = snapshot_socket_.load();
+    if (socket >= 0) shutdown(socket, SHUT_RDWR);
+}
+int MysqlSession::SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+                               std::shared_ptr<arrow::Schema> expected, uint32_t max_rows, uint64_t max_bytes,
+                               std::shared_ptr<arrow::RecordBatch>* output) {
+    output->reset();
+    last_error_.clear();
+    if (snapshot_cancelled_) {
+        last_error_ = "snapshot cancelled";
+        return -1;
+    }
+    std::string bounded = sql;
+    bounded.insert(6, " /*+ MAX_EXECUTION_TIME(" + std::to_string(snapshot_timeout_ms_) + ") */");
+    MYSQL_STMT* raw = PrepareStatement(conn_, bounded.c_str(), &last_error_);
+    if (!raw) return -1;
+    std::unique_ptr<MYSQL_STMT, decltype(&mysql_stmt_close)> stmt(raw, mysql_stmt_close);
+    if (BindMysqlParameters(raw, parameters, count, &last_error_) < 0) return -1;
+    std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)> meta(mysql_stmt_result_metadata(raw), mysql_free_result);
+    if (!meta || mysql_num_fields(meta.get()) != static_cast<unsigned>(expected->num_fields())) {
+        last_error_ = "snapshot metadata mismatch";
+        return -1;
+    }
+    MYSQL_FIELD* fields = mysql_fetch_fields(meta.get());
+    auto physical = [](const MYSQL_FIELD& f) -> std::string {
+        switch (f.type) {
+            case MYSQL_TYPE_TINY:
+            case MYSQL_TYPE_SHORT:
+            case MYSQL_TYPE_LONG:
+            case MYSQL_TYPE_LONGLONG:
+            case MYSQL_TYPE_INT24:
+                return f.flags & UNSIGNED_FLAG ? "int unsigned" : "int";
+            case MYSQL_TYPE_FLOAT:
+            case MYSQL_TYPE_DOUBLE:
+                return "double";
+            case MYSQL_TYPE_DECIMAL:
+            case MYSQL_TYPE_NEWDECIMAL:
+                return "decimal";
+            case MYSQL_TYPE_STRING:
+            case MYSQL_TYPE_VAR_STRING:
+            case MYSQL_TYPE_VARCHAR:
+            case MYSQL_TYPE_BLOB:
+            case MYSQL_TYPE_TINY_BLOB:
+            case MYSQL_TYPE_MEDIUM_BLOB:
+            case MYSQL_TYPE_LONG_BLOB:
+                return "text";
+            default:
+                return "unsupported";
+        }
+    };
+    const int n = expected->num_fields();
+    std::vector<MYSQL_BIND> bindings(n);
+    std::vector<unsigned long> lengths(n);
+    std::vector<std::array<char, 128>> scratch(n);
+    auto nulls = std::make_unique<bool[]>(n);
+    auto truncated = std::make_unique<bool[]>(n);
+    for (int i = 0; i < n; ++i) {
+        if (expected->field(i)->name() != fields[i].name ||
+            !SnapshotPhysicalType("mysql", physical(fields[i]), expected->field(i)->type()->id())) {
+            last_error_ = "snapshot physical field mismatch: " + expected->field(i)->name();
+            return -1;
+        }
+        auto& b = bindings[i];
+        std::memset(&b, 0, sizeof(b));
+        b.buffer_type = MYSQL_TYPE_STRING;
+        b.length = &lengths[i];
+        b.is_null = &nulls[i];
+        b.error = &truncated[i];
+        b.buffer = scratch[i].data();
+        b.buffer_length = scratch[i].size();
+    }
+    if (mysql_stmt_bind_result(raw, bindings.data())) {
+        last_error_ = mysql_stmt_error(raw);
+        return -1;
+    }
+    SnapshotRows rows;
+    uint64_t bytes = 0;
+    int rc;
+    while ((rc = mysql_stmt_fetch(raw)) == 0 || rc == MYSQL_DATA_TRUNCATED) {
+        if (rows.size() >= max_rows || snapshot_cancelled_) {
+            last_error_ = "snapshot row limit/cancelled";
+            return -1;
+        }
+        std::vector<SnapshotCell> row;
+        for (int i = 0; i < n; ++i) {
+            bytes += 16 + (nulls[i] ? 0 : lengths[i]);
+            if (bytes > max_bytes) {
+                last_error_ = "snapshot page byte budget exceeded";
+                return -1;
+            }
+            if (nulls[i]) {
+                row.push_back(std::nullopt);
+                continue;
+            }
+            std::string value(lengths[i], '\0');
+            MYSQL_BIND b{};
+            b.buffer_type = MYSQL_TYPE_STRING;
+            b.buffer = value.data();
+            b.buffer_length = value.size();
+            if (mysql_stmt_fetch_column(raw, &b, i, 0)) {
+                last_error_ = mysql_stmt_error(raw);
+                return -1;
+            }
+            row.emplace_back(std::move(value));
+        }
+        rows.push_back(std::move(row));
+    }
+    if (rc != MYSQL_NO_DATA) {
+        last_error_ = mysql_stmt_error(raw);
+        return -1;
+    }
+    return MakeSnapshotBatch(expected, rows, max_bytes, output, &last_error_);
 }
 
 }  // namespace database

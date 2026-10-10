@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_DATABASE_DRIVERS_MYSQL_DRIVER_H_
 #define _FLOWSQL_SERVICES_DATABASE_DRIVERS_MYSQL_DRIVER_H_
@@ -16,10 +11,12 @@
 #include <string>
 #include <unordered_map>
 
+#include "../atomic_target.h"
 #include "../capability_interfaces.h"
 #include "../connection_pool.h"
 #include "../db_session.h"
 #include "../relation_db_session.h"
+#include "../snapshot_read.h"
 
 namespace flowsql {
 namespace database {
@@ -37,7 +34,9 @@ class MysqlSession;
 
 // MysqlDriver — MySQL 数据库驱动
 // 基于 libmysqlclient，支持预编译语句和事务
-class __attribute__((visibility("default"))) MysqlDriver : public IDbDriver, public IDbSessionFactoryProvider {
+class __attribute__((visibility("default"))) MysqlDriver : public IDbDriver,
+                                                           public IDbSessionFactoryProvider,
+                                                           public AtomicTargetConfiguration {
  public:
     MysqlDriver() = default;
     ~MysqlDriver() override;
@@ -52,6 +51,7 @@ class __attribute__((visibility("default"))) MysqlDriver : public IDbDriver, pub
 
     // 连接池相关
     std::shared_ptr<IDbSession> CreateSession() override;
+    void DiscardSnapshot(MYSQL* conn);
     void ReturnToPool(MYSQL* conn);
 
  private:
@@ -102,7 +102,7 @@ class MysqlResultSet : public IResultSet {
 };
 
 // MySQL Session 实现
-class MysqlSession : public RelationDbSessionBase<MysqlTraits> {
+class MysqlSession : public RelationDbSessionBase<MysqlTraits>, public IDbSnapshotSession {
  public:
     MysqlSession(MysqlDriver* driver, MYSQL* conn);
     ~MysqlSession() override;
@@ -110,9 +110,17 @@ class MysqlSession : public RelationDbSessionBase<MysqlTraits> {
     // 覆盖基类模板方法，使用简单 API（非 prepared statement）
     int ExecuteQuery(const char* sql, IResultSet** result) override;
     int ExecuteSql(const char* sql) override;
+    int BeginSnapshot(const DatabaseSnapshotOptionsV1& options) override;
+    int SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+                     std::shared_ptr<arrow::Schema> expected, uint32_t rows, uint64_t bytes,
+                     std::shared_ptr<arrow::RecordBatch>* output) override;
+    void CancelSnapshot() override;
     int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
     int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
                              size_t execution_count) override;
+
+ private:
+    std::atomic<int> snapshot_socket_{-1};
 
  protected:
     // 钩子方法实现

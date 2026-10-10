@@ -12101,6 +12101,9 @@ void TestProtocolLabelIsolationAndAtomicFactoryFailure() {
 }
 
 struct ResultConsumerTrace {
+    std::vector<npm::NpmResultProgressV1> progress;
+    std::vector<size_t> rows_at_progress;
+    int progress_error = 0;
     std::vector<std::string> entities;
     std::vector<npm::NpmResultContextV1> contexts;
     std::vector<uint64_t> revisions;
@@ -12123,9 +12126,15 @@ struct ResultConsumerTrace {
     std::function<void()> on_finish;
     std::function<void()> on_cancel;
 };
-class RecordingResultConsumer final : public npm::INpmResultConsumerV1 {
+class RecordingResultConsumer final : public npm::INpmResultConsumerV1, public npm::INpmResultProgressConsumerV1 {
  public:
     explicit RecordingResultConsumer(ResultConsumerTrace* trace) : trace_(trace) {}
+    int PublishProgress(const npm::NpmResultContextV1&, const npm::NpmResultProgressV1& progress) override {
+        if (trace_->progress_error) return trace_->progress_error;
+        trace_->progress.push_back(progress);
+        trace_->rows_at_progress.push_back(trace_->entities.size());
+        return 0;
+    }
     int Consume(const npm::NpmResultContextV1& context, const npm::NpmEntityDescriptorV1& entity,
                 const arrow::RecordBatch& rows) override {
         ++trace_->attempts;
@@ -14219,7 +14228,91 @@ void TestLargeResultDeliveryWithinDefaultBudget() {
     }
 }
 
+void TestSafeResultProgress() {
+    flowsql::CaptureSourceSetV2 sources;
+    flowsql::CaptureQueueIdentityV1 first, second_input;
+    first.source_id = 1;
+    second_input.source_id = 2;
+    sources.inputs = {first, second_input};
+    flowsql::CaptureProgressTrackerV2 tracker(sources);
+    flowsql::CaptureProgressV1 a, b;
+    a.source_id = 1;
+    b.source_id = 2;
+    a.fact_sequence = b.fact_sequence = 1;
+    a.capture_time_ns = 100;
+    b.capture_time_ns = 80;
+    a.source_idle_confirmed = b.source_idle_confirmed = true;
+    a.backlog = b.backlog = flowsql::CaptureBacklogV1::kEmpty;
+    assert(tracker.Observe({a}) == flowsql::CaptureProgressErrorV1::kNone && !tracker.CommonCandidateNs());
+    assert(tracker.Observe({b}) == flowsql::CaptureProgressErrorV1::kNone && tracker.CommonCandidateNs() == 80);
+    b.fact_sequence = 2;
+    b.backlog = flowsql::CaptureBacklogV1::kPresent;
+    assert(tracker.Observe({b}) == flowsql::CaptureProgressErrorV1::kNone && !tracker.CommonCandidateNs());
+    b.fact_sequence = 3;
+    b.backlog = flowsql::CaptureBacklogV1::kUnknown;
+    assert(tracker.Observe({b}) == flowsql::CaptureProgressErrorV1::kNone && !tracker.CommonCandidateNs());
+    b.fact_sequence = 4;
+    b.backlog = flowsql::CaptureBacklogV1::kEmpty;
+    b.capture_time_ns = 150;
+    assert(tracker.Observe({b}) == flowsql::CaptureProgressErrorV1::kNone && tracker.CommonCandidateNs() == 100);
+    constexpr int64_t second = npm::kNpmNanosecondsPerSecond;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        ResultConsumerTrace trace;
+        auto config = MakeRuntimeTaskConfig(npm::NpmRunMode::kRealtime);
+        config.analysis.result_mode = npm::NpmResultMode::kPeriodicSnapshot;
+        config.analysis.output_interval_ns = 30 * second;
+        config.analysis.out_of_order_tolerance_ns = 2 * second;
+        auto runtime = CreateConsumingRuntime(config, &querier, &trace);
+        std::shared_ptr<arrow::RecordBatch> output;
+        if (scenario != 1) {
+            auto packet = MakeIpv4TcpPacket("192.0.2.1", 40000, "192.0.2.2", 80, {}, kTcpAck, 100);
+            assert(runtime
+                       ->ProcessOfflineBatch(MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, second, 1)}),
+                                             &output)
+                       .error == npm::NpmBasicOfflineBatchError::kNone);
+            assert(trace.progress.empty());  // ProcessBlock cannot publish before ReleaseBlock/facts.
+        }
+        int64_t tick = 1;
+        auto drive = [&](bool known, bool backlog, bool idle) {
+            output.reset();
+            return runtime->DriveRealtimeMaintenance(
+                RealtimeMaintenanceInput(tick++, 1000, 32 * second, false, idle, known, backlog), &output);
+        };
+        assert(drive(false, false, true).error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+        assert(drive(true, true, true).error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+        assert(drive(true, false, false).error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+        assert(trace.progress.empty());
+        if (scenario == 2) trace.fail_at = trace.attempts + 1;
+        if (scenario == 3) trace.progress_error = EIO;
+        auto status = drive(true, false, true);
+        if (scenario >= 2) {
+            assert(status.error != npm::NpmBasicRealtimeMaintenanceError::kNone && trace.progress.empty());
+            assert(runtime->State() == npm::NpmEofFlushState::kFailed);
+        } else {
+            assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+            assert(trace.progress.size() == 1 && trace.progress[0].closed_before_ns == 30 * second);
+            assert(trace.rows_at_progress[0] == (scenario == 1 ? 0 : 1));
+            assert(drive(true, false, true).error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+            assert(trace.progress.size() == 1);
+            output.reset();
+            assert(runtime->FlushOffline(1000, &output).error == npm::NpmEofFlushError::kNone);
+            assert(trace.progress.size() == 1);  // EOF/partial tail does not invent a closed period.
+        }
+        output.reset();
+        runtime->Cancel();
+        assert(trace.progress.size() == (scenario < 2 ? 1 : 0));
+    }
+}
+
 int main(int argc, char** argv) {
+    if (argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--progress-only")) {
+        TestSafeResultProgress();
+        if (argc == 2) return 0;
+    }
     if (argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--review-fixes-only")) {
         TestOfflineDeadlinesBeforePacketAdmission();
         TestOfflineIcmpDeadlinesBeforeReply();

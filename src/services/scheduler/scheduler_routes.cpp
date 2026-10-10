@@ -1,6 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
+#include <framework/interfaces/iblock_transform_result_output.h>
 
+#include <framework/interfaces/iblock_transform_dataframe_input.h>
 #include "scheduler_plugin.h"
 
 #include <rapidjson/document.h>
@@ -40,6 +42,7 @@
 #include "framework/interfaces/iblock_stream_manager.h"
 #include "framework/interfaces/iblock_stream_operator.h"
 #include "framework/interfaces/iblock_stream_reader.h"
+#include "framework/interfaces/iblock_transform_source_config.h"
 #include "framework/interfaces/ibridge.h"
 #include "framework/interfaces/ibuiltin_registry.h"
 #include "framework/interfaces/ichannel.h"
@@ -64,34 +67,27 @@ static std::shared_ptr<IChannel> MakeNonOwningChannelHolder(IChannel* ch) {
     return std::shared_ptr<IChannel>(ch, [](IChannel*) {});
 }
 
-static std::shared_ptr<IBlockStreamChannel> HoldExclusiveBlockReader(
-    IBlockStreamReaderFactoryV1* provider,
-    IBlockStreamChannel* reader) {
-    return std::shared_ptr<IBlockStreamChannel>(
-        reader, [provider](IBlockStreamChannel* value) {
-            try {
-                provider->ReleaseReader(value);
-            } catch (...) {
-                LOG_ERROR("IBlockStreamReaderFactoryV1::ReleaseReader threw");
-            }
-        });
+static std::shared_ptr<IBlockStreamChannel> HoldExclusiveBlockReader(IBlockStreamReaderFactoryV1* provider,
+                                                                     IBlockStreamChannel* reader) {
+    return std::shared_ptr<IBlockStreamChannel>(reader, [provider](IBlockStreamChannel* value) {
+        try {
+            provider->ReleaseReader(value);
+        } catch (...) {
+            LOG_ERROR("IBlockStreamReaderFactoryV1::ReleaseReader threw");
+        }
+    });
 }
 
-static int CreateExclusiveBlockReader(IQuerier* querier,
-                                      const std::string& task_id,
-                                      IBlockStreamChannel* legacy_source,
+static int CreateExclusiveBlockReader(IQuerier* querier, const std::string& task_id, IBlockStreamChannel* legacy_source,
                                       const std::string& pushed_filter_plan_json,
-                                      std::shared_ptr<IBlockStreamChannel>* reader_out,
-                                      std::string* error) {
-    if (!querier || !legacy_source || pushed_filter_plan_json.empty() ||
-        !reader_out || !error) {
+                                      std::shared_ptr<IBlockStreamChannel>* reader_out, std::string* error) {
+    if (!querier || !legacy_source || pushed_filter_plan_json.empty() || !reader_out || !error) {
         return EINVAL;
     }
     reader_out->reset();
     error->clear();
 
-    const std::string source_category =
-        legacy_source->Category() ? legacy_source->Category() : "";
+    const std::string source_category = legacy_source->Category() ? legacy_source->Category() : "";
     const std::string source_name = legacy_source->Name() ? legacy_source->Name() : "";
     BlockStreamReaderConfigV1 config;
     config.task_id = task_id.c_str();
@@ -102,63 +98,59 @@ static int CreateExclusiveBlockReader(IQuerier* querier,
     std::vector<std::shared_ptr<IBlockStreamChannel>> matches;
     int route_error = 0;
     try {
-        const int traverse_rc = querier->Traverse(
-            IID_BLOCK_STREAM_READER_FACTORY_V1, [&](void* value) -> int {
-                auto* provider = static_cast<IBlockStreamReaderFactoryV1*>(value);
-                if (!provider) return 0;
+        const int traverse_rc = querier->Traverse(IID_BLOCK_STREAM_READER_FACTORY_V1, [&](void* value) -> int {
+            auto* provider = static_cast<IBlockStreamReaderFactoryV1*>(value);
+            if (!provider) return 0;
 
-                IBlockStreamChannel* reader = nullptr;
-                int create_rc = 0;
-                try {
-                    create_rc = provider->CreateReader(config, &reader);
-                } catch (const std::exception& ex) {
-                    if (reader) {
-                        HoldExclusiveBlockReader(provider, reader).reset();
-                    }
-                    *error = std::string("block stream reader factory threw: ") + ex.what();
-                    route_error = EFAULT;
-                    return -1;
-                } catch (...) {
-                    if (reader) {
-                        HoldExclusiveBlockReader(provider, reader).reset();
-                    }
-                    *error = "block stream reader factory threw an unknown exception";
-                    route_error = EFAULT;
-                    return -1;
+            IBlockStreamChannel* reader = nullptr;
+            int create_rc = 0;
+            try {
+                create_rc = provider->CreateReader(config, &reader);
+            } catch (const std::exception& ex) {
+                if (reader) {
+                    HoldExclusiveBlockReader(provider, reader).reset();
                 }
+                *error = std::string("block stream reader factory threw: ") + ex.what();
+                route_error = EFAULT;
+                return -1;
+            } catch (...) {
+                if (reader) {
+                    HoldExclusiveBlockReader(provider, reader).reset();
+                }
+                *error = "block stream reader factory threw an unknown exception";
+                route_error = EFAULT;
+                return -1;
+            }
 
-                if (create_rc == ENOTSUP && !reader) return 0;
-                if (create_rc != 0 || !reader) {
-                    if (reader) {
-                        HoldExclusiveBlockReader(provider, reader).reset();
-                    }
-                    if (create_rc == 0) {
-                        *error = "block stream reader factory returned a null reader";
-                        route_error = EPROTO;
-                    } else if (create_rc == ENOTSUP) {
-                        *error = "block stream reader factory returned a reader with ENOTSUP";
-                        route_error = EPROTO;
-                    } else {
-                        *error = "block stream reader factory failed with code " +
-                                 std::to_string(create_rc);
-                        route_error = create_rc;
-                    }
-                    return -1;
+            if (create_rc == ENOTSUP && !reader) return 0;
+            if (create_rc != 0 || !reader) {
+                if (reader) {
+                    HoldExclusiveBlockReader(provider, reader).reset();
                 }
+                if (create_rc == 0) {
+                    *error = "block stream reader factory returned a null reader";
+                    route_error = EPROTO;
+                } else if (create_rc == ENOTSUP) {
+                    *error = "block stream reader factory returned a reader with ENOTSUP";
+                    route_error = EPROTO;
+                } else {
+                    *error = "block stream reader factory failed with code " + std::to_string(create_rc);
+                    route_error = create_rc;
+                }
+                return -1;
+            }
 
-                matches.push_back(HoldExclusiveBlockReader(provider, reader));
-                if (matches.size() > 1) {
-                    *error = "multiple block stream reader factories matched: " +
-                             source_category + "." + source_name;
-                    route_error = EEXIST;
-                    return -1;
-                }
-                return 0;
-            });
+            matches.push_back(HoldExclusiveBlockReader(provider, reader));
+            if (matches.size() > 1) {
+                *error = "multiple block stream reader factories matched: " + source_category + "." + source_name;
+                route_error = EEXIST;
+                return -1;
+            }
+            return 0;
+        });
         if (route_error != 0) return route_error;
         if (traverse_rc != 0) {
-            *error = "block stream reader factory traversal failed with code " +
-                     std::to_string(traverse_rc);
+            *error = "block stream reader factory traversal failed with code " + std::to_string(traverse_rc);
             return traverse_rc;
         }
     } catch (const std::exception& ex) {
@@ -174,8 +166,7 @@ static int CreateExclusiveBlockReader(IQuerier* querier,
     return 0;
 }
 
-size_t SchedulerPlugin::TraverseBlockFactories(
-    const std::function<int(IBlockStreamFactory*)>& visitor) const {
+size_t SchedulerPlugin::TraverseBlockFactories(const std::function<int(IBlockStreamFactory*)>& visitor) const {
     if (!querier_ || !visitor) return 0;
     size_t provider_count = 0;
     querier_->Traverse(IID_BLOCK_STREAM_FACTORY, [&](void* value) -> int {
@@ -187,8 +178,7 @@ size_t SchedulerPlugin::TraverseBlockFactories(
     return provider_count;
 }
 
-size_t SchedulerPlugin::TraverseBlockManagers(
-    const std::function<int(IBlockStreamManager*)>& visitor) const {
+size_t SchedulerPlugin::TraverseBlockManagers(const std::function<int(IBlockStreamManager*)>& visitor) const {
     if (!querier_ || !visitor) return 0;
     size_t provider_count = 0;
     querier_->Traverse(IID_BLOCK_STREAM_MANAGER, [&](void* value) -> int {
@@ -201,8 +191,7 @@ size_t SchedulerPlugin::TraverseBlockManagers(
 }
 
 SchedulerPlugin::BlockManagerRouteResult SchedulerPlugin::RouteBlockManagers(
-    const std::function<int(IBlockStreamManager*)>& operation,
-    bool ignore_not_found) const {
+    const std::function<int(IBlockStreamManager*)>& operation, bool ignore_not_found) const {
     BlockManagerRouteResult result;
     if (!operation) return result;
     result.provider_count = TraverseBlockManagers([&](IBlockStreamManager* manager) -> int {
@@ -223,18 +212,15 @@ SchedulerPlugin::BlockManagerRouteResult SchedulerPlugin::RouteBlockManagers(
     return result;
 }
 
-std::vector<IBlockStreamManager*> SchedulerPlugin::FindBlockManagerOwners(
-    const std::string& type,
-    const std::string& name) const {
+std::vector<IBlockStreamManager*> SchedulerPlugin::FindBlockManagerOwners(const std::string& type,
+                                                                          const std::string& name) const {
     std::vector<IBlockStreamManager*> owners;
     TraverseBlockManagers([&](IBlockStreamManager* manager) -> int {
         bool owns_channel = false;
-        manager->QueryChannels([&](const std::string& item_type,
-                                   const std::string& item_name,
-                                   const std::string&,
-                                   const std::string&) {
-            if (ToLowerAscii(item_type) == ToLowerAscii(type) && item_name == name) owns_channel = true;
-        });
+        manager->QueryChannels(
+            [&](const std::string& item_type, const std::string& item_name, const std::string&, const std::string&) {
+                if (ToLowerAscii(item_type) == ToLowerAscii(type) && item_name == name) owns_channel = true;
+            });
         if (owns_channel) owners.push_back(manager);
         return 0;
     });
@@ -254,39 +240,29 @@ static std::shared_ptr<IStreamChannel> MakeStreamOwner(IStreamChannel* stream_ch
 void SchedulerPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
     // 任务执行
     cb({"POST", "/scheduler/batch/execute",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
-            return HandleExecute(u, req, rsp);
-        }});
-    cb({"POST", "/scheduler/batch/submit",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+        [this](const std::string& u, const std::string& req, std::string& rsp) { return HandleExecute(u, req, rsp); }});
+    cb({"POST", "/scheduler/batch/submit", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleBatchSubmit(u, req, rsp);
         }});
-    cb({"POST", "/scheduler/batch/status",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/scheduler/batch/status", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleBatchStatus(u, req, rsp);
         }});
-    cb({"POST", "/scheduler/batch/stop",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/scheduler/batch/stop", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleBatchStop(u, req, rsp);
         }});
-    cb({"POST", "/scheduler/sql/classify",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/scheduler/sql/classify", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleSqlClassify(u, req, rsp);
         }});
-    cb({"POST", "/scheduler/stream/execute",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/scheduler/stream/execute", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleStreamExecute(u, req, rsp);
         }});
-    cb({"POST", "/scheduler/stream/stop",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/scheduler/stream/stop", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleStreamStop(u, req, rsp);
         }});
-    cb({"POST", "/scheduler/stream/status",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/scheduler/stream/status", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleStreamStatus(u, req, rsp);
         }});
-    cb({"POST", "/scheduler/stream/list",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/scheduler/stream/list", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleStreamList(u, req, rsp);
         }});
     cb({"POST", "/scheduler/runtime/graph/query",
@@ -294,38 +270,31 @@ void SchedulerPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
             return HandleRuntimeGraphQuery(u, req, rsp);
         }});
     // 流式通道查询（管理面最小字段）
-    cb({"POST", "/channels/stream/query",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/channels/stream/query", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleQueryStreamChannels(u, req, rsp);
         }});
     cb({"POST", "/channels/stream/definitions/query",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleQueryStreamChannelDefinitions(u, req, rsp);
         }});
-    cb({"POST", "/channels/stream/add",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/channels/stream/add", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleAddStreamChannel(u, req, rsp);
         }});
-    cb({"POST", "/channels/stream/modify",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/channels/stream/modify", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleModifyStreamChannel(u, req, rsp);
         }});
-    cb({"POST", "/channels/stream/reset",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/channels/stream/reset", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleResetStreamChannel(u, req, rsp);
         }});
-    cb({"POST", "/channels/stream/remove",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/channels/stream/remove", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleRemoveStreamChannel(u, req, rsp);
         }});
     // 内存通道查询
-    cb({"POST", "/channels/dataframe/query",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/channels/dataframe/query", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleGetChannels(u, req, rsp);
         }});
     // Python 算子刷新
-    cb({"POST", "/operators/python/refresh",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/operators/python/refresh", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleRefreshOperators(u, req, rsp);
         }});
 }
@@ -485,8 +454,9 @@ int32_t SchedulerPlugin::HandleBatchStatus(const std::string&, const std::string
         rsp = BuildErrorJson("batch runtime task not found: " + runtime_task_id);
         return error::NOT_FOUND;
     }
-    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    const int64_t now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
     batch_runtime_.SweepFinished(now_ms, stream_runtime_retention_s_, stream_runtime_max_count_);
 
     rapidjson::StringBuffer buf;
@@ -570,22 +540,15 @@ int32_t SchedulerPlugin::HandleBatchStop(const std::string&, const std::string& 
 }
 
 int32_t SchedulerPlugin::HandleStreamExecuteSingle(const rapidjson::Document& doc, std::string& rsp) {
-    if (doc.HasMember("group_mode") ||
-        doc.HasMember("dag") ||
-        doc.HasMember("sql") ||
-        doc.HasMember("sqls") ||
+    if (doc.HasMember("group_mode") || doc.HasMember("dag") || doc.HasMember("sql") || doc.HasMember("sqls") ||
         doc.HasMember("share_set_ready_timeout_s")) {
-        rsp = BuildExecutionErrorJson(
-            "single execution accepts only sql_text and timeout_s",
-            ErrorCodeId::kStreamGroupSqlTextInvalid,
-            ErrorStageId::kRequest);
+        rsp = BuildExecutionErrorJson("single execution accepts only sql_text and timeout_s",
+                                      ErrorCodeId::kStreamGroupSqlTextInvalid, ErrorStageId::kRequest);
         return error::BAD_REQUEST;
     }
     if (!doc.HasMember("sql_text") || !doc["sql_text"].IsString()) {
-        rsp = BuildExecutionErrorJson(
-            "invalid request, expected {\"sql_text\":\"...\"}",
-            ErrorCodeId::kStreamGroupSqlTextInvalid,
-            ErrorStageId::kRequest);
+        rsp = BuildExecutionErrorJson("invalid request, expected {\"sql_text\":\"...\"}",
+                                      ErrorCodeId::kStreamGroupSqlTextInvalid, ErrorStageId::kRequest);
         return error::BAD_REQUEST;
     }
     std::vector<std::string> sqls;
@@ -595,38 +558,28 @@ int32_t SchedulerPlugin::HandleStreamExecuteSingle(const rapidjson::Document& do
         if (!split_err.message.empty()) {
             err += ": " + split_err.message;
         }
-        rsp = BuildExecutionErrorWithSqlIndexJson(
-            err,
-            ErrorCodeId::kStreamGroupSqlTextInvalid,
-            ErrorStageId::kRequest,
-            split_err.statement_index);
+        rsp = BuildExecutionErrorWithSqlIndexJson(err, ErrorCodeId::kStreamGroupSqlTextInvalid, ErrorStageId::kRequest,
+                                                  split_err.statement_index);
         return error::BAD_REQUEST;
     }
     if (sqls.size() != 1) {
-        rsp = BuildExecutionErrorJson(
-            "single execution requires exactly one SQL statement",
-            ErrorCodeId::kStreamGroupSqlTextInvalid,
-            ErrorStageId::kRequest);
+        rsp = BuildExecutionErrorJson("single execution requires exactly one SQL statement",
+                                      ErrorCodeId::kStreamGroupSqlTextInvalid, ErrorStageId::kRequest);
         return error::BAD_REQUEST;
     }
 
     SqlParser parser;
     SqlStatement stmt = parser.Parse(sqls.front());
     if (!stmt.error.empty()) {
-        rsp = BuildExecutionErrorJson(
-            stmt.error,
-            ErrorCodeId::kStreamGroupSqlTextInvalid,
-            ErrorStageId::kParse);
+        rsp = BuildExecutionErrorJson(stmt.error, ErrorCodeId::kStreamGroupSqlTextInvalid, ErrorStageId::kParse);
         return error::BAD_REQUEST;
     }
     if (stmt.sources.empty() && !stmt.source.empty()) {
         stmt.sources.push_back(stmt.source);
     }
     if (stmt.sources.empty()) {
-        rsp = BuildExecutionErrorJson(
-            "source channel not found",
-            ErrorCodeId::kStreamGroupSqlTextInvalid,
-            ErrorStageId::kParse);
+        rsp = BuildExecutionErrorJson("source channel not found", ErrorCodeId::kStreamGroupSqlTextInvalid,
+                                      ErrorStageId::kParse);
         return error::BAD_REQUEST;
     }
     return ExecuteStreamTask(stmt, rsp);
@@ -636,27 +589,21 @@ int32_t SchedulerPlugin::HandleStreamExecute(const std::string&, const std::stri
     rapidjson::Document doc;
     doc.Parse(req_body.c_str());
     if (doc.HasParseError() || !doc.IsObject()) {
-        rsp = BuildExecutionErrorJson(
-            "invalid request body",
-            ErrorCodeId::kStreamGroupSqlTextInvalid,
-            ErrorStageId::kRequest);
+        rsp = BuildExecutionErrorJson("invalid request body", ErrorCodeId::kStreamGroupSqlTextInvalid,
+                                      ErrorStageId::kRequest);
         return error::BAD_REQUEST;
     }
     if (doc.HasMember("task_id")) {
-        rsp = BuildExecutionErrorJson(
-            "external task_id is not allowed",
-            ErrorCodeId::kStreamGroupSqlTextInvalid,
-            ErrorStageId::kRequest);
+        rsp = BuildExecutionErrorJson("external task_id is not allowed", ErrorCodeId::kStreamGroupSqlTextInvalid,
+                                      ErrorStageId::kRequest);
         return error::BAD_REQUEST;
     }
 
     std::string execution_kind = "single";
     if (doc.HasMember("execution_kind")) {
         if (!doc["execution_kind"].IsString()) {
-            rsp = BuildExecutionErrorJson(
-                "execution_kind must be string",
-                ErrorCodeId::kStreamGroupSqlTextInvalid,
-                ErrorStageId::kRequest);
+            rsp = BuildExecutionErrorJson("execution_kind must be string", ErrorCodeId::kStreamGroupSqlTextInvalid,
+                                          ErrorStageId::kRequest);
             return error::BAD_REQUEST;
         }
         execution_kind = ToLowerAscii(doc["execution_kind"].GetString());
@@ -669,10 +616,8 @@ int32_t SchedulerPlugin::HandleStreamExecute(const std::string&, const std::stri
         return HandleStreamExecuteGroup(doc, rsp);
     }
 
-    rsp = BuildExecutionErrorJson(
-        "unsupported execution_kind: " + execution_kind,
-        ErrorCodeId::kStreamGroupSqlTextInvalid,
-        ErrorStageId::kRequest);
+    rsp = BuildExecutionErrorJson("unsupported execution_kind: " + execution_kind,
+                                  ErrorCodeId::kStreamGroupSqlTextInvalid, ErrorStageId::kRequest);
     return error::BAD_REQUEST;
 }
 
@@ -715,8 +660,7 @@ int32_t SchedulerPlugin::HandleStreamStop(const std::string&, const std::string&
         CleanupGroupRuntimeResources(task_id, &snapshot);
         rapidjson::StringBuffer buf;
         rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-        WriteGroupSnapshotJson(&w, snapshot, &share_sets,
-                               node_sources.empty() ? nullptr : &node_sources);
+        WriteGroupSnapshotJson(&w, snapshot, &share_sets, node_sources.empty() ? nullptr : &node_sources);
         rsp = buf.GetString();
         SweepRuntimeRetainedObjects();
         return error::OK;
@@ -786,8 +730,7 @@ int32_t SchedulerPlugin::HandleStreamStatus(const std::string&, const std::strin
         }
         rapidjson::StringBuffer buf;
         rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-        WriteGroupSnapshotJson(&w, snapshot, &share_sets,
-                               node_sources.empty() ? nullptr : &node_sources);
+        WriteGroupSnapshotJson(&w, snapshot, &share_sets, node_sources.empty() ? nullptr : &node_sources);
         rsp = buf.GetString();
         SweepRuntimeRetainedObjects();
         return error::OK;
@@ -979,24 +922,19 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         const std::string block_runtime_id = NextStreamTaskId();
         BlockSourceFilterPlan source_filter_plan;
         std::string source_plan_error;
-        const int source_plan_rc = BuildBlockSourceFilterPlan(
-            source_resolved.block_channels.front().get(), stmt,
-            &source_filter_plan, &source_plan_error);
+        const int source_plan_rc = BuildBlockSourceFilterPlan(source_resolved.block_channels.front().get(), stmt,
+                                                              &source_filter_plan, &source_plan_error);
         if (source_plan_rc != 0) {
             rsp = BuildExecutionErrorJson(
-                source_plan_error.empty() ? "block source filter planning failed"
-                                          : source_plan_error,
-                source_plan_rc == EINVAL ? ErrorCodeId::kSqlTextInvalid
-                                         : ErrorCodeId::kOpExecFail,
+                source_plan_error.empty() ? "block source filter planning failed" : source_plan_error,
+                source_plan_rc == EINVAL ? ErrorCodeId::kSqlTextInvalid : ErrorCodeId::kOpExecFail,
                 ErrorStageId::kCapabilityCheck);
-            return source_plan_rc == EINVAL ? error::BAD_REQUEST
-                                            : error::INTERNAL_ERROR;
+            return source_plan_rc == EINVAL ? error::BAD_REQUEST : error::INTERNAL_ERROR;
         }
         std::string reader_error;
         const int reader_rc = CreateExclusiveBlockReader(
             querier_, block_runtime_id, source_resolved.block_channels.front().get(),
-            source_filter_plan.pushed_filter_plan_json,
-            &exclusive_block_reader, &reader_error);
+            source_filter_plan.pushed_filter_plan_json, &exclusive_block_reader, &reader_error);
         if (reader_rc == 0) {
             block_source_residual = std::move(source_filter_plan.exclusive_residual);
             source_resolved.block_channels.front() = exclusive_block_reader;
@@ -1005,35 +943,36 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             block_source_residual = std::move(source_filter_plan.shared_residual);
             std::string conflict_key;
             bool blocked_by_mutation = false;
-            const int lease_rc = TryAcquireStreamTaskLeases(block_runtime_id,
-                                                            source_resolved.source_keys,
-                                                            {},
-                                                            &conflict_key,
-                                                            &blocked_by_mutation);
+            const int lease_rc = TryAcquireStreamTaskLeases(block_runtime_id, source_resolved.source_keys, {},
+                                                            &conflict_key, &blocked_by_mutation);
             if (lease_rc != 0) {
                 rsp = BuildExecutionErrorJson(
                     blocked_by_mutation ? "block source is being modified: " + conflict_key
                                         : "block source is in use: " + conflict_key,
-                    blocked_by_mutation ? ErrorCodeId::kStreamChannelMutating
-                                        : ErrorCodeId::kStreamSourceInUse,
+                    blocked_by_mutation ? ErrorCodeId::kStreamChannelMutating : ErrorCodeId::kStreamSourceInUse,
                     ErrorStageId::kLease);
                 return error::CONFLICT;
             }
             block_lease_guard = std::unique_ptr<void, std::function<void(void*)>>(
                 reinterpret_cast<void*>(1),
-                [this, block_runtime_id](void*) {
-                    ReleaseStreamTaskLeases(block_runtime_id);
-                });
+                [this, block_runtime_id](void*) { ReleaseStreamTaskLeases(block_runtime_id); });
         } else {
-            rsp = BuildExecutionErrorJson(
-                reader_error.empty() ? "block stream reader factory failed"
-                                     : reader_error,
-                ErrorCodeId::kOpExecFail,
-                ErrorStageId::kCapabilityCheck);
+            rsp = BuildExecutionErrorJson(reader_error.empty() ? "block stream reader factory failed" : reader_error,
+                                          ErrorCodeId::kOpExecFail, ErrorStageId::kCapabilityCheck);
             return reader_rc == EEXIST ? error::CONFLICT : error::INTERNAL_ERROR;
         }
     }
-    if (source_resolved.has_block_source && !parsed_ops.empty()) {
+    std::string input_database_category, input_database_name, input_database_relation;
+    const bool database_block_candidate =
+        source_resolved.channels.size() == 1 &&
+        dynamic_cast<IDatabaseChannel*>(source_resolved.channels.front()) != nullptr &&
+        ParseDatabaseDestination(stmt.source, &input_database_category, &input_database_name, &input_database_relation);
+
+    const bool dataframe_block_candidate =
+        source_resolved.channels.size() == 1 &&
+        dynamic_cast<IDataFrameChannel*>(source_resolved.channels.front()) != nullptr;
+    if ((source_resolved.has_block_source || database_block_candidate || dataframe_block_candidate) &&
+        !parsed_ops.empty()) {
         std::vector<BlockTransformProviderRef> transform_providers;
         std::vector<CppOperatorCapabilityLeaseV1> transform_provider_leases;
         transform_providers.reserve(parsed_ops.size());
@@ -1047,31 +986,80 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                 op_ref.category, op_ref.name, &dynamic_lease, &transform_ambiguous, &transform_traverse_error);
             if (transform_traverse_error != 0) {
                 rsp = BuildExecutionErrorJson(
-                    "block transform operator discovery failed with code " +
-                        std::to_string(transform_traverse_error),
-                    ErrorCodeId::kOpExecFail,
-                    ErrorStageId::kCapabilityCheck);
+                    "block transform operator discovery failed with code " + std::to_string(transform_traverse_error),
+                    ErrorCodeId::kOpExecFail, ErrorStageId::kCapabilityCheck);
                 return error::INTERNAL_ERROR;
             }
             if (transform_ambiguous) {
-                rsp = BuildErrorJson("multiple block transform operators matched: " +
-                                     op_ref.category + "." + op_ref.name);
+                rsp = BuildErrorJson("multiple block transform operators matched: " + op_ref.category + "." +
+                                     op_ref.name);
                 return error::CONFLICT;
+            }
+            if (database_block_candidate && transform_provider.v1) transform_provider = {};
+            if (database_block_candidate && !input_database_relation.empty() &&
+                (!transform_provider.v2 ||
+                 !dynamic_cast<IBlockTransformSourceConfigProviderV1*>(transform_provider.v2)))
+                transform_provider = {};
+            if (dataframe_block_candidate) {
+                auto* capability = transform_provider.v2
+                                       ? dynamic_cast<IBlockTransformDataFrameInputProviderV1*>(transform_provider.v2)
+                                       : nullptr;
+                if (!capability || !capability->SupportsDataFrameInput()) transform_provider = {};
             }
             transform_providers.push_back(transform_provider);
             transform_provider_leases.push_back(std::move(dynamic_lease));
             if (transform_provider) ++transform_matches;
         }
         if (transform_matches != parsed_ops.size() &&
-            (transform_matches != 0 || parsed_ops.size() > 1)) {
+            (transform_matches != 0 || (source_resolved.has_block_source && parsed_ops.size() > 1))) {
             for (size_t i = 0; i < transform_providers.size(); ++i) {
                 if (transform_providers[i]) continue;
-                rsp = BuildErrorJson("block transform operator not found: " +
-                                     parsed_ops[i].category + "." + parsed_ops[i].name);
+                rsp = BuildErrorJson("block transform operator not found: " + parsed_ops[i].category + "." +
+                                     parsed_ops[i].name);
                 return error::NOT_FOUND;
             }
         }
         if (transform_matches == parsed_ops.size()) {
+            std::shared_ptr<IDataFrameChannel> dataframe_input_source;
+            if (dataframe_block_candidate) {
+                if (parsed_ops.size() != 1 || !transform_providers.front().v2 || !stmt.columns.empty() ||
+                    !stmt.stage_filters.empty()) {
+                    rsp = BuildErrorJson("DataFrame block input requires one V2 operator, SELECT *, and no WHERE");
+                    return error::BAD_REQUEST;
+                }
+                for (const auto& holder : source_resolved.channel_holders)
+                    if (holder.get() == source_resolved.channels.front())
+                        dataframe_input_source = std::dynamic_pointer_cast<IDataFrameChannel>(holder);
+                if (!dataframe_input_source || !dataframe_input_source->IsOpened()) {
+                    rsp = BuildErrorJson("DataFrame source lease unavailable");
+                    return error::UNAVAILABLE;
+                }
+            }
+            std::shared_ptr<IDatabaseChannel> database_input_source;
+            if (database_block_candidate) {
+                std::string category, name, relation;
+                if (parsed_ops.size() != 1 || !transform_providers.front().v2 || !stmt.columns.empty() ||
+                    !stmt.stage_filters.empty() ||
+                    !ParseDatabaseDestination(stmt.source, &category, &name, &relation)) {
+                    rsp = BuildErrorJson("database block input requires one V2 operator, SELECT *, and no WHERE");
+                    return error::BAD_REQUEST;
+                }
+                auto* leases = querier_ ? static_cast<IDatabaseChannelLeaseProviderV1*>(
+                                              querier_->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1))
+                                        : nullptr;
+                database_input_source = leases ? leases->AcquireChannel(category.c_str(), name.c_str()) : nullptr;
+                if (!database_input_source || !database_input_source->IsOpened() ||
+                    !database_input_source->IsConnected()) {
+                    rsp = BuildErrorJson("database source lease unavailable");
+                    return error::UNAVAILABLE;
+                }
+            }
+
+            auto* result_provider =
+                transform_providers.size() == 1 && transform_providers.front().v2
+                    ? dynamic_cast<IBlockTransformResultOutputProviderV1*>(transform_providers.front().v2)
+                    : nullptr;
+            const bool result_output = result_provider && result_provider->SupportsResultOutput();
             const bool managed_result = !stmt.dest.empty() && !IsDataframeRefName(stmt.dest);
             std::shared_ptr<IChannel> managed_channel;
             BlockTransformManagedSinkBindingV1 managed_binding;
@@ -1080,7 +1068,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             std::string db_relation;
             if (managed_result) {
                 if (!ParseDatabaseDestination(stmt.dest, &db_category, &db_name, &db_relation) ||
-                    !db_relation.empty() ||
+                    (!db_relation.empty() && !result_output) ||
                     (db_category != "sqlite" && db_category != "mysql" && db_category != "postgres" &&
                      db_category != "clickhouse")) {
                     rsp = BuildErrorJson("managed block transform requires a two-part database destination");
@@ -1120,9 +1108,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             }
 
             const bool named_result = !stmt.dest.empty() && !managed_result;
-            const std::string dataframe_name = named_result
-                                                   ? DataframeNamePart(stmt.dest)
-                                                   : std::string("sink");
+            const std::string dataframe_name = named_result ? DataframeNamePart(stmt.dest) : std::string("sink");
             std::shared_ptr<DataFrameChannel> dataframe_sink;
             if (!managed_result)
                 dataframe_sink =
@@ -1139,9 +1125,12 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             int transform_rc = 0;
             try {
                 transform_rc = ExecuteBlockTransformPipeline(
-                    source_resolved.block_channels.front().get(), transform_providers, dataframe_sink.get(),
-                    managed_result ? &managed_binding : nullptr, stmt, block_source_residual, &transform_terminal,
-                    &rows, &managed_result_json, &transform_error);
+                    (database_block_candidate || dataframe_block_candidate)
+                        ? nullptr
+                        : source_resolved.block_channels.front().get(),
+                    transform_providers, dataframe_sink.get(), managed_result ? &managed_binding : nullptr, stmt,
+                    block_source_residual, &transform_terminal, &rows, &managed_result_json, &transform_error,
+                    std::move(database_input_source), std::move(dataframe_input_source));
             } catch (const std::exception& ex) {
                 transform_error = std::string("block transform execution threw: ") + ex.what();
                 transform_rc = EFAULT;
@@ -1150,20 +1139,16 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                 transform_rc = EFAULT;
             }
             if (transform_terminal == BlockExecutionTerminal::kFailed ||
-                (transform_terminal != BlockExecutionTerminal::kCancelled &&
-                 transform_rc != 0)) {
+                (transform_terminal != BlockExecutionTerminal::kCancelled && transform_rc != 0)) {
                 rsp = BuildExecutionErrorJson(
-                    transform_error.empty()
-                        ? "block transform execution failed"
-                        : transform_error,
-                    transform_rc == EINVAL ? ErrorCodeId::kSqlTextInvalid
-                                           : ErrorCodeId::kOpExecFail,
-                    transform_rc == EINVAL ? ErrorStageId::kCapabilityCheck
-                                           : ErrorStageId::kExecute);
-                if (managed_result && !managed_result_json.empty()) {
+                    transform_error.empty() ? "block transform execution failed" : transform_error,
+                    transform_rc == EINVAL ? ErrorCodeId::kSqlTextInvalid : ErrorCodeId::kOpExecFail,
+                    transform_rc == EINVAL ? ErrorStageId::kCapabilityCheck : ErrorStageId::kExecute);
+                if (!managed_result_json.empty()) {
                     rapidjson::Document summary;
                     summary.Parse(managed_result_json.c_str());
-                    if (!summary.HasParseError() && summary.IsObject()) {
+                    if (!summary.HasParseError() && summary.IsObject() &&
+                        (managed_result || summary.HasMember("model_output") || summary.HasMember("results_output"))) {
                         rapidjson::Document failure;
                         failure.Parse(rsp.c_str());
                         if (!failure.HasParseError() && failure.IsObject()) {
@@ -1176,8 +1161,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                         }
                     }
                 }
-                return transform_rc == EINVAL ? error::BAD_REQUEST
-                                              : error::INTERNAL_ERROR;
+                return transform_rc == EINVAL ? error::BAD_REQUEST : error::INTERNAL_ERROR;
             }
 
             rapidjson::Document managed_summary;
@@ -1192,15 +1176,13 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                 rows = managed_summary["rows_written"].GetInt64();
             }
 
-            if (named_result) {
+            if (named_result && !result_output) {
                 if (ch_registry->Get(dataframe_name.c_str())) {
                     (void)ch_registry->Unregister(dataframe_name.c_str());
                 }
-                if (ch_registry->Register(
-                        dataframe_name.c_str(),
-                        std::static_pointer_cast<IChannel>(dataframe_sink)) != 0) {
-                    rsp = BuildErrorJson("failed to register dataframe channel: " +
-                                         dataframe_name);
+                if (ch_registry->Register(dataframe_name.c_str(), std::static_pointer_cast<IChannel>(dataframe_sink)) !=
+                    0) {
+                    rsp = BuildErrorJson("failed to register dataframe channel: " + dataframe_name);
                     return error::INTERNAL_ERROR;
                 }
             }
@@ -1232,72 +1214,88 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                 transform_writer.RawValue(managed_result_json.c_str(), managed_result_json.size(),
                                           rapidjson::kObjectType);
             }
+            if (!managed_result && !managed_result_json.empty()) {
+                rapidjson::Document summary;
+                summary.Parse(managed_result_json.c_str());
+                if (!summary.HasParseError() && summary.IsObject() &&
+                    (summary.HasMember("model_output") || summary.HasMember("results_output"))) {
+                    transform_writer.Key("result");
+                    transform_writer.RawValue(managed_result_json.c_str(), managed_result_json.size(),
+                                              rapidjson::kObjectType);
+                }
+            }
             if (!named_result && !managed_result) {
                 transform_writer.Key("data");
-                transform_writer.RawValue(
-                    result_json.c_str(), result_json.size(), rapidjson::kArrayType);
+                transform_writer.RawValue(result_json.c_str(), result_json.size(), rapidjson::kArrayType);
             }
             transform_writer.EndObject();
             rsp = transform_buf.GetString();
             return error::OK;
         }
 
-        if (parsed_ops.size() != 1) {
-            rsp = BuildErrorJson(
-                "block stream terminal operator path currently supports one operator");
-            return error::BAD_REQUEST;
-        }
+        // A database relation without the optional capability keeps the regular query path.
+        if (source_resolved.has_block_source || (database_block_candidate && input_database_relation.empty())) {
+            if (parsed_ops.size() != 1) {
+                rsp = BuildErrorJson("block stream terminal operator path currently supports one operator");
+                return error::BAD_REQUEST;
+            }
 
-        IBlockStreamOperator* block_op = FindBlockOperator(parsed_ops[0].category, parsed_ops[0].name);
-        if (!block_op) {
-            rsp = BuildErrorJson("block stream operator not found: " + parsed_ops[0].category + "." + parsed_ops[0].name);
-            return error::NOT_FOUND;
-        }
-        try {
-            const auto& params = !stmt.operator_with_params.empty() ? stmt.operator_with_params[0] : stmt.with_params;
-            for (const auto& kv : params) {
-                if (block_op->Configure(kv.first.c_str(), kv.second.c_str()) != 0) {
-                    rsp = BuildErrorJson("block stream operator configuration failed");
-                    return error::BAD_REQUEST;
+            IBlockStreamOperator* block_op = FindBlockOperator(parsed_ops[0].category, parsed_ops[0].name);
+            if (!block_op) {
+                rsp = BuildErrorJson("block stream operator not found: " + parsed_ops[0].category + "." +
+                                     parsed_ops[0].name);
+                return error::NOT_FOUND;
+            }
+            try {
+                const auto& params =
+                    !stmt.operator_with_params.empty() ? stmt.operator_with_params[0] : stmt.with_params;
+                for (const auto& kv : params) {
+                    if (block_op->Configure(kv.first.c_str(), kv.second.c_str()) != 0) {
+                        rsp = BuildErrorJson("block stream operator configuration failed");
+                        return error::BAD_REQUEST;
+                    }
                 }
-            }
-            if (block_op->Init("{}") != 0) {
-                rsp = BuildErrorJson("block stream operator initialization failed");
+                if (block_op->Init("{}") != 0) {
+                    rsp = BuildErrorJson("block stream operator initialization failed");
+                    return error::INTERNAL_ERROR;
+                }
+                int64_t rows = 0;
+                std::string block_error;
+                BlockExecutionTerminal block_terminal = BlockExecutionTerminal::kFailed;
+                const int block_rc = ExecuteBlockOperator(source_resolved.block_channels.front().get(), block_op,
+                                                          block_source_residual, &block_terminal, &rows, &block_error);
+                if (block_terminal == BlockExecutionTerminal::kFailed ||
+                    (block_terminal != BlockExecutionTerminal::kCancelled && block_rc != 0)) {
+                    rsp = BuildExecutionErrorJson(block_error.empty() ? "block stream execution failed" : block_error,
+                                                  ErrorCodeId::kOpExecFail, ErrorStageId::kExecute);
+                    return error::INTERNAL_ERROR;
+                }
+                const char* block_status = "completed";
+                if (block_terminal == BlockExecutionTerminal::kStopped) {
+                    block_status = "stopped";
+                } else if (block_terminal == BlockExecutionTerminal::kCancelled) {
+                    block_status = "cancelled";
+                }
+                rapidjson::StringBuffer block_buf;
+                rapidjson::Writer<rapidjson::StringBuffer> block_writer(block_buf);
+                block_writer.StartObject();
+                block_writer.Key("status");
+                block_writer.String(block_status);
+                block_writer.Key("rows");
+                block_writer.Int64(rows);
+                block_writer.Key("result_row_count");
+                block_writer.Int64(rows);
+                block_writer.EndObject();
+                rsp = block_buf.GetString();
+                return error::OK;
+            } catch (const std::exception& e) {
+                rsp = BuildExecutionErrorJson(e.what(), ErrorCodeId::kOpExecFail, ErrorStageId::kExecute);
+                return error::INTERNAL_ERROR;
+            } catch (...) {
+                rsp = BuildExecutionErrorJson("block stream execution exception", ErrorCodeId::kOpExecFail,
+                                              ErrorStageId::kExecute);
                 return error::INTERNAL_ERROR;
             }
-            int64_t rows = 0;
-            std::string block_error;
-            BlockExecutionTerminal block_terminal = BlockExecutionTerminal::kFailed;
-            const int block_rc = ExecuteBlockOperator(
-                source_resolved.block_channels.front().get(), block_op,
-                block_source_residual, &block_terminal, &rows, &block_error);
-            if (block_terminal == BlockExecutionTerminal::kFailed ||
-                (block_terminal != BlockExecutionTerminal::kCancelled && block_rc != 0)) {
-                rsp = BuildExecutionErrorJson(block_error.empty() ? "block stream execution failed" : block_error,
-                                              ErrorCodeId::kOpExecFail, ErrorStageId::kExecute);
-                return error::INTERNAL_ERROR;
-            }
-            const char* block_status = "completed";
-            if (block_terminal == BlockExecutionTerminal::kStopped) {
-                block_status = "stopped";
-            } else if (block_terminal == BlockExecutionTerminal::kCancelled) {
-                block_status = "cancelled";
-            }
-            rapidjson::StringBuffer block_buf;
-            rapidjson::Writer<rapidjson::StringBuffer> block_writer(block_buf);
-            block_writer.StartObject();
-            block_writer.Key("status"); block_writer.String(block_status);
-            block_writer.Key("rows"); block_writer.Int64(rows);
-            block_writer.Key("result_row_count"); block_writer.Int64(rows);
-            block_writer.EndObject();
-            rsp = block_buf.GetString();
-            return error::OK;
-        } catch (const std::exception& e) {
-            rsp = BuildExecutionErrorJson(e.what(), ErrorCodeId::kOpExecFail, ErrorStageId::kExecute);
-            return error::INTERNAL_ERROR;
-        } catch (...) {
-            rsp = BuildExecutionErrorJson("block stream execution exception", ErrorCodeId::kOpExecFail, ErrorStageId::kExecute);
-            return error::INTERNAL_ERROR;
         }
     }
     if (!parsed_ops.empty()) {
@@ -1330,8 +1328,8 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         if (!op_chain.empty()) {
             for (size_t i = 0; i < op_chain.size(); ++i) {
                 const auto& params = (i < stmt.operator_with_params.size())
-                    ? stmt.operator_with_params[i]
-                    : (i == 0 ? stmt.with_params : std::unordered_map<std::string, std::string>{});
+                                         ? stmt.operator_with_params[i]
+                                         : (i == 0 ? stmt.with_params : std::unordered_map<std::string, std::string>{});
                 for (const auto& kv : params) {
                     op_chain[i]->Configure(kv.first.c_str(), kv.second.c_str());
                 }
@@ -1346,7 +1344,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         if (!stmt.dest.empty()) {
             if (!IsQualifiedDestination(stmt.dest)) {
                 rsp = BuildErrorJson("invalid INTO destination: " + stmt.dest +
-                                    ", expected dataframe.<name> or <type>.<name>[.<table>]");
+                                     ", expected dataframe.<name> or <type>.<name>[.<table>]");
                 return error::BAD_REQUEST;
             }
             if (IsDataframeRefName(stmt.dest)) {
@@ -1401,8 +1399,8 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             }
             IChannel* source = input_channels[0];
             std::string source_type(source->Type());
-            rc = ExecuteTransfer(source, sink, source_type, sink_type, stmt,
-                                 block_source_residual, &affected_rows, &exec_error);
+            rc = ExecuteTransfer(source, sink, source_type, sink_type, stmt, block_source_residual, &affected_rows,
+                                 &exec_error);
         } else {
             rc = ExecuteWithOperatorChain(Span<IChannel*>(input_channels), sink, op_chain, sink_type, stmt,
                                           &affected_rows, &exec_error);
@@ -1457,12 +1455,17 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         rapidjson::StringBuffer buf;
         rapidjson::Writer<rapidjson::StringBuffer> w(buf);
         w.StartObject();
-        w.Key("status"); w.String("completed");
-        w.Key("rows"); w.Int64(row_count);
-        w.Key("result_row_count"); w.Int64(row_count);
-        w.Key("result_target"); w.String(stmt.dest.c_str());
+        w.Key("status");
+        w.String("completed");
+        w.Key("rows");
+        w.Int64(row_count);
+        w.Key("result_row_count");
+        w.Int64(row_count);
+        w.Key("result_target");
+        w.String(stmt.dest.c_str());
         if (!named_dataframe_result) {
-            w.Key("data"); w.RawValue(result_json.c_str(), result_json.size(), rapidjson::kArrayType);
+            w.Key("data");
+            w.RawValue(result_json.c_str(), result_json.size(), rapidjson::kArrayType);
         }
         w.EndObject();
         rsp = buf.GetString();
@@ -1492,10 +1495,14 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
     for (auto& [key, ch_ptr] : managed_snapshot) {
         auto* ch = ch_ptr.get();
         w.StartObject();
-        w.Key("category"); w.String(ch->Category());
-        w.Key("name"); w.String(ch->Name());
-        w.Key("type"); w.String(ch->Type());
-        w.Key("schema"); w.String(ch->Schema());
+        w.Key("category");
+        w.String(ch->Category());
+        w.Key("name");
+        w.String(ch->Name());
+        w.Key("type");
+        w.String(ch->Type());
+        w.Key("schema");
+        w.String(ch->Schema());
         w.EndObject();
     }
 
@@ -1504,10 +1511,14 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
         ch_registry->List([&w](const char* name, std::shared_ptr<IChannel> ch) {
             if (!name || !ch) return;
             w.StartObject();
-            w.Key("category"); w.String(ch->Category());
-            w.Key("name"); w.String(name);
-            w.Key("type"); w.String(ch->Type());
-            w.Key("schema"); w.String(ch->Schema());
+            w.Key("category");
+            w.String(ch->Category());
+            w.Key("name");
+            w.String(name);
+            w.Key("type");
+            w.String(ch->Type());
+            w.Key("schema");
+            w.String(ch->Schema());
             w.EndObject();
         });
     }
@@ -1517,10 +1528,14 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
         querier_->Traverse(IID_CHANNEL, [&w](void* p) -> int {
             auto* ch = static_cast<IChannel*>(p);
             w.StartObject();
-            w.Key("category"); w.String(ch->Category());
-            w.Key("name"); w.String(ch->Name());
-            w.Key("type"); w.String(ch->Type());
-            w.Key("schema"); w.String(ch->Schema());
+            w.Key("category");
+            w.String(ch->Category());
+            w.Key("name");
+            w.String(ch->Name());
+            w.Key("type");
+            w.String(ch->Type());
+            w.Key("schema");
+            w.String(ch->Schema());
             w.EndObject();
             return 0;
         });
@@ -1530,9 +1545,12 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
         if (factory) {
             factory->List([&w](const char* type, const char* name, const char* config_json) {
                 w.StartObject();
-                w.Key("category"); w.String(type);
-                w.Key("name"); w.String(name);
-                w.Key("type"); w.String(ChannelType::kDatabase);
+                w.Key("category");
+                w.String(type);
+                w.Key("name");
+                w.String(name);
+                w.Key("type");
+                w.String(ChannelType::kDatabase);
                 // 从 config_json 提取 database 字段作为 schema 展示
                 std::string db_label;
                 if (config_json) {
@@ -1546,7 +1564,8 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
                         }
                     }
                 }
-                w.Key("schema"); w.String(db_label.c_str());
+                w.Key("schema");
+                w.String(db_label.c_str());
                 w.EndObject();
             });
         }
@@ -1557,10 +1576,14 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
             stream_factory->List([&w](const char* type, const char* name, IStreamChannel* stream_ch) {
                 if (!stream_ch || !type || !name) return;
                 w.StartObject();
-                w.Key("category"); w.String(type);
-                w.Key("name"); w.String(name);
-                w.Key("type"); w.String(stream_ch->Type());
-                w.Key("schema"); w.String(stream_ch->Schema());
+                w.Key("category");
+                w.String(type);
+                w.Key("name");
+                w.String(name);
+                w.Key("type");
+                w.String(stream_ch->Type());
+                w.Key("schema");
+                w.String(stream_ch->Schema());
                 w.EndObject();
             });
         }
@@ -1569,10 +1592,14 @@ int32_t SchedulerPlugin::HandleGetChannels(const std::string&, const std::string
             factory->List([&w](const char* type, const char* name, IBlockStreamChannel* channel) {
                 if (!type || !name || !channel) return;
                 w.StartObject();
-                w.Key("category"); w.String(channel->Category());
-                w.Key("name"); w.String(channel->Name());
-                w.Key("type"); w.String(channel->Type());
-                w.Key("schema"); w.String(channel->Schema());
+                w.Key("category");
+                w.String(channel->Category());
+                w.Key("name");
+                w.String(channel->Name());
+                w.Key("type");
+                w.String(channel->Type());
+                w.Key("schema");
+                w.String(channel->Schema());
                 w.EndObject();
             });
             return 0;
@@ -1672,9 +1699,7 @@ int32_t SchedulerPlugin::HandleQueryStreamChannelDefinitions(const std::string&,
 }
 
 // --- HandleQueryStreamChannels ---
-int32_t SchedulerPlugin::HandleQueryStreamChannels(const std::string&,
-                                                   const std::string&,
-                                                   std::string& rsp) {
+int32_t SchedulerPlugin::HandleQueryStreamChannels(const std::string&, const std::string&, std::string& rsp) {
     SweepFinishedTaskLeases();
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
@@ -1685,10 +1710,8 @@ int32_t SchedulerPlugin::HandleQueryStreamChannels(const std::string&,
     auto* stream_manager = querier_ ? static_cast<IStreamManager*>(querier_->First(IID_STREAM_MANAGER)) : nullptr;
     auto* stream_factory = querier_ ? static_cast<IStreamFactory*>(querier_->First(IID_STREAM_FACTORY)) : nullptr;
     if (stream_manager) {
-        stream_manager->QueryChannels([this, stream_factory, &w](const std::string& type,
-                                                                 const std::string& name,
-                                                                 const std::string& option,
-                                                                 const std::string& status) {
+        stream_manager->QueryChannels([this, stream_factory, &w](const std::string& type, const std::string& name,
+                                                                 const std::string& option, const std::string& status) {
             const std::string key = MakeStreamChannelKey(type, name);
             uint32_t in_use_count = 0;
             {
@@ -1701,7 +1724,8 @@ int32_t SchedulerPlugin::HandleQueryStreamChannels(const std::string&,
 
             rapidjson::Document option_doc;
             std::string option_parse_err;
-            const bool option_ok = (ParseOptionObject(option, &option_doc, &option_parse_err) == 0 && option_doc.IsObject());
+            const bool option_ok =
+                (ParseOptionObject(option, &option_doc, &option_parse_err) == 0 && option_doc.IsObject());
 
             w.StartObject();
             w.Key("type");
@@ -1830,9 +1854,7 @@ int32_t SchedulerPlugin::HandleQueryStreamChannels(const std::string&,
     return error::OK;
 }
 
-int32_t SchedulerPlugin::HandleAddStreamChannel(const std::string&,
-                                                const std::string& req,
-                                                std::string& rsp) {
+int32_t SchedulerPlugin::HandleAddStreamChannel(const std::string&, const std::string& req, std::string& rsp) {
     auto* stream_manager = querier_ ? static_cast<IStreamManager*>(querier_->First(IID_STREAM_MANAGER)) : nullptr;
 
     rapidjson::Document doc;
@@ -1869,7 +1891,8 @@ int32_t SchedulerPlugin::HandleAddStreamChannel(const std::string&,
         options_obj = &(*cfg)["options"];
     }
     if (type.empty() || name.empty()) {
-        rsp = BuildErrorJson("invalid request, expected {\"type\":\"...\",\"name\":\"...\",\"role\":\"...\",\"options\":{...}}");
+        rsp = BuildErrorJson(
+            "invalid request, expected {\"type\":\"...\",\"name\":\"...\",\"role\":\"...\",\"options\":{...}}");
         return error::BAD_REQUEST;
     }
     std::string role = role_raw.empty() ? "both" : NormalizeStreamRole(role_raw);
@@ -1897,10 +1920,7 @@ int32_t SchedulerPlugin::HandleAddStreamChannel(const std::string&,
             option = "{}";
         }
         const auto route = RouteBlockManagers(
-            [&](IBlockStreamManager* manager) {
-                return manager->AddChannel(ToLowerAscii(type), name, option);
-            },
-            false);
+            [&](IBlockStreamManager* manager) { return manager->AddChannel(ToLowerAscii(type), name, option); }, false);
         if (route.conflict) {
             rsp = BuildErrorJson("multiple block stream managers accepted request: " + type + "." + name);
             return error::CONFLICT;
@@ -1970,9 +1990,7 @@ int32_t SchedulerPlugin::HandleAddStreamChannel(const std::string&,
     return error::OK;
 }
 
-int32_t SchedulerPlugin::HandleModifyStreamChannel(const std::string&,
-                                                   const std::string& req,
-                                                   std::string& rsp) {
+int32_t SchedulerPlugin::HandleModifyStreamChannel(const std::string&, const std::string& req, std::string& rsp) {
     auto* stream_manager = querier_ ? static_cast<IStreamManager*>(querier_->First(IID_STREAM_MANAGER)) : nullptr;
 
     rapidjson::Document doc;
@@ -2009,7 +2027,8 @@ int32_t SchedulerPlugin::HandleModifyStreamChannel(const std::string&,
         options_obj = &(*cfg)["options"];
     }
     if (type.empty() || name.empty()) {
-        rsp = BuildErrorJson("invalid request, expected {\"type\":\"...\",\"name\":\"...\",\"role\":\"...\",\"options\":{...}}");
+        rsp = BuildErrorJson(
+            "invalid request, expected {\"type\":\"...\",\"name\":\"...\",\"role\":\"...\",\"options\":{...}}");
         return error::BAD_REQUEST;
     }
     std::string role = role_raw.empty() ? "both" : NormalizeStreamRole(role_raw);
@@ -2052,15 +2071,12 @@ int32_t SchedulerPlugin::HandleModifyStreamChannel(const std::string&,
             std::string mutation_reason;
             const int mutation_rc = TryBeginStreamChannelMutation(key, &mutation_reason);
             if (mutation_rc != 0) {
-                rsp = BuildExecutionErrorJson(
-                    "block stream channel is in use: " + type + "." + name,
-                    ErrorCodeId::kStreamChannelInUse,
-                    ErrorStageId::kModify);
+                rsp = BuildExecutionErrorJson("block stream channel is in use: " + type + "." + name,
+                                              ErrorCodeId::kStreamChannelInUse, ErrorStageId::kModify);
                 return error::CONFLICT;
             }
             mutation_guard = std::unique_ptr<void, std::function<void(void*)>>(
-                reinterpret_cast<void*>(1),
-                [this, key](void*) { EndStreamChannelMutation(key); });
+                reinterpret_cast<void*>(1), [this, key](void*) { EndStreamChannelMutation(key); });
         }
         if (!owners.empty()) {
             const int rc = owners.front()->ModifyChannel(ToLowerAscii(type), name, option);
@@ -2075,9 +2091,7 @@ int32_t SchedulerPlugin::HandleModifyStreamChannel(const std::string&,
         }
         if (role == "source") {
             const auto route = RouteBlockManagers(
-                [&](IBlockStreamManager* manager) {
-                    return manager->ModifyChannel(ToLowerAscii(type), name, option);
-                },
+                [&](IBlockStreamManager* manager) { return manager->ModifyChannel(ToLowerAscii(type), name, option); },
                 true);
             if (route.conflict) {
                 rsp = BuildErrorJson("multiple block stream managers accepted request: " + type + "." + name);
@@ -2142,19 +2156,21 @@ int32_t SchedulerPlugin::HandleModifyStreamChannel(const std::string&,
     const int mutation_rc = TryBeginStreamChannelMutation(key, &mutation_reason);
     if (mutation_rc != 0) {
         if (mutation_reason == "source_in_use") {
-            rsp = BuildExecutionErrorJson("stream source is in use", ErrorCodeId::kStreamSourceInUse, ErrorStageId::kModify);
+            rsp = BuildExecutionErrorJson("stream source is in use", ErrorCodeId::kStreamSourceInUse,
+                                          ErrorStageId::kModify);
             return error::CONFLICT;
         }
         if (mutation_reason == "mutating") {
-            rsp = BuildExecutionErrorJson("stream channel is mutating", ErrorCodeId::kStreamChannelMutating, ErrorStageId::kModify);
+            rsp = BuildExecutionErrorJson("stream channel is mutating", ErrorCodeId::kStreamChannelMutating,
+                                          ErrorStageId::kModify);
             return error::CONFLICT;
         }
-        rsp = BuildExecutionErrorJson("stream channel is in use", ErrorCodeId::kStreamChannelInUse, ErrorStageId::kModify);
+        rsp = BuildExecutionErrorJson("stream channel is in use", ErrorCodeId::kStreamChannelInUse,
+                                      ErrorStageId::kModify);
         return error::CONFLICT;
     }
     auto mutation_guard = std::unique_ptr<void, std::function<void(void*)>>(
-        reinterpret_cast<void*>(1),
-        [this, key](void*) { EndStreamChannelMutation(key); });
+        reinterpret_cast<void*>(1), [this, key](void*) { EndStreamChannelMutation(key); });
 
     const int rc = stream_manager->ModifyChannel(ToLowerAscii(type), name, option);
     if (rc != 0) {
@@ -2166,9 +2182,7 @@ int32_t SchedulerPlugin::HandleModifyStreamChannel(const std::string&,
     return error::OK;
 }
 
-int32_t SchedulerPlugin::HandleResetStreamChannel(const std::string&,
-                                                  const std::string& req,
-                                                  std::string& rsp) {
+int32_t SchedulerPlugin::HandleResetStreamChannel(const std::string&, const std::string& req, std::string& rsp) {
     auto* stream_manager = querier_ ? static_cast<IStreamManager*>(querier_->First(IID_STREAM_MANAGER)) : nullptr;
     if (!stream_manager) {
         rsp = BuildErrorJson("stream manager unavailable");
@@ -2177,8 +2191,7 @@ int32_t SchedulerPlugin::HandleResetStreamChannel(const std::string&,
 
     rapidjson::Document doc;
     doc.Parse(req.c_str());
-    if (doc.HasParseError() || !doc.IsObject() ||
-        !doc.HasMember("type") || !doc["type"].IsString() ||
+    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("type") || !doc["type"].IsString() ||
         !doc.HasMember("name") || !doc["name"].IsString()) {
         rsp = BuildErrorJson("invalid request, expected {\"type\":\"...\",\"name\":\"...\"}");
         return error::BAD_REQUEST;
@@ -2194,27 +2207,26 @@ int32_t SchedulerPlugin::HandleResetStreamChannel(const std::string&,
     const int mutation_rc = TryBeginStreamChannelMutation(key, &mutation_reason);
     if (mutation_rc != 0) {
         if (mutation_reason == "source_in_use") {
-            rsp = BuildExecutionErrorJson("stream source is in use", ErrorCodeId::kStreamSourceInUse, ErrorStageId::kModify);
+            rsp = BuildExecutionErrorJson("stream source is in use", ErrorCodeId::kStreamSourceInUse,
+                                          ErrorStageId::kModify);
             return error::CONFLICT;
         }
         if (mutation_reason == "mutating") {
-            rsp = BuildExecutionErrorJson("stream channel is mutating", ErrorCodeId::kStreamChannelMutating, ErrorStageId::kModify);
+            rsp = BuildExecutionErrorJson("stream channel is mutating", ErrorCodeId::kStreamChannelMutating,
+                                          ErrorStageId::kModify);
             return error::CONFLICT;
         }
-        rsp = BuildExecutionErrorJson("stream channel is in use", ErrorCodeId::kStreamChannelInUse, ErrorStageId::kModify);
+        rsp = BuildExecutionErrorJson("stream channel is in use", ErrorCodeId::kStreamChannelInUse,
+                                      ErrorStageId::kModify);
         return error::CONFLICT;
     }
     auto mutation_guard = std::unique_ptr<void, std::function<void(void*)>>(
-        reinterpret_cast<void*>(1),
-        [this, key](void*) { EndStreamChannelMutation(key); });
+        reinterpret_cast<void*>(1), [this, key](void*) { EndStreamChannelMutation(key); });
 
     bool found = false;
     std::string current_option;
     stream_manager->QueryChannels(
-        [&](const std::string& item_type,
-            const std::string& item_name,
-            const std::string& option,
-            const std::string&) {
+        [&](const std::string& item_type, const std::string& item_name, const std::string& option, const std::string&) {
             if (found) return;
             if (ToLowerAscii(item_type) == type_l && item_name == name) {
                 found = true;
@@ -2237,15 +2249,12 @@ int32_t SchedulerPlugin::HandleResetStreamChannel(const std::string&,
     return error::OK;
 }
 
-int32_t SchedulerPlugin::HandleRemoveStreamChannel(const std::string&,
-                                                   const std::string& req,
-                                                   std::string& rsp) {
+int32_t SchedulerPlugin::HandleRemoveStreamChannel(const std::string&, const std::string& req, std::string& rsp) {
     auto* stream_manager = querier_ ? static_cast<IStreamManager*>(querier_->First(IID_STREAM_MANAGER)) : nullptr;
 
     rapidjson::Document doc;
     doc.Parse(req.c_str());
-    if (doc.HasParseError() || !doc.IsObject() ||
-        !doc.HasMember("type") || !doc["type"].IsString() ||
+    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("type") || !doc["type"].IsString() ||
         !doc.HasMember("name") || !doc["name"].IsString()) {
         rsp = BuildErrorJson("invalid request, expected {\"type\":\"...\",\"name\":\"...\"}");
         return error::BAD_REQUEST;
@@ -2267,15 +2276,12 @@ int32_t SchedulerPlugin::HandleRemoveStreamChannel(const std::string&,
             std::string mutation_reason;
             const int mutation_rc = TryBeginStreamChannelMutation(mutation_key, &mutation_reason);
             if (mutation_rc != 0) {
-                rsp = BuildExecutionErrorJson(
-                    "block stream channel is in use: " + type + "." + name,
-                    ErrorCodeId::kStreamChannelInUse,
-                    ErrorStageId::kRemove);
+                rsp = BuildExecutionErrorJson("block stream channel is in use: " + type + "." + name,
+                                              ErrorCodeId::kStreamChannelInUse, ErrorStageId::kRemove);
                 return error::CONFLICT;
             }
             mutation_guard = std::unique_ptr<void, std::function<void(void*)>>(
-                reinterpret_cast<void*>(1),
-                [this, mutation_key](void*) { EndStreamChannelMutation(mutation_key); });
+                reinterpret_cast<void*>(1), [this, mutation_key](void*) { EndStreamChannelMutation(mutation_key); });
         }
         if (!owners.empty()) {
             const int rc = owners.front()->RemoveChannel(ToLowerAscii(type), name);
@@ -2287,10 +2293,7 @@ int32_t SchedulerPlugin::HandleRemoveStreamChannel(const std::string&,
             return error::OK;
         }
         const auto route = RouteBlockManagers(
-            [&](IBlockStreamManager* manager) {
-                return manager->RemoveChannel(ToLowerAscii(type), name);
-            },
-            true);
+            [&](IBlockStreamManager* manager) { return manager->RemoveChannel(ToLowerAscii(type), name); }, true);
         if (route.conflict) {
             rsp = BuildErrorJson("multiple block stream managers accepted request: " + type + "." + name);
             return error::CONFLICT;
@@ -2320,19 +2323,21 @@ int32_t SchedulerPlugin::HandleRemoveStreamChannel(const std::string&,
     const int mutation_rc = TryBeginStreamChannelMutation(key, &mutation_reason);
     if (mutation_rc != 0) {
         if (mutation_reason == "source_in_use") {
-            rsp = BuildExecutionErrorJson("stream source is in use", ErrorCodeId::kStreamSourceInUse, ErrorStageId::kRemove);
+            rsp = BuildExecutionErrorJson("stream source is in use", ErrorCodeId::kStreamSourceInUse,
+                                          ErrorStageId::kRemove);
             return error::CONFLICT;
         }
         if (mutation_reason == "mutating") {
-            rsp = BuildExecutionErrorJson("stream channel is mutating", ErrorCodeId::kStreamChannelMutating, ErrorStageId::kRemove);
+            rsp = BuildExecutionErrorJson("stream channel is mutating", ErrorCodeId::kStreamChannelMutating,
+                                          ErrorStageId::kRemove);
             return error::CONFLICT;
         }
-        rsp = BuildExecutionErrorJson("stream channel is in use", ErrorCodeId::kStreamChannelInUse, ErrorStageId::kRemove);
+        rsp = BuildExecutionErrorJson("stream channel is in use", ErrorCodeId::kStreamChannelInUse,
+                                      ErrorStageId::kRemove);
         return error::CONFLICT;
     }
     auto mutation_guard = std::unique_ptr<void, std::function<void(void*)>>(
-        reinterpret_cast<void*>(1),
-        [this, key](void*) { EndStreamChannelMutation(key); });
+        reinterpret_cast<void*>(1), [this, key](void*) { EndStreamChannelMutation(key); });
 
     const int rc = stream_manager->RemoveChannel(ToLowerAscii(type), name);
     if (rc != 0) {

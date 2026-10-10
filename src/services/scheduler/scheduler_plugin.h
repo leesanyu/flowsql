@@ -18,6 +18,7 @@
 #include <common/span.h>
 #include <framework/interfaces/iblock_stream_channel.h>
 #include <framework/interfaces/iblock_stream_operator.h>
+#include <framework/interfaces/iblock_transform_database_input.h>
 #include <framework/interfaces/iblock_transform_operator.h>
 #include <framework/interfaces/ibridge.h>
 #include <framework/interfaces/icpp_operator_plugin_registry.h>
@@ -28,12 +29,12 @@
 
 #include <rapidjson/document.h>
 
-#include "stream_runtime.h"
 #include "scheduler_batch_runtime.h"
-#include "shared_source_hub.h"
-#include "stream_task_group.h"
-#include "stream_execution_plan.h"
 #include "scheduler_stream_group_internal.h"
+#include "shared_source_hub.h"
+#include "stream_execution_plan.h"
+#include "stream_runtime.h"
+#include "stream_task_group.h"
 
 namespace flowsql {
 
@@ -110,9 +111,7 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
     std::vector<std::pair<std::string, std::shared_ptr<IChannel>>> SnapshotManagedChannels();
     IChannel* FindChannel(const std::string& name);
     IChannel* FindChannel(const std::string& name, std::shared_ptr<IChannel>* owner_out);
-    IChannel* FindChannel(const std::string& name,
-                          std::shared_ptr<IChannel>* owner_out,
-                          bool* ambiguous_out);
+    IChannel* FindChannel(const std::string& name, std::shared_ptr<IChannel>* owner_out, bool* ambiguous_out);
     void RegisterChannel(const std::string& key, std::shared_ptr<IChannel> ch);
     size_t TraverseBlockFactories(const std::function<int(IBlockStreamFactory*)>& visitor) const;
     size_t TraverseBlockManagers(const std::function<int(IBlockStreamManager*)>& visitor) const;
@@ -124,12 +123,9 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
         int accepted_rc = 0;
         bool conflict = false;
     };
-    BlockManagerRouteResult RouteBlockManagers(
-        const std::function<int(IBlockStreamManager*)>& operation,
-        bool ignore_not_found) const;
-    std::vector<IBlockStreamManager*> FindBlockManagerOwners(
-        const std::string& type,
-        const std::string& name) const;
+    BlockManagerRouteResult RouteBlockManagers(const std::function<int(IBlockStreamManager*)>& operation,
+                                               bool ignore_not_found) const;
+    std::vector<IBlockStreamManager*> FindBlockManagerOwners(const std::string& type, const std::string& name) const;
 
     // 算子查找
     std::shared_ptr<IOperator> FindOperator(const std::string& category, const std::string& name);
@@ -141,12 +137,9 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
 
         explicit operator bool() const { return v1 || v2; }
     };
-    BlockTransformProviderRef FindBlockTransformOperator(
-        const std::string& category,
-        const std::string& name,
-        CppOperatorCapabilityLeaseV1* dynamic_lease,
-        bool* ambiguous,
-        int* traverse_error);
+    BlockTransformProviderRef FindBlockTransformOperator(const std::string& category, const std::string& name,
+                                                         CppOperatorCapabilityLeaseV1* dynamic_lease, bool* ambiguous,
+                                                         int* traverse_error);
     enum class BlockExecutionTerminal {
         kCompleted,
         kStopped,
@@ -158,104 +151,74 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
         std::shared_ptr<const BoundFilterExpr> exclusive_residual;
         std::shared_ptr<const BoundFilterExpr> shared_residual;
     };
-    int BuildBlockSourceFilterPlan(IBlockStreamChannel* source,
-                                   const SqlStatement& stmt,
-                                   BlockSourceFilterPlan* plan,
+    int BuildBlockSourceFilterPlan(IBlockStreamChannel* source, const SqlStatement& stmt, BlockSourceFilterPlan* plan,
                                    std::string* error);
-    int ExecuteBlockOperator(IBlockStreamChannel* source,
-                             IBlockStreamOperator* op,
+    int ExecuteBlockOperator(IBlockStreamChannel* source, IBlockStreamOperator* op,
                              const std::shared_ptr<const BoundFilterExpr>& source_residual,
-                             BlockExecutionTerminal* terminal,
-                             int64_t* rows_affected,
-                             std::string* error);
+                             BlockExecutionTerminal* terminal, int64_t* rows_affected, std::string* error);
     int ExecuteBlockTransformPipeline(IBlockStreamChannel* source,
                                       const std::vector<BlockTransformProviderRef>& providers, IDataFrameChannel* sink,
                                       const BlockTransformManagedSinkBindingV1* managed_sink, const SqlStatement& stmt,
                                       const std::shared_ptr<const BoundFilterExpr>& source_residual,
                                       BlockExecutionTerminal* terminal, int64_t* rows_affected,
-                                      std::string* managed_result_json, std::string* error);
+                                      std::string* managed_result_json, std::string* error,
+                                      std::shared_ptr<IDatabaseChannel> database_source = {},
+                                      std::shared_ptr<IDataFrameChannel> dataframe_source = {});
     int ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* source, BlockTransformProviderRef provider,
                                             IDataFrameChannel* sink,
                                             const BlockTransformManagedSinkBindingV1* managed_sink,
                                             const SqlStatement& stmt,
                                             const std::shared_ptr<const BoundFilterExpr>& source_residual,
                                             BlockExecutionTerminal* terminal, int64_t* rows_affected,
-                                            std::string* managed_result_json, std::string* error);
+                                            std::string* managed_result_json, std::string* error,
+                                            std::shared_ptr<IDatabaseChannel> database_source = {},
+                                            std::shared_ptr<IDataFrameChannel> dataframe_source = {});
 
     // 执行路径
-    int ExecuteTransfer(IChannel* source, IChannel* sink,
-                        const std::string& source_type, const std::string& sink_type,
+    int ExecuteTransfer(IChannel* source, IChannel* sink, const std::string& source_type, const std::string& sink_type,
                         const SqlStatement& stmt,
                         const std::shared_ptr<const BoundFilterExpr>& source_residual = nullptr,
-                        int64_t* rows_affected = nullptr,
-                        std::string* error = nullptr);
+                        int64_t* rows_affected = nullptr, std::string* error = nullptr);
 
-    int ExecuteWithOperator(IChannel* source, IChannel* sink, IOperator* op,
-                            const std::string& sink_type,
-                            const SqlStatement& stmt, int64_t* rows_affected = nullptr,
-                            std::string* error = nullptr);
+    int ExecuteWithOperator(IChannel* source, IChannel* sink, IOperator* op, const std::string& sink_type,
+                            const SqlStatement& stmt, int64_t* rows_affected = nullptr, std::string* error = nullptr);
     int ExecuteWithOperatorChain(Span<IChannel*> inputs, IChannel* sink, const std::vector<IOperator*>& ops,
-                                 const std::string& sink_type,
-                                 const SqlStatement& stmt, int64_t* rows_affected = nullptr,
-                                 std::string* error = nullptr);
+                                 const std::string& sink_type, const SqlStatement& stmt,
+                                 int64_t* rows_affected = nullptr, std::string* error = nullptr);
 
-    int32_t ExecuteStreamTask(const SqlStatement& stmt,
-                              std::string& rsp,
-                              const std::string& lease_owner_id = "",
+    int32_t ExecuteStreamTask(const SqlStatement& stmt, std::string& rsp, const std::string& lease_owner_id = "",
                               bool skip_lease_acquire = false);
-    int32_t BuildStreamExecutionPlan(const SqlStatement& stmt,
-                                     const std::string& lease_owner_id,
-                                     bool skip_lease_acquire,
-                                     StreamExecutionPlan* plan,
-                                     std::string* err_rsp);
+    int32_t BuildStreamExecutionPlan(const SqlStatement& stmt, const std::string& lease_owner_id,
+                                     bool skip_lease_acquire, StreamExecutionPlan* plan, std::string* err_rsp);
     int32_t ValidateStreamExecutionPlan(StreamExecutionPlan* plan, std::string* err_rsp);
-    int32_t AcquireStreamExecutionLease(StreamExecutionPlan* plan,
-                                        LeaseToken* lease_token,
-                                        std::string* err_rsp);
-    int32_t AcquireSharedSourceSubscription(StreamExecutionPlan* plan,
-                                            std::shared_ptr<IStreamChannel>* source_override,
+    int32_t AcquireStreamExecutionLease(StreamExecutionPlan* plan, LeaseToken* lease_token, std::string* err_rsp);
+    int32_t AcquireSharedSourceSubscription(StreamExecutionPlan* plan, std::shared_ptr<IStreamChannel>* source_override,
                                             std::string* err_rsp);
     int32_t HandleStreamExecuteSingle(const rapidjson::Document& doc, std::string& rsp);
     int32_t HandleStreamExecuteGroup(const rapidjson::Document& doc, std::string& rsp);
-    int32_t ParseStreamGroupExecuteRequest(const rapidjson::Document& doc,
-                                           StreamGroupExecuteRequest* out,
+    int32_t ParseStreamGroupExecuteRequest(const rapidjson::Document& doc, StreamGroupExecuteRequest* out,
                                            std::string* err_rsp);
-    int32_t BuildStreamGroupPlan(const StreamGroupExecuteRequest& req,
-                                 StreamGroupBuildArtifacts* out,
+    int32_t BuildStreamGroupPlan(const StreamGroupExecuteRequest& req, StreamGroupBuildArtifacts* out,
                                  std::string* err_rsp);
-    int32_t ValidateStreamGroupPlan(const StreamGroupBuildArtifacts& build,
-                                    std::string* err_rsp);
-    int32_t AcquireStreamGroupLeases(const std::string& runtime_task_id,
-                                     const StreamGroupBuildArtifacts& build,
+    int32_t ValidateStreamGroupPlan(const StreamGroupBuildArtifacts& build, std::string* err_rsp);
+    int32_t AcquireStreamGroupLeases(const std::string& runtime_task_id, const StreamGroupBuildArtifacts& build,
                                      std::string* err_rsp);
     int32_t PrepareStreamGroupRuntimeResources(const std::string& runtime_task_id,
-                                               const StreamGroupBuildArtifacts& build,
-                                               StreamGroupRuntimeArtifacts* out,
-                                               std::function<void()>* cleanup_local_resources,
-                                               std::string* err_rsp);
+                                               const StreamGroupBuildArtifacts& build, StreamGroupRuntimeArtifacts* out,
+                                               std::function<void()>* cleanup_local_resources, std::string* err_rsp);
     std::shared_ptr<StreamTaskGroup> BuildStreamGroupObject(
-        const std::string& runtime_task_id,
-        const StreamGroupExecuteRequest& req,
-        const StreamGroupBuildArtifacts& build,
-        const StreamGroupRuntimeArtifacts& runtime_build,
+        const std::string& runtime_task_id, const StreamGroupExecuteRequest& req,
+        const StreamGroupBuildArtifacts& build, const StreamGroupRuntimeArtifacts& runtime_build,
         std::shared_ptr<StreamGroupCallbackContext>* callback_ctx_out);
-    int32_t RegisterAndStartStreamGroup(const std::string& runtime_task_id,
-                                        const StreamGroupBuildArtifacts& build,
+    int32_t RegisterAndStartStreamGroup(const std::string& runtime_task_id, const StreamGroupBuildArtifacts& build,
                                         const StreamGroupRuntimeArtifacts& runtime_build,
-                                        const std::shared_ptr<StreamTaskGroup>& group,
-                                        int share_set_ready_timeout_s,
-                                        std::function<void()> cleanup_local_resources,
-                                        std::string* err_rsp);
-    int SubmitStreamGroupNodeRuntime(StreamGroupCallbackContext* ctx,
-                                     const std::string& node_id,
-                                     const std::string& sql,
-                                     std::string* node_runtime_task_id,
-                                     std::string* error_msg);
-    int QueryStreamGroupNodeRuntime(StreamGroupCallbackContext* ctx,
-                                    const std::string& node_runtime_task_id,
+                                        const std::shared_ptr<StreamTaskGroup>& group, int share_set_ready_timeout_s,
+                                        std::function<void()> cleanup_local_resources, std::string* err_rsp);
+    int SubmitStreamGroupNodeRuntime(StreamGroupCallbackContext* ctx, const std::string& node_id,
+                                     const std::string& sql, std::string* node_runtime_task_id, std::string* error_msg);
+    int QueryStreamGroupNodeRuntime(StreamGroupCallbackContext* ctx, const std::string& node_runtime_task_id,
                                     TaskSnapshot* snapshot_out);
-    void StopStreamGroupNodeRuntime(StreamGroupCallbackContext* ctx,
-                                    const std::string& node_runtime_task_id);
+    void StopStreamGroupNodeRuntime(StreamGroupCallbackContext* ctx, const std::string& node_runtime_task_id);
     void StopStreamGroupShareSetHubs(const std::string& group_runtime_task_id);
     int32_t ClassifySqlTaskKind(const std::string& sql_text, std::string* task_kind, std::string* err_rsp,
                                 bool* requires_async = nullptr);
@@ -277,9 +240,7 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
         std::string table_name;
     };
 
-    int32_t ResolveStreamSink(const SqlStatement& stmt,
-                              SinkBinding* binding,
-                              std::string* err_out);
+    int32_t ResolveStreamSink(const SqlStatement& stmt, SinkBinding* binding, std::string* err_out);
     struct SourceResolveResult {
         std::vector<IChannel*> channels;
         std::vector<std::shared_ptr<IChannel>> channel_holders;
@@ -292,29 +253,22 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
         bool has_non_stream_source = false;
         bool has_block_source = false;
     };
-    int32_t ResolveSourceBindings(const SqlStatement& stmt,
-                                  SourceResolveResult* out,
-                                  std::string* err_rsp);
+    int32_t ResolveSourceBindings(const SqlStatement& stmt, SourceResolveResult* out, std::string* err_rsp);
     std::string QueryStreamChannelRole(const std::string& type, const std::string& name);
-    int TryAcquireStreamTaskLeases(const std::string& runtime_task_id,
-                                   const std::vector<std::string>& source_keys,
-                                   const std::vector<std::string>& sink_keys,
-                                   std::string* conflict_key_out,
-                                   bool* blocked_by_mutation_out = nullptr,
-                                   const std::string& lease_owner_id = "",
+    int TryAcquireStreamTaskLeases(const std::string& runtime_task_id, const std::vector<std::string>& source_keys,
+                                   const std::vector<std::string>& sink_keys, std::string* conflict_key_out,
+                                   bool* blocked_by_mutation_out = nullptr, const std::string& lease_owner_id = "",
                                    const std::unordered_map<std::string, uint64_t>* expected_versions = nullptr,
                                    std::string* version_conflict_key_out = nullptr);
-    void CaptureStreamChannelVersionSnapshot(
-        const std::vector<std::string>& keys,
-        std::unordered_map<std::string, uint64_t>* snapshot_out);
+    void CaptureStreamChannelVersionSnapshot(const std::vector<std::string>& keys,
+                                             std::unordered_map<std::string, uint64_t>* snapshot_out);
     int TryBeginStreamChannelMutation(const std::string& key, std::string* reason_out);
     void EndStreamChannelMutation(const std::string& key);
     void ReleaseStreamTaskLeases(const std::string& runtime_task_id);
     void ReleaseRuntimeSubscriptions(const std::string& runtime_task_id);
     void PruneSharedHubs(bool force_stop = false);
     void SweepFinishedTaskLeases();
-    void MarkRuntimeTerminal(const std::string& runtime_task_id,
-                             const std::string& runtime_kind,
+    void MarkRuntimeTerminal(const std::string& runtime_task_id, const std::string& runtime_kind,
                              int64_t terminal_ms = 0);
     void TouchRuntimeAccess(const std::string& runtime_task_id, int64_t now_ms = 0);
     void SweepRuntimeRetainedObjects(int64_t now_ms = 0);

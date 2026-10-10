@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "channel_adapter.h"
 
@@ -12,8 +7,8 @@
 #include <arrow/compute/api.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
-#include <cstdio>
 #include <common/log.h>
+#include <cstdio>
 
 #include "dataframe.h"
 
@@ -31,16 +26,16 @@ static std::vector<Field> SchemaToFields(const std::shared_ptr<arrow::Schema>& s
     return fields;
 }
 
-int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query,
-                                     IDataFrameChannel* df_out, std::string* error) {
+int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query, IDataFrameChannel* df_out,
+                                    std::string* error) {
     if (!db || !df_out) return -1;
 
     IBatchReader* reader = nullptr;
     if (db->CreateReader(query, &reader) != 0 || !reader) {
         if (error) {
             const char* detail = db->GetLastError();
-            *error = (detail && detail[0]) ? detail
-                   : "CreateReader failed for query: " + std::string(query ? query : "");
+            *error =
+                (detail && detail[0]) ? detail : "CreateReader failed for query: " + std::string(query ? query : "");
         }
         return -1;
     }
@@ -61,7 +56,9 @@ int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query,
             return -1;
         }
 
-        auto arrow_buf = arrow::Buffer::Wrap(buf, static_cast<int64_t>(len));
+        // IBatchReader owns buf only until its next call or destruction. IPC arrays may
+        // borrow the stream bytes, so retain an owned copy before advancing the reader.
+        auto arrow_buf = arrow::Buffer::FromString(std::string(reinterpret_cast<const char*>(buf), len));
         auto input = std::make_shared<arrow::io::BufferReader>(arrow_buf);
         auto stream_result = arrow::ipc::RecordBatchStreamReader::Open(input);
         if (!stream_result.ok()) {
@@ -97,8 +94,7 @@ int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query,
     return df_out->Write(&result);
 }
 
-int64_t ChannelAdapter::WriteFromDataFrame(IDataFrameChannel* df_in,
-                                           IDatabaseChannel* db, const char* table,
+int64_t ChannelAdapter::WriteFromDataFrame(IDataFrameChannel* df_in, IDatabaseChannel* db, const char* table,
                                            std::string* error) {
     if (!df_in || !db || !table) return -1;
 
@@ -114,8 +110,7 @@ int64_t ChannelAdapter::WriteFromDataFrame(IDataFrameChannel* df_in,
     if (db->CreateWriter(table, &writer) != 0 || !writer) {
         if (error) {
             const char* detail = db->GetLastError();
-            *error = (detail && detail[0]) ? detail
-                   : "CreateWriter failed for table: " + std::string(table);
+            *error = (detail && detail[0]) ? detail : "CreateWriter failed for table: " + std::string(table);
         }
         return -1;
     }
@@ -139,7 +134,7 @@ int64_t ChannelAdapter::WriteFromDataFrame(IDataFrameChannel* df_in,
         writer->Release();
         return -1;
     }
-    ipc_writer->Close();
+    (void)ipc_writer->Close();
 
     auto buffer = sink_stream->Finish().ValueOrDie();
     if (writer->Write(buffer->data(), static_cast<size_t>(buffer->size())) != 0) {
@@ -154,8 +149,8 @@ int64_t ChannelAdapter::WriteFromDataFrame(IDataFrameChannel* df_in,
     writer->Close(&stats);
     writer->Release();
 
-    LOG_INFO("ChannelAdapter::WriteFromDataFrame: wrote %ld rows, %ld bytes in %ld ms",
-           stats.rows_written, stats.bytes_written, stats.elapsed_ms);
+    LOG_INFO("ChannelAdapter::WriteFromDataFrame: wrote %ld rows, %ld bytes in %ld ms", stats.rows_written,
+             stats.bytes_written, stats.elapsed_ms);
 
     // 返回写入的行数
     return stats.rows_written;

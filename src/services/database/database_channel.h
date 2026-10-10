@@ -4,22 +4,29 @@
 #ifndef _FLOWSQL_SERVICES_DATABASE_DATABASE_CHANNEL_H_
 #define _FLOWSQL_SERVICES_DATABASE_DATABASE_CHANNEL_H_
 
+#include <framework/interfaces/idatabase_atomic_target.h>
 #include <framework/interfaces/idatabase_channel.h>
+#include <framework/interfaces/idatabase_published_source.h>
+#include <framework/interfaces/idatabase_snapshot_source.h>
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <functional>
 
-#include "idb_driver.h"
 #include "db_session.h"
+#include "idb_driver.h"
 
 namespace flowsql {
 namespace database {
 
 // DatabaseChannel — 通用数据库通道实现
 // 持有 IDbDriver 弱引用和 Session 工厂，支持连接池复用
-class DatabaseChannel : public IDatabaseChannel, public IDatabasePreparedCommandV1 {
+class DatabaseChannel : public IDatabaseChannel,
+                        public IDatabasePreparedCommandV1,
+                        public IDatabaseSnapshotSourceV1,
+                        public IDatabasePublishedSourceV1,
+                        public IDatabaseAtomicTargetV1 {
  public:
     using SessionFactory = std::function<std::shared_ptr<IDbSession>()>;
 
@@ -48,16 +55,22 @@ class DatabaseChannel : public IDatabaseChannel, public IDatabasePreparedCommand
     // IDatabaseChannel 列式接口
     int CreateArrowReader(const char* query, IArrowReader** reader) override;
     int CreateArrowWriter(const char* table, IArrowWriter** writer) override;
-    int ExecuteQueryArrow(const char* query,
-                          std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) override;
-    int WriteArrowBatches(const char* table,
-                          const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) override;
+    int ExecuteQueryArrow(const char* query, std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) override;
+    int WriteArrowBatches(const char* table, const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) override;
 
     // IDatabaseChannel 通用接口
     int ExecuteSql(const char* sql) override;
     int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
     int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
                              size_t execution_count) override;
+
+    int CreateSnapshotSession(const DatabaseSnapshotOptionsV1& options,
+                              std::shared_ptr<IDatabaseSnapshotSessionV1>* output) override;
+    int CreatePublishedProgressReader(const DatabaseSnapshotOptionsV1& options,
+                                      std::shared_ptr<IDatabasePublishedProgressReaderV1>* output) override;
+
+    DatabaseAtomicStatusV1 AcquireAtomicSession(const DatabaseAtomicSessionOptionsV1& options,
+                                                std::shared_ptr<IDatabaseAtomicSessionV1>* output) override;
 
  private:
     std::string type_;

@@ -21,6 +21,7 @@
 #include <operators/npm_basic/modules/dns/npm_dns_contract.h>
 #include <operators/npm_basic/modules/http1/npm_http1_contract.h>
 #include <operators/npm_basic/npm_basic_result_consumer.h>
+#include <operators/npm_basic/npm_result_progress.h>
 #include <operators/npm_basic/output/npm_basic_result_encoder.h>
 #include <services/database/database_plugin.h>
 
@@ -77,6 +78,52 @@ class BoundedBudget final : public INpmTaskBudget {
     mutable std::mutex mutex_;
     NpmBudgetUsage usage_;
     uint64_t peak_pending_ = 0;
+};
+
+// Simulate a lost acknowledgement after the real commit. The writer must not retry or publish position 2.
+class LostPublicationAck final : public IDatabaseChannel, public IDatabasePreparedCommandV1 {
+ public:
+    explicit LostPublicationAck(IDatabaseChannel* channel)
+        : channel_(channel), commands_(dynamic_cast<IDatabasePreparedCommandV1*>(channel)) {}
+    const char* Category() override { return channel_->Category(); }
+    const char* Name() override { return channel_->Name(); }
+    const char* Type() override { return channel_->Type(); }
+    const char* Schema() override { return channel_->Schema(); }
+    int Open() override { return 0; }
+    int Close() override { return 0; }
+    int Flush() override { return channel_->Flush(); }
+    int CreateWriter(const char* table, flowsql::IBatchWriter** out) override {
+        return channel_->CreateWriter(table, out);
+    }
+    int CreateArrowWriter(const char* table, flowsql::IArrowWriter** out) override {
+        return channel_->CreateArrowWriter(table, out);
+    }
+    int ExecuteQueryArrow(const char* sql, std::vector<std::shared_ptr<arrow::RecordBatch>>* out) override {
+        return channel_->ExecuteQueryArrow(sql, out);
+    }
+    int WriteArrowBatches(const char* table, const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) override {
+        return channel_->WriteArrowBatches(table, batches);
+    }
+    bool IsOpened() const override { return channel_->IsOpened(); }
+    bool IsConnected() override { return channel_->IsConnected(); }
+    const char* GetLastError() override { return "injected unknown publication commit"; }
+    int ExecuteSql(const char* sql) override { return channel_->ExecuteSql(sql); }
+    int CreateReader(const char* sql, flowsql::IBatchReader** out) override { return channel_->CreateReader(sql, out); }
+    int CreateArrowReader(const char* sql, flowsql::IArrowReader** out) override {
+        return channel_->CreateArrowReader(sql, out);
+    }
+    int ExecutePrepared(const char* sql, const flowsql::DatabaseParameterV1* parameters, size_t count) override {
+        const int rc = commands_->ExecutePrepared(sql, parameters, count);
+        return std::string(sql).find("INSERT INTO npm_result_progress_v1") == 0 && rc >= 0 ? -1 : rc;
+    }
+    int ExecutePreparedBatch(const char* sql, const flowsql::DatabaseParameterV1* parameters, size_t width,
+                             size_t count) override {
+        return commands_->ExecutePreparedBatch(sql, parameters, width, count);
+    }
+
+ private:
+    IDatabaseChannel* channel_;
+    IDatabasePreparedCommandV1* commands_;
 };
 
 class SqliteProbe final {
@@ -437,6 +484,61 @@ int main() {
     assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_history_v1 WHERE __npm_run_id='run-labeled'") == 1);
     assert(probe.Int64("SELECT COUNT(*) FROM sqlite_master WHERE name='npm_basic_history_v2'") == 0);
 
+    {
+        auto late = CreateConsumer(factory.get(), {"task-late", "run-late"}, {labeled_basic},
+                                   std::make_shared<BoundedBudget>());
+        auto* publisher = dynamic_cast<flowsql::npm::INpmResultProgressConsumerV1*>(late.get());
+        flowsql::npm::NpmBasicResult row;
+        row.session_id = 10001;
+        row.revision = 1;
+        row.protocol_status = flowsql::npm::NpmProtocolStatus::kUnknown;
+        row.period = flowsql::npm::NpmBasicPeriodStats{0, 30000000000LL, true, 1, 0, 1, 0, 1};
+        std::shared_ptr<arrow::RecordBatch> encoded;
+        assert(flowsql::npm::EncodeNpmBasicResults({row}, &encoded) == flowsql::npm::NpmBasicEncodeError::kNone);
+        assert(late->Consume({"task-late", "run-late"}, labeled_basic, *encoded) == 0);
+        flowsql::npm::NpmResultProgressV1 progress;
+        progress.period_ns = progress.closed_before_ns = 30000000000LL;
+        assert(publisher->PublishProgress({"task-late", "run-late"}, progress) == 0);
+        row.revision = 2;
+        assert(flowsql::npm::EncodeNpmBasicResults({row}, &encoded) == flowsql::npm::NpmBasicEncodeError::kNone);
+        assert(late->Consume({"task-late", "run-late"}, labeled_basic, *encoded) == EINVAL);
+        progress.closed_before_ns *= 2;
+        assert(publisher->PublishProgress({"task-late", "run-late"}, progress) == EPIPE);
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_v1_data WHERE __npm_run_id='run-late'") == 1);
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_result_progress_v1 WHERE run_id='run-late'") == 1);
+    }
+    {
+        auto failing = CreateConsumer(factory.get(), {"task-publish-fail", "run-publish-fail"}, {labeled_basic},
+                                      std::make_shared<BoundedBudget>());
+        probe.Execute(
+            "CREATE TRIGGER fail_progress BEFORE INSERT ON npm_result_progress_v1 "
+            "WHEN NEW.run_id='run-publish-fail' BEGIN SELECT RAISE(ABORT,'publication failed'); END");
+        auto* publisher = dynamic_cast<flowsql::npm::INpmResultProgressConsumerV1*>(failing.get());
+        flowsql::npm::NpmResultProgressV1 progress;
+        progress.period_ns = progress.closed_before_ns = 30000000000LL;
+        assert(publisher->PublishProgress({"task-publish-fail", "run-publish-fail"}, progress) == EIO);
+        assert(publisher->PublishProgress({"task-publish-fail", "run-publish-fail"}, progress) == EPIPE);
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_result_progress_v1 WHERE run_id='run-publish-fail'") == 0);
+        probe.Execute("DROP TRIGGER fail_progress");
+    }
+
+    {
+        LostPublicationAck lost_ack(channel.get());
+        auto lost_factory = flowsql::npm::MakeNpmDatabaseResultConsumerFactory(&lost_ack, "netadapter.ack");
+        auto unknown = CreateConsumer(lost_factory.get(), {"task-publication-unknown", "run-publication-unknown"},
+                                      {labeled_basic}, std::make_shared<BoundedBudget>());
+        auto* publisher = dynamic_cast<flowsql::npm::INpmResultProgressConsumerV1*>(unknown.get());
+        flowsql::npm::NpmResultProgressV1 progress;
+        progress.period_ns = progress.closed_before_ns = 30000000000LL;
+        assert(publisher->PublishProgress({"task-publication-unknown", "run-publication-unknown"}, progress) == EIO);
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_result_progress_v1 WHERE run_id='run-publication-unknown'") == 1);
+        progress.closed_before_ns *= 2;
+        assert(publisher->PublishProgress({"task-publication-unknown", "run-publication-unknown"}, progress) == EPIPE);
+        assert(unknown->Finish() == EPIPE);
+        assert(probe.Int64("SELECT MAX(position) FROM npm_result_progress_v1 WHERE run_id='run-publication-unknown'") ==
+               1);
+    }
+
     for (int labels : {0, 1, 2}) {
         const std::string run = "run-periodic-" + std::to_string(labels);
         auto periodic =
@@ -465,6 +567,21 @@ int main() {
         assert(flowsql::npm::EncodeNpmBasicResults(records, &encoded, nullptr, labels != 0) ==
                flowsql::npm::NpmBasicEncodeError::kNone);
         assert(periodic->Consume({"task-periodic", run}, labeled_basic, *encoded) == 0);
+        auto* publisher = dynamic_cast<flowsql::npm::INpmResultProgressConsumerV1*>(periodic.get());
+        assert(publisher);
+        flowsql::npm::NpmResultProgressV1 progress;
+        progress.period_ns = 30000000000LL;
+        progress.closed_before_ns = 60000000000LL;
+        assert(publisher->PublishProgress({"task-periodic", run}, progress) == 0);
+        assert(publisher->PublishProgress({"task-periodic", run}, progress) == 0);  // idempotent boundary
+        assert(publisher->PublishProgress({"other-task", run}, progress) == EINVAL);
+        progress.closed_before_ns = 90000000000LL;
+        assert(publisher->PublishProgress({"task-periodic", run}, progress) == 0);  // no data progression
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_result_progress_v1 WHERE run_id='" + run + "'") == 2);
+        assert(probe.Int64("SELECT MAX(position) FROM npm_result_progress_v1 WHERE run_id='" + run + "'") == 2);
+        assert(probe.Text("SELECT epoch FROM npm_result_progress_v1 WHERE run_id='" + run + "' AND position=2") == run);
+        assert(probe.Int64("SELECT closed_before_ns FROM npm_result_progress_v1 WHERE run_id='" + run +
+                           "' AND position=2") == 90000000000LL);
         assert(periodic->Finish() == 0);
         const std::string where = " WHERE __npm_run_id='" + run + "'";
         assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_history_v1" + where) == 3);

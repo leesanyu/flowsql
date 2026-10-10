@@ -491,6 +491,11 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(BlockTransformPipe
         return BlockTransformPipelineError::kInvalidArgument;
     }
     auto* capture_reader = dynamic_cast<ICaptureBlockStreamReaderV2*>(config_.source);
+    auto* input_progress_reader = dynamic_cast<IBlockStreamInputProgressV1*>(config_.source);
+    if (input_progress_reader && !config_.input_progress_task) {
+        if (error) *error = "input progress consumer missing";
+        return BlockTransformPipelineError::kInvalidArgument;
+    }
     if (config_.capture_fact_task && !capture_reader) {
         if (error) *error = "capture fact task requires a capture reader";
         return BlockTransformPipelineError::kInvalidArgument;
@@ -502,7 +507,13 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(BlockTransformPipe
             if (control) control->BindWake({});
         }
     } wake_lease{config_.control};
-    if (config_.control) config_.control->BindWake([this]() { config_.source->Cancel(); });
+    if (config_.control)
+        config_.control->BindWake([this]() {
+            if (config_.control->cancel_requested.load())
+                Cancel();
+            else
+                config_.source->Cancel();
+        });
     const auto cancelled = [&]() {
         return cancel_requested_.load() || (config_.control && config_.control->cancel_requested.load());
     };
@@ -527,10 +538,12 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(BlockTransformPipe
         return std::string("transform did not provide an error message");
     };
     auto fail = [&](BlockTransformPipelineError code, std::string message) {
-        result->terminal = BlockTransformPipelineTerminal::kFailed;
+        const bool was_cancelled = cancelled() && code != BlockTransformPipelineError::kTransformContractViolation;
+        result->terminal =
+            was_cancelled ? BlockTransformPipelineTerminal::kCancelled : BlockTransformPipelineTerminal::kFailed;
         if (error) *error = std::move(message);
         Cancel();
-        return code;
+        return was_cancelled ? BlockTransformPipelineError::kCancelled : code;
     };
 
     BlockFilterStage source_filter(config_.source_residual);
@@ -959,6 +972,16 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(BlockTransformPipe
         }
         if (block_error != BlockTransformPipelineError::kNone) {
             return fail(block_error, std::move(block_error_message));
+        }
+        if (input_progress_reader) {
+            BlockInputProgressV1 progress;
+            try {
+                if (input_progress_reader->ReadInputProgress(&progress) != 0 ||
+                    (!progress.datasets.empty() && config_.input_progress_task->AcceptInputProgress(progress) != 0))
+                    return fail(BlockTransformPipelineError::kTransformFailed, "input progress delivery failed");
+            } catch (...) {
+                return fail(BlockTransformPipelineError::kTransformFailed, "input progress delivery threw");
+            }
         }
         if (!capture_contract_error.empty()) {
             return fail(BlockTransformPipelineError::kSourcePollFailed, std::move(capture_contract_error));

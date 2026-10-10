@@ -7,14 +7,16 @@
 #include <sqlite3.h>
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
-#include <memory>
 
+#include "../atomic_target.h"
+#include "../capability_interfaces.h"
 #include "../connection_pool.h"
 #include "../db_session.h"
-#include "../capability_interfaces.h"
 #include "../relation_db_session.h"
+#include "../snapshot_read.h"
 
 namespace flowsql {
 namespace database {
@@ -34,7 +36,8 @@ class SqliteResultSet;
 // SqliteDriver — SQLite 数据库驱动
 // 使用 FULLMUTEX 模式保证多线程安全，WAL 模式提升并发读写性能
 class __attribute__((visibility("default"))) SqliteDriver : public IDbDriver,
-                                                             public IDbSessionFactoryProvider {
+                                                            public IDbSessionFactoryProvider,
+                                                            public AtomicTargetConfiguration {
  public:
     SqliteDriver() = default;
     ~SqliteDriver() override;
@@ -62,7 +65,7 @@ class __attribute__((visibility("default"))) SqliteDriver : public IDbDriver,
 
 // SQLite 结果集实现
 class SqliteResultSet : public IResultSet {
-public:
+ public:
     SqliteResultSet(sqlite3_stmt* stmt, std::function<void(sqlite3_stmt*)> free_func);
     ~SqliteResultSet() override;
 
@@ -83,7 +86,7 @@ public:
     sqlite3_stmt* GetStmt() const { return stmt_; }
     friend class SqliteSession;
 
-private:
+ private:
     sqlite3_stmt* stmt_;
     std::function<void(sqlite3_stmt*)> free_func_;
     bool has_next_;
@@ -91,10 +94,15 @@ private:
 };
 
 // SQLite Session 实现
-class SqliteSession : public RelationDbSessionBase<SqliteTraits> {
-public:
+class SqliteSession : public RelationDbSessionBase<SqliteTraits>, public IDbSnapshotSession {
+ public:
     SqliteSession(SqliteDriver* driver, sqlite3* db);
     ~SqliteSession() override;
+    int BeginSnapshot(const DatabaseSnapshotOptionsV1& options) override;
+    int SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+                     std::shared_ptr<arrow::Schema> expected, uint32_t rows, uint64_t bytes,
+                     std::shared_ptr<arrow::RecordBatch>* output) override;
+    void CancelSnapshot() override;
     int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
     int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
                              size_t execution_count) override;
@@ -111,10 +119,8 @@ public:
     void ReturnConnection(sqlite3* db) override;
 
     // 工厂方法
-    IResultSet* CreateResultSet(sqlite3_stmt* stmt,
-                                std::function<void(sqlite3_stmt*)> free_func) override;
-    IBatchReader* CreateBatchReader(IResultSet* result,
-                                    std::shared_ptr<arrow::Schema> schema) override;
+    IResultSet* CreateResultSet(sqlite3_stmt* stmt, std::function<void(sqlite3_stmt*)> free_func) override;
+    IBatchReader* CreateBatchReader(IResultSet* result, std::shared_ptr<arrow::Schema> schema) override;
     IBatchWriter* CreateBatchWriter(const char* table) override;
     std::shared_ptr<arrow::Schema> InferSchema(IResultSet* result, std::string* error) override;
 };

@@ -128,6 +128,7 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_builtin ${CMAKE_BINARY_DIR}/test
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/task ${CMAKE_BINARY_DIR}/task)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_task ${CMAKE_BINARY_DIR}/test_task)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_baseline ${CMAKE_BINARY_DIR}/test_baseline)
+add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_baseliner_contract ${CMAKE_BINARY_DIR}/test_baseliner_contract)
 
 # Stage 3: Gateway 服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/gateway ${CMAKE_BINARY_DIR}/gateway)

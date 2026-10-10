@@ -10,6 +10,8 @@
 
 | 状态 | Feature | 优先级 | 目标 | 规格 |
 | --- | --- | --- | --- | --- |
+| [-] | Baseline/Baseliner 生命周期与评估契约修复 (`baseliner-contract-safety`) | P1 | 为通过 Scheduler 加载并调度 Baseline 分析的用户，修复停机清理与活动任务冲突、取消与输出会话交接冲突，以及冷启动依赖诊断文本的问题；交付先排空任务再释放插件状态、在途取消结束后再关闭会话、通过插件显式状态输出有效评估结果的保证。 | [规格](specs/feat-baseliner-contract-safety.md) |
+| [x] | Baseliner 单表与 DataFrame 分析及输出 (`baseliner-single-source`) | P1 | 让测试指定数据库表和上传 CSV 的离线分析用户，直接通过三段数据库或 DataFrame 来源执行基线任务，在 WITH 内配置少量指标并指定模型参数出口，通过单一 INTO 指定评估/预测结果出口；交付可分别查询的最终模型与一致的分析结果，减少重复配置并保持源数据、有限快照、原持续发布进度及托管恢复保证。 | [归档](archive/feat-baseliner-single-source.md) |
 | [x] | NPM 运行时检视修复 (`npm-runtime-review-fixes`) | P1 | 为离线批处理和实时终态分析修复已复现的超时顺序、输出内存放大、周期空扫描与标签预算未归还问题，使目标流超时结果稳定、默认预算可交付三万会话结果且资源账目随生命周期归零。 | [归档](archive/feat-npm-runtime-review-fixes.md) |
 | [x] | NPM 数据包契约与解析基础 (`npm-packet-contract`) | P0 | 定义统一的 packet 数据实体、采集元数据、Arrow Schema 及截断/畸形报文语义，并复用现有 NPI 分层与协议识别能力。 | [归档](archive/feat-npm-packet-contract.md) |
 | [x] | NPM 离线数据包全量导入 (`npm-offline-import`) | P0 | 提供 pcap/pcapng 文件的有限流读取与回放，保留原始时间戳、捕获长度、线速长度和报文顺序，接入现有流批任务运行时。 | [归档](archive/feat-npm-offline-import.md) |
@@ -24,7 +26,7 @@
 | [x] | C++ 算子源码目录归位 (`operator-source-layout`) | P1 | 建立独立的 C++ 业务算子源码根目录，将 `npm_basic` 与通用能力插件分离，同时保持内置算子和运行时契约不变。 | [归档](archive/feat-operator-source-layout.md) |
 | [x] | NPM 基础分析算子插件生命周期 (`npm-basic-operator-plugin-lifecycle`) | P0 | 让 `npm.basic` 作为按功能命名的 C++ 算子，通过统一多算子插件 ABI 完成上传、激活、任务租约、去激活和重启恢复。 | [归档](archive/feat-npm-basic-operator-plugin-lifecycle.md) |
 | [x] | 流式算子时间驱动 (`stream-time-drive`) | P0 | 让实时有状态算子在暂时无包、持续繁忙及输出背压期间仍能获得版本化时间通知并按期维护；正常 EOF 单次终结且错误/取消不伪装成 EOF，使 `npm.basic` 可按最早截止时间驱动同一任务内全部已启用模块而不受当前观察结果影响。 | [归档](archive/feat-stream-time-drive.md) |
-| [ ] | Baseline 封装算子 (`baseline-operator`) | P1 | 为使用 Value、Ratio、Relation 持续检测上游数据的 FlowSQL 用户补齐类型化接入与在线不活跃处理；交付串行的数据/时间驱动、显式超时与容量策略、完整状态释放和可观察结果，使无数据到达时仍可维护资源且通用算法插件无需产品接线或新增维护线程；依赖 baseline-review-fixes 的插件状态管理能力。 | [规格](specs/feat-baseline-operator.md) |
+| [x] | Baseline 封装算子 (`baseline-operator`) | P1 | 让分析已落库 NPM 流量数据的用户，通过显式表/字段配置持续获得实际值、预期值、上下条带和偏离结果，并按配置产出未来预测；交付 explore.baseliner 的三类基线分析、独立结果表与模型/消费位置一致持久化，使结果可查询、源表保持原始事实且重启延续学习，同时提供有限容量与在线不活跃维护；字段映射可复用于普通业务表，探索性分析算子统一归属 explore 类别。 | [归档](archive/feat-baseline-operator.md) |
 | [x] | NPM TCP/UDP 会话性能分析 (`npm-session-analysis`) | P1 | 让流量分析用户在同一 `npm.basic` 任务内按 `features` 启用 Session 模块、以独立的 `observing` 选择是否前台查看类型化会话性能结果；模块复用唯一会话、方向、协议识别结果、生命周期与预算，提供带有效性依据的连接、传输时延、重传和吞吐指标，不重复会话化或把序列缺口直接宣称为网络丢包。 | [归档](archive/feat-npm-session-analysis.md) |
 | [x] | NPM 通用参数入口 (`npm-basic-parameters`) | P1 | 让同一 `npm.basic` 任务既需要共享配置又组合多个模块的用户，不再为每类能力增加专用顶层 `WITH` 参数或承受配置归属冲突；交付单一 `parameters` JSON 字符串入口，以 `core` 承载流量标签化引用等任务共享配置、以扁平模块 ID 承载私有配置，严格校验信封、共享字段及已启用模块，自动忽略未启用、未加载或未知模块节点，并在任务打开时冻结拥有型配置；保留旧 Basic/Session SQL 兼容，不交付具体配置内容的业务解释。 | [归档](archive/feat-npm-basic-parameters.md) |
 | [x] | 流量标签化 (`flow-labeling`) | P1 | 依赖 `config-channel` 与 `npm-basic-parameters`；让网络性能、安全等分析场景中需要按 MAC、VLAN、IP/CIDR、传输协议和端口确定会话流主归属的用户，不再由各消费模块重复匹配规则或面对多结果冲突；交付通用同进程能力插件 `libflowsql_flow_labeling.so`，当前由显式启用 `labeling` 的 `npm.basic` 任务通过固定 IID 绑定精确配置快照和任务私有 DPDK ACL matcher，为每个双向会话流产生零或一个唯一具名主标签；插件统一拥有进程级 EAL 与 DPDK 依赖，未部署插件或未启用标签化不影响其他任务，启用但 provider/运行环境不可用则在任务打开前明确失败。 | [归档](archive/feat-flow-labeling.md) |
@@ -40,9 +42,9 @@
 | [x] | NPM 基础分析生产实时接线 (`npm-basic-realtime-integration`) | P0 | 让生产实时 SQL 用户在无包、繁忙和背压时仍能取得 `npm.basic` 的周期结果与正确终结状态；依赖基础分析、时间驱动和采集契约，交付同一任务独占 reader 的采集事实与版本化时间通知接线，验证 EOF、取消和任务隔离；不实现采集后端、结果持久化或分析算法。 | [归档](archive/feat-npm-basic-realtime-integration.md) |
 | [x] | NPM TCP/UDP 会话周期统计 (`npm-basic-periodic-stats`) | P1 | 让分析 PCAP 与实时网卡流量的用户不必等长会话结束才查看统计；交付两类来源共用的可配置周期记录，包含每周期双向包数/字节增量与会话累计总量，以稳定会话身份串联时序，按采集时间划分周期并在正常结束时收尾，结果可经统一存储查询；不按周期重建会话或改变协议事务语义。 | [归档](archive/feat-npm-basic-periodic-stats.md) |
 | [x] | NetAdapter 常规网卡采集通道 (`npm-linux-capture-backends`) | P1 | 让 Linux 镜像口、网卡和虚拟网卡上的 NPM 用户通过Web通道管理创建、编辑、查看和删除具名 netadapter 通道，并采集同一观测域中的多张网卡，在创建配置中选择 AF_PACKET、PF_RING Classic 或 AF_XDP copy/generic-SKB；共享有界采集运行逻辑，交付完整声明范围的 packet 流、保守进度、过滤及逐输入丢包/吞吐诊断，生产 SQL 无需暴露采集技术名称；不包含 native zero-copy、DPDK 或跨观测域合并。 | [归档](archive/feat-npm-linux-capture-backends.md) |
-| [ ] | NPM AF_XDP Native Zero-Copy (`npm-af-xdp-native-zerocopy`) | P2 | 提供 native XDP + AF_XDP zero-copy 能力，覆盖驱动/内核能力探测、队列与 RSS、UMEM、显式降级策略和硬件性能验证。 | 待创建 |
+| [ ] | NPM 快速网卡采集通道 (`npm-af-xdp-native-zerocopy`) | P2 | 让具备 native XDP 与网卡零拷贝支持的 Linux 部署获得独立的快速直接采集入口，复用公共 packet、身份、生命周期与安全进度契约，并可验证驱动/队列能力、UMEM 回收和真实收包性能；通道名称待定（候选 netdirect），不以名称承诺固定速度。 | 待创建 |
 | [ ] | NPM DPDK 运行环境与设备管理 (`npm-dpdk-runtime`) | P2 | 提供 DPDK EAL、hugepage、PCI/VFIO、NUMA、核心绑定、设备发现、能力探测和启动诊断；不包含 NPM 分析和跨进程数据面。 | 待创建 |
-| [ ] | NPM DPDK 单进程采集 (`npm-dpdk-capture`) | P2 | 基于 DPDK PMD 实现端口/队列、mempool、rte_mbuf、RX burst、时间戳、背压/丢包统计，并接入统一采集契约；暂不包含 Primary/Secondary。 | 待创建 |
+| [ ] | NPM 用户态高吞吐采集通道 (`npm-dpdk-capture`) | P2 | 让已配置 DPDK 运行环境的采集部署通过独立通道取得单进程持续收包能力，复用公共采集契约并可验证端口/队列范围、缓冲回收、时间戳及背压/丢包统计；通道名称待定（候选 netengine），不强制以 Linux 网卡名选择设备，不包含 Primary/Secondary。 | 待创建 |
 | [ ] | NPM DPDK 跨进程零拷贝接入 (`npm-dpdk-cross-process`) | P2 | 实现 DPDK Primary/Secondary、共享 mempool/ring、mbuf 所有权回收、Scheduler/NPM 服务接入以及重启清理语义。 | 待创建 |
 | [ ] | 流式历史补算 (`stream-recompute`) | P2 | 对已落地存储按时间窗口或条件执行可幂等的批处理补算，不在流式数据面实现回放。 | [规格](specs/feat-stream-recompute.md) |
 

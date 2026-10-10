@@ -1,5 +1,11 @@
 project(test_baseline)
 find_package(ICU REQUIRED COMPONENTS uc i18n)
+add_executable(test_baseline_checkpoint test_baseline_checkpoint.cpp)
+target_link_libraries(test_baseline_checkpoint PRIVATE flowsql_baseline flowsql_common)
+target_compile_options(test_baseline_checkpoint PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+set_target_properties(test_baseline_checkpoint PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_baseline_checkpoint COMMAND $<TARGET_FILE:test_baseline_checkpoint>)
+set_tests_properties(test_baseline_checkpoint PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output LABELS "baseline;checkpoint" TIMEOUT 90)
 
 add_executable(${PROJECT_NAME} test_baseline_plugin.cpp)
 add_executable(test_baseline_task_headers test_baseline_task_headers.cpp)

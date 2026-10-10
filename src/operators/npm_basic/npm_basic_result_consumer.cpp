@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "npm_basic_result_consumer.h"
+#include "npm_result_progress.h"
 
 #include <arrow/api.h>
 #include <arrow/io/memory.h>
@@ -819,7 +820,7 @@ std::string ObjectTypeQuery(DatabaseBackend backend, std::string_view name) {
            std::string(name) + "'";
 }
 
-class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1 {
+class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, public INpmResultProgressConsumerV1 {
  public:
     NpmDatabaseResultConsumer(IDatabaseChannel* channel, IDatabasePreparedCommandV1* commands, DatabaseBackend backend,
                               NpmResultContextV1 context, std::vector<EntityStorage> entities,
@@ -843,7 +844,7 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1 {
     int Consume(const NpmResultContextV1& context, const NpmEntityDescriptorV1& entity,
                 const arrow::RecordBatch& rows) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (terminal_) return EPIPE;
+        if (terminal_ || publication_failed_) return EPIPE;
         if (cancelled_.load(std::memory_order_acquire)) return ECANCELED;
         if (context.run_id != context_.run_id || context.task_id != context_.task_id) return EINVAL;
         const auto found = std::find_if(entities_.begin(), entities_.end(), [&](const auto& candidate) {
@@ -852,6 +853,39 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1 {
         });
         if (found == entities_.end() || !rows.schema()->Equals(*found->descriptor.schema, true)) return EINVAL;
         if (rows.num_rows() == 0) return 0;
+
+        if (entity.entity_id == "basic") {
+            auto starts = std::dynamic_pointer_cast<arrow::Int64Array>(rows.GetColumnByName("period_start_ns"));
+            auto ends = std::dynamic_pointer_cast<arrow::Int64Array>(rows.GetColumnByName("period_end_ns"));
+            auto ab = std::dynamic_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("interval_packets_ab"));
+            auto ba = std::dynamic_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("interval_packets_ba"));
+            auto finals = std::dynamic_pointer_cast<arrow::BooleanArray>(rows.GetColumnByName("is_final"));
+            for (int64_t row = 0; row < rows.num_rows(); ++row) {
+                if (!starts || !ends || !ab || !ba || !finals || starts->IsNull(row) || ends->IsNull(row) ||
+                    ab->IsNull(row) || ba->IsNull(row)) {
+                    invalid_periods_ = true;
+                    continue;
+                }
+                const auto start = starts->Value(row), end = ends->Value(row);
+                if (start < 0 || end <= start || (observed_period_ns_ && end - start != observed_period_ns_) ||
+                    start % (end - start) != 0) {
+                    invalid_periods_ = true;
+                    continue;
+                }
+                observed_period_ns_ = end - start;
+                const bool metadata_only = finals->Value(row) && ab->Value(row) == 0 && ba->Value(row) == 0;
+                if (start < closed_before_ns_ && !metadata_only) {
+                    error_ = "late NPM period run=" + context_.run_id + " start=" + std::to_string(start) +
+                             " closed_before_ns=" + std::to_string(closed_before_ns_);
+                    publication_failed_ = true;
+                    return EINVAL;
+                }
+            }
+            if (position_ && (invalid_periods_ || observed_period_ns_ != period_ns_)) {
+                publication_failed_ = true;
+                return EINVAL;
+            }
+        }
 
         const size_t parameters_per_row = static_cast<size_t>(rows.num_columns()) + 2;
         if (static_cast<uint64_t>(rows.num_rows()) > std::numeric_limits<size_t>::max() / parameters_per_row) {
@@ -877,6 +911,7 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1 {
             const int rc = commands_->ExecutePreparedBatch(found->insert_sql.c_str(), parameters.data(),
                                                            parameters_per_row, rows.num_rows());
             if (rc < 0) {
+                publication_failed_ = true;
                 error_ = channel_->GetLastError();
                 return EIO;
             }
@@ -887,10 +922,49 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1 {
         }
     }
 
+    int PublishProgress(const NpmResultContextV1& context, const NpmResultProgressV1& progress) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (terminal_ || publication_failed_) return EPIPE;
+        if (cancelled_.load(std::memory_order_acquire)) return ECANCELED;
+        auto basic = std::find_if(entities_.begin(), entities_.end(),
+                                  [](const auto& entity) { return entity.descriptor.entity_id == "basic"; });
+        if (context.run_id != context_.run_id || context.task_id != context_.task_id ||
+            progress.contract_version != 1 || progress.entity_id != "basic" || basic == entities_.end() ||
+            progress.period_ns <= 0 || progress.closed_before_ns < closed_before_ns_ ||
+            progress.closed_before_ns % progress.period_ns != 0 || invalid_periods_ ||
+            (observed_period_ns_ && observed_period_ns_ != progress.period_ns) ||
+            (position_ && period_ns_ != progress.period_ns) || position_ == std::numeric_limits<int64_t>::max())
+            return EINVAL;
+        if (position_ && progress.closed_before_ns == closed_before_ns_) return 0;
+        const int64_t next = position_ + 1;
+        const DatabaseParameterV1 parameters[] = {StringParameter(context_.run_id),
+                                                  StringParameter(progress.entity_id),
+                                                  StringParameter(basic->history_relation),
+                                                  StringParameter(context_.run_id),
+                                                  IntParameter(next),
+                                                  IntParameter(progress.period_ns),
+                                                  IntParameter(progress.closed_before_ns)};
+        const int rc = commands_->ExecutePrepared(
+            "INSERT INTO "
+            "npm_result_progress_v1(run_id,entity_id,relation_name,epoch,position,period_ns,closed_before_ns) "
+            "VALUES(?,?,?,?,?,?,?)",
+            parameters, 7);
+        if (rc < 0 || (backend_ != DatabaseBackend::kClickHouse && rc != 1)) {
+            publication_failed_ = true;  // Includes an unknown commit outcome. Never retry this writer.
+            error_ = channel_->GetLastError();
+            return EIO;
+        }
+        position_ = next;
+        period_ns_ = progress.period_ns;
+        closed_before_ns_ = progress.closed_before_ns;
+        return 0;
+    }
+
     int Finish() override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminal_) return terminal_status_ == "completed" ? 0 : EPIPE;
         if (cancelled_.load(std::memory_order_acquire)) return ECANCELED;
+        if (publication_failed_) return EPIPE;
         const std::string status = "completed";
         const int64_t completed_at = NowNs();
         const DatabaseParameterV1 parameters[] = {StringParameter(status), IntParameter(completed_at),
@@ -993,6 +1067,12 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1 {
     mutable std::mutex mutex_;
     std::atomic<bool> cancelled_{false};
     bool terminal_ = false;
+    bool publication_failed_ = false;
+    bool invalid_periods_ = false;
+    int64_t observed_period_ns_ = 0;
+    int64_t position_ = 0;
+    int64_t period_ns_ = 0;
+    int64_t closed_before_ns_ = 0;
     std::string terminal_status_ = "writing";
     std::string metadata_status_ = "known";
     std::string error_;
@@ -1048,6 +1128,18 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
                 storage.push_back(std::move(next));
             }
             if (CreateCatalog(commands) != 0) return last_code_;
+            const std::string progress_ddl =
+                backend_ == DatabaseBackend::kClickHouse
+                    ? "CREATE TABLE IF NOT EXISTS npm_result_progress_v1(run_id String,entity_id String,relation_name "
+                      "String,"
+                      "epoch String,position Int64,period_ns Int64,closed_before_ns Int64) ENGINE=MergeTree "
+                      "ORDER BY (run_id,entity_id,position)"
+                    : "CREATE TABLE IF NOT EXISTS npm_result_progress_v1(run_id VARCHAR(128) NOT NULL,"
+                      "entity_id VARCHAR(128) NOT NULL,relation_name VARCHAR(128) NOT NULL,epoch VARCHAR(128) NOT NULL,"
+                      "position BIGINT NOT NULL,period_ns BIGINT NOT NULL,closed_before_ns BIGINT NOT NULL,"
+                      "PRIMARY KEY(run_id,entity_id,position))";
+            if (channel_->ExecuteSql(progress_ddl.c_str()) < 0)
+                return Fail(EIO, "failed to create NPM publication relation");
             for (auto& entity : storage) {
                 if (PrepareEntity(commands, &entity) != 0) return last_code_;
             }
@@ -1065,6 +1157,14 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
                                 : NullParameter(),
                 StringParameter(known),
             };
+            StringRows existing_run;
+            std::string lookup_error;
+            const std::string existing_sql =
+                "SELECT run_id FROM npm_result_runs WHERE run_id=" + QuoteLiteral(backend_, context.run_id) +
+                " LIMIT 1";
+            if (ReadStringRows(channel_, backend_, existing_sql, 1, &existing_run, &lookup_error) != 0)
+                return Fail(EIO, "cannot verify unique NPM run: " + lookup_error);
+            if (!existing_run.empty()) return Fail(EEXIST, "NPM run ID already exists");
             if (commands->ExecutePrepared(
                     "INSERT INTO npm_result_runs(run_id,task_id,input_namespace,status,started_at_ns,expires_at_ns,"
                     "metadata_status) VALUES(?,?,?,?,?,?,?)",
@@ -1118,6 +1218,28 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
             QuoteLiteral(backend_, cursor) + " ORDER BY data_table LIMIT 1";
         if (ReadStringRows(channel_, backend_, catalog, 3, &tables, &error) != 0) return EIO;
         if (tables.empty()) {
+            StringRows progress_rows;
+            if (ReadStringRows(
+                    channel_, backend_,
+                    "SELECT position FROM npm_result_progress_v1 WHERE run_id=" + QuoteLiteral(backend_, run_id) +
+                        " ORDER BY position LIMIT " + std::to_string(kPurgeBatchRows),
+                    1, &progress_rows, &error) != 0)
+                return EIO;
+            if (!progress_rows.empty()) {
+                int64_t last_position;
+                try {
+                    last_position = std::stoll(progress_rows.back()[0]);
+                } catch (const std::exception&) {
+                    return EINVAL;
+                }
+                const std::string purge_progress =
+                    backend_ == DatabaseBackend::kClickHouse
+                        ? "ALTER TABLE npm_result_progress_v1 DELETE WHERE run_id=? AND position<=? SETTINGS "
+                          "mutations_sync=2"
+                        : "DELETE FROM npm_result_progress_v1 WHERE run_id=? AND position<=?";
+                const DatabaseParameterV1 parameters[] = {run_parameter, IntParameter(last_position)};
+                return commands->ExecutePrepared(purge_progress.c_str(), parameters, 2) < 0 ? EIO : 0;
+            }
             const std::string sql = backend_ == DatabaseBackend::kClickHouse
                                         ? "ALTER TABLE npm_result_runs DELETE WHERE run_id=? AND status='purging' "
                                           "SETTINGS mutations_sync=2"

@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "clickhouse_driver.h"
 
@@ -385,6 +380,119 @@ int ClickHouseSession::SerializeArrowStream(const std::vector<std::shared_ptr<ar
     auto buf = *buffer_result;
     *body = std::string(reinterpret_cast<const char*>(buf->data()), buf->size());
     return 0;
+}
+
+int ClickHouseSession::BeginSnapshot(const DatabaseSnapshotOptionsV1& options) {
+    if (options.consistent_transaction) {
+        last_error_ = "ClickHouse requires immutable_range or completed NPM run";
+        return -1;
+    }
+    snapshot_timeout_ms_ = options.operation_timeout_ms;
+    snapshot_client_ = std::make_shared<httplib::Client>(host_, port_);
+    const auto duration = std::chrono::milliseconds(snapshot_timeout_ms_);
+    snapshot_client_->set_connection_timeout(duration);
+    snapshot_client_->set_read_timeout(duration);
+    snapshot_client_->set_write_timeout(duration);
+    return 0;
+}
+void ClickHouseSession::CancelSnapshot() {
+    snapshot_cancelled_ = true;
+    if (snapshot_client_) snapshot_client_->stop();
+}
+int ClickHouseSession::SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+                                    std::shared_ptr<arrow::Schema> expected, uint32_t max_rows, uint64_t max_bytes,
+                                    std::shared_ptr<arrow::RecordBatch>* output) {
+    output->reset();
+    last_error_.clear();
+    if (snapshot_cancelled_) {
+        last_error_ = "snapshot cancelled";
+        return -1;
+    }
+    ClickHouseParameterizedSql rewritten;
+    if (!RewriteClickHouseParameters(sql, parameters, count, &rewritten)) {
+        last_error_ = "snapshot parameters invalid";
+        return -1;
+    }
+    std::string path = "/?database=" + httplib::detail::encode_url(database_);
+    for (size_t i = 0; i < count; ++i)
+        path +=
+            "&param_p" + std::to_string(i) + "=" + httplib::detail::encode_url(ClickHouseParameterValue(parameters[i]));
+    rewritten.sql += " SETTINGS max_execution_time=" + std::to_string((snapshot_timeout_ms_ + 999) / 1000) +
+                     ", max_result_rows=" + std::to_string(max_rows + 1) +
+                     ", result_overflow_mode='throw' FORMAT ArrowStream";
+    std::string body;
+    httplib::Headers headers = {{"X-ClickHouse-User", user_}, {"X-ClickHouse-Key", password_}};
+    httplib::Request request;
+    request.method = "POST";
+    request.path = path;
+    request.headers = headers;
+    request.set_header("Content-Type", "text/plain");
+    request.body = rewritten.sql;
+    request.content_receiver = [&](const char* data, size_t length, uint64_t, uint64_t) {
+        if (snapshot_cancelled_ || length > max_bytes - body.size()) return false;
+        body.append(data, length);
+        return true;
+    };
+    auto response = snapshot_client_->send(request);
+    if (!response || response->status != 200) {
+        last_error_ = response ? "snapshot HTTP status " + std::to_string(response->status) + ": " + body
+                               : "snapshot HTTP query failed or byte budget exceeded";
+        return -1;
+    }
+    auto buffer = std::make_shared<arrow::io::BufferReader>(arrow::Buffer::FromString(body));
+    auto opened = arrow::ipc::RecordBatchStreamReader::Open(buffer);
+    if (!opened.ok()) {
+        last_error_ = opened.status().ToString();
+        return -1;
+    }
+    auto reader = *opened;
+    const auto schema = reader->schema();
+    if (schema->num_fields() != expected->num_fields()) {
+        last_error_ = "snapshot metadata mismatch";
+        return -1;
+    }
+    for (int i = 0; i < schema->num_fields(); ++i) {
+        if (schema->field(i)->name() != expected->field(i)->name() ||
+            !SnapshotPhysicalType("clickhouse", schema->field(i)->type()->ToString(),
+                                  expected->field(i)->type()->id())) {
+            last_error_ = "snapshot physical field mismatch: " + expected->field(i)->name();
+            return -1;
+        }
+    }
+    SnapshotRows rows;
+    for (;;) {
+        std::shared_ptr<arrow::RecordBatch> batch;
+        auto status = reader->ReadNext(&batch);
+        if (!status.ok()) {
+            last_error_ = status.ToString();
+            return -1;
+        }
+        if (!batch) break;
+        if (batch->num_rows() + rows.size() > max_rows) {
+            last_error_ = "snapshot row budget exceeded";
+            return -1;
+        }
+        for (int64_t r = 0; r < batch->num_rows(); ++r) {
+            std::vector<SnapshotCell> row;
+            for (int c = 0; c < batch->num_columns(); ++c) {
+                auto scalar = batch->column(c)->GetScalar(r);
+                if (!scalar.ok()) {
+                    last_error_ = scalar.status().ToString();
+                    return -1;
+                }
+                if (!(*scalar)->is_valid)
+                    row.push_back(std::nullopt);
+                else if (expected->field(c)->type()->id() == arrow::Type::BOOL)
+                    row.emplace_back((*scalar)->ToString() == "true"    ? "1"
+                                     : (*scalar)->ToString() == "false" ? "0"
+                                                                        : (*scalar)->ToString());
+                else
+                    row.emplace_back((*scalar)->ToString());
+            }
+            rows.push_back(std::move(row));
+        }
+    }
+    return MakeSnapshotBatch(expected, rows, max_bytes, output, &last_error_);
 }
 
 }  // namespace database

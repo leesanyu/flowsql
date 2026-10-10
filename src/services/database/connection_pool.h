@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_DATABASE_CONNECTION_POOL_H_
 #define _FLOWSQL_SERVICES_DATABASE_CONNECTION_POOL_H_
@@ -20,17 +15,17 @@ namespace database {
 
 // 连接池配置
 struct ConnectionPoolConfig {
-    int max_connections = 10;                    // 最大连接数
-    int min_connections = 0;                     // 最小连接数
-    std::chrono::seconds idle_timeout = std::chrono::seconds(300);  // 空闲超时（5 分钟）
+    int max_connections = 10;                                               // 最大连接数
+    int min_connections = 0;                                                // 最小连接数
+    std::chrono::seconds idle_timeout = std::chrono::seconds(300);          // 空闲超时（5 分钟）
     std::chrono::seconds health_check_interval = std::chrono::seconds(60);  // 健康检查间隔
 };
 
 // 连接池实现
 // 线程安全的连接池，支持连接复用、超时回收、健康检查
-template<typename ConnectionType>
+template <typename ConnectionType>
 class ConnectionPool {
-public:
+ public:
     // 连接工厂函数
     using FactoryFunc = std::function<ConnectionType(std::string* error)>;
     // 关闭连接函数
@@ -38,10 +33,7 @@ public:
     // 健康检查函数
     using PingFunc = std::function<bool(ConnectionType)>;
 
-    ConnectionPool(ConnectionPoolConfig config,
-                   FactoryFunc factory,
-                   CloseFunc closer,
-                   PingFunc pinger)
+    ConnectionPool(ConnectionPoolConfig config, FactoryFunc factory, CloseFunc closer, PingFunc pinger)
         : config_(std::move(config)),
           factory_(std::move(factory)),
           closer_(std::move(closer)),
@@ -85,8 +77,9 @@ public:
                         return false;
                     }
                     if (error) {
-                        *error = "Connection pool exhausted (max_connections=" +
-                                 std::to_string(config_.max_connections) + ")";
+                        *error =
+                            "Connection pool exhausted (max_connections=" + std::to_string(config_.max_connections) +
+                            ")";
                     }
                     return false;
                 }
@@ -96,8 +89,7 @@ public:
 
                 auto now = std::chrono::steady_clock::now();
                 auto& info = conn_info_[candidate];
-                auto idle_time = std::chrono::duration_cast<std::chrono::seconds>(
-                    now - info.last_used).count();
+                auto idle_time = std::chrono::duration_cast<std::chrono::seconds>(now - info.last_used).count();
 
                 if (idle_time > config_.idle_timeout.count()) {
                     // 超时，锁外关闭
@@ -105,8 +97,7 @@ public:
                     total_connections_--;
                     need_close = true;
                 } else {
-                    auto since_check = std::chrono::duration_cast<std::chrono::seconds>(
-                        now - info.last_check).count();
+                    auto since_check = std::chrono::duration_cast<std::chrono::seconds>(now - info.last_check).count();
                     if (since_check >= config_.health_check_interval.count()) {
                         // 需要健康检查，锁外 ping
                         need_ping = true;
@@ -165,6 +156,13 @@ public:
         pool_.push_back(conn);
     }
 
+    // Discard an exclusively leased connection after cancellation/protocol failure.
+    void Discard(ConnectionType conn) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (conn_info_.erase(conn)) --total_connections_;
+        closer_(conn);
+    }
+
     // 获取当前池状态
     struct PoolStats {
         int total_connections;
@@ -175,14 +173,10 @@ public:
     PoolStats GetStats() {
         std::lock_guard<std::mutex> lock(mutex_);
         int available = static_cast<int>(pool_.size());
-        return {
-            total_connections_,
-            available,
-            total_connections_ - available
-        };
+        return {total_connections_, available, total_connections_ - available};
     }
 
-private:
+ private:
     // 预创建连接
     void PrecreateConnections(int count) {
         for (int i = 0; i < count; ++i) {

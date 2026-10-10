@@ -14,6 +14,7 @@
 
 #include "framework/core/filter_executor.h"
 #include "framework/interfaces/iblock_stream_channel.h"
+#include "framework/interfaces/iblock_transform_database_input.h"
 #include "framework/interfaces/iblock_transform_operator.h"
 #include "framework/interfaces/ichannel.h"
 #include "framework/interfaces/ioperator.h"
@@ -139,6 +140,7 @@ struct BlockTransformPipelineConfig {
     IBlockTransformTimeDrivenTaskV1* time_transform = nullptr;
     // Present only for a task-exclusive capture reader and the same execution transform task.
     IBlockTransformCaptureFactTaskV2* capture_fact_task = nullptr;
+    IBlockTransformInputProgressTaskV1* input_progress_task = nullptr;
     std::shared_ptr<const BoundFilterExpr> source_residual;
     std::shared_ptr<const BoundFilterExpr> transform_residual;
     std::function<int(const BlockTransformOutputV1&)> output_consumer;

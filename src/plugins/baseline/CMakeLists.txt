@@ -1,8 +1,11 @@
 project(flowsql_baseline)
 find_package(ICU REQUIRED COMPONENTS uc i18n)
+find_package(OpenSSL REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
     baseline_plugin.cpp
+    checkpoint/checkpoint.cpp
+    checkpoint/model_parameters.cpp
     bootstrap/bootstrap_engine.cpp
     config/runtime_config.cpp
     config_parser.cpp
@@ -44,7 +47,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 )
 
 add_thirddepen(${PROJECT_NAME} eigen rapidjson yaml-cpp)
-target_link_libraries(${PROJECT_NAME} ${ICU_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} ${ICU_LIBRARIES} OpenSSL::Crypto)
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output

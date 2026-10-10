@@ -14,6 +14,10 @@
 
 namespace flowsql {
 namespace baseline {
+namespace checkpoint {
+template <class T>
+struct Fields;
+}
 
 struct RelationStreamBasisConfig {
     std::size_t max_groups = 256;
@@ -59,6 +63,9 @@ struct RelationStreamGroupEstimate {
 };
 
 class RelationStreamBasisAccumulator {
+    friend class CheckpointAccess;
+    friend struct checkpoint::Fields<RelationStreamBasisAccumulator>;
+
  public:
     explicit RelationStreamBasisAccumulator(RelationStreamBasisConfig config);
 
@@ -87,6 +94,9 @@ class RelationStreamBasisAccumulator {
 };
 
 class RelationBasisRuntimeState {
+    friend class CheckpointAccess;
+    friend struct checkpoint::Fields<RelationBasisRuntimeState>;
+
  public:
     explicit RelationBasisRuntimeState(RelationBasisRuntimeConfig config);
 
@@ -94,13 +104,10 @@ class RelationBasisRuntimeState {
     BaselineStatus ObserveValidated(const RelationRollingObservation& obs, std::size_t metric_index);
     BaselineStatus Observe(const RelationBootstrapBlock& block, std::size_t metric_index);
     BaselineStatus LoadSeedBasis(RelationServiceBasis basis, RelationBasisStatus status);
-    RelationBasisRefreshDecision MaybeRefresh(const RelationBasisBuildInput& base_input,
-                                              int64_t bucket_id);
+    RelationBasisRefreshDecision MaybeRefresh(const RelationBasisBuildInput& base_input, int64_t bucket_id);
 
     RelationBasisStatus basis_status() const { return basis_status_; }
-    const RelationServiceBasis* active_basis() const {
-        return has_active_basis_ ? &active_basis_ : nullptr;
-    }
+    const RelationServiceBasis* active_basis() const { return has_active_basis_ ? &active_basis_ : nullptr; }
     const RelationStreamBasisAccumulator& accumulator() const { return accumulator_; }
 
  private:

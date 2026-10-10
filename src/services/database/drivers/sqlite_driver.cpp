@@ -92,29 +92,21 @@ SqliteResultSet::~SqliteResultSet() {
     }
 }
 
-int SqliteResultSet::FieldCount() {
-    return stmt_ ? sqlite3_column_count(stmt_) : 0;
-}
+int SqliteResultSet::FieldCount() { return stmt_ ? sqlite3_column_count(stmt_) : 0; }
 
 const char* SqliteResultSet::FieldName(int index) const {
     if (!stmt_) return nullptr;
-    return (index >= 0 && index < sqlite3_column_count(stmt_))
-           ? sqlite3_column_name(stmt_, index) : nullptr;
+    return (index >= 0 && index < sqlite3_column_count(stmt_)) ? sqlite3_column_name(stmt_, index) : nullptr;
 }
 
 int SqliteResultSet::FieldType(int index) const {
     if (!stmt_) return 0;
-    return (index >= 0 && index < sqlite3_column_count(stmt_))
-           ? sqlite3_column_type(stmt_, index) : 0;
+    return (index >= 0 && index < sqlite3_column_count(stmt_)) ? sqlite3_column_type(stmt_, index) : 0;
 }
 
-int SqliteResultSet::FieldLength(int index) {
-    return 0;
-}
+int SqliteResultSet::FieldLength(int index) { return 0; }
 
-bool SqliteResultSet::HasNext() {
-    return has_next_;
-}
+bool SqliteResultSet::HasNext() { return has_next_; }
 
 bool SqliteResultSet::Next() {
     if (!stmt_ || !has_next_) return false;
@@ -175,11 +167,15 @@ bool SqliteResultSet::IsNull(int index) {
 
 // ==================== SqliteSession 实现 ====================
 
-SqliteSession::SqliteSession(SqliteDriver* driver, sqlite3* db)
-    : RelationDbSessionBase<SqliteTraits>(driver, db) {}
+SqliteSession::SqliteSession(SqliteDriver* driver, sqlite3* db) : RelationDbSessionBase<SqliteTraits>(driver, db) {}
 
 SqliteSession::~SqliteSession() {
     if (conn_) {
+        if (snapshot_transaction_) {
+            sqlite3_exec(conn_, "ROLLBACK", nullptr, nullptr, nullptr);
+            sqlite3_exec(conn_, "PRAGMA query_only=OFF", nullptr, nullptr, nullptr);
+            sqlite3_progress_handler(conn_, 0, nullptr, nullptr);
+        }
         ReturnConnection(conn_);
         conn_ = nullptr;
     }
@@ -336,30 +332,30 @@ void SqliteSession::ReturnConnection(sqlite3* db) {
     }
 }
 
-IResultSet* SqliteSession::CreateResultSet(sqlite3_stmt* stmt,
-                                           std::function<void(sqlite3_stmt*)> free_func) {
+IResultSet* SqliteSession::CreateResultSet(sqlite3_stmt* stmt, std::function<void(sqlite3_stmt*)> free_func) {
     return new SqliteResultSet(stmt, free_func);
 }
 
-IBatchReader* SqliteSession::CreateBatchReader(IResultSet* result,
-                                                std::shared_ptr<arrow::Schema> schema) {
+IBatchReader* SqliteSession::CreateBatchReader(IResultSet* result, std::shared_ptr<arrow::Schema> schema) {
     return new RelationBatchReader(shared_from_this(), result, schema);
 }
 
 // ==================== SqliteBatchWriter 实现 ====================
 
 class SqliteBatchWriter : public RelationBatchWriterBase {
-public:
+ public:
     SqliteBatchWriter(std::shared_ptr<IDbSession> session, const char* table)
         : RelationBatchWriterBase(std::move(session), table) {}
 
-protected:
+ protected:
     // SQLite 用双引号包裹标识符，内部双引号用 "" 转义
     std::string QuoteIdentifier(const std::string& name) override {
         std::string result = "\"";
         for (char c : name) {
-            if (c == '"') result += "\"\"";
-            else result += c;
+            if (c == '"')
+                result += "\"\"";
+            else
+                result += c;
         }
         result += "\"";
         return result;
@@ -396,8 +392,10 @@ protected:
         auto quote_string = [](const std::string& s) -> std::string {
             std::string r = "'";
             for (char c : s) {
-                if (c == '\'') r += "''";
-                else r += c;
+                if (c == '\'')
+                    r += "''";
+                else
+                    r += c;
             }
             r += "'";
             return r;
@@ -417,26 +415,20 @@ protected:
                     values += "X'";
                     for (size_t i = 0; i < blob.size(); ++i) {
                         char hex[3];
-                        snprintf(hex, sizeof(hex), "%02X",
-                                 static_cast<unsigned char>(blob.data()[i]));
+                        snprintf(hex, sizeof(hex), "%02X", static_cast<unsigned char>(blob.data()[i]));
                         values += hex;
                     }
                     values += "'";
                 } else if (array->type()->id() == arrow::Type::INT32) {
-                    values += std::to_string(
-                        std::static_pointer_cast<arrow::Int32Array>(array)->Value(row));
+                    values += std::to_string(std::static_pointer_cast<arrow::Int32Array>(array)->Value(row));
                 } else if (array->type()->id() == arrow::Type::INT64) {
-                    values += std::to_string(
-                        std::static_pointer_cast<arrow::Int64Array>(array)->Value(row));
+                    values += std::to_string(std::static_pointer_cast<arrow::Int64Array>(array)->Value(row));
                 } else if (array->type()->id() == arrow::Type::FLOAT) {
-                    values += std::to_string(
-                        std::static_pointer_cast<arrow::FloatArray>(array)->Value(row));
+                    values += std::to_string(std::static_pointer_cast<arrow::FloatArray>(array)->Value(row));
                 } else if (array->type()->id() == arrow::Type::DOUBLE) {
-                    values += std::to_string(
-                        std::static_pointer_cast<arrow::DoubleArray>(array)->Value(row));
+                    values += std::to_string(std::static_pointer_cast<arrow::DoubleArray>(array)->Value(row));
                 } else {
-                    values += quote_string(
-                        std::static_pointer_cast<arrow::StringArray>(array)->GetString(row));
+                    values += quote_string(std::static_pointer_cast<arrow::StringArray>(array)->GetString(row));
                 }
             }
             values += ")";
@@ -454,7 +446,6 @@ protected:
 IBatchWriter* SqliteSession::CreateBatchWriter(const char* table) {
     return new SqliteBatchWriter(shared_from_this(), table);
 }
-
 
 // ==================== SqliteDriver 实现 ====================
 
@@ -487,9 +478,12 @@ std::shared_ptr<arrow::Schema> SqliteSession::InferSchema(IResultSet* result, st
         } else {
             // 无声明类型（如表达式列），根据运行时类型推断
             int runtime_type = sqlite3_column_type(stmt, i);
-            if (runtime_type == SQLITE_INTEGER) type = arrow::int64();
-            else if (runtime_type == SQLITE_FLOAT) type = arrow::float64();
-            else if (runtime_type == SQLITE_BLOB) type = arrow::binary();
+            if (runtime_type == SQLITE_INTEGER)
+                type = arrow::int64();
+            else if (runtime_type == SQLITE_FLOAT)
+                type = arrow::float64();
+            else if (runtime_type == SQLITE_BLOB)
+                type = arrow::binary();
         }
         fields.push_back(arrow::field(name ? name : "", type));
     }
@@ -499,6 +493,7 @@ std::shared_ptr<arrow::Schema> SqliteSession::InferSchema(IResultSet* result, st
 SqliteDriver::~SqliteDriver() = default;
 
 int SqliteDriver::Connect(const std::unordered_map<std::string, std::string>& params) {
+    atomic_parameters = params;
     ConnectionPoolConfig config;
     config.max_connections = 10;
     config.min_connections = 0;
@@ -508,8 +503,7 @@ int SqliteDriver::Connect(const std::unordered_map<std::string, std::string>& pa
     auto it = params.find("path");
     db_path_ = (it != params.end()) ? it->second : ":memory:";
 
-    bool readonly = (params.find("readonly") != params.end() &&
-                     params.at("readonly") == "true");
+    bool readonly = (params.find("readonly") != params.end() && params.at("readonly") == "true");
 
     auto factory = [this, readonly](std::string* error) -> sqlite3* {
         sqlite3* db = nullptr;
@@ -529,7 +523,9 @@ int SqliteDriver::Connect(const std::unordered_map<std::string, std::string>& pa
         return db;
     };
 
-    auto closer = [](sqlite3* db) { if (db) sqlite3_close(db); };
+    auto closer = [](sqlite3* db) {
+        if (db) sqlite3_close(db);
+    };
     auto pinger = [](sqlite3* db) -> bool {
         if (!db) return false;
         char* errmsg = nullptr;
@@ -549,9 +545,7 @@ int SqliteDriver::Disconnect() {
     return 0;
 }
 
-bool SqliteDriver::Ping() {
-    return pool_ != nullptr;
-}
+bool SqliteDriver::Ping() { return pool_ != nullptr; }
 
 std::shared_ptr<IDbSession> SqliteDriver::CreateSession() {
     if (!pool_) {
@@ -573,6 +567,95 @@ void SqliteDriver::ReturnToPool(sqlite3* db) {
     if (pool_ && db) {
         pool_->Return(db);
     }
+}
+
+int SqliteSession::BeginSnapshot(const DatabaseSnapshotOptionsV1& options) {
+    snapshot_timeout_ms_ = options.operation_timeout_ms;
+    sqlite3_busy_timeout(conn_, snapshot_timeout_ms_);
+    if (sqlite3_exec(conn_, "PRAGMA query_only=ON; BEGIN", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        last_error_ = sqlite3_errmsg(conn_);
+        sqlite3_exec(conn_, "PRAGMA query_only=OFF", nullptr, nullptr, nullptr);
+        return -1;
+    }
+    snapshot_transaction_ = true;
+    return 0;
+}
+void SqliteSession::CancelSnapshot() {
+    snapshot_cancelled_ = true;
+    sqlite3_interrupt(conn_);
+}
+int SqliteSession::SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+                                std::shared_ptr<arrow::Schema> expected, uint32_t max_rows, uint64_t max_bytes,
+                                std::shared_ptr<arrow::RecordBatch>* output) {
+    output->reset();
+    last_error_.clear();
+    if (snapshot_cancelled_) {
+        last_error_ = "snapshot cancelled";
+        return -1;
+    }
+    struct Progress {
+        SqliteSession* self;
+        std::chrono::steady_clock::time_point deadline;
+    } progress{this, std::chrono::steady_clock::now() + std::chrono::milliseconds(snapshot_timeout_ms_)};
+    sqlite3_progress_handler(
+        conn_, 1000,
+        [](void* p) {
+            auto* v = static_cast<Progress*>(p);
+            return v->self->snapshot_cancelled_ || std::chrono::steady_clock::now() >= v->deadline ? 1 : 0;
+        },
+        &progress);
+    struct Clear {
+        sqlite3* conn;
+        ~Clear() { sqlite3_progress_handler(conn, 0, nullptr, nullptr); }
+    } clear{conn_};
+    sqlite3_stmt* raw = nullptr;
+    const char* tail = nullptr;
+    if (sqlite3_prepare_v2(conn_, sql, -1, &raw, &tail) != SQLITE_OK) {
+        last_error_ = sqlite3_errmsg(conn_);
+        return -1;
+    }
+    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> stmt(raw, sqlite3_finalize);
+    if (!raw || !sqlite3_stmt_readonly(raw) || (tail && *tail) || sqlite3_column_count(raw) != expected->num_fields()) {
+        last_error_ = "invalid snapshot selection";
+        return -1;
+    }
+    for (int i = 0; i < expected->num_fields(); ++i) {
+        const char* physical = sqlite3_column_decltype(raw, i);
+        if (expected->field(i)->name() != sqlite3_column_name(raw, i) || !physical ||
+            !SnapshotPhysicalType("sqlite", physical, expected->field(i)->type()->id())) {
+            last_error_ = "snapshot physical field mismatch: " + expected->field(i)->name();
+            return -1;
+        }
+    }
+    if (BindSqliteParameters(raw, parameters, count, &last_error_) != 0) return -1;
+    SnapshotRows rows;
+    uint64_t bytes = 0;
+    int rc;
+    while ((rc = sqlite3_step(raw)) == SQLITE_ROW) {
+        if (rows.size() >= max_rows || snapshot_cancelled_) {
+            last_error_ = "snapshot row limit/cancelled";
+            return -1;
+        }
+        std::vector<SnapshotCell> row;
+        for (int i = 0; i < expected->num_fields(); ++i) {
+            auto length = sqlite3_column_bytes(raw, i);
+            bytes += 16 + length;
+            if (bytes > max_bytes) {
+                last_error_ = "snapshot page byte budget exceeded";
+                return -1;
+            }
+            if (sqlite3_column_type(raw, i) == SQLITE_NULL)
+                row.push_back(std::nullopt);
+            else
+                row.emplace_back(std::string(reinterpret_cast<const char*>(sqlite3_column_text(raw, i)), length));
+        }
+        rows.push_back(std::move(row));
+    }
+    if (rc != SQLITE_DONE) {
+        last_error_ = sqlite3_errmsg(conn_);
+        return -1;
+    }
+    return MakeSnapshotBatch(expected, rows, max_bytes, output, &last_error_);
 }
 
 }  // namespace database

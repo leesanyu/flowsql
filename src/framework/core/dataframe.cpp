@@ -1,11 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
-
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 #include "dataframe.h"
 
 #include <arrow/builder.h>
@@ -133,7 +127,7 @@ std::vector<FieldValue> DataFrame::GetColumn(const std::string& name) const {
 // --- Arrow 互操作 ---
 
 std::shared_ptr<arrow::RecordBatch> DataFrame::ToArrow() const {
-    if (pending_rows_ > 0) {
+    if (pending_rows_ > 0 || (!batch_ && arrow_schema_)) {
         Finalize();
     }
     return batch_;
@@ -306,7 +300,7 @@ void DataFrame::Clear() {
 // --- Finalize: builders_ → batch_ ---
 
 void DataFrame::Finalize() const {
-    if (pending_rows_ == 0 || builders_.empty()) return;
+    if ((pending_rows_ == 0 && batch_) || !arrow_schema_) return;
     std::vector<std::shared_ptr<arrow::Array>> arrays;
     arrays.reserve(builders_.size());
     for (size_t idx = 0; idx < builders_.size(); ++idx) {

@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "postgres_driver.h"
 
@@ -192,6 +187,15 @@ PostgresSession::PostgresSession(PostgresDriver* driver, PGconn* conn)
 
 PostgresSession::~PostgresSession() {
     if (conn_) {
+        if (snapshot_cancelled_) {
+            static_cast<PostgresDriver*>(driver_)->DiscardSnapshot(conn_);
+            conn_ = nullptr;
+            return;
+        }
+        if (snapshot_transaction_) {
+            auto* r = PQexec(conn_, "ROLLBACK");
+            if (r) PQclear(r);
+        }
         ReturnConnection(conn_);
         conn_ = nullptr;
     }
@@ -629,6 +633,7 @@ std::string PostgresDriver::BuildConninfo() const {
 }
 
 int PostgresDriver::Connect(const std::unordered_map<std::string, std::string>& params) {
+    atomic_parameters = params;
     ConnectionPoolConfig config;
     config.max_connections = 10;
     config.min_connections = 0;
@@ -740,6 +745,135 @@ void PostgresDriver::ReturnToPool(PGconn* conn) {
     if (pool_ && conn) {
         pool_->Return(conn);
     }
+}
+
+void PostgresDriver::DiscardSnapshot(PGconn* conn) {
+    if (pool_) pool_->Discard(conn);
+}
+int PostgresSession::BeginSnapshot(const DatabaseSnapshotOptionsV1& options) {
+    snapshot_timeout_ms_ = options.operation_timeout_ms;
+    if (ExecuteSql("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") < 0) return -1;
+    snapshot_transaction_ = true;
+    if (ExecuteSql(("SET LOCAL statement_timeout=" + std::to_string(snapshot_timeout_ms_)).c_str()) < 0) return -1;
+    snapshot_cancel_ = std::shared_ptr<PGcancel>(PQgetCancel(conn_), PQfreeCancel);
+    return snapshot_cancel_ ? 0 : -1;
+}
+void PostgresSession::CancelSnapshot() {
+    snapshot_cancelled_ = true;
+    char error[256];
+    if (snapshot_cancel_) PQcancel(snapshot_cancel_.get(), error, sizeof(error));
+}
+int PostgresSession::SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+                                  std::shared_ptr<arrow::Schema> expected, uint32_t max_rows, uint64_t max_bytes,
+                                  std::shared_ptr<arrow::RecordBatch>* output) {
+    output->reset();
+    last_error_.clear();
+    if (snapshot_cancelled_) {
+        last_error_ = "snapshot cancelled";
+        return -1;
+    }
+    bool valid = false;
+    auto converted = PostgresParameterSql(sql, count, &valid);
+    if (!valid) {
+        last_error_ = "snapshot parameter mismatch";
+        return -1;
+    }
+    std::vector<std::string> values(count);
+    std::vector<const char*> pointers(count);
+    std::vector<Oid> types(count);
+    for (size_t i = 0; i < count; ++i) {
+        const auto& p = parameters[i];
+        switch (p.kind) {
+            case DatabaseParameterKindV1::kNull:
+                continue;
+            case DatabaseParameterKindV1::kInt64:
+                values[i] = std::to_string(p.int64_value);
+                break;
+            case DatabaseParameterKindV1::kUInt64:
+                types[i] = 1700;
+                values[i] = std::to_string(p.uint64_value);
+                break;
+            case DatabaseParameterKindV1::kDouble: {
+                std::ostringstream s;
+                s << std::setprecision(17) << p.double_value;
+                values[i] = s.str();
+                break;
+            }
+            case DatabaseParameterKindV1::kString:
+                if (!p.data && p.size) {
+                    last_error_ = "invalid text parameter";
+                    return -1;
+                }
+                values[i].assign(p.data ? static_cast<const char*>(p.data) : "", p.size);
+                if (values[i].find('\0') != std::string::npos) {
+                    last_error_ = "NUL text parameter";
+                    return -1;
+                }
+                break;
+            default:
+                last_error_ = "unsupported snapshot parameter";
+                return -1;
+        }
+        pointers[i] = values[i].c_str();
+    }
+    if (!PQsendQueryParams(conn_, converted.c_str(), count, types.data(), pointers.data(), nullptr, nullptr, 0) ||
+        !PQsetSingleRowMode(conn_)) {
+        last_error_ = PQerrorMessage(conn_);
+        return -1;
+    }
+    SnapshotRows rows;
+    uint64_t bytes = 0;
+    bool failed = false;
+    PGresult* raw;
+    while ((raw = PQgetResult(conn_))) {
+        std::unique_ptr<PGresult, decltype(&PQclear)> result(raw, PQclear);
+        const auto status = PQresultStatus(raw);
+        if (failed) continue;
+        if (status != PGRES_SINGLE_TUPLE && status != PGRES_TUPLES_OK) {
+            last_error_ = PQresultErrorMessage(raw);
+            failed = true;
+            continue;
+        }
+        if (PQnfields(raw) != expected->num_fields()) {
+            last_error_ = "snapshot metadata mismatch";
+            failed = true;
+            continue;
+        }
+        std::vector<SnapshotCell> row;
+        for (int i = 0; i < expected->num_fields(); ++i) {
+            const auto oid = PQftype(raw, i);
+            std::string type = oid == 20 || oid == 21 || oid == 23       ? "int"
+                               : oid == 1700                             ? "numeric"
+                               : oid == 700 || oid == 701                ? "double"
+                               : oid == 16                               ? "boolean"
+                               : oid == 25 || oid == 1042 || oid == 1043 ? "text"
+                                                                         : "unsupported";
+            if (expected->field(i)->name() != PQfname(raw, i) ||
+                !SnapshotPhysicalType("postgres", type, expected->field(i)->type()->id())) {
+                last_error_ = "snapshot physical field mismatch: " + expected->field(i)->name();
+                failed = true;
+                break;
+            }
+            if (status == PGRES_TUPLES_OK) continue;
+            bytes += 16 + PQgetlength(raw, 0, i);
+            if (bytes > max_bytes || rows.size() >= max_rows || snapshot_cancelled_) {
+                last_error_ = "snapshot page budget/cancelled";
+                failed = true;
+                break;
+            }
+            if (PQgetisnull(raw, 0, i))
+                row.push_back(std::nullopt);
+            else
+                row.emplace_back(std::string(PQgetvalue(raw, 0, i), PQgetlength(raw, 0, i)));
+        }
+        if (!failed && status == PGRES_SINGLE_TUPLE) rows.push_back(std::move(row));
+        if (failed) {
+            char error[256];
+            PQcancel(snapshot_cancel_.get(), error, sizeof(error));
+        }
+    }
+    if (failed) return -1;
+    return MakeSnapshotBatch(expected, rows, max_bytes, output, &last_error_);
 }
 
 }  // namespace database

@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_DATABASE_DRIVERS_POSTGRES_DRIVER_H_
 #define _FLOWSQL_SERVICES_DATABASE_DRIVERS_POSTGRES_DRIVER_H_
@@ -17,10 +12,12 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../atomic_target.h"
 #include "../capability_interfaces.h"
 #include "../connection_pool.h"
 #include "../db_session.h"
 #include "../relation_db_session.h"
+#include "../snapshot_read.h"
 
 namespace flowsql {
 namespace database {
@@ -34,7 +31,9 @@ struct PostgresTraits {
 
 class PostgresSession;
 
-class __attribute__((visibility("default"))) PostgresDriver : public IDbDriver, public IDbSessionFactoryProvider {
+class __attribute__((visibility("default"))) PostgresDriver : public IDbDriver,
+                                                              public IDbSessionFactoryProvider,
+                                                              public AtomicTargetConfiguration {
  public:
     PostgresDriver() = default;
     ~PostgresDriver() override;
@@ -47,6 +46,7 @@ class __attribute__((visibility("default"))) PostgresDriver : public IDbDriver, 
     bool Ping() override;
 
     std::shared_ptr<IDbSession> CreateSession() override;
+    void DiscardSnapshot(PGconn* conn);
     void ReturnToPool(PGconn* conn);
 
  private:
@@ -97,16 +97,24 @@ class PostgresResultSet : public IResultSet {
     std::vector<std::string> bytea_cache_;
 };
 
-class PostgresSession : public RelationDbSessionBase<PostgresTraits> {
+class PostgresSession : public RelationDbSessionBase<PostgresTraits>, public IDbSnapshotSession {
  public:
     PostgresSession(PostgresDriver* driver, PGconn* conn);
     ~PostgresSession() override;
 
     int ExecuteQuery(const char* sql, IResultSet** result) override;
     int ExecuteSql(const char* sql) override;
+    int BeginSnapshot(const DatabaseSnapshotOptionsV1& options) override;
+    int SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+                     std::shared_ptr<arrow::Schema> expected, uint32_t rows, uint64_t bytes,
+                     std::shared_ptr<arrow::RecordBatch>* output) override;
+    void CancelSnapshot() override;
     int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
     int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
                              size_t execution_count) override;
+
+ private:
+    std::shared_ptr<PGcancel> snapshot_cancel_;
 
  protected:
     const char* PrepareStatement(PGconn* conn, const char* sql, std::string* error) override;

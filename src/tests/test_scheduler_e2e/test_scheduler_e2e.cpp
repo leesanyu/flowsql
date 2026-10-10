@@ -37,6 +37,8 @@
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_operator.h>
 #include <framework/interfaces/iblock_stream_reader.h>
+#include <framework/interfaces/iblock_transform_database_input.h>
+#include <framework/interfaces/iblock_transform_execution_policy.h>
 #include <framework/interfaces/iblock_transform_operator.h>
 #include <framework/interfaces/icapture_block_stream_reader.h>
 #include <framework/interfaces/ichannel_registry.h>
@@ -490,6 +492,178 @@ class SchedulerE2eManagedProvider final : public IBlockTransformOperatorV1 {
  private:
     SchedulerE2eManagedTrace* trace_;
     IDatabaseFactory* factory_ = nullptr;
+};
+
+struct DatabaseInputGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool cancelled = false;
+};
+struct DatabaseInputTrace {
+    std::shared_ptr<DatabaseInputGate> gate;
+    int failure = 0;
+    int created = 0;
+    int input_released = 0;
+    int task_released = 0;
+    int processed = 0;
+    int progress_accepted = 0;
+    int flushed = 0;
+    bool alive = false;
+};
+class DatabaseInputProbe final : public IBlockTransformTaskV2,
+                                 public IBlockTransformDatabaseInputTaskV1,
+                                 public IBlockStreamChannel,
+                                 public IBlockStreamInputProgressV1,
+                                 public IBlockTransformInputProgressTaskV1 {
+ public:
+    explicit DatabaseInputProbe(DatabaseInputTrace* trace) : trace_(trace) {}
+    int CreateDatabaseInput(const BlockDatabaseInputBindingV1& binding, BlockDatabaseInputV1* output) override {
+        ASSERT_TRUE(ValidBlockDatabaseInputBindingV1(binding));
+        ASSERT_EQ(std::string(binding.exact_source), "sqlite.local");
+        ASSERT_TRUE(!created_);
+        ++trace_->created;
+        if (trace_->failure == 1) return EIO;
+        if (trace_->failure == 13) {
+            auto gate = trace_->gate;
+            std::unique_lock<std::mutex> lock(gate->mutex);
+            gate->entered = true;
+            gate->cv.notify_all();
+            ASSERT_TRUE(gate->cv.wait_for(lock, std::chrono::seconds(3), [&] { return gate->cancelled; }));
+            return ECANCELED;
+        }
+        source_ = binding.source;
+        created_ = true;
+        schema_ = arrow::schema({arrow::field("database_value", arrow::int64(), false)});
+        output->input = this;
+        output->schema = schema_;
+        return 0;
+    }
+    void ReleaseDatabaseInput(IBlockStreamChannel* input) override {
+        ASSERT_TRUE(created_ && input == static_cast<IBlockStreamChannel*>(this));
+        ++trace_->input_released;
+        created_ = false;
+        schema_.reset();
+        source_.reset();
+    }
+    int Open(std::shared_ptr<arrow::Schema> input, std::shared_ptr<arrow::Schema>* output) override {
+        ASSERT_TRUE(created_ && source_ && source_->IsConnected());
+        ASSERT_TRUE(input && input->Equals(*schema_));
+        if (trace_->failure == 2) return EIO;
+        *output = input;
+        return 0;
+    }
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts,
+                     std::vector<BlockTransformOutputV1>* outputs) override {
+        ++trace_->processed;
+        ASSERT_EQ(input->num_rows(), trace_->failure == 9 ? 0 : 1);
+        ASSERT_TRUE(input->schema()->Equals(*schema_));
+        if (trace_->failure == 3) return -EIO;
+        outputs->push_back({input, ts});
+        return static_cast<int>(trace_->failure == 5 ? BlockTransformStatusV1::kStop
+                                                     : BlockTransformStatusV1::kContinue);
+    }
+    int Flush(std::vector<BlockTransformOutputV1>*) override {
+        ++trace_->flushed;
+        return trace_->failure == 4 ? EIO : 0;
+    }
+    int ReadInputProgress(BlockInputProgressV1* progress) const override {
+        ASSERT_TRUE(released_);
+        if (trace_->failure == 6) return EIO;
+        if (trace_->failure == 11) throw std::runtime_error("progress read failure");
+        progress->datasets = {{"probe", "epoch", "position", 1}};
+        return 0;
+    }
+    int AcceptInputProgress(const BlockInputProgressV1& progress) override {
+        ASSERT_TRUE(released_ && trace_->processed == 1 && progress.datasets.size() == 1);
+        ASSERT_EQ(progress.datasets[0].committed_position, "position");
+        ++trace_->progress_accepted;
+        if (trace_->failure == 12) throw std::runtime_error("progress accept failure");
+        return trace_->failure == 7 ? EIO : 0;
+    }
+    void Cancel() override {
+        cancelled_ = true;
+        if (trace_->gate) {
+            std::lock_guard<std::mutex> lock(trace_->gate->mutex);
+            trace_->gate->cancelled = true;
+            trace_->gate->cv.notify_all();
+        }
+    }
+    std::string LastError() const override { return "database input probe"; }
+    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
+        state->armed = 0;
+        return 0;
+    }
+    int OnTime(const BlockTransformTimeEventV1&, std::vector<BlockTransformOutputV1>*) override { return 0; }
+    const char* Category() override { return "test"; }
+    const char* Name() override { return "db_input"; }
+    const char* Type() override { return ChannelType::kBlockStream; }
+    const char* Schema() override { return "[]"; }
+    int Open() override { return 0; }
+    int Close() override { return 0; }
+    bool IsOpened() const override { return true; }
+    int Flush() override { return 0; }
+    BlockPollEvent PollBlock(int) override {
+        if (cancelled_) return {BlockPollEvent::kCancelled};
+        if (trace_->failure == 10 && !timeout_sent_) {
+            timeout_sent_ = true;
+            return {BlockPollEvent::kTimeout};
+        }
+        if (sent_) return {BlockPollEvent::kEof};
+        sent_ = true;
+        if (trace_->failure == 9) {
+            auto empty = arrow::RecordBatch::MakeEmpty(schema_);
+            ASSERT_TRUE(empty.ok());
+            return {BlockPollEvent::kData, *empty};
+        }
+        arrow::Int64Builder b;
+        ASSERT_TRUE(b.Append(42).ok());
+        auto array = b.Finish();
+        ASSERT_TRUE(array.ok());
+        return {BlockPollEvent::kData, arrow::RecordBatch::Make(schema_, 1, {*array})};
+    }
+    int ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>&) override {
+        released_ = true;
+        return trace_->failure == 8 ? EIO : 0;
+    }
+    bool IsFinished() const override { return sent_ || cancelled_; }
+    bool Released() const { return !created_ && !source_ && !schema_; }
+
+ private:
+    DatabaseInputTrace* trace_;
+    std::shared_ptr<IDatabaseChannel> source_;
+    std::shared_ptr<arrow::Schema> schema_;
+    bool created_ = false;
+    bool sent_ = false;
+    bool released_ = false;
+    bool timeout_sent_ = false;
+    bool cancelled_ = false;
+};
+class DatabaseInputProvider final : public IBlockTransformOperatorV2, public IBlockTransformExecutionPolicyProviderV1 {
+ public:
+    DatabaseInputTrace trace;
+    int RequiresAsyncExecution(const char* with, const char* source, bool* output) const override {
+        ASSERT_EQ(std::string(source), "sqlite.local");
+        rapidjson::Document config;
+        config.Parse(with);
+        if (config.HasParseError() || !config.IsObject()) return EINVAL;
+        *output =
+            config.HasMember("mode") && config["mode"].IsString() && std::string(config["mode"].GetString()) == "poll";
+        return 0;
+    }
+    std::string Category() const override { return "test"; }
+    std::string Name() const override { return "database_input"; }
+    std::string Description() const override { return "database input same-task fixture"; }
+    int CreateTask(const BlockTransformTaskConfigV2&, IBlockTransformTaskV2** task) override {
+        *task = new DatabaseInputProbe(&trace);
+        return 0;
+    }
+    void ReleaseTask(IBlockTransformTaskV2* task) override {
+        auto* p = dynamic_cast<DatabaseInputProbe*>(task);
+        ASSERT_TRUE(p && p->Released());
+        ++trace.task_released;
+        delete p;
+    }
 };
 
 static void AppendPcapLe16(std::vector<uint8_t>* bytes, uint16_t value) {
@@ -1791,10 +1965,12 @@ int main() {
     SchedulerE2eTransformProvider parameter_capture_transform("parameter_capture",
                                                               SchedulerE2eTransformKind::kAnyPassthrough);
     SchedulerE2eTransformProvider stop_capture_transform("stop_capture", SchedulerE2eTransformKind::kStopOnFirst);
+    DatabaseInputProvider database_input_provider;
     SchedulerE2eManagedTrace managed_trace;
     SchedulerE2eManagedProvider managed_transform(&managed_trace);
     SchedulerCaptureFixture capture_fixture;
     SchedulerHttp1Labeling http1_labeling;
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V2, &database_input_provider);
     loader->Regist(IID_PROTOCOL, &pcap_protocol);
     loader->Regist(IID_BLOCK_STREAM_OPERATOR, &block_operator);
     loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &packet_transform);
@@ -1881,6 +2057,86 @@ int main() {
     ASSERT_TRUE(stream_list != nullptr);
     ASSERT_TRUE(stream_add != nullptr);
     ASSERT_TRUE(stream_remove != nullptr);
+
+    {
+        for (int failure = 0; failure <= 12; ++failure) {
+            database_input_provider.trace = {};
+            database_input_provider.trace.failure = failure;
+            std::string response;
+            const auto rc =
+                exec("/scheduler/batch/execute",
+                     MakeReq("SELECT * FROM sqlite.local USING test.database_input INTO dataframe.database_input"),
+                     response);
+            if (failure == 0 || failure == 5 || failure == 9 || failure == 10)
+                ASSERT_EQ(rc, error::OK);
+            else
+                ASSERT_TRUE(rc != error::OK);
+            ASSERT_EQ(database_input_provider.trace.progress_accepted,
+                      (failure == 0 || failure == 4 || failure == 5 || failure == 7 || failure == 9 || failure == 10 ||
+                       failure == 12)
+                          ? 1
+                          : 0);
+            if (failure == 6 || failure == 7 || failure == 8 || failure == 11 || failure == 12)
+                ASSERT_EQ(database_input_provider.trace.flushed, 0);
+            ASSERT_EQ(database_input_provider.trace.created, 1);
+            ASSERT_EQ(database_input_provider.trace.task_released, 1);
+            ASSERT_EQ(database_input_provider.trace.input_released, failure == 1 ? 0 : 1);
+            if (failure == 0) {
+                auto output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get("database_input"));
+                ASSERT_TRUE(output);
+                DataFrame frame;
+                ASSERT_EQ(output->Read(&frame), 0);
+                auto batch = frame.ToArrow();
+                ASSERT_TRUE(batch && batch->schema()->GetFieldIndex("database_value") == 0);
+                ASSERT_EQ(std::static_pointer_cast<arrow::Int64Array>(batch->column(0))->Value(0), 42);
+            }
+        }
+        for (const auto& sql : {"SELECT database_value FROM sqlite.local USING test.database_input",
+                                "SELECT * FROM sqlite.local USING test.database_input WHERE database_value>0",
+                                "SELECT * FROM sqlite.local.src USING test.database_input",
+                                "SELECT * FROM sqlite.local USING test.database_input THEN test.database_input"}) {
+            database_input_provider.trace = {};
+            std::string response;
+            ASSERT_TRUE(exec("/scheduler/batch/execute", MakeReq(sql), response) != error::OK);
+            ASSERT_EQ(database_input_provider.trace.created, 0);
+        }
+        database_input_provider.trace = {};
+        database_input_provider.trace.failure = 13;
+        auto gate = std::make_shared<DatabaseInputGate>();
+        database_input_provider.trace.gate = gate;
+        auto submit = FindRouteHandler(loader, "POST", "/scheduler/batch/submit");
+        auto stop = FindRouteHandler(loader, "POST", "/scheduler/batch/stop");
+        auto status = FindRouteHandler(loader, "POST", "/scheduler/batch/status");
+        ASSERT_TRUE(submit && stop && status);
+        std::string response;
+        const std::string identity = "{\"runtime_task_id\":\"database-init-cancel\"}";
+        const std::string request =
+            "{\"runtime_task_id\":\"database-init-cancel\",\"sql_text\":\"SELECT * FROM sqlite.local USING "
+            "test.database_input INTO dataframe.database_init_cancel\"}";
+        ASSERT_EQ(submit("/scheduler/batch/submit", request, response), error::OK);
+        {
+            std::unique_lock<std::mutex> lock(gate->mutex);
+            ASSERT_TRUE(gate->cv.wait_for(lock, std::chrono::seconds(3), [&] { return gate->entered; }));
+        }
+        ASSERT_EQ(stop("/scheduler/batch/stop", "{\"runtime_task_id\":\"database-init-cancel\",\"mode\":\"cancel\"}",
+                       response),
+                  error::OK);
+        rapidjson::Document final;
+        for (int attempt = 0; attempt < 200; ++attempt) {
+            ASSERT_EQ(status("/scheduler/batch/status", identity, response), error::OK);
+            final.Parse(response.c_str());
+            ASSERT_TRUE(!final.HasParseError());
+            if (std::string(final["status"].GetString()) == "cancelled") break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        ASSERT_EQ(std::string(final["status"].GetString()), "cancelled");
+        ASSERT_EQ(database_input_provider.trace.created, 1);
+        ASSERT_EQ(database_input_provider.trace.task_released, 1);
+        ASSERT_EQ(database_input_provider.trace.input_released, 0);
+        ASSERT_EQ(database_input_provider.trace.flushed, 0);
+        database_input_provider.trace = {};
+        std::puts("[PASS] database block input SQL, schema, initialization Cancel and same-task cleanup");
+    }
     {
         std::string managed_rsp;
         ASSERT_EQ(
@@ -3467,6 +3723,23 @@ int main() {
         ASSERT_TRUE(!batch_doc.HasParseError() && batch_doc.IsObject());
         ASSERT_TRUE(batch_doc.HasMember("task_kind") && batch_doc["task_kind"].IsString());
         ASSERT_EQ(std::string(batch_doc["task_kind"].GetString()), "batch");
+
+        for (const auto& mode : {"snapshot", "poll"}) {
+            const int before_created = database_input_provider.trace.created;
+            const int before_released = database_input_provider.trace.task_released;
+            ASSERT_EQ(
+                sql_classify("/scheduler/sql/classify",
+                             MakeReq(std::string("SELECT * FROM sqlite.local USING test.database_input WITH mode='") +
+                                     mode + "' INTO dataframe.classify_db"),
+                             rsp),
+                error::OK);
+            rapidjson::Document policy;
+            policy.Parse(rsp.c_str());
+            ASSERT_TRUE(!policy.HasParseError() && policy.HasMember("requires_async"));
+            ASSERT_EQ(policy["requires_async"].GetBool(), std::string(mode) == "poll");
+            ASSERT_EQ(database_input_provider.trace.created, before_created);
+            ASSERT_EQ(database_input_provider.trace.task_released, before_released);
+        }
 
         ASSERT_EQ(sql_classify("/scheduler/sql/classify",
                                MakeReq("SELECT * FROM tcp_session_mock.tcp_src USING builtin.tcp_service_merge_stream "
@@ -6491,6 +6764,22 @@ int main() {
     }
     std::puts("[PASS] T66/T67");
 
+    // StopAll must cancel and join an input creation call before unloading plugins.
+    database_input_provider.trace = {};
+    database_input_provider.trace.failure = 13;
+    auto unload_gate = std::make_shared<DatabaseInputGate>();
+    database_input_provider.trace.gate = unload_gate;
+    {
+        auto submit = FindRouteHandler(loader, "POST", "/scheduler/batch/submit");
+        std::string response;
+        ASSERT_EQ(submit("/scheduler/batch/submit",
+                         "{\"runtime_task_id\":\"database-unload-cancel\",\"sql_text\":\"SELECT * FROM sqlite.local "
+                         "USING test.database_input INTO dataframe.database_unload_cancel\"}",
+                         response),
+                  error::OK);
+        std::unique_lock<std::mutex> lock(unload_gate->mutex);
+        ASSERT_TRUE(unload_gate->cv.wait_for(lock, std::chrono::seconds(3), [&] { return unload_gate->entered; }));
+    }
     exec = fnRouterHandler();
     stream_exec = fnRouterHandler();
     stream_stop = fnRouterHandler();
@@ -6508,6 +6797,11 @@ int main() {
     delete_operator = fnRouterHandler();
     upsert_batch = fnRouterHandler();
     loader->StopAll();
+    ASSERT_TRUE(unload_gate->cancelled);
+    ASSERT_EQ(database_input_provider.trace.task_released, 1);
+    ASSERT_EQ(database_input_provider.trace.flushed, 0);
+    ASSERT_EQ(database_input_provider.trace.input_released, 0);
+    std::puts("[PASS] StopAll cancels and joins in-flight database initialization before plugin unload");
     loader->Unload();
     std::filesystem::remove(db_path);
     std::filesystem::remove(stream_cfg);

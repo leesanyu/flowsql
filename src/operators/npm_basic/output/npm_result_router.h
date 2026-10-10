@@ -5,6 +5,7 @@
 #include <arrow/memory_pool.h>
 #include <arrow/table_builder.h>
 #include <operators/npm_basic/npm_protocol_contract.h>
+#include <operators/npm_basic/npm_result_progress.h>
 #include <atomic>
 #include <functional>
 
@@ -21,6 +22,7 @@ class NpmResultRouter final {
     int Emit(std::string_view module, std::string_view entity, const arrow::RecordBatch& rows);
     int Drain(std::shared_ptr<arrow::RecordBatch>* output);
     int Finish();
+    int PublishProgress(const NpmResultProgressV1& progress);
     int FailRun(int32_t code, std::string stage, std::string message) noexcept;
     std::string ResultJson() const;
     int Reject(int code, std::string message) { return Fail(code, std::move(message)); }
@@ -42,6 +44,7 @@ class NpmResultRouter final {
     std::unique_ptr<arrow::RecordBatchBuilder> pending_;
     size_t pending_rows_ = 0;
     int error_code_ = 0;
+    int64_t closed_before_ns_ = -1;
     std::string error_;
     std::atomic<bool> cancelled_{false};
     std::atomic<bool> finished_{false};
