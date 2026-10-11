@@ -29,6 +29,25 @@ constexpr auto relation_json =
 "series_keys":["g"],"deduplicate":{"keys":["g","t"],"on_duplicate":"require_equal"},"bucket":{"column":"t","unit":"bucket_id"},
 "metrics":[{"id":"dist","kind":"relation","feature_type":"relation","profile":"default","group_space":{"id":"groups","version":"v1","column":"g","unknown":"other","other_group_idx":99},
 "metrics":[{"id":"m","column":"x","aggregate":"sum"}],"support_policy":{"k_support":3,"min_hist_share":0.01,"min_active_ratio":0.1},"summary_policy":{"k_head":2,"k_stable":1}}]}]})";
+void MysqlResultIndexes(IDatabaseAtomicSessionV1& session) {
+    for (auto kind : {SchemaKind::kResults, SchemaKind::kRelationFusion, SchemaKind::kMaintenance}) {
+        const std::string table = kind == SchemaKind::kResults          ? "baseline_results_v1"
+                                  : kind == SchemaKind::kRelationFusion ? "baseline_relation_fusion_v1"
+                                                                        : "baseline_maintenance_v1";
+        const auto index = "baseline_" + std::to_string(static_cast<int>(kind)) + "_task_generation";
+        std::shared_ptr<arrow::RecordBatch> rows;
+        assert(ReadAtomicBatch(session,
+                               "SELECT COLUMN_NAME,SEQ_IN_INDEX FROM information_schema.STATISTICS WHERE "
+                               "TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME=? ORDER BY SEQ_IN_INDEX",
+                               {TextParameter(table), TextParameter(index)}, &rows)
+                   .ok());
+        assert(rows->num_rows() == 2);
+        auto columns = std::static_pointer_cast<arrow::StringArray>(rows->column(0));
+        assert(columns->GetString(0) == "task_key" && columns->GetString(1) == "published_generation");
+        assert(rows->column(1)->GetScalar(0).ValueOrDie()->ToString() == "1");
+        assert(rows->column(1)->GetScalar(1).ValueOrDie()->ToString() == "2");
+    }
+}
 void ActualModels(IDatabaseChannel* channel) {
     baseline::BaselinePlugin plugin;
     assert(plugin.Option(nullptr) == 0 && plugin.Load(nullptr) == 0 && plugin.Start() == 0);
@@ -339,6 +358,7 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, IDatabaseChannel* cross_sch
     assert(target);
     std::shared_ptr<IDatabaseAtomicSessionV1> observer;
     assert(target->AcquireAtomicSession({}, &observer).ok());
+    if (backend == "mysql") MysqlResultIndexes(*observer);
     assert(channel->ExecuteSql("CREATE TABLE IF NOT EXISTS source_facts(id BIGINT PRIMARY KEY,v TEXT)") >= 0);
     assert(channel->ExecuteSql("DELETE FROM source_facts") >= 0);
     assert(channel->ExecuteSql("INSERT INTO source_facts VALUES(1,'unchanged')") >= 0);
@@ -400,6 +420,11 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, IDatabaseChannel* cross_sch
            std::static_pointer_cast<arrow::Int64Array>(rows->column(0))->Value(1) == store.Generation());
     ActualModels(channel.get());
     store.Close();
+    DurableStore reopened;
+    assert(reopened.Open(c, channel.get(), "reopened") == 0);
+    assert(reopened.Load(&restored) == 0 && restored.generation == 4);
+    if (backend == "mysql") MysqlResultIndexes(*observer);
+    reopened.Close();
     observer->Close();
     observer.reset();
     channel.reset();

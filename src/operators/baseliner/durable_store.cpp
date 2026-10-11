@@ -173,13 +173,25 @@ int DurableStore::Initialize() {
             return Fail(status.message);
         }
         auto index = "baseline_" + std::to_string(static_cast<int>(kind)) + "_task_generation";
-        if (backend_ != "mysql") {
-            sql = "CREATE INDEX IF NOT EXISTS " + index + " ON " + table + "(task_key,published_generation)";
-            status = session.ExecutePrepared(sql.c_str(), nullptr, 0, &n);
+        if (backend_ == "mysql") {
+            std::shared_ptr<arrow::RecordBatch> indexes;
+            status = ReadAtomicBatch(session,
+                                     "SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() "
+                                     "AND TABLE_NAME=? AND INDEX_NAME=?",
+                                     {TextParameter(table), TextParameter(index)}, &indexes);
             if (!status.ok()) {
                 session.Rollback();
                 return Fail(status.message);
             }
+            if (std::stoll(indexes->column(0)->GetScalar(0).ValueOrDie()->ToString()) != 0) continue;
+            sql = "CREATE INDEX " + index + " ON " + table + "(task_key,published_generation)";
+        } else {
+            sql = "CREATE INDEX IF NOT EXISTS " + index + " ON " + table + "(task_key,published_generation)";
+        }
+        status = session.ExecutePrepared(sql.c_str(), nullptr, 0, &n);
+        if (!status.ok()) {
+            session.Rollback();
+            return Fail(status.message);
         }
     }
     auto result = session.Commit();

@@ -1063,6 +1063,36 @@ INTO mysql.baseline
 不可变前缀与桶关闭证据；普通业务表或有限 PCAP 落库不会自动满足这些条件。
 NPM 按 `interval_*` 增量字段建模，基线桶宽必须是 NPM 统计周期的正整数倍。
 
+### 数据库输入表的索引建议
+
+对大表或持续 `poll` 分析，建议在投入使用前为输入表准备能支持时间范围过滤和分页读取的索引，
+并用数据库的 `EXPLAIN` 检查实际执行计划。Baseliner 不修改输入表，也不会替用户创建输入索引；
+没有合适索引时，每次分页或关闭桶后的读取都可能重复扫描、排序大量历史数据，导致延迟增加或任务超时。
+索引是运行性能建议，不替代不可变范围、去重键或 poll 发布进度契约，也不是算子启动时的硬性检查。
+
+SQLite、MySQL、PostgreSQL 的候选复合索引应结合配置确定：常用等值过滤字段在前，随后是
+`dataset.bucket.column`，再按配置顺序追加 `deduplicate.keys` 中尚未出现的字段；配置了修订字段时，
+还需考虑 `revision_column`。这对应时间范围过滤及按“时间字段、去重字段、修订字段”排序的分页路径。
+`latest_revision` 使用窗口查询，字符串排序使用精确比较语义，需额外核对排序规则、表达式及执行计划；
+普通索引不保证消除所有排序。多 run 查询也应按实际计划验证，而不能只根据索引存在判断性能。
+
+例如上面的 `samples` 按 `bucket` 范围读取，并以 `(bucket, link)` 去重，可在来源数据库执行：
+
+```sql
+CREATE INDEX samples_baseline_scan ON samples(bucket, link);
+```
+
+已落库 NPM 数据若主要按单个 `__npm_run_id` 和 `period_start_ns` 范围分析，可从
+`(__npm_run_id, period_start_ns, <其余去重字段>)` 评估候选索引。ClickHouse 应评估 MergeTree
+排序键、主键与分区的裁剪效果，例如 run 和时间字段的排序前缀；不能照搬关系数据库的 B-tree 索引建议。
+DataFrame 快照不适用数据库索引要求。
+
+托管出口的 `baseline_results_v1`、`baseline_relation_fusion_v1`、`baseline_maintenance_v1` 则由
+Baseliner 在 SQLite、MySQL、PostgreSQL 上创建并确保 `(task_key, published_generation)` 索引，
+用于按任务查询和代际维护。这些内部结果表索引与用户维护的输入表索引分别服务于输出和输入路径。
+首次为已有大量数据的托管表创建索引时，应按实测 DDL 耗时配置 `persistence.operation_timeout_ms`
+（默认 5 秒），并满足 `renew_ms + operation_timeout_ms < lease_ms`；结果表索引存在后，重复初始化会复用它。
+
 完整配置、结果查询与恢复方式见 [Baseliner 使用说明](docs/baseliner.md)；
 验证范围和成本测量见 [Baseliner 验收记录](docs/baseliner-acceptance.md)。
 

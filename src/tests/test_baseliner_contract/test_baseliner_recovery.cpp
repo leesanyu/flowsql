@@ -16,7 +16,9 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
+#include <tuple>
 using namespace flowsql;
 using namespace flowsql::baseliner;
 namespace {
@@ -450,6 +452,26 @@ ConfigSnapshot WithRestore(const ConfigSnapshot& config, const char* policy) {
     Check(output.sha256_hex != config.sha256_hex, "exact configuration hash changes");
     return output;
 }
+void CleanupTask(IDatabaseChannel* target, const std::string& task_key) {
+    std::shared_ptr<IDatabaseAtomicSessionV1> session;
+    Check(dynamic_cast<IDatabaseAtomicTargetV1*>(target)->AcquireAtomicSession({}, &session).ok(), "cleanup session");
+    Check(session->Begin().ok(), "cleanup begin");
+    const auto parameter = TextParameter(task_key);
+    for (const char* table : {"baseline_results_v1", "baseline_relation_fusion_v1", "baseline_maintenance_v1",
+                              "baseline_source_positions", "baseline_model_versions", "baseline_tasks"}) {
+        const auto sql = std::string("DELETE FROM ") + table + " WHERE task_key=?";
+        uint64_t affected = 0;
+        Check(session->ExecutePrepared(sql.c_str(), &parameter, 1, &affected).ok(), "cleanup task rows");
+        std::shared_ptr<arrow::RecordBatch> rows;
+        Check(ReadAtomicBatch(*session, std::string("SELECT COUNT(*) FROM ") + table + " WHERE task_key=?", {parameter},
+                              &rows)
+                  .ok(),
+              "inspect cleanup");
+        Check(rows->column(0)->GetScalar(0).ValueOrDie()->ToString() == "0", "cleanup leaves no task rows");
+    }
+    Check(session->Commit().status.ok(), "cleanup commit");
+    session->Close();
+}
 void FaultRecovery(std::shared_ptr<IDatabaseChannel> target) {
     for (int mode = 1; mode <= 4; ++mode) {
         auto unique = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
@@ -529,6 +551,7 @@ void FaultRecovery(std::shared_ptr<IDatabaseChannel> target) {
         DurableStore invalid;
         Check(invalid.Open(mismatch, target.get(), "invalid") != 0, "config mismatch rejected");
         invalid.Close();
+        CleanupTask(target.get(), c.config.task_key);
     }
     ConfigSnapshot c;
     Check(ParseConfig(
@@ -547,11 +570,13 @@ void FaultRecovery(std::shared_ptr<IDatabaseChannel> target) {
     StoredGeneration empty;
     Check(optional.Load(&empty) == 0 && empty.generation == 0, "if_exists cold start");
     optional.Close();
+    CleanupTask(target.get(), c.config.task_key);
     c.config.task_key += "-fresh";
     c.config.persistence.restore = "fresh";
     DurableStore fresh;
     Check(fresh.Open(c, target.get(), "fresh") == 0, fresh.LastError());
     fresh.Close();
+    CleanupTask(target.get(), c.config.task_key);
 }
 
 void Matrix(database::DatabasePlugin& db, const std::shared_ptr<Loaded>& owner, Querier& querier,
@@ -674,6 +699,31 @@ void Matrix(database::DatabasePlugin& db, const std::shared_ptr<Loaded>& owner, 
     int64_t count = 0;
     for (const auto& b : expected) count += b->num_rows();
     assert(std::static_pointer_cast<arrow::Int64Array>(rows->column(0))->Value(0) == count);
+    // Read the task once; checking each expected row must not issue another database scan.
+    // Explicit null flags keep SQLite's first-row type inference independent of cold-start nulls.
+    std::shared_ptr<arrow::RecordBatch> persisted;
+    Check(
+        ReadAtomicBatch(*inspection,
+                        "SELECT COALESCE(observed,0.0),COALESCE(expected,0.0),COALESCE(lower,0.0),COALESCE(upper,0.0),"
+                        "CASE WHEN observed IS NULL THEN 1 ELSE 0 END,CASE WHEN expected IS NULL THEN 1 ELSE 0 END,"
+                        "CASE WHEN lower IS NULL THEN 1 ELSE 0 END,CASE WHEN upper IS NULL THEN 1 ELSE 0 END,"
+                        "metric_id,result_kind,target_bucket,issued_after_bucket,model_basis_id "
+                        "FROM baseline_results_v1 WHERE task_key=?",
+                        {TextParameter(c.config.task_key)}, &persisted)
+            .ok(),
+        "read persisted results");
+    Check(persisted->num_rows() == count, "persisted result count");
+    using ResultKey = std::tuple<std::string, std::string, int64_t, int64_t, std::string>;
+    std::map<ResultKey, std::vector<int64_t>> result_rows;
+    for (int64_t row = 0; row < persisted->num_rows(); ++row) {
+        auto text = [&](int column) {
+            return std::static_pointer_cast<arrow::StringArray>(persisted->column(column))->GetString(row);
+        };
+        auto integer = [&](int column) {
+            return std::static_pointer_cast<arrow::Int64Array>(persisted->column(column))->Value(row);
+        };
+        result_rows[{text(8), text(9), integer(10), integer(11), text(12)}].push_back(row);
+    }
     for (const auto& b : expected)
         for (int64_t row = 0; row < b->num_rows(); ++row) {
             auto text = [&](const char* name) {
@@ -684,23 +734,21 @@ void Matrix(database::DatabasePlugin& db, const std::shared_ptr<Loaded>& owner, 
                        issued = std::static_pointer_cast<arrow::Int64Array>(b->GetColumnByName("issued_after_bucket"))
                                     ->Value(row);
             auto metric = text("metric_id"), kind = text("result_kind"), basis = text("model_basis_id");
-            assert(ReadAtomicBatch(
-                       *inspection,
-                       "SELECT observed,expected,lower,upper FROM baseline_results_v1 WHERE task_key=? AND metric_id=? "
-                       "AND result_kind=? AND target_bucket=? AND issued_after_bucket=? AND model_basis_id=?",
-                       {TextParameter(c.config.task_key), TextParameter(metric), TextParameter(kind),
-                        IntParameter(bucket), IntParameter(issued), TextParameter(basis)},
-                       &rows)
-                       .ok());
+            auto found = result_rows.find({metric, kind, bucket, issued, basis});
+            Check(found != result_rows.end(), "persisted result identity");
             // Relation summaries can share these predicates; scalar Value/Ratio have exactly one row.
             if (metric == "v" || metric == "r") {
-                assert(rows->num_rows() == 1);
+                assert(found->second.size() == 1);
+                const auto actual_row = found->second.front();
                 for (int column = 0; column < 4; ++column) {
-                    auto actual = rows->column(column), expected_value = b->GetColumnByName(std::vector<std::string>{
-                                                            "observed", "expected", "lower", "upper"}[column]);
-                    assert(actual->IsNull(0) == expected_value->IsNull(row));
-                    if (!actual->IsNull(0))
-                        assert(std::static_pointer_cast<arrow::DoubleArray>(actual)->Value(0) ==
+                    auto actual = persisted->column(column),
+                         expected_value = b->GetColumnByName(
+                             std::vector<std::string>{"observed", "expected", "lower", "upper"}[column]);
+                    const bool is_null =
+                        persisted->column(column + 4)->GetScalar(actual_row).ValueOrDie()->ToString() == "1";
+                    assert(is_null == expected_value->IsNull(row));
+                    if (!is_null)
+                        assert(std::static_pointer_cast<arrow::DoubleArray>(actual)->Value(actual_row) ==
                                std::static_pointer_cast<arrow::DoubleArray>(expected_value)->Value(row));
                 }
             }
@@ -723,6 +771,7 @@ void Matrix(database::DatabasePlugin& db, const std::shared_ptr<Loaded>& owner, 
         restarted_with_require.Finish();
     }
     Check(source->ExecuteSql(("DROP TABLE " + table).c_str()) >= 0, source->GetLastError());
+    CleanupTask(target.get(), c.config.task_key);
     std::cout << "PASS recovery " << source_type << " -> " << target_type << (poll ? " poll" : " snapshot")
               << std::endl;
 }
