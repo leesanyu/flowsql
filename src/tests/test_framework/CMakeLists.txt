@@ -59,6 +59,8 @@ endfunction()
 add_plugin_loader_fixture(plugin_loader_fixture_a "a" TRUE)
 add_plugin_loader_fixture(plugin_loader_fixture_b "b" FALSE)
 add_plugin_loader_fixture(plugin_loader_fixture_c "c" FALSE)
+target_compile_definitions(plugin_loader_fixture_c PRIVATE PLUGIN_LOADER_FIXTURE_TASK_RUNTIME=1)
+add_plugin_loader_fixture(plugin_loader_fixture_d "d" FALSE)
 
 add_executable(test_plugin_loader test_plugin_loader.cpp)
 target_include_directories(test_plugin_loader PRIVATE ${CMAKE_SOURCE_DIR})
@@ -68,6 +70,7 @@ add_dependencies(test_plugin_loader
     plugin_loader_fixture_a
     plugin_loader_fixture_b
     plugin_loader_fixture_c
+    plugin_loader_fixture_d
     flowsql_gateway
     flowsql_router
     flowsql_web
@@ -83,6 +86,7 @@ add_test(NAME test_plugin_loader COMMAND
     $<TARGET_FILE:flowsql_gateway>
     $<TARGET_FILE:flowsql_router>
     $<TARGET_FILE:flowsql_web>
+    $<TARGET_FILE:plugin_loader_fixture_d>
 )
 
 add_executable(test_native_deploy_config

@@ -10,7 +10,8 @@
 
 | 状态 | Feature | 优先级 | 目标 | 规格 |
 | --- | --- | --- | --- | --- |
-| [-] | Baseline/Baseliner 生命周期与评估契约修复 (`baseliner-contract-safety`) | P1 | 为通过 Scheduler 加载并调度 Baseline 分析的用户，修复停机清理与活动任务冲突、取消与输出会话交接冲突，以及冷启动依赖诊断文本的问题；交付先排空任务再释放插件状态、在途取消结束后再关闭会话、通过插件显式状态输出有效评估结果的保证。 | [规格](specs/feat-baseliner-contract-safety.md) |
+| [-] | NPI 报文布局与分析地址分离 (`npi-wire-layout`) | P1 | 为通过 NPI 解码并由 NPM Basic 分析离线/实时流量的使用者，修复任意报文偏移下的未对齐访问及字节读取导致的字段可读性下降；交付符合协议字节布局的具名报文头、适宜对齐的分析地址及明确值转换，保持端点、识别和会话结果并提供可复核的兼容与成本证据。 | [规格](specs/feat-npi-wire-layout.md) |
+| [x] | Baseline/Baseliner 生命周期与评估契约修复 (`baseliner-contract-safety`) | P1 | 为通过 Scheduler 加载并调度 Baseline 分析的用户，修复停机清理与活动任务冲突、取消与输出会话交接冲突，以及冷启动依赖诊断文本的问题；交付先排空任务再释放插件状态、在途取消结束后再关闭会话、通过插件显式状态输出有效评估结果的保证。 | [归档](archive/feat-baseliner-contract-safety.md) |
 | [x] | Baseliner 单表与 DataFrame 分析及输出 (`baseliner-single-source`) | P1 | 让测试指定数据库表和上传 CSV 的离线分析用户，直接通过三段数据库或 DataFrame 来源执行基线任务，在 WITH 内配置少量指标并指定模型参数出口，通过单一 INTO 指定评估/预测结果出口；交付可分别查询的最终模型与一致的分析结果，减少重复配置并保持源数据、有限快照、原持续发布进度及托管恢复保证。 | [归档](archive/feat-baseliner-single-source.md) |
 | [x] | NPM 运行时检视修复 (`npm-runtime-review-fixes`) | P1 | 为离线批处理和实时终态分析修复已复现的超时顺序、输出内存放大、周期空扫描与标签预算未归还问题，使目标流超时结果稳定、默认预算可交付三万会话结果且资源账目随生命周期归零。 | [归档](archive/feat-npm-runtime-review-fixes.md) |
 | [x] | NPM 数据包契约与解析基础 (`npm-packet-contract`) | P0 | 定义统一的 packet 数据实体、采集元数据、Arrow Schema 及截断/畸形报文语义，并复用现有 NPI 分层与协议识别能力。 | [归档](archive/feat-npm-packet-contract.md) |

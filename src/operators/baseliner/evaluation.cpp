@@ -4,6 +4,7 @@
 #include <arrow/io/memory.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/ipc/writer.h>
+#include <framework/interfaces/ibaseline_evaluation.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -31,10 +32,6 @@ std::string Hex(std::string_view value) {
     return out;
 }
 bool Finite(const std::optional<double>& value) { return value && std::isfinite(*value); }
-bool Cold(const RollingBaselineResult& result) {
-    return std::find(result.uncertainty_source.begin(), result.uncertainty_source.end(), "first_observation") !=
-           result.uncertainty_source.end();
-}
 Observation Identity(const Observation& input) {
     Observation identity;
     identity.dataset_id = input.dataset_id;
@@ -45,7 +42,8 @@ Observation Identity(const Observation& input) {
     identity.bucket = input.bucket;
     return identity;
 }
-EvaluationRow Row(const Observation& input, const RollingBaselineResult& result, const std::string& basis) {
+EvaluationRow Row(const Observation& input, const RollingBaselineResult& result,
+                  BaselineEvaluationReadinessV1 readiness, const std::string& basis) {
     EvaluationRow row;
     row.input = Identity(input);
     row.rolling = result;
@@ -55,18 +53,18 @@ EvaluationRow Row(const Observation& input, const RollingBaselineResult& result,
     row.values.observed = result.observed;
     row.values.status = result.status;
     row.values.can_alert = false;
-    if (result.status == BaselineStatus::kOk && !Cold(result)) {
+    if (result.status == BaselineStatus::kOk && readiness == BaselineEvaluationReadinessV1::kReady) {
         row.values.expected = result.baseline_mu;
         row.values.lower = result.baseline_lower;
         row.values.upper = result.baseline_upper;
         row.values.can_alert = result.can_alert;
-    } else if (Cold(result))
+    } else if (readiness == BaselineEvaluationReadinessV1::kColdStart)
         row.values.status = BaselineStatus::kNotTrained;
     return row;
 }
 EvaluationRow RelationRow(const Observation& input, const RelationRoutedSummaryResult& routed,
-                          const std::string& basis) {
-    auto row = Row(input, routed.rolling, basis);
+                          BaselineEvaluationReadinessV1 readiness, const std::string& basis) {
+    auto row = Row(input, routed.rolling, readiness, basis);
     row.summary_id = routed.summary;
     row.input.metric_id = routed.metric;
     row.basis_id = routed.basis_scoped ? std::to_string(routed.basis_version) : "";
@@ -109,6 +107,9 @@ struct EvaluationEngine::Impl {
     struct Module {
         Metric metric;
         std::shared_ptr<IBaselineTask> task;
+        IBaselineValueEvaluationV1* value_evaluation = nullptr;
+        IBaselineRatioEvaluationV1* ratio_evaluation = nullptr;
+        IBaselineRelationEvaluationV1* relation_evaluation = nullptr;
         std::shared_ptr<IBaselineTaskStateControlV1> control;
         std::shared_ptr<IBaselineCheckpointV1> checkpoint;
         std::map<std::string, Series> series;
@@ -330,6 +331,15 @@ int EvaluationEngine::Open(ConfigSnapshot config, IBaselineService* service, IBa
                 Close();
                 return impl_->Fail("algorithm task creation failed");
             }
+            module->value_evaluation = dynamic_cast<IBaselineValueEvaluationV1*>(module->task.get());
+            module->ratio_evaluation = dynamic_cast<IBaselineRatioEvaluationV1*>(module->task.get());
+            module->relation_evaluation = dynamic_cast<IBaselineRelationEvaluationV1*>(module->task.get());
+            if ((metric.kind == BaselineTaskKind::kValue && !module->value_evaluation) ||
+                (metric.kind == BaselineTaskKind::kRatio && !module->ratio_evaluation) ||
+                (metric.kind == BaselineTaskKind::kRelation && !module->relation_evaluation)) {
+                Close();
+                return impl_->Fail("algorithm task lacks baseline evaluation V1 capability");
+            }
             auto bound = control->Bind(module->task, impl_->config.config.state.limits);
             if (bound.first != BaselineStatus::kOk || !bound.second) {
                 Close();
@@ -406,15 +416,17 @@ int EvaluationEngine::Submit(const Observation& input, EvaluationOutput* output)
         observation.group_idx = input.groups;
         for (const auto& metric : input.metrics)
             observation.metrics.push_back({metric.metric, metric.total, metric.active_count, metric.values_by_group});
-        auto relation =
-            std::static_pointer_cast<IBaselineRelationTask>(module.task)->SubmitObservation(observation, {});
+        auto evaluation = module.relation_evaluation->SubmitObservationWithReadiness(observation, {});
+        const auto& relation = evaluation.result;
+        if (evaluation.routed_readiness.size() != relation.routed_results.size())
+            return impl_->Fail("algorithm relation evaluation V1 readiness length mismatch");
         if (relation.status != BaselineStatus::kOk) return impl_->Fail("algorithm relation Submit failed");
         if (!impl_->FitsRows(input, basis,
                              relation.routed_results.size() * (uint64_t(impl_->config.config.horizon_buckets) + 1)))
             return impl_->Fail("relation evaluation/forecast budget exceeded");
         next.relation = relation;
-        for (const auto& routed : relation.routed_results) {
-            auto row = RelationRow(input, routed, basis);
+        for (size_t i = 0; i < relation.routed_results.size(); ++i) {
+            auto row = RelationRow(input, relation.routed_results[i], evaluation.routed_readiness[i], basis);
             if (!ValidateResult(row.values).ok()) return impl_->Fail("invalid relation evaluation result");
             next.results.push_back(std::move(row));
         }
@@ -440,20 +452,20 @@ int EvaluationEngine::Submit(const Observation& input, EvaluationOutput* output)
         *output = std::move(next);
         return 0;
     }
-    RollingBaselineResult result;
+    BaselineEvaluationResultV1 evaluation;
     if (!impl_->FitsRows(input, basis, uint64_t(impl_->config.config.horizon_buckets) + 1))
         return impl_->Fail("scalar evaluation/forecast budget exceeded");
     if (input.kind == BaselineTaskKind::kValue)
-        result = std::static_pointer_cast<IBaselineValueTask>(module.task)
-                     ->SubmitObservation(
-                         {Hex(input.identity), input.bucket, *input.value, input.sample_count.value_or(1)}, {});
+        evaluation = module.value_evaluation->SubmitObservationWithReadiness(
+            {Hex(input.identity), input.bucket, *input.value, input.sample_count.value_or(1)}, {});
     else
-        result = std::static_pointer_cast<IBaselineRatioTask>(module.task)
-                     ->SubmitObservation({Hex(input.identity), input.bucket, *input.numerator, *input.denominator}, {});
+        evaluation = module.ratio_evaluation->SubmitObservationWithReadiness(
+            {Hex(input.identity), input.bucket, *input.numerator, *input.denominator}, {});
+    const auto& result = evaluation.result;
     if (result.status != BaselineStatus::kOk && result.status != BaselineStatus::kInsufficientData &&
         result.status != BaselineStatus::kNotTrained)
         return impl_->Fail("algorithm Submit failed: " + std::to_string(static_cast<int>(result.status)));
-    auto row = Row(input, result, basis);
+    auto row = Row(input, result, evaluation.readiness, basis);
     if (!ValidateResult(row.values).ok()) return impl_->Fail("invalid algorithm evaluation result");
     state.last = input.bucket;
     impl_->Touch({input.dataset_id, input.metric_id}, input.identity, state);

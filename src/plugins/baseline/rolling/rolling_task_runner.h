@@ -4,7 +4,7 @@
 #ifndef _FLOWSQL_PLUGINS_BASELINE_ROLLING_ROLLING_TASK_RUNNER_H_
 #define _FLOWSQL_PLUGINS_BASELINE_ROLLING_ROLLING_TASK_RUNNER_H_
 
-#include <framework/interfaces/ibaseline_types.h>
+#include <framework/interfaces/ibaseline_evaluation.h>
 
 #include <string>
 #include <string_view>
@@ -30,11 +30,13 @@ struct RollingEventContext {
 
 RollingBaselineResult RunValueRollingSubmit(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
                                             RollingStateMap* states, const ValueRollingObservation& obs,
-                                            const RollingSubmitOptions& options, RollingEventContext* events = nullptr);
+                                            const RollingSubmitOptions& options, RollingEventContext* events = nullptr,
+                                            BaselineEvaluationReadinessV1* readiness = nullptr);
 
 RollingBaselineResult RunRatioRollingSubmit(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
                                             RollingStateMap* states, const RatioRollingObservation& obs,
-                                            const RollingSubmitOptions& options, RollingEventContext* events = nullptr);
+                                            const RollingSubmitOptions& options, RollingEventContext* events = nullptr,
+                                            BaselineEvaluationReadinessV1* readiness = nullptr);
 
 RollingPrediction PredictRollingForSeries(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
                                           const RollingStateMap& states, std::string_view series_key, int64_t bucket_id,

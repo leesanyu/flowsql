@@ -4,6 +4,9 @@
 Value、Ratio 和 Relation 可以在同一个配置中使用。当前支持 SQLite、MySQL、PostgreSQL、ClickHouse 来源；
 模型和结果托管目标支持 SQLite、MySQL、PostgreSQL。
 
+部署时需要配套的 Baseline 插件提供 Value、Ratio、Relation 的 V1 评估就绪能力。算子在打开任务时检查能力，
+缺少所需能力会明确失败。旧 Baseline 任务调用接口继续可用；新算子的部署应同时更新 Baseline 插件。
+
 ## NPM 落库与基线分析
 
 先运行独立的 NPM 任务，再运行基线任务。下面的 `mysql.npm`、`mysql.baseline` 是已配置的数据库通道，
@@ -194,6 +197,9 @@ Baseline 桶宽 `B` 必须为 NPM 周期 `P` 的正整数倍。`B=P` 与同桶�
 不会把一次数据库分页等同于一次模型更新。Ratio 使用分子、分母分别汇总后求比值；Relation 保留组分布并输出路由摘要。
 
 当前桶先用更新前模型评估，再按策略学习。冷启动或没有有效预测时，保留 observed，expected/lower/upper 为 NULL。
+插件明确返回本次评估是 unavailable、cold start 或 ready；算子按该状态决定当前桶的预测字段，诊断文案不影响输出。
+从当前观测首次初始化成功仍属于当前桶冷启动；bootstrap 或恢复的旧模型可使首条在线观测直接 ready。
+已有模型但支持不足、禁止学习或禁止告警时，只要本次评估有效，仍可输出预测；ready 不代表可以学习或告警。
 forecast 不包含 actual，保留 `issued_after_bucket` 和 `model_basis_id`；同一未来桶的不同发布时间可以并存。
 
 两段数据库托管模式下，`checkpoint_every_buckets` 和 `checkpoint_interval_ms` 控制持久发布频率。模型、消费位置、结果在一个 generation 内原子发布，
@@ -226,6 +232,9 @@ INTO dataframe.future_baseline
 
 poll 不把空轮询当 EOF。`POST /scheduler/batch/stop` 请求 `{"runtime_task_id":"...","mode":"stop"}`
 会唤醒 reader 并正常提交尾批；`mode=cancel` 或执行错误不发布成功尾批。所有在途调用结束后才关闭资源或卸载库。
+使用配套加载器和声明 task runtime 角色的 Scheduler 时，Scheduler 先停止接纳、取消并等待活动任务退出，
+Baseline 随后清理模型；直接卸载也先执行停止流程。两出口交接会话时，在途取消仍持有会话和数据库通道，
+最后使用者退出后才关闭会话并释放通道。仅替换 Baseline 插件不能提供完整的停机顺序保证。
 
 托管基础契约见 [原算子规格](../tasks/archive/feat-baseline-operator.md)，单表与两出口契约见
 [单表与 DataFrame 规格](../tasks/archive/feat-baseliner-single-source.md)，生产条件、五轮排序/转换与模型导出测量见

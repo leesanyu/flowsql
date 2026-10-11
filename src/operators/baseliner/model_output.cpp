@@ -121,7 +121,7 @@ std::string ModelOutputStore::Type(const arrow::DataType& type) const {
 }
 int ModelOutputStore::Open(const ConfigSnapshot& config, std::shared_ptr<IDatabaseChannel> channel, std::string table,
                            SchemaKind kind) {
-    if (session_ || cancelled_ || !channel || !channel->IsOpened() || !channel->IsConnected())
+    if (owner_ || cancelled_ || !channel || !channel->IsOpened() || !channel->IsConnected())
         return Fail("model target unavailable");
     if (kind != SchemaKind::kModelParameters && kind != SchemaKind::kResults) return Fail("invalid output kind");
     kind_ = kind;
@@ -136,14 +136,16 @@ int ModelOutputStore::Open(const ConfigSnapshot& config, std::shared_ptr<IDataba
     auto* target = dynamic_cast<IDatabaseAtomicTargetV1*>(channel.get());
     if (!target) return Fail("model target lacks atomic session capability");
     table_ = std::move(table);
-    channel_ = std::move(channel);
     max_bytes_ = config.config.read.max_pending_bytes;
     DatabaseAtomicSessionOptionsV1 options;
     options.operation_timeout_ms = config.config.persistence.operation_timeout_ms;
     std::shared_ptr<IDatabaseAtomicSessionV1> session;
     auto status = target->AcquireAtomicSession(options, &session);
     if (!status.ok()) return Fail(status.message);
-    std::atomic_store(&session_, session);
+    auto owner = std::make_shared<SessionOwner>();
+    owner->channel = std::move(channel);
+    owner->session = session;
+    std::atomic_store(&owner_, owner);
     if (cancelled_) {
         session->Cancel();
         return Fail("model output cancelled");
@@ -178,7 +180,8 @@ int ModelOutputStore::Open(const ConfigSnapshot& config, std::shared_ptr<IDataba
     return 0;
 }
 int ModelOutputStore::ValidateSchema() {
-    auto session = std::atomic_load(&session_);
+    auto owner = std::atomic_load(&owner_);
+    auto session = owner ? owner->session : nullptr;
     std::shared_ptr<arrow::RecordBatch> batch;
     DatabaseAtomicStatusV1 status;
     if (backend_ == "sqlite")
@@ -256,24 +259,30 @@ int ModelOutputStore::ValidateRelations(IDatabaseChannel* source, const std::vec
     return 0;
 }
 int ModelOutputStore::Join(ModelOutputStore& model) {
-    if (!session_ || !model.session_) return Fail("output session unavailable");
+    auto owner = std::atomic_load(&owner_);
+    if (!owner || !std::atomic_load(&model.owner_)) return Fail("output session unavailable");
     if (backend_ != model.backend_ || database_identity_ != model.database_identity_ ||
         default_schema_ != model.default_schema_)
         return 0;
     if ((backend_ == "sqlite" ? Lower(table_) == Lower(model.table_) : table_ == model.table_))
         return Fail("model and results overlap actual target");
-    model.Close();
-    model.channel_ = channel_;  // Each session holder retains the actual session's channel lease.
-    std::atomic_store(&model.session_, std::atomic_load(&session_));
-    model.owns_session_ = false;
+    std::atomic_store(&model.owner_, owner);
+    // Cancel sets its sticky flag before loading the owner. Checking after publication covers
+    // cancellation on either side of the handoff, including a call still using the old session.
+    if (cancelled_ || model.cancelled_) {
+        cancelled_ = true;
+        model.cancelled_ = true;
+        owner->session->Cancel();
+    }
     return 0;
 }
 bool ModelOutputStore::SharesSession(const ModelOutputStore& model) const {
-    const auto session = std::atomic_load(&session_);
-    return session && session == std::atomic_load(&model.session_);
+    const auto owner = std::atomic_load(&owner_);
+    return owner && owner == std::atomic_load(&model.owner_);
 }
 int ModelOutputStore::Insert(const std::shared_ptr<arrow::RecordBatch>& batch) {
-    auto session = std::atomic_load(&session_);
+    auto owner = std::atomic_load(&owner_);
+    auto session = owner ? owner->session : nullptr;
     if (!batch || !batch->schema()->Equals(*MakeSchema(kind_), true) || !batch->ValidateFull().ok())
         return Fail("invalid output Schema");
     std::string sql = "INSERT INTO " + Quote(table_) + "(logical_key";
@@ -312,7 +321,8 @@ int ModelOutputStore::Write(const std::shared_ptr<arrow::RecordBatch>& batch) {
 }
 int ModelOutputStore::Write(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches, ModelOutputStore* model,
                             const std::shared_ptr<arrow::RecordBatch>& parameters) {
-    auto session = std::atomic_load(&session_);
+    auto owner = std::atomic_load(&owner_);
+    auto session = owner ? owner->session : nullptr;
     if (!session || cancelled_ || state_ != "pending" ||
         (model && (!SharesSession(*model) || model->state_ != "pending" || model->cancelled_)))
         return Fail("output transaction unavailable");
@@ -368,13 +378,9 @@ int ModelOutputStore::Write(const std::vector<std::shared_ptr<arrow::RecordBatch
 }
 void ModelOutputStore::Cancel() {
     cancelled_ = true;
-    auto session = std::atomic_load(&session_);
+    auto owner = std::atomic_load(&owner_);
+    auto session = owner ? owner->session : nullptr;
     if (session) session->Cancel();
 }
-void ModelOutputStore::Close() {
-    auto session = std::atomic_exchange(&session_, std::shared_ptr<IDatabaseAtomicSessionV1>{});
-    if (session && owns_session_) session->Close();
-    session.reset();
-    channel_.reset();
-}
+void ModelOutputStore::Close() { std::atomic_store(&owner_, std::shared_ptr<SessionOwner>{}); }
 }  // namespace flowsql::baseliner

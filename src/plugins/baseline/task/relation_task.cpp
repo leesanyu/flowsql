@@ -956,27 +956,33 @@ void BaselineRelationTask::ResetFusionCleanupRuntime() {
 RelationRollingResult BaselineRelationTask::SubmitObservation(
     const RelationRollingObservation& obs,
     const RelationRollingSubmitOptions& options) {
-    RelationRollingResult result;
+    return SubmitObservationWithReadiness(obs, options).result;
+}
+
+BaselineRelationEvaluationResultV1 BaselineRelationTask::SubmitObservationWithReadiness(
+    const RelationRollingObservation& obs, const RelationRollingSubmitOptions& options) {
+    BaselineRelationEvaluationResultV1 evaluation;
+    auto& result = evaluation.result;
     result.series_key = obs.series_key;
     result.bucket_id = obs.bucket_id;
     result.status = EnsureOpen();
-    if (result.status != BaselineStatus::kOk) return result;
+    if (result.status != BaselineStatus::kOk) return evaluation;
     MarkStateOperation();
     if (obs.series_key.empty()) {
         result.status = BaselineStatus::kInvalidArgument;
-        return result;
+        return evaluation;
     }
 
     if (!HasIdentityCapacity(obs.series_key, false)) {
         result.status = BaselineStatus::kInvalidArgument;
         AppendDiagnostic(options.include_diagnostics, "baseline_state_capacity_reached", &result.diagnostics);
-        return result;
+        return evaluation;
     }
 
     auto cursor_it = last_processed_by_source_.find(obs.series_key);
     if (cursor_it != last_processed_by_source_.end() && obs.bucket_id <= cursor_it->second) {
         result.status = BaselineStatus::kInvalidArgument;
-        return result;
+        return evaluation;
     }
 
     const BootstrapSeed* restore_seed = nullptr;
@@ -986,7 +992,7 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
             restore_seed = &seed->second;
             if (obs.bucket_id <= restore_seed->coverage_report.train_end_bucket) {
                 result.status = BaselineStatus::kInvalidArgument;
-                return result;
+                return evaluation;
             }
         }
     }
@@ -1037,7 +1043,7 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
         }
         if (!fusion_metric.valid) {
             result.status = BaselineStatus::kInvalidArgument;
-            return result;
+            return evaluation;
         }
         saw_valid_metric = true;
 
@@ -1086,11 +1092,11 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
             summary_options.include_basis_scoped = active_basis.has_value();
             if (!ProjectRelationMetricSummaries(obs, metric_index, metric_name, summary_options, &prepared.summaries)) {
                 result.status = BaselineStatus::kInvalidArgument;
-                return result;
+                return evaluation;
             }
         } else if (!IsValidRelationMetric(*metric, obs.group_idx.size(), metric_name)) {
             result.status = BaselineStatus::kInvalidArgument;
-            return result;
+            return evaluation;
         }
         prepared_metrics.push_back(std::move(prepared));
     }
@@ -1100,7 +1106,7 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
     if (restore_seed && prepared_metrics.empty() &&
         !(routed_enabled && MakeFusionRuntimeConfig().enable_relation_fusion)) {
         result.status = BaselineStatus::kInvalidArgument;
-        return result;
+        return evaluation;
     }
     if (restore_seed) {
         InitializeRuntimeFromRelationSeed(*restore_seed);
@@ -1136,6 +1142,7 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
                 }
 
                 RollingBaselineResult rolling;
+                BaselineEvaluationReadinessV1 readiness = BaselineEvaluationReadinessV1::kUnavailable;
                 if (summary.task_kind == BaselineTaskKind::kValue) {
                     ValueRollingObservation routed_obs;
                     routed_obs.series_key = identity.routed_series_key;
@@ -1144,7 +1151,7 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
                     routed_obs.sample_count = 1;
                     rolling = RunValueRollingSubmit(spec_it->second, shard.routed_seeds_by_series,
                                                     &shard.routed_rolling_states, routed_obs, options.routed_options,
-                                                    &events);
+                                                    &events, &readiness);
                 } else if (summary.task_kind == BaselineTaskKind::kRatio) {
                     RatioRollingObservation routed_obs;
                     routed_obs.series_key = identity.routed_series_key;
@@ -1153,7 +1160,7 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
                     routed_obs.denominator = summary.denominator;
                     rolling = RunRatioRollingSubmit(spec_it->second, shard.routed_seeds_by_series,
                                                     &shard.routed_rolling_states, routed_obs, options.routed_options,
-                                                    &events);
+                                                    &events, &readiness);
                 } else {
                     continue;
                 }
@@ -1186,6 +1193,7 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
 
                 if (options.include_routed_results) {
                     result.routed_results.push_back(std::move(routed_result));
+                    evaluation.routed_readiness.push_back(readiness);
                 }
             }
         } else if (!routed_enabled) {
@@ -1324,7 +1332,7 @@ RelationRollingResult BaselineRelationTask::SubmitObservation(
         }
         if (versions_changed) RetireManagedVersions(obs.series_key);
     }
-    return result;
+    return evaluation;
 }
 
 RollingPrediction BaselineRelationTask::PredictRoutedSummary(

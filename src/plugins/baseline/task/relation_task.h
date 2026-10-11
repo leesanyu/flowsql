@@ -4,6 +4,8 @@
 #ifndef _FLOWSQL_PLUGINS_BASELINE_TASK_RELATION_TASK_H_
 #define _FLOWSQL_PLUGINS_BASELINE_TASK_RELATION_TASK_H_
 
+#include <framework/interfaces/ibaseline_evaluation.h>
+
 #include <memory>
 #include <string>
 #include <string_view>
@@ -25,7 +27,9 @@ namespace baseline {
 
 class TaskRegistry;
 
-class BaselineRelationTask final : public IBaselineRelationTask, public BaselineTaskBase {
+class BaselineRelationTask final : public IBaselineRelationTask,
+                                   public IBaselineRelationEvaluationV1,
+                                   public BaselineTaskBase {
     friend class CheckpointAccess;
     friend struct checkpoint::Fields<BaselineRelationTask>;
 
@@ -46,6 +50,8 @@ class BaselineRelationTask final : public IBaselineRelationTask, public Baseline
 
     RelationRollingResult SubmitObservation(const RelationRollingObservation& obs,
                                             const RelationRollingSubmitOptions& options) override;
+    BaselineRelationEvaluationResultV1 SubmitObservationWithReadiness(
+        const RelationRollingObservation& obs, const RelationRollingSubmitOptions& options) override;
     RollingPrediction PredictRoutedSummary(const RelationRoutedSummaryQuery& query, int64_t bucket_id) const override;
     BaselineSerializationResult QueryRoutedSummarySnapshot(const RelationRoutedSummaryQuery& query,
                                                            BaselineSerializationFormat format) const override;

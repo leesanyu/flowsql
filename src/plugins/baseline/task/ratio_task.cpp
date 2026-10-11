@@ -84,7 +84,13 @@ void BaselineRatioTask::OnClosing() {
 RollingBaselineResult BaselineRatioTask::SubmitObservation(
     const RatioRollingObservation& obs,
     const RollingSubmitOptions& options) {
-    RollingBaselineResult result;
+    return SubmitObservationWithReadiness(obs, options).result;
+}
+
+BaselineEvaluationResultV1 BaselineRatioTask::SubmitObservationWithReadiness(const RatioRollingObservation& obs,
+                                                                             const RollingSubmitOptions& options) {
+    BaselineEvaluationResultV1 evaluation;
+    auto& result = evaluation.result;
     result.series_key = obs.series_key;
     result.bucket_id = obs.bucket_id;
     const BaselineStatus status = EnsureOpen();
@@ -92,7 +98,7 @@ RollingBaselineResult BaselineRatioTask::SubmitObservation(
         result.status = status;
         result.numerator = obs.numerator;
         result.denominator = obs.denominator;
-        return result;
+        return evaluation;
     }
     RollingEventContext events{compiled_event_calendar_.get()};
     MarkStateOperation();
@@ -102,9 +108,11 @@ RollingBaselineResult BaselineRatioTask::SubmitObservation(
     if (may_initialize && !HasIdentityCapacity(obs.series_key, false)) {
         result.status = BaselineStatus::kInvalidArgument;
         result.diagnostics = "baseline_state_capacity_reached";
-        return result;
+        return evaluation;
     }
-    return RunRatioRollingSubmit(spec_, seeds_by_series_, &rolling_states_, obs, options, &events);
+    result =
+        RunRatioRollingSubmit(spec_, seeds_by_series_, &rolling_states_, obs, options, &events, &evaluation.readiness);
+    return evaluation;
 }
 
 RollingPrediction BaselineRatioTask::PredictRolling(std::string_view series_key,

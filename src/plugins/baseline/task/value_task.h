@@ -4,6 +4,8 @@
 #ifndef _FLOWSQL_PLUGINS_BASELINE_TASK_VALUE_TASK_H_
 #define _FLOWSQL_PLUGINS_BASELINE_TASK_VALUE_TASK_H_
 
+#include <framework/interfaces/ibaseline_evaluation.h>
+
 #include <memory>
 #include <string>
 #include <string_view>
@@ -20,7 +22,7 @@ namespace baseline {
 
 class TaskRegistry;
 
-class BaselineValueTask final : public IBaselineValueTask, public BaselineTaskBase {
+class BaselineValueTask final : public IBaselineValueTask, public IBaselineValueEvaluationV1, public BaselineTaskBase {
     friend class CheckpointAccess;
 
  public:
@@ -39,6 +41,8 @@ class BaselineValueTask final : public IBaselineValueTask, public BaselineTaskBa
 
     RollingBaselineResult SubmitObservation(const ValueRollingObservation& obs,
                                             const RollingSubmitOptions& options) override;
+    BaselineEvaluationResultV1 SubmitObservationWithReadiness(const ValueRollingObservation& obs,
+                                                              const RollingSubmitOptions& options) override;
     RollingPrediction PredictRolling(std::string_view series_key, int64_t bucket_id) const override;
     RollingPredictionSequence PredictRolling(std::string_view series_key, int64_t start_bucket_id,
                                              uint32_t point_count) const override;

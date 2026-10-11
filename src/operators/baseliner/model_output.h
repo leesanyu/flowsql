@@ -31,13 +31,20 @@ class ModelOutputStore {
     int Insert(const std::shared_ptr<arrow::RecordBatch>& batch);
     std::string Quote(const std::string& id) const;
     std::string Type(const arrow::DataType& type) const;
-    std::shared_ptr<IDatabaseChannel> channel_;  // Must outlive the task-private session.
-    std::shared_ptr<IDatabaseAtomicSessionV1> session_;
+    struct SessionOwner {
+        std::shared_ptr<IDatabaseChannel> channel;
+        std::shared_ptr<IDatabaseAtomicSessionV1> session;
+        ~SessionOwner() {
+            if (session) session->Close();
+            session.reset();  // Destroy the session before releasing its channel/library lease.
+        }
+    };
+    // Cancel retains this complete owner, including the channel lease, until its call exits.
+    std::shared_ptr<SessionOwner> owner_;
     std::string backend_, table_, default_schema_, database_identity_, error_, state_ = "pending";
     uint64_t max_bytes_ = 0;
     int64_t rows_written_ = 0;
     SchemaKind kind_ = SchemaKind::kModelParameters;
-    bool owns_session_ = true;
     std::atomic<bool> cancelled_{false};
 };
 }  // namespace flowsql::baseliner

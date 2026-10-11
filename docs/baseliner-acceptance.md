@@ -1,5 +1,273 @@
 # Baseliner 验收记录
 
+## baseliner-contract-safety T4 最终验收（2026-10-11）
+
+本 Feature 的 T1～T4 已完成，规格已归档。按用户本轮授权，新网络头/分析地址布局及其 NPI/NPM
+适配由独立 [npi-wire-layout](../tasks/specs/feat-npi-wire-layout.md) 交付，不作为本 Feature 的完成前置。
+本次直接验收当前一致源码；本轮只修改任务/验收文档，所有既有生产源码、CMake 和测试与切片起点 SHA256 一致。
+下文其他 T4 检查点均为历史记录，未将它们拼接为本次完整回归，也未将当前通过当作未来新布局的验收。
+
+### 当前构建、回归与契约
+
+- 标准 `cmake -B build src` 和 `cmake --build build -j4` 通过；本次构建日志没有 warning/error。
+- 从第 1 项开始的一次完整 CTest **83/83** 通过，**1050.02s**；
+  failures/errors/skipped 均为 0，真实数据库用例没有跳过。包含全部 Baseline/Baseliner、加载器及网络/框架既有回归。
+- 当前定向 ASan/UBSan/LSan **11/11**、**144.50s**（10 个测试及 1 个目录 fixture），
+  覆盖 loader、checkpoint、safety、operator、evaluation、Store、lifecycle、readiness、独立旧调用方和生产链路。
+  保持 `detect_leaks=1`、halt_on_error，不添加抑制；无内存访问、未定义行为或泄漏报告。
+- 真实 PCAP → NPM → Baseliner → 数据库/模型出口完成 **43 组分析 + 43 次插件重载恢复**；
+  源 Schema/内容、结果值/NULL/逻辑键及恢复输出断言通过。普通完整回归和上述仪器化生产回归分别保留原始证据。
+- 两种 Scheduler/Baseline 注册顺序 × Stop/直接 Unload，以及 Cancel 在途时 Join/Close、最后使用者退出后恰好 Close 一次，
+  均由真实 `.so` 与可控屏障断言验收；低支持、禁止学习、bootstrap/checkpoint 首条、Relation mixed ready/cold、
+  basis 切换、关闭 routed 输出、缺 V1 能力和诊断文案变化回归通过。
+- 新旧 Submit 的完整旧结果、模型快照/学习次数和 checkpoint 等价；独立只使用旧接口的 dlopen 调用方通过。
+  旧 service/types/checkpoint 公共头、结果 codec 与配置契约逐字节等于 HEAD；瞬时 readiness 不进入持久格式。
+- 修改区间/新增文件 clang-format-18 **20 个文件**、统一版权检查通过；**12 个翻译单元**严格 C++17 语法编译通过。
+  沿用仓库既有 unused-parameter 等例外；Scheduler 的既有 PollEvent 聚合初始化保留 missing-field-initializers 例外，
+  安全测试的既有公共头保留 type-limits/pessimizing-move 例外，未将带例外检查表述为无例外严格编译。
+- 本次核对 **213 个翻译单元 / 202 个不同源文件**的仪器化构建及 **15 个 FlowSQL `.so`** 的 ASan/UBSan 符号。
+  Arrow、DPDK、数据库客户端、ICU/OpenSSL 等第三方仍使用普通依赖缓存；没有声明第三方库完整仪器化。
+- TSan 最小探针 exit 66，`unexpected memory mapping`，记录为本机不支持；未声明 TSan race 检查通过。
+
+### 当前五轮固定负载成本
+
+Intel i9-13900H、20 逻辑 CPU、WSL2/Linux x86_64；仓库空 build type，成本目标无优化 flags。
+两项测试固定 `taskset -c 0`，各五轮通过；不是独占系统，测量期间存在构建/测试负载，原始范围保留。
+下表为五轮中位数 [min, max]；第一表单位 μs。
+
+| 测量 | 中位数 [min, max] |
+| --- | ---: |
+| 旧 Submit 墙钟 / 观测 | 20.964 [19.913, 33.168] |
+| V1 Submit 墙钟 / 观测 | 20.327 [19.929, 34.027] |
+| 旧 Submit CPU / 观测 | 20.773 [19.882, 32.604] |
+| V1 Submit CPU / 观测 | 19.934 [19.897, 34.165] |
+| Join 每轮墙钟中位数 | 8.117 [7.867, 10.507] |
+| Join 每轮墙钟 p95 | 12.455 [11.348, 26.017] |
+| Join 每轮墙钟平均值 | 9.097 [8.770, 13.358] |
+| Join 每轮 CPU 平均值 | 9.810 [9.680, 14.653] |
+| 两个 Store Open/Schema 每轮平均值 | 640.882 [624.794, 884.928] |
+| 两个 Store 最终 Close 每轮平均值 | 6.119 [5.992, 7.635] |
+
+| 路径 | 总耗时 ms | CPU ms | 峰值 RSS MiB |
+| --- | ---: | ---: | ---: |
+| 直接评估引擎 | 108.519 [103.342, 130.965] | 100.228 [98.111, 102.276] | 30.164 [30.051, 30.207] |
+| Arrow 算子 | 308.408 [293.286, 312.148] | 302.745 [290.381, 309.679] | 32.766 [32.680, 32.809] |
+| SQLite 托管 | 749.265 [739.379, 762.001] | 625.871 [612.880, 644.058] | 45.938 [45.797, 46.066] |
+| SQLite 托管，每提交 +2 ms | 775.012 [762.485, 814.487] | 627.478 [620.223, 672.272] | 45.980 [45.934, 46.219] |
+
+| DataFrame 原始数据路径 | 总耗时 ms | CPU ms | 峰值 RSS MiB |
+| --- | ---: | ---: | ---: |
+| 有序宽类型 → DataFrame 结果 | 170.144 [165.554, 195.416] | 164.962 [163.616, 183.550] | 46.094 [45.988, 46.270] |
+| 逆序宽类型 → DataFrame 结果 | 161.689 [159.179, 166.617] | 162.319 [159.903, 167.225] | 46.109 [46.039, 46.215] |
+| 逆序窄类型 → DataFrame 结果 | 164.256 [160.784, 209.114] | 165.070 [161.382, 207.213] | 46.984 [46.941, 47.148] |
+| 逆序窄类型 → DataFrame 结果及模型 | 169.171 [166.192, 246.674] | 169.942 [164.696, 247.514] | 47.305 [47.258, 47.461] |
+| 逆序窄类型 → SQLite 结果及模型 | 385.314 [368.393, 686.152] | 348.835 [332.559, 568.085] | 41.105 [41.004, 41.281] |
+
+Submit 固定一个 Value 身份、10000 条观测，轮次交替新旧入口顺序；checksum/完整快照相同，cold=1、ready=9999。
+旧入口和 V1 使用当前同一算法实现，不能据此推导修复前后 overhead。计时包含观测构造、结果消费和夹具断言，
+排除 Open、快照查询及环境析构。Join 每轮 200 对 SQLite Store，仅测 Join，Open/Schema 与最终 Close 单列；
+Join 含被替换会话最后所有者的同步关闭，不能解释为一次 shared_ptr 交换的成本。
+
+既有成本测试的四条标准观测路径和五条原始 DataFrame 路径，各轮均输出 5760 行并通过数值汇总对照；
+三类算法、960 条观测、24 个模型身份、Relation 3 组/1 指标、horizon=2，Arrow 每批 24 条、checkpoint_every_buckets=7。
+模型出口场景各轮 24 行；原始 DataFrame 为同一份 960 行，宽/窄类型、物理排序、出口组合按既有夹具固定。
+原始 DataFrame 与标准观测路径的计时范围不同，分别比较各组；逐组 CPU、RSS、Open、模型导出编码、发布、
+目标初始化和维护延迟见机器可读汇总。这些小夹具不提供大表扫描、真实采集吞吐或生产规模 SLA。
+
+### 环境与可复核证据
+
+初次沙箱启动被 `setpriv: apply bounding set: Operation not permitted` 阻止；保留日志，未运行测试，
+有效验收在沙箱外执行并沿用 `setpriv --bounding-set=-net_admin` 的 WSL 条件，不据此声称特权 DPDK 清理已修复。
+完整回归首次又确认本机 IPv4 数据库超时，WSL 表 127 将 127.0.0.1 指向 loopback0；保留失败/中断日志。
+仅在完整 CTest 期间临时改为 lo，三个数据库端口连通后从第 1 项重跑；结束后原路由已恢复，前后原文完全相同。
+Baseliner 普通/仪器化用例使用已有 IPv6 私有配置文件，真实后端必跑；没有把连接串误当文件路径。
+
+证据 `/tmp/baseliner-contract-safety-closeout/`：`full-tests.xml`、`full-ctest.log`、`full-test-detail.log`、
+`sanitizer-tests.xml`、`sanitizer-detail.log`、`sanitizer-coverage.json`、构建日志、
+`cost-runs.json`、`cost-measurements.json`、`cost-summary.json`、`format-results.json`、`strict-results.json`、
+`compatibility.json`、`accepted-artifact-hashes.json`、路由前/中/后记录、起点/增量 diff/hash 和 `verification.json`。
+凭据仅使用已有本机私有文件，不进入仓库。工作台 WIP=0，完成即停，未提交/推送；NPI 新布局 T1～T4 状态保持。
+
+
+## 当前任务归属调整（2026-10-11）
+
+协议报文布局、分析地址分离及 NPI/NPM Basic 适配已独立为 [npi-wire-layout](../tasks/specs/feat-npi-wire-layout.md)。
+所有网络协议报文头及嵌套报文结构按 1 字节布局，分析用 IPv4/IPv6/MAC 采用各自适宜对齐；
+本轮仅交付方案和任务文档，原有源码改动保留，新布局尚未实施或验收。
+
+按用户后续授权，Baseliner T1/T2/T3 状态保持，T4 独立验收当前一致源码的 PCAP → NPM → Baseliner 集成链路，
+完成自身完整 CTest、契约成本和文档出口；新网络布局的同版部署回归、网络字段/识别成本由新 Feature 承接。
+下文的普通/仪器化通过和已修复泄漏仍是对应源码快照的有效记录；不能作为尚未实施的新布局证据。
+Baseliner 的提交/会话交接五轮成本已记录，后续核对适用范围；不将其重新表述为尚未测量。
+
+## baseliner-contract-safety T4 Hyperscan 数据库交接修复（2026-10-11）
+
+用户确认扩大范围后，本切片修复 `RegexRecognizer::Ready` 重编译覆盖旧数据库指针的泄漏。
+新数据库编译到局部指针；失败保留旧数据库，成功后释放旧数据库并交接，再执行既有 scratch 分配。
+公共头、规则、scratch 分配流程和识别热路径保持；此前池/parser 修复与其余工作树改动全部保留。
+本切片已验收，T4 仍未整体完成；以下当前证据优先于后文历史检查点。
+
+- 标准 `cmake -B build src` 及既有仪器化 build 配置通过，使用已有数据库 options 文件路径；
+  普通 packet/alignment targets 与全部 11 个定向 Sanitizer targets 构建通过。
+- 普通 packet/alignment CTest **2/2**；ASan/UBSan/LSan 定向 CTest **12/12**，**144.14s**（含目录 fixture），
+  没有跳过测试；loader、checkpoint、safety、operator、evaluation、Store、lifecycle、readiness 与生产均通过。
+- 真实 NPI `.so` 空配置与已有规则配置各三次加载/停止/卸载，HTTP 规则在 0～15 偏移均命中；
+  前轮同规则重载 **343,200 bytes / 4 allocations** 泄漏已消除。
+- 当前生产 **43 组分析 + 43 次任务重载恢复** 通过，源 Schema/内容保持，退出无 Sanitizer 报告；
+  detect_leaks=1，未添加抑制；有效测试在沙箱外去除 net_admin 执行，第三方缓存库仍为普通构建。
+- 独立旧/新实现 ASan/UBSan/LSan 探针：旧实现连续 Ready 后编译无效正则，旧数据库被丢弃且泄漏，exit 1；
+  修复后连续三次 Ready、两个 scratch 的实际匹配、失败保留旧数据库与匹配全部通过，exit 0、无泄漏。
+  仓库已有真实重载回归保持；临时探针与原始日志作为补充证据保留。
+- 修改区间 clang-format-18 与版权检查通过；regex 翻译单元严格 C++17 编译通过，沿用既有公共头/回调
+  unused-parameter、reorder、pessimizing-move、type-limits 告警例外，未宣称无例外严格编译。
+- 八个相关公共头与切片起点逐字节一致；其中六个旧公共头仍等于 HEAD；所有切片外文件与起点一致。
+- 本轮不修改识别热路径，不重新外推前轮成本结果；完整普通 CTest、额外隧道字段和实际规则成本证据仍待 T4 最终收口。
+  工作台 WIP=0，完成即停；T4 未勾选，Feature 未归档，未提交/推送。
+
+证据目录 `/tmp/npi-regex-t4/`：`verification.json`、`normal-tests.xml/log`、`sanitizer-tests.xml/log`、
+`sanitizer-detail.log`（含生产与 HTTP 命中完整输出）、`before-leak.log`、`probe-results.json` 与旧/新探针日志，
+构建/格式/严格编译日志、兼容检查、切片增量 diff、范围与最终 hash。
+
+## baseliner-contract-safety T4 生命周期释放修复（2026-10-11）
+
+本切片已实施获准的 ObjectsPool/BufferPool 当前块和 NPI parser 析构释放；公共结构、分配路径与识别规则保持。
+当前 T4 仍未完成：新同库重载回归又确认 Hyperscan 数据库覆盖泄漏，尚未获准扩大到 regexmatch.cpp。
+以下新证据优先于后文前轮检查点，不将历史完整 CTest 作为当前完整验收。
+
+- 标准 src 配置、全量普通构建通过；头文件实际调用方 config/engine/model/npi 均重新编译。
+- 普通 packet/alignment CTest 2/2 通过；回归覆盖空池、部分块、整块、多块、非平凡对象析构计数、
+  BufferPool 零初始化与跨块数据保持，真实 .so 空配置和仓库已有规则配置各三次加载/停止/卸载。
+  已有规则确实加载：查询 HTTP 条目并验证 0～15 起始偏移下 HTTP payload 命中 2000。
+- 新 ObjectsPool 断言在修复前稳定失败（SIGABRT，销毁后仍有存活对象）；原块释放修复后通过。
+  BufferPool 旧/新独立 LSan 对照：旧实现泄漏 exit 1，修复后无泄漏 exit 0；原始程序和日志保留。
+- 独立池测试和空配置 NPI 重载在 ASan/UBSan/LSan 下通过。保留 detect_leaks=1；沙箱 ptrace 失败原日志保留，
+  有效结果来自沙箱外执行，未添加抑制或关闭检查。
+- 完整本切片定向 Sanitizer **11/12**，147.39s（含一个目录 fixture）：loader、checkpoint、safety、operator、
+  evaluation、Store、lifecycle、readiness、packet 和生产通过；生产 **43 组分析 + 43 次任务重载恢复**，
+  源内容/Schema 保持，退出无 LSan 报告。第三方缓存库仍为普通构建，FlowSQL 依赖沿用仪器化构建。
+- 唯一失败为新增规则配置反复加载的 alignment 测试：**343,200 bytes / 4 allocations**，栈指向
+  `RegexRecognizer::Ready → hs_compile_multi`。Ready 将新数据库直接写入 hyper_database_，
+  重新 Load 时覆盖旧指针；当前析构只能释放最后一个数据库。此问题与已修复的池/parser 泄漏有独立栈证据。
+- 最小待确认方案：增加允许 regexmatch.cpp，编译新数据库到局部指针；成功后释放旧数据库并交接指针，
+  失败保留旧数据库，scratch 分配和规则/公共接口保持。沿用同库重载、HTTP 命中与 LSan 回归，不减弱断言。
+- 修改区间 clang-format-18 通过；六个相关翻译单元严格 C++17 检查通过，既有公共头告警例外和 Config
+  具体类型删除 Dictionary 的 delete-non-virtual-dtor 告警例外均单列，未越界改公共头。
+- 本切片没有修改热路径，不重测或改变前轮成本结论；完整普通 CTest、更多隧道字段和成本限制仍属 T4 最终验收待项。
+- 非阻塞旁路发现：Dictionary::Count 的计数没有在 Insert 更新，真实规则查询成功但 Count 为零；
+  测试已改为实际条目/规则命中断言，本切片不修改该独立计数问题。
+
+证据目录 `/tmp/npi-lifecycle-t4/`：旧实现断言、BufferPool 对照、标准/仪器化构建，normal-final.xml，
+sanitizer-tests.xml/log、sanitizer-detail.log（生产 43 组完整输出）、pool-after.log、npi-empty-sanitizer.log，
+格式/严格编译原始与例外日志、incremental scope/diff/hash。后续状态以工作台为准，未提交/推送。
+
+## baseliner-contract-safety T4 续执行检查点（2026-10-11）
+
+T4 仍未完成。本次续执行保留已有 NPI 对齐读取草稿，未新增实现代码；实际刷新了构建、定向测试、
+Sanitizer、成本及兼容核验。以下结果优先于后文前轮检查点，不把历史完整 CTest 拼接为本次全绿。
+
+- 标准 src 配置和全量构建通过；普通 packet/alignment 定向 CTest 2/2 通过。
+- 新对齐测试在真实 NPI .so 下完成 0～15 偏移及截断前缀断言；ASan/UBSan 未再次报告未对齐访问，
+  但退出 LSan 报告 **16,752 bytes / 23 allocations**，因此该测试和本切片均不能宣称验收通过。
+- 泄漏证据：`NetworkLayer::~NetworkLayer()` 为空，22 个 parser 对象未释放；
+  `ObjectsPool<Recognized,1024>` 析构仅清理 used 链表，当前 `using_objects_` 块未释放。
+  通用池文件不在当前允许清单；未关闭 detect_leaks、未添加抑制，也未越界修复。
+- 初次定向 Sanitizer 8/12 通过；另外三项数据库测试受生成配置错误阻碍：CTest 将连接串写入了
+  本应为文件路径的 BASELINER_*_DB_OPTIONS。重新以已有 options.txt 路径配置后复跑，Store/lifecycle 通过；生产 43 组分析与 43 次重载恢复
+  功能断言通过，随后退出 LSan 报 **1,239,101 bytes / 70 allocations**，三项最终 2/3（147.19s）。
+  符号核查同时指向 ObjectsPool 的 Definition/Item/Recognized 当前块、BufferPool 当前块及 NPI parser，
+  原始退出栈部分因 .so 已卸载显示 unknown module；地址按已知 NPI 基址还原，符号结果单独保存。
+- 本次普通完整 CTest 未通过且已终止（exit 143）：NPM 段错误、MySQL 连接失败，随后 PCAP upload 挂起。
+  GDB 定位 NPM 为 DPDK `rte_vdev_uninit → rte_eal_cleanup → FlowLabelingPlugin::Stop`；
+  按既有 WSL 条件 `setpriv --bounding-set=-net_admin` 复跑该项通过（12.19s）。
+  MySQL 在沙箱外仍连接失败；未改路由，完整 CTest 待环境恢复后从头验收。
+- clang-format-18 对修改区间/新增文件检查通过；五个相关翻译单元严格编译通过，但沿用已有
+  公共头 warning 例外（unused-parameter/reorder/pessimizing-move/type-limits），不宣称无例外严格编译。
+- 公共 netbase/netaddress/iprotocol 与旧 Baseline service/types 头逐字节等于 HEAD。
+- 固定 CPU 0、八个既有报文夹具、每阶段 50,000 包，旧/新交替五轮：分层中位数 58.4332 → 59.0839 ns/包
+  （+1.1%），端点解码 234.864 → 259.849（+10.6%），识别入口 20.2795 → 21.0327（+3.7%）。
+  普通构建为 -g、未启用优化，测量并非独占系统；识别夹具未加载协议规则、checksum=0，不能外推完整识别成本。
+  尚需补齐实际规则命中、其他改动隧道字段与有效负载的验收；未为降低成本扩大代码范围。
+
+证据在 `/tmp/npi-alignment-t4/resume-*`：初次 Sanitizer XML/log、配置修正复跑、GDB 栈、
+WSL 条件复跑、五轮成本、格式、严格编译（原失败和例外复跑分别保留）、公共头兼容和范围/hash。
+本次不归档、不修改 Backlog、不提交/推送。
+
+## baseliner-contract-safety T4 前轮验收检查点
+
+验收日期：2026-10-11。本次 T4 尚未完成：生产 Sanitizer 在既有 NPI IPv4 未对齐访问处失败，
+完整普通 CTest 正在运行。T1～T3 保持完成；T4 未勾选，Feature 未归档，未提交或推送。
+以下是本轮当前源码的结果，后文历史 Feature 的完成记录不作为本 Feature 验收依据。
+
+### 当前验证与阻塞
+
+标准 `cmake -B build src`、`cmake --build build -j4` 完成，无编译 Error。
+全量日志有 9 条未修改 `test_bridge/main.cpp` 的既有 Arrow nodiscard 返回值告警；本轮没有修改该测试。
+Feature 的 C++ 修改区间/新增文件格式检查、12 个实现/测试翻译单元严格 C++17 编译通过。
+Scheduler 注册单元保留已有公共头告警例外；本轮额外的 `PollEvent::err_msg` 聚合初始化告警例外与原失败日志单列保存。
+旧 Baseline service/types/checkpoint 公共头、结果 codec 和配置契约与 HEAD 及切片起点逐字节一致。
+
+普通完整 CTest 已启动，真实数据库用例必跑，沿用 `setpriv --bounding-set=-net_admin` 的 WSL 条件。
+截至 2026-10-11T11:53:58+08:00，前 74/82 项通过，完整命令尚未结束；test_baseliner_recovery 仍运行。本检查点不宣称完整回归通过。
+沙箱外的真实数据库 Store 探针通过；沙箱网络失败日志保留。
+
+定向 ASan/UBSan/LSan 使用独立构建目录、标准 src 入口、`-fsanitize=address,undefined -fno-omit-frame-pointer -O0`，
+复用主工作区第三方缓存。核对 208 个实际翻译单元、199 个不同源文件和 15 个 FlowSQL 动态库已仪器化，
+覆盖完整 Baseline/Baseliner、Scheduler 及本次加载的 FlowSQL 依赖；Arrow、DPDK、数据库客户端、ICU/OpenSSL 保持普通缓存库。
+沙箱内 LSan 遇到 ptrace 限制后，保持 `detect_leaks=1` 在沙箱外重跑；最终 **9/10 项通过**，包含一个目录 fixture。
+loader、safety、checkpoint、operator、evaluation、Store、lifecycle、readiness 均通过，生产测试失败，合计 34.90s。
+
+生产失败报告为 `src/plugins/npi/layer.cpp:91` 对 `Ipv4Header` 的 misaligned member access：以太网头偏移 14 字节，
+而类型要求 4 字节对齐。栈为 PCAP reader → NPI packet decoder → network layer → ipv4_delamination，
+发生在生产 PCAP → NPM 导入阶段，不能据此宣称完整生产链路的 Sanitizer 通过。
+layer/packet_decoder/engine/netbase 四文件 hash 与 HEAD、切片起点均相同；这些文件不在本轮允许清单，未越界修复。
+继续验收需要先用单独冻结的切片修复网络头未对齐读取，并重跑生产 Sanitizer。
+TSan 的 PIE/非 PIE 最小探针均因 `unexpected memory mapping` 退出 66，记录为环境不支持，未声明 race 检查通过。
+
+### 固定负载成本
+
+Intel i9-13900H、20 逻辑 CPU、WSL2/Linux x86_64；默认空 CMake build type，测量目标没有优化 flags。
+两项成本测试均以 `taskset -c 0` 固定 CPU，各运行五轮；测量时完整 CTest 也在运行，存在并行系统负载。
+下表为五轮中位数和各轮 min/max，时间单位 μs。
+
+| 测量 | 中位数 [min, max] |
+| --- | --- |
+| 旧 Submit 墙钟 / 观测 | 20.047 [19.999, 22.019] |
+| V1 Submit 墙钟 / 观测 | 19.710 [19.557, 19.859] |
+| 旧 Submit CPU / 观测 | 19.945 [19.898, 21.048] |
+| V1 Submit CPU / 观测 | 19.606 [19.465, 19.786] |
+| Join 每轮墙钟中位数 | 8.228 [7.775, 8.354] |
+| Join 每轮墙钟 p95 | 13.956 [11.205, 15.160] |
+| Join 每轮墙钟平均值 | 9.181 [8.459, 9.627] |
+| Join 每轮 CPU 平均值 | 9.914 [9.183, 10.415] |
+| 两个 Store Open/Schema 每轮平均值 | 606.424 [587.691, 631.366] |
+| 两个 Store 最终 Close 每轮平均值 | 6.406 [6.042, 7.224] |
+
+Submit 固定一个 Value 身份、10000 条观测，按轮交替新旧入口顺序，断言完整序列快照和 checksum 一致，
+V1 cold=1、ready=9999。这是当前旧入口与 V1 入口比较，两者共享新算法实现，不能视为修复前后 overhead。
+计时包含观测构造、结果消费及断言等夹具开销；Open/建表、快照查询与环境析构不计入 Submit。
+Join 固定 200 对 SQLite Store，只计 Join，Open/Schema 和最后 Close 单列；Join 内部释放被替换会话的最后所有者，
+因此包含其同步关闭成本，不能将这个数字解释为单次 shared_ptr 交换成本。
+每轮 Join p50/p95 取排序后下标 100/190 的样本（下标从 0 开始），表中再汇总五轮分位数；计时调用本身也有开销。
+
+既有 `test_baseliner_cost` 保持每轮 960 条标准观测、三类算法、24 个模型身份、5760 个结果，值汇总一致，五轮全部通过。
+四条路径的墙钟中位数 [min, max]，单位 ms：
+
+| 路径 | 墙钟耗时 |
+| --- | --- |
+| Evaluation engine | 105.92 [103.25, 110.19] |
+| Arrow operator | 303.01 [299.48, 316.43] |
+| 托管 SQLite | 732.92 [728.96, 815.09] |
+| 托管 SQLite，每次 Commit 注入 2 ms | 793.67 [747.69, 830.44] |
+
+原始 DataFrame 五路径总耗时中位数分别为 164.02、164.77、166.51、167.15、386.41 ms，
+对应排序/逆序、窄类型转换、模型导出及 SQLite 双表输出，场景定义和计时边界沿用既有成本测试。
+逐组 CPU、RSS、input Open、模型导出编码、发布、目标初始化等中位数和范围保存在机器可读汇总，
+不得将这些小夹具推广为生产 SLA、网络吞吐或大表扫描结论。
+
+本轮证据目录 `/tmp/baseliner-contract-safety-t4/`：普通构建/CTest 日志和 XML、`sanitizer-tests.log/xml`、
+`sanitizer-coverage.json`、`npi-blocker.json`、`cost-runs.json`、`cost-measurements.json`、`cost-summary.json`、
+兼容/格式/严格编译和起点/最终范围 hash；凭据仅在本机 0600 文件中，未写入文档或仓库。
+
 ## 单表与 DataFrame Feature：T6 本次验收
 
 本次针对 `baseliner-single-source`，验收日期为 2026-10-10。原 `baseline-operator` 的历史验收保留在后文。

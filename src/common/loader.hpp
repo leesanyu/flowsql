@@ -148,6 +148,7 @@ inline int PluginLoader::Load(const char* path, const char* relapath[], const ch
 }
 
 inline int PluginLoader::Unload() {
+    StopAll();
     this->Traverse(flowsql::IID_PLUGIN, [](void* imod) {
         flowsql::IPlugin* iplugin_ = reinterpret_cast<flowsql::IPlugin*>(imod);
         return iplugin_->Unload();
@@ -200,6 +201,9 @@ inline int PluginLoader::StartAll() {
     std::vector<void*> external_entries;
     auto external_it = ifs_ref_.find(flowsql::IID_PLUGIN_EXTERNAL_ENTRY);
     if (external_it != ifs_ref_.end()) external_entries = external_it->second;
+    std::vector<void*> task_runtimes;
+    auto runtime_it = ifs_ref_.find(flowsql::IID_PLUGIN_TASK_RUNTIME);
+    if (runtime_it != ifs_ref_.end()) task_runtimes = runtime_it->second;
 
     const size_t previous_started_count = started_plugins_.size();
     auto rollback = [this, previous_started_count]() {
@@ -209,12 +213,15 @@ inline int PluginLoader::StartAll() {
         }
     };
 
-    auto start_phase = [&](bool external_entry) {
+    auto start_phase = [&](int phase) {
         for (size_t i = 0; i < plugins.size(); ++i) {
             auto* plugin = reinterpret_cast<IPlugin*>(plugins[i]);
             const bool marked_external =
                 std::find(external_entries.begin(), external_entries.end(), plugin) != external_entries.end();
-            if (marked_external != external_entry ||
+            const bool marked_runtime =
+                std::find(task_runtimes.begin(), task_runtimes.end(), plugin) != task_runtimes.end();
+            const int plugin_phase = marked_external ? 2 : marked_runtime ? 1 : 0;
+            if (plugin_phase != phase ||
                 std::find(started_plugins_.begin(), started_plugins_.end(), plugin) != started_plugins_.end()) {
                 continue;
             }
@@ -228,8 +235,9 @@ inline int PluginLoader::StartAll() {
         return 0;
     };
 
-    if (start_phase(false) != 0) return -1;
-    return start_phase(true);
+    for (int phase = 0; phase < 3; ++phase)
+        if (start_phase(phase) != 0) return -1;
+    return 0;
 }
 
 inline void PluginLoader::StopAll() {

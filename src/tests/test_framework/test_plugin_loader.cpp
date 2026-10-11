@@ -85,9 +85,12 @@ class PluginLoaderFixture final : public flowsql::IPlugin {
 }  // namespace
 
 BEGIN_PLUGIN_REGIST(PluginLoaderFixture)
-    ____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
+____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
 #ifdef PLUGIN_LOADER_FIXTURE_EXTERNAL_ENTRY
-    ____INTERFACE(flowsql::IID_PLUGIN_EXTERNAL_ENTRY, flowsql::IPlugin)
+____INTERFACE(flowsql::IID_PLUGIN_EXTERNAL_ENTRY, flowsql::IPlugin)
+#endif
+#ifdef PLUGIN_LOADER_FIXTURE_TASK_RUNTIME
+____INTERFACE(flowsql::IID_PLUGIN_TASK_RUNTIME, flowsql::IPlugin)
 #endif
 END_PLUGIN_REGIST()
 
@@ -168,16 +171,16 @@ bool TestSuccessfulBatch(flowsql::PluginLoader* loader, const char* libraries[3]
     const char* options[] = {a.c_str(), b.c_str(), c.c_str()};
 
     bool ok = Expect(loader->Load(".", libraries, options, 3) == 0, "successful batch Load must succeed");
-    ok = ExpectEvents(log_path,
-                      {"a.Option", "b.Option", "c.Option", "a.Load", "b.Load", "c.Load"},
+    ok = ExpectEvents(log_path, {"a.Option", "b.Option", "c.Option", "a.Load", "b.Load", "c.Load"},
                       "all Option calls must precede every Load call") &&
          ok;
     ok = Expect(loader->StartAll() == 0, "successful batch StartAll must succeed") && ok;
-    ok = ExpectEvents(log_path,
-                      {"a.Option", "b.Option", "c.Option", "a.Load", "b.Load", "c.Load", "b.Start", "c.Start",
-                       "a.Start"},
-                      "internal plugins must start before the external entry") &&
+    ok = ExpectEvents(
+             log_path,
+             {"a.Option", "b.Option", "c.Option", "a.Load", "b.Load", "c.Load", "b.Start", "c.Start", "a.Start"},
+             "internal plugins must start before the external entry") &&
          ok;
+    loader->StopAll();
     loader->StopAll();
     ok = ExpectEvents(log_path,
                       {"a.Option", "b.Option", "c.Option", "a.Load", "b.Load", "c.Load", "b.Start", "c.Start",
@@ -188,9 +191,75 @@ bool TestSuccessfulBatch(flowsql::PluginLoader* loader, const char* libraries[3]
     return ok;
 }
 
-bool TestPositiveOptionFailure(flowsql::PluginLoader* loader,
-                               const char* libraries[3],
-                               const std::string& log_path) {
+bool TestReorderedPhases(flowsql::PluginLoader* loader, const char* libraries[3], const std::string& log_path) {
+    const char* reordered[] = {libraries[2], libraries[0], libraries[1]};
+    const std::string option = MakeOption(log_path);
+    const char* options[] = {option.c_str(), option.c_str(), option.c_str()};
+    bool ok = Expect(loader->Load(".", reordered, options, 3) == 0, "reordered batch must load");
+    ok = Expect(loader->StartAll() == 0, "reordered batch must start") && ok;
+    // Direct Unload must drain runtimes before capabilities; Stop must happen only once.
+    loader->Unload();
+    loader->StopAll();
+    ok = ExpectEvents(log_path,
+                      {"c.Option", "a.Option", "b.Option", "c.Load", "a.Load", "b.Load", "b.Start", "c.Start",
+                       "a.Start", "a.Stop", "c.Stop", "b.Stop", "c.Unload", "a.Unload", "b.Unload"},
+                      "direct Unload must stop all three phases before unloading") &&
+         ok;
+    return ok;
+}
+
+bool TestCapabilityStartFailure(flowsql::PluginLoader* loader, const char* libraries[3], const std::string& log_path) {
+    const std::string a = MakeOption(log_path), b = MakeOption(log_path, "start_rc=5"), c = MakeOption(log_path);
+    const char* options[] = {a.c_str(), b.c_str(), c.c_str()};
+    bool ok = Expect(loader->Load(".", libraries, options, 3) == 0, "capability failure batch must load");
+    ok = Expect(loader->StartAll() != 0, "capability Start failure must fail the batch") && ok;
+    loader->StopAll();
+    ok = ExpectEvents(log_path, {"a.Option", "b.Option", "c.Option", "a.Load", "b.Load", "c.Load", "b.Start"},
+                      "capability failure must never start runtime or external entry") &&
+         ok;
+    loader->Unload();
+    return ok;
+}
+
+bool TestStablePhaseAndIncrementalRollback(flowsql::PluginLoader* loader, const char* libraries[3], const char* d,
+                                           const std::string& log_path) {
+    const char* ordered[] = {d, libraries[2], libraries[0], libraries[1]};
+    const std::string option = MakeOption(log_path);
+    const char* options[] = {option.c_str(), option.c_str(), option.c_str(), option.c_str()};
+    bool ok =
+        Expect(loader->Load(".", ordered, options, 4) == 0 && loader->StartAll() == 0, "four-plugin batch must start");
+    loader->StopAll();
+    ok = ExpectEvents(log_path,
+                      {"d.Option", "c.Option", "a.Option", "b.Option", "d.Load", "c.Load", "a.Load", "b.Load",
+                       "d.Start", "b.Start", "c.Start", "a.Start", "a.Stop", "c.Stop", "b.Stop", "d.Stop"},
+                      "plugins in the same phase must retain registration order") &&
+         ok;
+    loader->Unload();
+    const auto incremental_log = log_path + ".incremental";
+    const std::string prior = MakeOption(incremental_log), failed = MakeOption(incremental_log, "start_rc=7");
+    const char* first[] = {d};
+    const char* first_options[] = {prior.c_str()};
+    ok = Expect(loader->Load(".", first, first_options, 1) == 0 && loader->StartAll() == 0, "prior batch must start") &&
+         ok;
+    const char* next_options[] = {failed.c_str(), prior.c_str(), prior.c_str()};
+    ok = Expect(loader->Load(".", libraries, next_options, 3) == 0 && loader->StartAll() != 0,
+                "incremental external Start must fail") &&
+         ok;
+    ok = ExpectEvents(incremental_log,
+                      {"d.Option", "d.Load", "d.Start", "a.Option", "b.Option", "c.Option", "a.Load", "b.Load",
+                       "c.Load", "b.Start", "c.Start", "a.Start", "c.Stop", "b.Stop"},
+                      "rollback must stop only successfully started plugins in the new batch") &&
+         ok;
+    loader->StopAll();
+    const auto events = ReadEvents(incremental_log);
+    ok = Expect(std::count(events.begin(), events.end(), "d.Stop") == 1,
+                "previously started plugin must remain live until StopAll") &&
+         ok;
+    loader->Unload();
+    return ok;
+}
+
+bool TestPositiveOptionFailure(flowsql::PluginLoader* loader, const char* libraries[3], const std::string& log_path) {
     const std::string a = MakeOption(log_path);
     const std::string b = MakeOption(log_path, "option_rc=7");
     const std::string c = MakeOption(log_path);
@@ -203,17 +272,14 @@ bool TestPositiveOptionFailure(flowsql::PluginLoader* loader,
     return ok;
 }
 
-bool TestPositiveLoadFailure(flowsql::PluginLoader* loader,
-                             const char* libraries[3],
-                             const std::string& log_path) {
+bool TestPositiveLoadFailure(flowsql::PluginLoader* loader, const char* libraries[3], const std::string& log_path) {
     const std::string a = MakeOption(log_path);
     const std::string b = MakeOption(log_path, "load_rc=9");
     const std::string c = MakeOption(log_path);
     const char* options[] = {a.c_str(), b.c_str(), c.c_str()};
 
     bool ok = Expect(loader->Load(".", libraries, options, 3) != 0, "positive Load return must fail the batch");
-    ok = ExpectEvents(log_path,
-                      {"a.Option", "b.Option", "c.Option", "a.Load", "b.Load", "b.Unload", "a.Unload"},
+    ok = ExpectEvents(log_path, {"a.Option", "b.Option", "c.Option", "a.Load", "b.Load", "b.Unload", "a.Unload"},
                       "Load failure must unload attempted plugins in reverse order") &&
          ok;
     ok = Expect(loader->First(flowsql::IID_PLUGIN) == nullptr, "Load failure must remove batch registrations") && ok;
@@ -221,9 +287,7 @@ bool TestPositiveLoadFailure(flowsql::PluginLoader* loader,
     return ok;
 }
 
-bool TestPositiveStartFailure(flowsql::PluginLoader* loader,
-                              const char* libraries[3],
-                              const std::string& log_path) {
+bool TestPositiveStartFailure(flowsql::PluginLoader* loader, const char* libraries[3], const std::string& log_path) {
     const std::string a = MakeOption(log_path);
     const std::string b = MakeOption(log_path);
     const std::string c = MakeOption(log_path, "start_rc=11");
@@ -232,8 +296,7 @@ bool TestPositiveStartFailure(flowsql::PluginLoader* loader,
     bool ok = Expect(loader->Load(".", libraries, options, 3) == 0, "Start failure fixture Load must succeed");
     ok = Expect(loader->StartAll() != 0, "positive Start return must fail StartAll") && ok;
     const std::vector<std::string> expected = {
-        "a.Option", "b.Option", "c.Option", "a.Load", "b.Load", "c.Load",
-        "b.Start",  "c.Start",  "b.Stop",
+        "a.Option", "b.Option", "c.Option", "a.Load", "b.Load", "c.Load", "b.Start", "c.Start", "b.Stop",
     };
     ok = ExpectEvents(log_path, expected, "internal Start failure must not activate the external entry") && ok;
     loader->StopAll();
@@ -242,8 +305,7 @@ bool TestPositiveStartFailure(flowsql::PluginLoader* loader,
     return ok;
 }
 
-bool TestExternalEntryStartFailure(flowsql::PluginLoader* loader,
-                                   const char* libraries[3],
+bool TestExternalEntryStartFailure(flowsql::PluginLoader* loader, const char* libraries[3],
                                    const std::string& log_path) {
     const std::string a = MakeOption(log_path, "start_rc=13");
     const std::string b = MakeOption(log_path);
@@ -264,8 +326,8 @@ bool TestExternalEntryStartFailure(flowsql::PluginLoader* loader,
 }
 
 bool TestProductionExternalEntryMarkers(flowsql::PluginLoader* loader, const char* libraries[3]) {
-    bool ok = Expect(loader->Load(".", libraries, nullptr, 3) == 0,
-                     "Gateway, Router and Web registration batch must load");
+    bool ok =
+        Expect(loader->Load(".", libraries, nullptr, 3) == 0, "Gateway, Router and Web registration batch must load");
     std::vector<void*> plugins;
     std::vector<void*> external_entries;
     loader->Traverse(flowsql::IID_PLUGIN, [&](void* plugin) {
@@ -290,8 +352,9 @@ bool TestProductionExternalEntryMarkers(flowsql::PluginLoader* loader, const cha
 }  // namespace
 
 int main(int argc, char* argv[]) {
-    if (argc != 7) {
-        std::cerr << "usage: test_plugin_loader <fixture-a> <fixture-b> <fixture-c> <gateway> <router> <web>\n";
+    if (argc != 8) {
+        std::cerr
+            << "usage: test_plugin_loader <fixture-a> <fixture-b> <fixture-c> <gateway> <router> <web> <fixture-d>\n";
         return 2;
     }
 
@@ -308,6 +371,9 @@ int main(int argc, char* argv[]) {
 
     bool ok = true;
     ok = TestSuccessfulBatch(loader, libraries, temporary.LogPath("success.log")) && ok;
+    ok = TestReorderedPhases(loader, libraries, temporary.LogPath("reordered.log")) && ok;
+    ok = TestCapabilityStartFailure(loader, libraries, temporary.LogPath("capability-failure.log")) && ok;
+    ok = TestStablePhaseAndIncrementalRollback(loader, libraries, argv[7], temporary.LogPath("stable-phase.log")) && ok;
     ok = TestPositiveOptionFailure(loader, libraries, temporary.LogPath("option-failure.log")) && ok;
     ok = TestPositiveLoadFailure(loader, libraries, temporary.LogPath("load-failure.log")) && ok;
     ok = TestPositiveStartFailure(loader, libraries, temporary.LogPath("start-failure.log")) && ok;

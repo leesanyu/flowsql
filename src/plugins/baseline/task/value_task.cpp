@@ -84,13 +84,19 @@ void BaselineValueTask::OnClosing() {
 RollingBaselineResult BaselineValueTask::SubmitObservation(
     const ValueRollingObservation& obs,
     const RollingSubmitOptions& options) {
-    RollingBaselineResult result;
+    return SubmitObservationWithReadiness(obs, options).result;
+}
+
+BaselineEvaluationResultV1 BaselineValueTask::SubmitObservationWithReadiness(const ValueRollingObservation& obs,
+                                                                             const RollingSubmitOptions& options) {
+    BaselineEvaluationResultV1 evaluation;
+    auto& result = evaluation.result;
     result.series_key = obs.series_key;
     result.bucket_id = obs.bucket_id;
     const BaselineStatus status = EnsureOpen();
     if (status != BaselineStatus::kOk) {
         result.status = status;
-        return result;
+        return evaluation;
     }
     RollingEventContext events{compiled_event_calendar_.get()};
     MarkStateOperation();
@@ -100,9 +106,11 @@ RollingBaselineResult BaselineValueTask::SubmitObservation(
     if (may_initialize && !HasIdentityCapacity(obs.series_key, false)) {
         result.status = BaselineStatus::kInvalidArgument;
         result.diagnostics = "baseline_state_capacity_reached";
-        return result;
+        return evaluation;
     }
-    return RunValueRollingSubmit(spec_, seeds_by_series_, &rolling_states_, obs, options, &events);
+    result =
+        RunValueRollingSubmit(spec_, seeds_by_series_, &rolling_states_, obs, options, &events, &evaluation.readiness);
+    return evaluation;
 }
 
 RollingPrediction BaselineValueTask::PredictRolling(std::string_view series_key,
