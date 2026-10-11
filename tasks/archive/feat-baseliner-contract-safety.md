@@ -1,6 +1,6 @@
 # Baseline/Baseliner 生命周期与评估契约修复
 
-状态：T1 / T2 / T3 / T4 已完成，Feature 已归档（2026-10-11）。网络新布局由 [npi-wire-layout](../specs/feat-npi-wire-layout.md) 独立交付。优先级：P1。
+状态：T1 / T2 / T3 / T4 已完成，Feature 已归档（2026-10-11）。网络新布局由 [npi-wire-layout](feat-npi-wire-layout.md) 独立交付。优先级：P1。
 前置能力：[Baseline 算子](feat-baseline-operator.md)、[单表与 DataFrame 分析及输出](feat-baseliner-single-source.md)。
 
 ## 业务意图与 Non-Goals
@@ -13,7 +13,7 @@
 不处理结果发布阶段的取消空窗、通用 DataFrame 查询/CSV 展示、一般去重或文件重构；
 不引入通用插件依赖图、算法全局锁、专属工作线程或新的数据库公共接口。
 
-网络协议头/分析地址布局及 NPI/NPM Basic 适配归独立的 [npi-wire-layout](../specs/feat-npi-wire-layout.md) Feature。
+网络协议头/分析地址布局及 NPI/NPM Basic 适配归独立的 [npi-wire-layout](feat-npi-wire-layout.md) Feature。
 本 Feature 不承接其字段覆盖、网络成本或公共布局迁移；T4 验收当前一致源码的生产链路，未来新布局的同版部署回归由该独立 Feature 负责。
 
 责任边界：Baseline 插件拥有算法、模型状态和本次评估的就绪判定；Baseliner 算子负责数据适配、

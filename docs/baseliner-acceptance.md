@@ -3,7 +3,7 @@
 ## baseliner-contract-safety T4 最终验收（2026-10-11）
 
 本 Feature 的 T1～T4 已完成，规格已归档。按用户本轮授权，新网络头/分析地址布局及其 NPI/NPM
-适配由独立 [npi-wire-layout](../tasks/specs/feat-npi-wire-layout.md) 交付，不作为本 Feature 的完成前置。
+适配由独立 [npi-wire-layout](../tasks/archive/feat-npi-wire-layout.md) 交付，不作为本 Feature 的完成前置。
 本次直接验收当前一致源码；本轮只修改任务/验收文档，所有既有生产源码、CMake 和测试与切片起点 SHA256 一致。
 下文其他 T4 检查点均为历史记录，未将它们拼接为本次完整回归，也未将当前通过当作未来新布局的验收。
 
@@ -91,7 +91,7 @@ Baseliner 普通/仪器化用例使用已有 IPv6 私有配置文件，真实后
 
 ## 当前任务归属调整（2026-10-11）
 
-协议报文布局、分析地址分离及 NPI/NPM Basic 适配已独立为 [npi-wire-layout](../tasks/specs/feat-npi-wire-layout.md)。
+协议报文布局、分析地址分离及 NPI/NPM Basic 适配已独立为 [npi-wire-layout](../tasks/archive/feat-npi-wire-layout.md)。
 所有网络协议报文头及嵌套报文结构按 1 字节布局，分析用 IPv4/IPv6/MAC 采用各自适宜对齐；
 本轮仅交付方案和任务文档，原有源码改动保留，新布局尚未实施或验收。
 

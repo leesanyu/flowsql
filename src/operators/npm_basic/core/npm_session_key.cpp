@@ -28,10 +28,8 @@ bool AddSize(size_t left, size_t right, size_t* result) {
 }
 
 template <typename Header>
-bool ReadHeader(const packet::PacketView& packet, size_t offset, Header* header) {
-    if (offset > packet.bytes.size || sizeof(Header) > packet.bytes.size - offset) return false;
-    std::memcpy(header, packet.bytes.data + offset, sizeof(Header));
-    return true;
+const Header* HeaderAt(const packet::PacketView& packet, size_t offset) {
+    return wire::View<Header>(packet.bytes.data, packet.bytes.size, offset);
 }
 
 NpmSessionPacketError ResolveDomain(const NpmObservationDomainMap& domain_map, uint32_t source_id,
@@ -63,12 +61,9 @@ NpmSessionPacketError ValidateIpv6Fragments(const packet::PacketView& packet, co
         if (IsNetworkLayer(kind)) break;
         if (kind != static_cast<uint16_t>(eLayer::IPv6_EXT_FRAGMENT)) continue;
         const size_t offset = layer.layers[index].offset;
-        if (offset > packet.bytes.size || 8 > packet.bytes.size - offset) {
-            return NpmSessionPacketError::kIncompleteTransportHeader;
-        }
-        uint16_t fragment_field = 0;
-        std::memcpy(&fragment_field, packet.bytes.data + offset + 2, sizeof(fragment_field));
-        if ((ntohs(fragment_field) & 0xfff8u) != 0) return NpmSessionPacketError::kNonInitialFragment;
+        const auto* fragment = HeaderAt<Ipv6FragmentHeader>(packet, offset);
+        if (!fragment) return NpmSessionPacketError::kIncompleteTransportHeader;
+        if ((ntohs(fragment->fragment) & 0xfff8u) != 0) return NpmSessionPacketError::kNonInitialFragment;
     }
     return NpmSessionPacketError::kNone;
 }
@@ -110,12 +105,12 @@ uint16_t VlanTpid(const packet::PacketView& packet, const packet::PacketLayerInf
     if (vlan_index == 0) return 0;
     const auto& previous = layer.layers[vlan_index - 1];
     if (previous.kind == static_cast<uint16_t>(eLayer::ETHERNET)) {
-        EthernetHeader ethernet;
-        return ReadHeader(packet, previous.offset, &ethernet) ? ntohs(ethernet.ether_type) : 0;
+        const auto* ethernet = HeaderAt<EthernetHeader>(packet, previous.offset);
+        return ethernet ? ntohs(ethernet->ether_type) : 0;
     }
     if (previous.kind == static_cast<uint16_t>(eLayer::VLAN)) {
-        VlanHeader vlan;
-        return ReadHeader(packet, previous.offset, &vlan) ? ntohs(vlan.ether_type) : 0;
+        const auto* vlan = HeaderAt<VlanHeader>(packet, previous.offset);
+        return vlan ? ntohs(vlan->ether_type) : 0;
     }
     return 0;
 }
@@ -125,11 +120,11 @@ void PopulateLabelVlans(const packet::PacketView& packet, const packet::PacketLa
     size_t fact_index = 0;
     for (uint8_t index = 0; index < network_index && fact_index < 2; ++index) {
         if (layer.layers[index].kind != static_cast<uint16_t>(eLayer::VLAN)) continue;
-        VlanHeader vlan;
+        const auto* vlan = HeaderAt<VlanHeader>(packet, layer.layers[index].offset);
         const uint16_t tpid = VlanTpid(packet, layer, index);
-        if (tpid == 0 || !ReadHeader(packet, layer.layers[index].offset, &vlan)) continue;
+        if (tpid == 0 || !vlan) continue;
         output->vlan[fact_index].tpid = tpid;
-        output->vlan[fact_index].vid = ntohs(vlan.vlan_tci) & 0x0fffu;
+        output->vlan[fact_index].vid = ntohs(vlan->vlan_tci) & 0x0fffu;
         output->vlan[fact_index].valid = 1;
         ++fact_index;
     }
@@ -173,39 +168,38 @@ NpmSessionPacketError ValidateNetworkRange(const NpmObservationDomainMap& domain
     size_t& network_end = range->end;
     auto& family = range->family;
     if (network_kind == static_cast<uint16_t>(eLayer::IPv4)) {
-        Ipv4Header header;
-        if (!ReadHeader(packet, network_offset, &header)) {
+        const auto* header = HeaderAt<Ipv4Header>(packet, network_offset);
+        if (!header) {
             return NpmSessionPacketError::kInvalidPacketBounds;
         }
-        if (header.version != 4 || header.ihl < 5) return NpmSessionPacketError::kMalformedLayer;
-        const size_t header_size = static_cast<size_t>(header.ihl) * 4;
+        if (header->version != 4 || header->ihl < 5) return NpmSessionPacketError::kMalformedLayer;
+        const size_t header_size = static_cast<size_t>(header->ihl) * 4;
         if (header_size > packet.bytes.size - network_offset) {
             return NpmSessionPacketError::kInvalidPacketBounds;
         }
-        const size_t total_length = ntohs(header.total_length);
+        const size_t total_length = ntohs(header->total_length);
         if (total_length < header_size || !AddSize(network_offset, total_length, &network_end)) {
             return NpmSessionPacketError::kInvalidPayloadBounds;
         }
-        if ((ntohs(header.fragment_offset) & 0x1fffu) != 0) {
+        if ((ntohs(header->fragment_offset) & 0x1fffu) != 0) {
             return NpmSessionPacketError::kNonInitialFragment;
         }
         range->body = network_offset + header_size;
-        range->protocol = header.protocol;
+        range->protocol = header->protocol;
         family = packet::AddressFamily::kIPv4;
     } else {
-        Ipv6Header header;
-        if (!ReadHeader(packet, network_offset, &header)) {
+        const auto* header = HeaderAt<Ipv6Header>(packet, network_offset);
+        if (!header) {
             return NpmSessionPacketError::kInvalidPacketBounds;
         }
-        // IPv6 puts its version in the first wire octet; the legacy 32-bit C++ bitfield is not a wire accessor.
-        if ((packet.bytes.data[network_offset] >> 4) != 6 ||
-            !AddSize(network_offset, sizeof(Ipv6Header) + static_cast<size_t>(ntohs(header.payload)), &network_end)) {
+        if (header->version != 6 ||
+            !AddSize(network_offset, sizeof(Ipv6Header) + static_cast<size_t>(ntohs(header->payload)), &network_end)) {
             return NpmSessionPacketError::kInvalidPayloadBounds;
         }
         const auto fragment_error = ValidateIpv6Fragments(packet, layer, network_index);
         if (fragment_error != NpmSessionPacketError::kNone) return fragment_error;
         range->body = network_offset + sizeof(Ipv6Header);
-        range->protocol = header.protocol;
+        range->protocol = header->protocol;
         family = packet::AddressFamily::kIPv6;
     }
     if (packet.meta.wire_len != 0 && network_end > packet.meta.wire_len) {
@@ -238,15 +232,19 @@ NpmSessionPacketError BuildNpmControlInput(const NpmObservationDomainMap& domain
                                        : range.protocol == 51 ? eLayer::IPv6_EXT_AH
                                                               : eLayer::IPv6_EXT_DSTOPTS;
             if (kind != expected_kind) return NpmSessionPacketError::kInvalidLayerSelection;
-            const auto* bytes = packet.bytes.data + range.body;
-            const size_t length = range.protocol == 44   ? 8
-                                  : range.protocol == 51 ? (bytes[1] + 2) * 4
-                                                         : (bytes[1] + 1) * 8;
-            if (range.protocol == 44 && ((bytes[2] << 8 | bytes[3]) & 0xfff8) != 0)
-                return NpmSessionPacketError::kNonInitialFragment;
+            const auto* prefix = reinterpret_cast<const Ipv6ExtensionPrefix*>(packet.bytes.data + range.body);
+            const size_t length = range.protocol == 44   ? sizeof(Ipv6FragmentHeader)
+                                  : range.protocol == 51 ? (prefix->extlen + 2) * 4
+                                                         : (prefix->extlen + 1) * 8;
+            if (range.protocol == 51 && length < sizeof(Ipv6AuthenticationHeader))
+                return NpmSessionPacketError::kInvalidPayloadBounds;
+            if (range.protocol == 44) {
+                const auto* fragment = reinterpret_cast<const Ipv6FragmentHeader*>(packet.bytes.data + range.body);
+                if ((ntohs(fragment->fragment) & 0xfff8) != 0) return NpmSessionPacketError::kNonInitialFragment;
+            }
             if (length > packet.bytes.size - range.body || length > range.end - range.body)
                 return NpmSessionPacketError::kInvalidPayloadBounds;
-            range.protocol = bytes[0];
+            range.protocol = prefix->protocol;
             range.body += length;
             ++index;
         }
@@ -318,12 +316,12 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
     size_t payload_wire_bytes = 0;
     NpmTcpPacketFacts tcp_facts;
     if (is_tcp) {
-        TcpHeader header;
-        if (!ReadHeader(packet, transport_offset, &header)) {
+        const auto* header = HeaderAt<TcpHeader>(packet, transport_offset);
+        if (!header) {
             return NpmSessionPacketError::kIncompleteTransportHeader;
         }
-        if (header.offset < 5) return NpmSessionPacketError::kInvalidPayloadBounds;
-        const size_t header_size = static_cast<size_t>(header.offset) * 4;
+        if (header->offset < 5) return NpmSessionPacketError::kInvalidPayloadBounds;
+        const size_t header_size = static_cast<size_t>(header->offset) * 4;
         if (!AddSize(transport_offset, header_size, &payload_start)) {
             return NpmSessionPacketError::kInvalidPayloadBounds;
         }
@@ -332,19 +330,19 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
         payload_wire_bytes = network_end - payload_start;
         payload_end = std::min(network_end, packet.bytes.size);
         tcp_facts.valid = true;
-        tcp_facts.syn = header.flags.flags_bit.syn != 0;
-        tcp_facts.ack = header.flags.flags_bit.ack != 0;
-        tcp_facts.fin = header.flags.flags_bit.fin != 0;
-        tcp_facts.rst = header.flags.flags_bit.rst != 0;
-        tcp_facts.sequence = ntohl(header.seq);
-        tcp_facts.acknowledgment = ntohl(header.ack);
-        tcp_facts.window = ntohs(header.window);
+        tcp_facts.syn = header->flags.flags_bit.syn != 0;
+        tcp_facts.ack = header->flags.flags_bit.ack != 0;
+        tcp_facts.fin = header->flags.flags_bit.fin != 0;
+        tcp_facts.rst = header->flags.flags_bit.rst != 0;
+        tcp_facts.sequence = ntohl(header->seq);
+        tcp_facts.acknowledgment = ntohl(header->ack);
+        tcp_facts.window = ntohs(header->window);
     } else {
-        UdpHeader header;
-        if (!ReadHeader(packet, transport_offset, &header)) {
+        const auto* header = HeaderAt<UdpHeader>(packet, transport_offset);
+        if (!header) {
             return NpmSessionPacketError::kIncompleteTransportHeader;
         }
-        const size_t udp_length = ntohs(header.length);
+        const size_t udp_length = ntohs(header->length);
         size_t udp_end = 0;
         if (udp_length < sizeof(UdpHeader) || !AddSize(transport_offset, udp_length, &udp_end) ||
             udp_end > network_end) {

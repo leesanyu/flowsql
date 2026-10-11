@@ -1,27 +1,13 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "layer.h"
 #include <common/network/netbase.h>
+#include <algorithm>
 
 namespace flowsql {
 namespace protocol {
 
-namespace {
-template <typename Integer>
-inline Integer alignment(Integer number, int32_t align) {
-    auto padding = number % align;
-    if (padding) {
-        return number + align - padding;
-    }
-    return number;
-}
-}  // namespace
 namespace {
 Delamination::Result ethernet_delamination(eLayer /* below */, const uint8_t* data, int32_t size,
                                            uint16_t base_length) {
@@ -29,8 +15,9 @@ Delamination::Result ethernet_delamination(eLayer /* below */, const uint8_t* da
     res.dword = INVALID;
     if (size >= base_length) {
         res.offset = base_length;
-        EthernetHeader* eth = (EthernetHeader*)data;
-        switch (n2h16(eth->ether_type)) {
+
+        const auto* ethernet = reinterpret_cast<const EthernetHeader*>(data);
+        switch (n2h16(ethernet->ether_type)) {
             case ethernet::eNext::PPPOE_SESSION:
                 res.next = eLayer::PPPoE_Session;
                 break;
@@ -60,7 +47,8 @@ Delamination::Result vlan_delamination(eLayer /* below */, const uint8_t* data, 
     res.dword = INVALID;
     if (size >= base_length) {
         res.offset = base_length;
-        VlanHeader* vlan = (VlanHeader*)data;
+
+        const auto* vlan = reinterpret_cast<const VlanHeader*>(data);
         switch (n2h16(vlan->ether_type)) {
             case ethernet::eNext::IPv4:
                 res.next = eLayer::IPv4;
@@ -87,9 +75,12 @@ Delamination::Result ipv4_delamination(eLayer /* below */, const uint8_t* data, 
     Delamination::Result res;
     res.dword = INVALID;
     if (size >= base_length) {
-        Ipv4Header* ipv4header = (Ipv4Header*)data;
-        res.offset = ipv4header->ihl << 2;
-        switch (ipv4header->protocol) {
+        const auto* header = reinterpret_cast<const Ipv4Header*>(data);
+        if (header->version != 4 || header->ihl < 5) return res;
+        res.offset = header->ihl * 4;
+        if (res.offset > size) return res;
+        if ((n2h16(header->fragment_offset) & 0x1fff) != 0) return res;
+        switch (header->protocol) {
             case ipv4::eNext::TCP:
                 res.next = eLayer::TCP;
                 break;
@@ -169,9 +160,10 @@ Delamination::Result ipv6_delamination(eLayer /* below */, const uint8_t* data, 
     Delamination::Result res;
     res.dword = INVALID;
     if (size >= base_length) {
-        Ipv6Header* ipv6header = (Ipv6Header*)data;
+        const auto* header = reinterpret_cast<const Ipv6Header*>(data);
+        if (header->version != 6) return res;
         res.offset = base_length;
-        IPV6_NEXT_LAYER(res.next, ipv6header->protocol);
+        IPV6_NEXT_LAYER(res.next, header->protocol);
     }
     return res;
 }
@@ -181,9 +173,10 @@ Delamination::Result ipv6_hopopts_delamination(eLayer /* below */, const uint8_t
     Delamination::Result res;
     res.dword = INVALID;
     if (size >= base_length) {
-        Ipv6ExtentHeader* exthdr = (Ipv6ExtentHeader*)data;
-        res.offset = (exthdr->extlen + 1) * 8;
-        IPV6_NEXT_LAYER(res.next, exthdr->protocol);
+        const auto* header = reinterpret_cast<const Ipv6ExtensionPrefix*>(data);
+        res.offset = (header->extlen + 1) * 8;
+        if (res.offset > size) return res;
+        IPV6_NEXT_LAYER(res.next, header->protocol);
     }
     return res;
 }
@@ -193,9 +186,10 @@ Delamination::Result ipv6_routing_delamination(eLayer /* below */, const uint8_t
     Delamination::Result res;
     res.dword = INVALID;
     if (size >= base_length) {
-        Ipv6ExtentHeader* exthdr = (Ipv6ExtentHeader*)data;
-        res.offset = (exthdr->extlen + 1) * 8;
-        IPV6_NEXT_LAYER(res.next, exthdr->protocol);
+        const auto* header = reinterpret_cast<const Ipv6ExtensionPrefix*>(data);
+        res.offset = (header->extlen + 1) * 8;
+        if (res.offset > size) return res;
+        IPV6_NEXT_LAYER(res.next, header->protocol);
     }
     return res;
 }
@@ -205,11 +199,11 @@ Delamination::Result ipv6_fragment_delamination(eLayer /* below */, const uint8_
     Delamination::Result res;
     res.dword = INVALID;
     if (size >= base_length) {
-        Ipv6ExtentHeader* exthdr = (Ipv6ExtentHeader*)data;
         res.offset = base_length;
-        if (0 == exthdr->offset) {
+        const auto* header = reinterpret_cast<const Ipv6FragmentHeader*>(data);
+        if ((n2h16(header->fragment) & 0xfff8) == 0) {
             // Only the first fragment has upper layer header
-            IPV6_NEXT_LAYER(res.next, exthdr->protocol);
+            IPV6_NEXT_LAYER(res.next, header->protocol);
         } else {
             // TODO
             res.next = eLayer::NONE;
@@ -230,9 +224,14 @@ Delamination::Result ipv6_ah_delamination(eLayer /* below */, const uint8_t* dat
     Delamination::Result res;
     res.dword = INVALID;
     if (size >= base_length) {
-        Ipv6ExtentHeader* exthdr = (Ipv6ExtentHeader*)data;
-        res.offset = (exthdr->extlen + 2) * 4;
-        IPV6_NEXT_LAYER(res.next, exthdr->protocol);
+        const auto* header = reinterpret_cast<const Ipv6AuthenticationHeader*>(data);
+        res.offset = (header->extlen + 2) * 4;
+        if (res.offset < sizeof(Ipv6AuthenticationHeader)) {
+            res.dword = INVALID;
+            return res;
+        }
+        if (res.offset > size) return res;
+        IPV6_NEXT_LAYER(res.next, header->protocol);
     }
     return res;
 }
@@ -242,9 +241,10 @@ Delamination::Result ipv6_dstopts_delamination(eLayer /* below */, const uint8_t
     Delamination::Result res;
     res.dword = INVALID;
     if (size >= base_length) {
-        Ipv6ExtentHeader* exthdr = (Ipv6ExtentHeader*)data;
-        res.offset = (exthdr->extlen + 1) * 8;
-        IPV6_NEXT_LAYER(res.next, exthdr->protocol);
+        const auto* header = reinterpret_cast<const Ipv6ExtensionPrefix*>(data);
+        res.offset = (header->extlen + 1) * 8;
+        if (res.offset > size) return res;
+        IPV6_NEXT_LAYER(res.next, header->protocol);
     }
     return res;
 }
@@ -253,9 +253,17 @@ Delamination::Result vxlan_delamination(eLayer /* below */, const uint8_t* data,
     Delamination::Result res;
     res.dword = INVALID;
     if (size >= base_length) {
-        VxlanHeader* vxlan = (VxlanHeader*)data;
         res.offset = base_length;
-        switch (vxlan->proto) {
+        const auto* header = reinterpret_cast<const VxlanHeader*>(data);
+        if (!header->I || header->ver != 0) {
+            res.dword = INVALID;
+            return res;
+        }
+        if (!header->P) {
+            res.next = eLayer::ETHERNET;
+            return res;
+        }
+        switch (header->proto) {
             case vxlan::eNext::IPv4:
                 res.next = eLayer::IPv4;
                 break;
@@ -280,29 +288,35 @@ Delamination::Result gre_delamination(eLayer /* below */, const uint8_t* data, i
     Delamination::Result res;
     res.dword = INVALID;
     if (size >= base_length) {
-        GreHeader* gre = (GreHeader*)data;
-        // calc option fields length
+        const auto* header = reinterpret_cast<const GreHeader*>(data);
         res.offset = base_length;
-        if (gre->S) res.offset += 4;  // Sequence optional : 4 bytes
-        if (gre->K) res.offset += 4;  // Key optional : 4 bytes
-        if (gre->A) res.offset += 4;  // Acknowledgment optional : 4 bytes
-        if (gre->R) {
-            // Routing option : SourceRouteEntry
-            res.offset += 4;  // Checksum2 + offset2
-            while (res.offset + sizeof(SourceRouteEntry) <= size) {
-                SourceRouteEntry* sre = (SourceRouteEntry*)(data + res.offset);
-                if (res.offset + sizeof(SourceRouteEntry) + sre->length <= size) {
-                    res.offset += sizeof(SourceRouteEntry) + sre->length;
+        if (header->C || header->R) res.offset += 4;
+        if (header->K) res.offset += 4;
+        if (header->S) res.offset += 4;
+        if (header->A) res.offset += 4;
+        if (res.offset > size) return res;
+        if (header->R) {
+            for (;;) {
+                const auto* route = wire::View<SourceRouteEntry>(data, size, res.offset);
+                if (!route) {
+                    res.offset = std::min<size_t>(UINT16_MAX, res.offset + sizeof(SourceRouteEntry));
+                    return res;
                 }
-
-                if (0 == sre->addr_family && 0 == sre->length) {
-                    break;
+                if (res.offset + sizeof(SourceRouteEntry) + route->length > UINT16_MAX) {
+                    res.dword = INVALID;
+                    return res;
                 }
+                res.offset += sizeof(SourceRouteEntry);
+                if (route->length > size - res.offset) {
+                    res.offset += route->length;
+                    return res;
+                }
+                res.offset += route->length;
+                if (route->addr_family == 0 && route->length == 0) break;
             }
-        } else if (gre->C)
-            res.offset += 4;  // Checksum2 + offset2
+        }
 
-        switch (n2h16(gre->proto)) {
+        switch (n2h16(header->proto)) {
             case gre::eNext::IPv4:
                 res.next = eLayer::IPv4;
                 break;
@@ -330,9 +344,11 @@ Delamination::Result geneve_delamination(eLayer /* below */, const uint8_t* data
     Delamination::Result res;
     res.dword = INVALID;
     if (size >= base_length) {
-        GeneveHeader* gnv = (GeneveHeader*)data;
-        res.offset = base_length + gnv->opt_len * 4;
-        switch (n2h16(gnv->proto)) {
+        const auto* header = reinterpret_cast<const GeneveHeader*>(data);
+        if (header->version != 0) return res;
+        res.offset = base_length + header->opt_len * 4;
+        if (res.offset > size) return res;
+        switch (n2h16(header->proto)) {
             case geneve::eNext::IPv4:
                 res.next = eLayer::IPv4;
                 break;
@@ -360,9 +376,9 @@ Delamination::Result udp_delamination(eLayer /* below */, const uint8_t* data, i
     Delamination::Result res;
     res.dword = INVALID;
     if (size >= base_length) {
-        UdpHeader* udphdr = (UdpHeader*)data;
         res.offset = base_length;
-        switch (n2h16(udphdr->dst_port)) {
+        const auto* udp = reinterpret_cast<const UdpHeader*>(data);
+        switch (n2h16(udp->dst_port)) {
             case udp::eNext::L2TP:
                 res.next = eLayer::L2TP;
                 break;
@@ -388,7 +404,7 @@ Delamination::Result udp_delamination(eLayer /* below */, const uint8_t* data, i
                 break;
         }
 
-        switch (n2h16(udphdr->src_port)) {
+        switch (n2h16(udp->src_port)) {
             case udp::eNext::L2TP:
                 res.next = eLayer::L2TP;
                 break;
@@ -421,25 +437,10 @@ Delamination::Result tcp_delamination(eLayer /* below */, const uint8_t* data, i
     Delamination::Result res;
     res.dword = INVALID;
     if (size >= base_length) {
-        const TcpHeader* tcphdr = reinterpret_cast<const TcpHeader*>(data);
-        res.offset = tcphdr->offset * 4;
+        const auto* header = reinterpret_cast<const TcpHeader*>(data);
+        if (header->offset < 5) return res;
+        res.offset = header->offset * 4;
         res.next = eLayer::NONE;
-
-        // switch (n2h16(tcphdr->dst_port)) {
-        //     case tcp::eNext::TPKT:
-        //         res.next = eLayer::TPKT;
-        //         break;
-        //     default:
-        //         break;
-        // }
-
-        // switch (n2h16(tcphdr->src_port)) {
-        //     case tcp::eNext::TPKT:
-        //         res.next = eLayer::TPKT;
-        //         break;
-        //     default:
-        //         break;
-        // }
     }
     return res;
 }
@@ -449,13 +450,14 @@ Delamination::Result sctp_delamination(eLayer /* below */, const uint8_t* data, 
     res.dword = INVALID;
     if (size >= base_length) {
         res.next = eLayer::NONE;
-        const SctpHeader* sctp = reinterpret_cast<const SctpHeader*>(data);
-        switch (sctp->chunk.type) {
+
+        const auto* header = reinterpret_cast<const SctpHeader*>(data);
+        switch (header->chunk.type) {
             case sctp::eChunk::DATA:
                 res.offset = 28;
                 break;
             default:
-                res.offset = n2h16(sctp->chunk.length) + 12;
+                res.offset = 12 + n2h16(header->chunk.length);
                 break;
         }
     }
@@ -466,23 +468,26 @@ Delamination::Result sctp_delamination(eLayer /* below */, const uint8_t* data, 
 Delamination::Result l2tp_delamination(eLayer /* below */, const uint8_t* data, int32_t size, uint16_t base_length) {
     Delamination::Result res;
     res.dword = INVALID;
-    if (size > base_length) {
-        L2tpHeader* l2tp = (L2tpHeader*)data;
-        if (l2tp->L) {
-            res.offset = l2tp->tunnel_or_length;
-        } else {
-            res.offset = base_length;
-            if (l2tp->S) res.offset += 4;
-            if (l2tp->O) {
-                uint16_t offset_length = *((uint16_t*)(data + res.offset));
-                res.offset += 2 + offset_length;
-            }
+    if (size < base_length) return res;
+    const auto* header = reinterpret_cast<const L2tpHeader*>(data);
+    if (header->ver != 2 || header->T) return res;
+    res.offset = base_length + (header->L ? 2 : 0);
+    if (header->L && n2h16(header->tunnel_or_length) < res.offset) return res;
+    if (header->S) res.offset += sizeof(L2tpSequenceHeader);
+    if (header->O) {
+        const auto* padding = wire::View<L2tpOffsetHeader>(data, size, res.offset);
+        if (!padding) {
+            res.offset += sizeof(L2tpOffsetHeader);
+            return res;
         }
-        res.next = eLayer::PPP;
-    } else {
-        res.offset = base_length;
-        res.next = eLayer::NONE;
+        const size_t next = res.offset + sizeof(L2tpOffsetHeader) + n2h16(padding->size);
+        if (next > UINT16_MAX) {
+            res.dword = INVALID;
+            return res;
+        }
+        res.offset = next;
     }
+    if (res.offset <= size) res.next = eLayer::PPP;
     return res;
 }
 
@@ -498,13 +503,15 @@ Delamination::Result ppp_delamination(eLayer below, const uint8_t* data, int32_t
     Delamination::Result res;
     res.dword = INVALID;
     uint16_t nextpro = 0;
+    if (below == eLayer::PPPoE_Session) base_length = sizeof(PppProtocolHeader);
     if (size >= base_length) {
-        PppHeader* ppp = (PppHeader*)data;
         if (eLayer::PPPoE_Session == below) {
             res.offset = 2;
-            nextpro = n2h16(*(uint16_t*)data);
+            const auto* ppp = reinterpret_cast<const PppProtocolHeader*>(data);
+            nextpro = n2h16(ppp->protocol);
         } else {
             res.offset = base_length;
+            const auto* ppp = reinterpret_cast<const PppHeader*>(data);
             nextpro = n2h16(ppp->protocol);
         }
 
@@ -533,12 +540,13 @@ Delamination::Result mpls_delamination(eLayer /* below */, const uint8_t* data, 
     Delamination::Result res;
     res.dword = INVALID;
     res.offset = base_length;
-    MplsHeader* mpls = (MplsHeader*)(data);
+    if (size < base_length) return res;
+    const auto* mpls = reinterpret_cast<const MplsHeader*>(data);
     if (mpls->bos) {
         // detect forword one byte : ipver
         if (res.offset < size) {
-            uint8_t byte = *(uint8_t*)(data + res.offset);
-            switch ((byte & 0xf0) >> 4) {
+            const auto* header = reinterpret_cast<const IpVersionHeader*>(data + res.offset);
+            switch (header->version) {
                 case mpls::eIpVer::IPv4:
                     res.next = eLayer::IPv4;
                     break;
@@ -562,46 +570,46 @@ Delamination::Result gtp_delamination(eLayer /* below */, const uint8_t* data, i
     Delamination::Result res;
     res.dword = INVALID;
     res.offset = base_length;
-    GprsTunnelHeader* gtphdr = (GprsTunnelHeader*)(data);
-    if (gtphdr->sequence) res.offset += 2;
-    if (gtphdr->npdu_number) res.offset += 1;
-    if (gtphdr->next_extension_header) {
-        res.offset += 1;  // exthdrtype byte
-        res.offset = alignment(res.offset, 4);
-        while (res.offset + 4 <= size) {
-            uint8_t exthdrtype = *(data + res.offset + 3);
-            res.offset += 4;
-            if (0 == exthdrtype) {
-                break;
+    if (size < base_length) return res;
+    const auto* header = reinterpret_cast<const GprsTunnelHeader*>(data);
+    if (header->ver != 1 || !header->proto_type || header->msg_type != 255) return res;
+    if (header->sequence || header->npdu_number || header->next_extension_header) {
+        const auto* optional = wire::View<GtpOptionalHeader>(data, size, res.offset);
+        if (!optional) {
+            res.offset += sizeof(GtpOptionalHeader);
+            return res;
+        }
+        res.offset += sizeof(GtpOptionalHeader);
+        uint8_t next_extension = header->next_extension_header ? optional->next_extension : 0;
+        while (next_extension != 0) {
+            const auto* extension = wire::View<GtpExtensionPrefix>(data, size, res.offset);
+            if (!extension) {
+                ++res.offset;
+                return res;
             }
+            const size_t length = extension->length * 4;
+            if (length == 0) {
+                res.dword = INVALID;
+                return res;
+            }
+            const size_t next = res.offset + length;
+            if (next > UINT16_MAX) {
+                res.dword = INVALID;
+                return res;
+            }
+            if (next > static_cast<size_t>(size)) {
+                res.offset = next;
+                return res;
+            }
+            // The final octet of each variable-length extension selects its successor.
+            next_extension = data[next - 1];
+            res.offset = next;
         }
-        // while (res.offset + sizeof(GprsTunnelHeader::next_ext_hdr) <= size) {
-        //     GprsTunnelHeader::next_ext_hdr* exthdr = (GprsTunnelHeader::next_ext_hdr*)(data + res.offset);
-        //     res.offset += sizeof(GprsTunnelHeader::next_ext_hdr);
-        //     if (0 == exthdr->type) {
-        //         break;
-        //     }
-        // }
-    } else {
-        res.offset = alignment(res.offset, 4);
     }
-
-    // TODO calc GTP layer length
     if (res.offset < size) {
-        // detect forword one byte : ipver
-        uint8_t byte = *(uint8_t*)(data + res.offset);
-        switch ((byte & 0xf0) >> 4) {
-            case gtp::eIpVer::IPv4:
-                res.next = eLayer::IPv4;
-                break;
-            case gtp::eIpVer::IPv6:
-                res.next = eLayer::IPv6;
-                break;
-            default:
-                break;
-        }
-    } else {
-        // packet error
+        const auto* inner = reinterpret_cast<const IpVersionHeader*>(data + res.offset);
+        if (inner->version == 4) res.next = eLayer::IPv4;
+        if (inner->version == 6) res.next = eLayer::IPv6;
     }
 
     return res;
@@ -622,45 +630,12 @@ Delamination::Result cotp_delamination(eLayer /* below */, const uint8_t* data, 
     Delamination::Result res;
     res.offset = 0;
     res.next = eLayer::NONE;
-    if (size) {
-        res.offset = data[0] + 1;
+    if (size >= base_length) {
+        const auto* cotp = reinterpret_cast<const CotpHeader*>(data);
+        res.offset = cotp->length + 1;
     }
     return res;
 }
-
-/*
-Delamination::Result mpls_delamination(eLayer below , const uint8_t* data, int32_t size, uint16_t base_length) {
-    Delamination::Result res;
-    res.dword = INVALID;
-    for (size_t offs = 0; offs < size; offs += base_length) {
-        MplsHeader* mpls = (MplsHeader*)(data + offs);
-        if (mpls->bos) {
-            offs += base_length;
-            res.offset = offs;
-            break;
-        }
-    }
-
-    // detect forword one byte : ipver
-    if (res.offset < size) {
-        uint8_t byte = *(uint8_t*)(data + res.offset);
-        switch (byte & 0xf0) {
-            case mpls::eIpVer::IPv4:
-                res.next = eLayer::IPv4;
-                break;
-            case mpls::eIpVer::IPv6:
-                res.next = eLayer::IPv6;
-                break;
-            default:
-                break;
-        }
-    } else {
-        // packet error
-    }
-
-    return res;
-}
-*/
 
 }  // namespace
 
@@ -676,7 +651,7 @@ NetworkLayer::NetworkLayer() {
     parsers_map_[eLayer::IPv6_EXT_ROUTING] = new Delamination(2, ipv6_routing_delamination);
     parsers_map_[eLayer::IPv6_EXT_FRAGMENT] = new Delamination(8, ipv6_fragment_delamination);
     parsers_map_[eLayer::IPv6_EXT_ESP] = new Delamination(2, ipv6_esp_delamination);
-    parsers_map_[eLayer::IPv6_EXT_AH] = new Delamination(2, ipv6_ah_delamination);
+    parsers_map_[eLayer::IPv6_EXT_AH] = new Delamination(sizeof(Ipv6AuthenticationHeader), ipv6_ah_delamination);
     parsers_map_[eLayer::IPv6_EXT_DSTOPTS] = new Delamination(2, ipv6_dstopts_delamination);
     parsers_map_[eLayer::UDP] = new Delamination(sizeof(UdpHeader), udp_delamination);
     parsers_map_[eLayer::TCP] = new Delamination(sizeof(TcpHeader), tcp_delamination);
@@ -693,14 +668,18 @@ NetworkLayer::NetworkLayer() {
     // parsers_map_[eLayer::COTP] = new Delamination(sizeof(CotpHeader), cotp_delamination);
 }
 
-NetworkLayer::~NetworkLayer() {}
+NetworkLayer::~NetworkLayer() {
+    for (auto* parser : parsers_map_) delete parser;
+}
 
 int32_t NetworkLayer::Layer(const uint8_t* packet, int32_t packet_size, protocol::Layers* layers) {
     flowsql::eLayer layer = flowsql::eLayer::ETHERNET;
-    uint16_t offset = 0;
+    uint32_t offset = 0;
     int32_t degree = 0;
     eLayer below = eLayer::NONE;
-    while (offset < packet_size && degree < MAX_LAYERS && layer != eLayer::NONE) {
+    if (!layers || !packet || packet_size <= 0) return 0;
+    while (offset <= UINT16_MAX && offset < static_cast<uint32_t>(packet_size) && degree < MAX_LAYERS &&
+           layer != eLayer::NONE) {
         layers->layers[degree].offset = offset;
         layers->layers[degree].layer = layer;
         Delamination* parser = parsers_map_[layer];
@@ -715,7 +694,7 @@ int32_t NetworkLayer::Layer(const uint8_t* packet, int32_t packet_size, protocol
         }
     }
 
-    layers->payload = offset;
+    layers->payload = static_cast<uint16_t>(std::min<uint32_t>(offset, UINT16_MAX));
     layers->layercount = degree;
     return degree;
 }

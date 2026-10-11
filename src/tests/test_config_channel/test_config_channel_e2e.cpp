@@ -314,8 +314,8 @@ flowsql::packet::PacketRecord MakeTcpPacket(const char* source, uint16_t source_
     record.layer.network_layer_index = 0;
     record.layer.transport_layer_index = 1;
     record.layer.payload_offset = static_cast<uint32_t>(bytes->size());
-    record.layer.src_ip = ip->src_addr;
-    record.layer.dst_ip = ip->dst_addr;
+    record.layer.src_ip = flowsql::wire::ToAnalysis(ip->src_addr);
+    record.layer.dst_ip = flowsql::wire::ToAnalysis(ip->dst_addr);
     record.layer.transport_protocol = flowsql::ipv4::eNext::TCP;
     record.layer.src_port = source_port;
     record.layer.dst_port = destination_port;

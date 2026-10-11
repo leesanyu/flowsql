@@ -1,17 +1,12 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_COMMON_NETWORK_NETBASE_H_
 #define _FLOWSQL_COMMON_NETWORK_NETBASE_H_
 
 #include <stdint.h>
 #include "../typedef.h"
-#include "netaddress.h"
+#include "wire.h"
 
 namespace flowsql {
 // 定义网络最基本的协议层次
@@ -254,12 +249,14 @@ enum eLayer : uint16_t {
  * Ethernet header: Contains the destination address, source address
  * and frame type.
  */
+#pragma pack(push, 1)
+
 struct EthernetHeader {
     enum : uint16_t { level = eLayer::ETHERNET };
-    EtherAdderss d_addr; /**< Destination address. */
-    EtherAdderss s_addr; /**< Source address. */
-    uint16_t ether_type; /**< Frame type. */
-} FAST_MEM_ALIGN(1);
+    wire::EthernetAddress d_addr; /**< Destination address. */
+    wire::EthernetAddress s_addr; /**< Source address. */
+    uint16_t ether_type;          /**< Frame type. */
+};
 
 /**
  * Ethernet VLAN Header.
@@ -270,7 +267,7 @@ struct VlanHeader {
     enum : uint16_t { level = eLayer::VLAN };
     uint16_t vlan_tci;   /**< Priority (3) + CFI (1) + Identifier Code (12) */
     uint16_t ether_type; /**< Ethernet type of encapsulated frame. */
-} FAST_MEM_ALIGN(1);
+};
 
 /**
  * VXLAN-GPE protocol header (draft-ietf-nvo3-vxlan-gpe-05).
@@ -279,22 +276,31 @@ struct VlanHeader {
  */
 struct VxlanHeader {
     enum : uint16_t { level = eLayer::VXLAN };
+    union {
+        uint8_t vx_flags;
+        struct {
 #if defined(__LITTLE_ENDIAN_BITFIELD)
-    uint8_t vx_flags;        /**< flag (8). */
-    uint16_t reserved1 : 14; /**< Reserved (14). */
-    uint16_t ver : 2;        /**< Ver (2). */
-    uint8_t proto;           /**< next-protocol (8). */
-    uint32_t reserved2 : 8;  /**< Reserved (8). */
-    uint32_t vni : 24;       /**< VNI (24). */
-#elif defined(__BIG_ENDIAN_BITFIELD)
-    uint8_t vx_flags;        /**< flag (8). */
-    uint16_t ver : 2;        /**< Ver (2). */
-    uint16_t reserved1 : 14; /**< Reserved (14). */
-    uint8_t proto;           /**< next-protocol (8). */
-    uint32_t vni : 24;       /**< VNI (24). */
-    uint32_t reserved2 : 8;  /**< Reserved (8). */
+            uint8_t O : 1;
+            uint8_t reserved_flags1 : 1;
+            uint8_t P : 1;
+            uint8_t I : 1;
+            uint8_t ver : 2;
+            uint8_t reserved_flags2 : 2;
+#else
+            uint8_t reserved_flags2 : 2;
+            uint8_t ver : 2;
+            uint8_t I : 1;
+            uint8_t P : 1;
+            uint8_t reserved_flags1 : 1;
+            uint8_t O : 1;
 #endif
-} FAST_MEM_ALIGN(1);
+        };
+    };
+    uint8_t reserved1[2];
+    uint8_t proto;
+    uint8_t vni[3];
+    uint8_t reserved2;
+};
 
 /**
  * GRE Header sizeof = 4 + K*4 + S*4 + R*
@@ -314,54 +320,54 @@ struct GreHeader {
     uint8_t reserved : 4; /**< Reserved set to zero */
     uint8_t A : 1;        /**< Acknowledgment */
 #elif defined(__BIG_ENDIAN_BITFIELD)
-    uint8_t C : 1;           /**< Checksum Present bit */
-    uint8_t R : 1;           /**< Routing Present bit */
-    uint8_t K : 1;           /**< Key Present bit */
-    uint8_t S : 1;           /**< Sequence Number Present bit */
-    uint8_t s : 1;           /**< Strict Source route */
-    uint8_t rc : 3;          /**< Recursion Control */
-    uint8_t A : 1;           /**< Acknowledgment */
-    uint8_t reserved : 4;    /**< Reserved set to zero */
-    uint8_t ver : 3;         /**< Version Number */
+    uint8_t C : 1;        /**< Checksum Present bit */
+    uint8_t R : 1;        /**< Routing Present bit */
+    uint8_t K : 1;        /**< Key Present bit */
+    uint8_t S : 1;        /**< Sequence Number Present bit */
+    uint8_t s : 1;        /**< Strict Source route */
+    uint8_t rc : 3;       /**< Recursion Control */
+    uint8_t A : 1;        /**< Acknowledgment */
+    uint8_t reserved : 4; /**< Reserved set to zero */
+    uint8_t ver : 3;      /**< Version Number */
 #endif
     uint16_t proto; /**< Protocol Type */
     // Variable fields below
     // uint16_t checksum;       /**< C=1 OR R=1 */
     // uint16_t offset;         /**< C=1 OR R=1 */
     // SourceRouteEntry sres;   /**< R=1 : list of Source Route Entries (SREs) */
-} FAST_MEM_ALIGN(1);
+};
 
 struct SourceRouteEntry {
     uint16_t addr_family; /**< Address Family */
     uint8_t offset;       /**< SRE Offset */
     uint8_t length;       /**< SRE Length */
     // std::string routing; /**< Routing Information (variable) */
-} FAST_MEM_ALIGN(1);
+};
 
 // GENEVE头部定义 sizeof = 8 + opt_len * 4
 struct GeneveHeader {
     enum : uint16_t { level = eLayer::GENEVE };
 #if defined(__LITTLE_ENDIAN_BITFIELD)
-    uint8_t opt_len : 6;    /**< options length MAX 63*4=252. */
-    uint8_t version : 2;    /**< version Default 0. */
-    uint8_t reserved1 : 6;  /**< reserved. */
-    uint8_t c_flag : 1;     /**< Critical option flag. */
-    uint8_t o_flag : 1;     /**< OAM flag. */
-    uint16_t proto;         /**< Protocol Type */
-    uint32_t reserved2 : 8; /**< reserved. */
-    uint32_t vni : 24;      /**< Virtual Network Indentifier */
+    uint8_t opt_len : 6;   /**< options length MAX 63*4=252. */
+    uint8_t version : 2;   /**< version Default 0. */
+    uint8_t reserved1 : 6; /**< reserved. */
+    uint8_t c_flag : 1;    /**< Critical option flag. */
+    uint8_t o_flag : 1;    /**< OAM flag. */
+    uint16_t proto;        /**< Protocol Type */
+    uint8_t vni[3];
+    uint8_t reserved2;
 #elif defined(__BIG_ENDIAN_BITFIELD)
-    uint8_t version : 2;     /**< version Default 0. */
-    uint8_t opt_len : 6;     /**< options length MAX 63*4=252. */
-    uint8_t o_flag : 1;      /**< OAM flag. */
-    uint8_t c_flag : 1;      /**< Critical option flag. */
-    uint8_t reserved1 : 6;   /**< reserved. */
-    uint16_t proto;          /**< Protocol Type */
-    uint32_t vni : 24;       /**< Virtual Network Indentifier */
-    uint32_t reserved2 : 8;  /**< reserved. */
+    uint8_t version : 2;   /**< version Default 0. */
+    uint8_t opt_len : 6;   /**< options length MAX 63*4=252. */
+    uint8_t o_flag : 1;    /**< OAM flag. */
+    uint8_t c_flag : 1;    /**< Critical option flag. */
+    uint8_t reserved1 : 6; /**< reserved. */
+    uint16_t proto;        /**< Protocol Type */
+    uint8_t vni[3];
+    uint8_t reserved2;
 #endif
     // uint32_t options[0];    /**< VNI (24) + Reserved (8). */
-} FAST_MEM_ALIGN(1);
+};
 
 /**
  * IPv4 Header
@@ -372,19 +378,19 @@ struct Ipv4Header {
     uint8_t ihl : 4;      // Internet header length (4 bits)
     uint8_t version : 4;  // Version (4 bits)
 #elif defined(__BIG_ENDIAN_BITFIELD)
-    uint8_t version : 4;     // Version (4 bits)
-    uint8_t ihl : 4;         // Internet header length (4 bits)
+    uint8_t version : 4;  // Version (4 bits)
+    uint8_t ihl : 4;      // Internet header length (4 bits)
 #endif
-    uint8_t type_of_service;   // Type of service
-    uint16_t total_length;     // Total length
-    uint16_t identify;         // Identification
-    uint16_t fragment_offset;  // Flags (3 bits) + Fragment offset (13 bits)
-    uint8_t ttl;               // Time to live
-    uint8_t protocol;          // Protocol
-    uint16_t checksum;         // Header checksum
-    IPv4Address src_addr;      // Source address
-    IPv4Address dst_addr;      // Destination address
-} FAST_MEM_ALIGN(1);
+    uint8_t type_of_service;     // Type of service
+    uint16_t total_length;       // Total length
+    uint16_t identify;           // Identification
+    uint16_t fragment_offset;    // Flags (3 bits) + Fragment offset (13 bits)
+    uint8_t ttl;                 // Time to live
+    uint8_t protocol;            // Protocol
+    uint16_t checksum;           // Header checksum
+    wire::IPv4Address src_addr;  // Source address
+    wire::IPv4Address dst_addr;  // Destination address
+};
 
 /* IPv6 header */
 /* ************************** IPv6 header *******************************
@@ -408,62 +414,51 @@ struct Ipv4Header {
 struct Ipv6Header {
     enum : uint16_t { level = eLayer::IPv6 };
 #if defined(__LITTLE_ENDIAN_BITFIELD)
-    uint32_t flow_label : 24;
-    uint32_t version : 4;
-    uint32_t priority : 4;
-#elif defined(__BIG_ENDIAN_BITFIELD)
-    uint32_t version : 4;
-    uint32_t priority : 4;
-    uint32_t flow_label : 24;
+    uint8_t priority : 4;
+    uint8_t version : 4;
+    uint8_t flow_label_high : 4;
+    uint8_t traffic_class_low : 4;
+#else
+    uint8_t version : 4;
+    uint8_t priority : 4;
+    uint8_t traffic_class_low : 4;
+    uint8_t flow_label_high : 4;
 #endif
+    uint16_t flow_label_low;
     uint16_t payload;   /**< IP packet length - includes header size */
     uint8_t protocol;   /**< Protocol, next header. */
     uint8_t hop_limits; /**< Hop limits. */
-    IPv6Address src_addr;
-    IPv6Address dst_addr;
-} FAST_MEM_ALIGN_PACKED;
+    wire::IPv6Address src_addr;
+    wire::IPv6Address dst_addr;
+};
 
+// Only this prefix is common to options/routing/AH headers. Actual lengths are protocol-specific.
+struct Ipv6ExtensionPrefix {
+    uint8_t protocol;
+    uint8_t extlen;
+};
+struct Ipv6FragmentHeader {
+    uint8_t protocol;
+    uint8_t reserved;
+    uint16_t fragment;  // Network order: offset in bits 15..3, M in bit 0.
+    uint32_t identification;
+};
+struct Ipv6AuthenticationHeader {
+    uint8_t protocol;
+    uint8_t extlen;
+    uint16_t reserved;
+    uint32_t spi;
+    uint32_t sequence;
+};
+struct Ipv6EspHeader {
+    uint32_t spi;
+    uint32_t sequence;
+};
 union Ipv6ExtentHeader {
-    enum : uint16_t { level = eLayer::IPv6 };
-    struct {
-        uint8_t protocol; /**< Protocol, next header. */
-        uint8_t extlen;   /**< Length of the Destination Options extension header, fragment not used. */
-        union {
-            struct {
-                uint8_t option_type;
-                uint8_t option_length;
-                // uint8_t option_data[0];
-            };
-            struct {
-                uint8_t routing_type;
-                uint8_t segments;
-                // uint8_t data[0];
-            };
-            struct {
-#if defined(__LITTLE_ENDIAN_BITFIELD)
-                uint16_t M : 1;
-                uint16_t res : 2;
-                uint16_t offset : 13;
-#elif defined(__BIG_ENDIAN_BITFIELD)
-                uint16_t offset : 13;
-                uint16_t res : 2;
-                uint16_t M : 1;
-#endif
-                uint32_t Identification;
-            };
-            struct {
-                uint16_t ah_reserved;
-                uint32_t ah_spi;  // Security Parameters Index
-                uint32_t ah_sn;   // Sequence Number Field
-                // uint8_t data[0];
-            };
-        };
-    } FAST_MEM_ALIGN(1);
-    struct {
-        uint32_t esp_spi;
-        uint32_t esp_sn;
-        // ...
-    } FAST_MEM_ALIGN(1);
+    Ipv6ExtensionPrefix prefix;
+    Ipv6FragmentHeader fragment;
+    Ipv6AuthenticationHeader authentication;
+    Ipv6EspHeader esp;
 };
 
 /**
@@ -475,7 +470,7 @@ struct UdpHeader {
     uint16_t dst_port;  // Destination port
     uint16_t length;    // Datagram length
     uint16_t checksum;  // Checksum
-} FAST_MEM_ALIGN(1);
+};
 
 /* tcp flags*/
 struct TCPFlagsBit {
@@ -500,12 +495,12 @@ struct TCPFlagsBit {
 #else
 #error "Adjust your <asm/byteorder.h> defines"
 #endif
-} FAST_MEM_ALIGN(1);
+};
 
 union TCPFlags {
     TCPFlagsBit flags_bit;
     uint8_t flags_byte;
-} FAST_MEM_ALIGN(1);
+};
 
 /**
  * TCP Header
@@ -531,7 +526,7 @@ struct TcpHeader {
     uint16_t window;
     uint16_t checkSum;
     uint16_t urgent;
-} FAST_MEM_ALIGN(1);
+};
 
 /**
  * SCTP Header
@@ -548,7 +543,7 @@ struct SctpHeader {
         uint8_t flags;
         uint16_t length;
     } chunk;
-} FAST_MEM_ALIGN(1);
+};
 
 /*
  * FF: private data passed from the MPLS dissector to subdissectors
@@ -556,20 +551,18 @@ struct SctpHeader {
  */
 struct MplsHeader {
     enum : uint16_t { level = eLayer::MPLS };
+    uint16_t label_high;  // Network-order first 16 label bits.
 #if defined(__LITTLE_ENDIAN_BITFIELD)
-    uint32_t ttl : 8;    /* TTL bits of last mpls shim in stack */
-    uint32_t bos : 1;    /* BOS bit of last mpls shim in stack */
-    uint32_t exp : 3;    /* former EXP bits of last mpls shim in stack */
-    uint32_t label : 20; /* last mpls label in label stack */
-#elif defined(__BIG_ENDIAN_BITFIELD)
-    uint32_t label : 20; /* last mpls label in label stack */
-    uint32_t exp : 3;    /* former EXP bits of last mpls shim in stack */
-    uint32_t bos : 1;    /* BOS bit of last mpls shim in stack */
-    uint32_t ttl : 8;    /* TTL bits of last mpls shim in stack */
+    uint8_t bos : 1;
+    uint8_t exp : 3;
+    uint8_t label_low : 4;
 #else
-#error "Please fix <asm/byteorder.h>"
+    uint8_t label_low : 4;
+    uint8_t exp : 3;
+    uint8_t bos : 1;
 #endif
-} FAST_MEM_ALIGN(1);
+    uint8_t ttl;
+};
 
 /**
  * PppoeHeader Header sizeof = 6
@@ -591,7 +584,7 @@ struct PppoeHeader {
     uint8_t code;
     uint16_t session_id;
     uint16_t payload_length;
-} FAST_MEM_ALIGN(1);
+};
 
 /**
  * PppHeader Header sizeof = 4
@@ -606,7 +599,7 @@ struct PppHeader {
     uint8_t address;
     uint8_t control;
     uint16_t protocol;
-} FAST_MEM_ALIGN(1);
+};
 
 /**
  * L2TP Header sizeof = 2
@@ -631,15 +624,15 @@ struct L2tpHeader {
     uint8_t ver : 4;   /**< Version Number, Ver MUST be 2 or 3*/
     uint8_t rsvd4 : 4; /**< Reserved set to zero */
 #elif defined(__BIG_ENDIAN_BITFIELD)
-    uint8_t T : 1;      /**< indicates the type of message. 0 for a data message and 1 for a control message. */
-    uint8_t L : 1;      /**< the Length field. MUST be set to 1 for control messages. */
-    uint8_t rsvd2 : 2;  /**< All reserved bits MUST be set to 0 on outgoing messages and ignored on incoming messages */
-    uint8_t S : 1;      /**< the Ns and Nr fields. MUST be set to 1 for control messages. */
-    uint8_t rsvd1 : 1;  /**< reserved set to zero */
-    uint8_t O : 1;      /**< the Offset Size field. MUST be set to 0 (zero) for control messages. */
-    uint8_t P : 1;      /**< the Priority bit */
-    uint8_t rsvd4 : 4;  /**< Reserved set to zero */
-    uint8_t ver : 4;    /**< Version Number, Ver MUST be 2*/
+    uint8_t T : 1;     /**< indicates the type of message. 0 for a data message and 1 for a control message. */
+    uint8_t L : 1;     /**< the Length field. MUST be set to 1 for control messages. */
+    uint8_t rsvd2 : 2; /**< All reserved bits MUST be set to 0 on outgoing messages and ignored on incoming messages */
+    uint8_t S : 1;     /**< the Ns and Nr fields. MUST be set to 1 for control messages. */
+    uint8_t rsvd1 : 1; /**< reserved set to zero */
+    uint8_t O : 1;     /**< the Offset Size field. MUST be set to 0 (zero) for control messages. */
+    uint8_t P : 1;     /**< the Priority bit */
+    uint8_t rsvd4 : 4; /**< Reserved set to zero */
+    uint8_t ver : 4;   /**< Version Number, Ver MUST be 2*/
 #endif
     uint16_t tunnel_or_length;
     uint16_t session_or_tunnel;
@@ -656,8 +649,8 @@ struct L2tpHeader {
         uint16_t attr_type; /**< Attribute Type. */
                             /**uint8_t attr_value[0]; // < Attribute Value length = avp.length - 6*/
 #elif defined(__BIG_ENDIAN_BITFIELD)
-        uint16_t M : 1; /**< Mandatory (M) bit. */
-        uint16_t H : 1; /**< Hidden (H) bit. */
+        uint16_t M : 1;       /**< Mandatory (M) bit. */
+        uint16_t H : 1;       /**< Hidden (H) bit. */
         uint16_t rsvd4 : 4;   /**< All reserved bits MUST be set to 0 */
         uint16_t length : 10; /**< Encodes the number of octets (including the Overall Length and bitmask fields)
                                contained in this AVP */
@@ -665,8 +658,8 @@ struct L2tpHeader {
         uint16_t attr_type;   /**< Attribute Type. */
                               /**uint8_t attr_value[0]; // < Attribute Value length = avp.length - 6*/
 #endif
-    } FAST_MEM_ALIGN(1);
-} FAST_MEM_ALIGN(1);
+    };
+};
 
 // GTP-U
 struct GprsTunnelHeader {
@@ -679,9 +672,9 @@ struct GprsTunnelHeader {
     uint8_t proto_type : 1;            /**< Protocol Type. */
     uint8_t ver : 3;                   /**< Version. */
 #elif defined(__BIG_ENDIAN_BITFIELD)
-    uint8_t ver : 3;          /**< Version. */
-    uint8_t proto_type : 1;   /**< Protocol Type. */
-    uint8_t rsvd : 1;         /**< Reserved bit. */
+    uint8_t ver : 3;                   /**< Version. */
+    uint8_t proto_type : 1;            /**< Protocol Type. */
+    uint8_t rsvd : 1;                  /**< Reserved bit. */
     uint8_t next_extension_header : 1; /**< Is Next Extension Header Present? */
     uint8_t sequence : 1;              /**< Is Sequence Number Present? */
     uint8_t npdu_number : 1;           /**< Is N-DPU Number Present? */
@@ -694,8 +687,8 @@ struct GprsTunnelHeader {
     //     uint8_t len;
     //     uint16_t word;
     //     uint8_t type;
-    // } FAST_MEM_ALIGN(1);
-} FAST_MEM_ALIGN(1);
+    // };
+};
 
 // TPKT
 // https://www.rfc-editor.org/rfc/rfc1006.html
@@ -704,7 +697,7 @@ struct TpktHeader {
     uint8_t ver;
     uint8_t rsvd;
     uint16_t length;
-} FAST_MEM_ALIGN(1);
+};
 
 // COTP
 // https://www.rfc-editor.org/rfc/rfc983.html
@@ -712,7 +705,62 @@ struct CotpHeader {
     enum : uint16_t { level = eLayer::COTP };
     uint8_t length;
     // ...
-} FAST_MEM_ALIGN(1);
+};
+
+// Fixed pieces of variable headers, viewed directly after their captured ranges are checked.
+struct IpVersionHeader {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+    uint8_t low : 4;
+    uint8_t version : 4;
+#else
+    uint8_t version : 4;
+    uint8_t low : 4;
+#endif
+};
+struct PortPairHeader {
+    uint16_t src_port;
+    uint16_t dst_port;
+};
+struct PppProtocolHeader {
+    uint16_t protocol;
+};
+struct L2tpSessionHeader {
+    uint16_t tunnel;
+    uint16_t session;
+};
+struct L2tpSequenceHeader {
+    uint16_t ns;
+    uint16_t nr;
+};
+struct L2tpOffsetHeader {
+    uint16_t size;
+};
+struct GtpOptionalHeader {
+    uint16_t sequence;
+    uint8_t npdu;
+    uint8_t next_extension;
+};
+struct GtpExtensionPrefix {
+    uint8_t length;
+};
+struct IcmpHeader {
+    uint8_t type;
+    uint8_t code;
+    uint16_t checksum;
+    union {
+        struct {
+            uint16_t id;
+            uint16_t sequence;
+        } echo;
+        struct {
+            uint16_t unused;
+            uint16_t mtu;
+        } unreachable;
+        uint32_t mtu;
+    } body;
+};
+
+#pragma pack(pop)
 
 }  // namespace flowsql
 

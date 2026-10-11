@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "regexmatch.h"
 #include <assert.h>
@@ -151,14 +146,18 @@ int32_t RegexRecognizer::Ready(int32_t concurrency) {
     assert(patterns_.size() == patterns_ptr_.size() && patterns_flag_.size() == patterns_ptr_.size() &&
            patterns_ptr_.size() == confirmers_.size());
 
+    hs_database_t* database = nullptr;
     hs_compile_error_t* compileErr;
     hs_error_t err = hs_compile_multi(patterns_ptr_.data(), patterns_flag_.data(), patterns_id_.data(),
-                                      patterns_ptr_.size(), HS_MODE_BLOCK, nullptr, &hyper_database_, &compileErr);
+                                      patterns_ptr_.size(), HS_MODE_BLOCK, nullptr, &database, &compileErr);
     if (err != HS_SUCCESS) {
         // ERROR MESSAGE
         hs_free_compile_error(compileErr);
         return -1;
     }
+
+    hs_free_database(hyper_database_);
+    hyper_database_ = database;
 
     for (int32_t i = 0; i < concurrency; ++i) {
         err = hs_alloc_scratch(hyper_database_, hyper_scratchs_ + i);

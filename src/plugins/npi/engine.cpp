@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "engine.h"
 #include <common/network/netbase.h>
@@ -141,9 +136,7 @@ int32_t Engine::Builder::build(int32_t number, IRecognizer* reco) {
     return 0;
 }
 
-Engine::Engine() : builder_(this) {
-    enum_recognizer_pool_ = EnumerateRecognizerPool::instance();
-}
+Engine::Engine() : builder_(this) { enum_recognizer_pool_ = EnumerateRecognizerPool::instance(); }
 
 Engine::~Engine() {
     for (auto& bitrecognizer : proport_recognizers_) {
@@ -176,65 +169,81 @@ int32_t Engine::Ready() {
 void Engine::Concurrency(int32_t number) { concurrency_ = number; }
 
 int32_t Engine::Identify(int32_t pipeno, const uint8_t* packet, int32_t packet_size, const protocol::Layers* layers) {
+    if (!packet || !layers || packet_size < 0 || layers->layercount == 0 || layers->layercount > MAX_LAYERS)
+        return eLayer::NONE;
+    const size_t offset = layers->layers[layers->layercount - 1].offset;
+    if (offset > static_cast<size_t>(packet_size)) return eLayer::NONE;
+    const auto* data = packet + offset;
+    const size_t size = packet_size - offset;
     RecognizeContext rctx;
     eLayer toplevel = layers->Top();
     rctx.level = toplevel;
     switch (toplevel) {
         case eLayer::ETHERNET: {
             rctx.layer = eLayer::L2;
-            const EthernetHeader* etherhdr = layers->Top<EthernetHeader>(packet, packet_size);
-            rctx.proto = n2h16(etherhdr->ether_type);
+            if (size < sizeof(EthernetHeader)) return eLayer::NONE;
+            const auto* header = reinterpret_cast<const EthernetHeader*>(data);
+            rctx.proto = n2h16(header->ether_type);
             break;
         }
         case eLayer::VLAN: {
             rctx.layer = eLayer::L2;
-            const VlanHeader* vlanhdr = layers->Top<VlanHeader>(packet, packet_size);
-            rctx.proto = n2h16(vlanhdr->ether_type);
+            if (size < sizeof(VlanHeader)) return eLayer::NONE;
+            const auto* header = reinterpret_cast<const VlanHeader*>(data);
+            rctx.proto = n2h16(header->ether_type);
             break;
         }
         case eLayer::IPv4: {
             rctx.layer = eLayer::L3;
-            const Ipv4Header* ipv4_header = layers->Top<Ipv4Header>(packet, packet_size);
-            rctx.proto = ipv4_header->protocol;
+            if (size < sizeof(Ipv4Header)) return eLayer::NONE;
+            const auto* header = reinterpret_cast<const Ipv4Header*>(data);
+            rctx.proto = header->protocol;
             break;
         }
         case eLayer::TCP: {
             rctx.layer = eLayer::L4;
-            const TcpHeader* tcp_header = layers->Top<TcpHeader>(packet, packet_size);
-            rctx.dst_port = n2h16(tcp_header->dst_port);
-            rctx.src_port = n2h16(tcp_header->src_port);
+            if (size < sizeof(TcpHeader)) return eLayer::NONE;
+            const auto* header = reinterpret_cast<const TcpHeader*>(data);
+            rctx.dst_port = n2h16(header->dst_port);
+            rctx.src_port = n2h16(header->src_port);
             break;
         }
         case eLayer::UDP: {
             rctx.layer = eLayer::L4;
-            const UdpHeader* udp_header = layers->Top<UdpHeader>(packet, packet_size);
-            rctx.dst_port = n2h16(udp_header->dst_port);
-            rctx.src_port = n2h16(udp_header->src_port);
+            if (size < sizeof(UdpHeader)) return eLayer::NONE;
+            const auto* header = reinterpret_cast<const UdpHeader*>(data);
+            rctx.dst_port = n2h16(header->dst_port);
+            rctx.src_port = n2h16(header->src_port);
             break;
         }
         case eLayer::IPv6: {
             rctx.layer = eLayer::L3;
-            const Ipv6Header* ipv6_header = layers->Top<Ipv6Header>(packet, packet_size);
-            rctx.proto = ipv6_header->protocol;
+            if (size < sizeof(Ipv6Header)) return eLayer::NONE;
+            const auto* header = reinterpret_cast<const Ipv6Header*>(data);
+            rctx.proto = header->protocol;
             break;
         }
         case eLayer::IPv6_EXT_HOPOPTS:
         case eLayer::IPv6_EXT_ROUTING:
         case eLayer::IPv6_EXT_FRAGMENT:
-        case eLayer::IPv6_EXT_ESP:
         case eLayer::IPv6_EXT_AH:
         case eLayer::IPv6_EXT_DSTOPTS: {
             rctx.layer = eLayer::L3;
-            const Ipv6ExtentHeader* ipv6ext_header = layers->Top<Ipv6ExtentHeader>(packet, packet_size);
+            const size_t minimum = toplevel == eLayer::IPv6_EXT_FRAGMENT ? sizeof(Ipv6FragmentHeader)
+                                   : toplevel == eLayer::IPv6_EXT_AH     ? sizeof(Ipv6AuthenticationHeader)
+                                                                         : sizeof(Ipv6ExtensionPrefix);
+            if (size < minimum) return eLayer::NONE;
             rctx.level = eLayer::IPv6;
-            rctx.proto = ipv6ext_header->protocol;
+            const auto* header = reinterpret_cast<const Ipv6ExtensionPrefix*>(data);
+            rctx.proto = header->protocol;
             break;
         }
         case eLayer::SCTP: {
             rctx.layer = eLayer::L4;
-            const SctpHeader* sctp_header = layers->Top<SctpHeader>(packet, packet_size);
-            rctx.dst_port = n2h16(sctp_header->dst_port);
-            rctx.src_port = n2h16(sctp_header->src_port);
+            if (size < sizeof(SctpHeader)) return eLayer::NONE;
+            const auto* header = reinterpret_cast<const SctpHeader*>(data);
+            rctx.dst_port = n2h16(header->dst_port);
+            rctx.src_port = n2h16(header->src_port);
             break;
         }
         default:

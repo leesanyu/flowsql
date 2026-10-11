@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_COMMON_ALGO_OBJECTS_POOL_HPP_
 #define _FLOWSQL_COMMON_ALGO_OBJECTS_POOL_HPP_
@@ -20,6 +15,7 @@ class BufferPool {
  public:
     virtual ~BufferPool() {
         used_buffer_.Clear([](BufferNode* node) { delete node; });
+        delete using_buffer_;
     }
 
     inline uint8_t* Alloc(size_t len) {
@@ -64,6 +60,7 @@ class ObjectsPool {
  public:
     virtual ~ObjectsPool() {
         used_objects_.Clear([](ObjectsNode* node) { delete node; });
+        delete using_objects_;
     }
 
     inline ValueType* Alloc() {

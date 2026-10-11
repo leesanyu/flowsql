@@ -10,9 +10,8 @@
 
 | 状态 | Feature | 优先级 | 目标 | 规格 |
 | --- | --- | --- | --- | --- |
-| [-] | NPI 报文布局与分析地址分离 (`npi-wire-layout`) | P1 | 为通过 NPI 解码并由 NPM Basic 分析离线/实时流量的使用者，修复任意报文偏移下的未对齐访问及字节读取导致的字段可读性下降；交付符合协议字节布局的具名报文头、适宜对齐的分析地址及明确值转换，保持端点、识别和会话结果并提供可复核的兼容与成本证据。 | [规格](specs/feat-npi-wire-layout.md) |
-| [x] | Baseline/Baseliner 生命周期与评估契约修复 (`baseliner-contract-safety`) | P1 | 为通过 Scheduler 加载并调度 Baseline 分析的用户，修复停机清理与活动任务冲突、取消与输出会话交接冲突，以及冷启动依赖诊断文本的问题；交付先排空任务再释放插件状态、在途取消结束后再关闭会话、通过插件显式状态输出有效评估结果的保证。 | [归档](archive/feat-baseliner-contract-safety.md) |
-| [x] | Baseliner 单表与 DataFrame 分析及输出 (`baseliner-single-source`) | P1 | 让测试指定数据库表和上传 CSV 的离线分析用户，直接通过三段数据库或 DataFrame 来源执行基线任务，在 WITH 内配置少量指标并指定模型参数出口，通过单一 INTO 指定评估/预测结果出口；交付可分别查询的最终模型与一致的分析结果，减少重复配置并保持源数据、有限快照、原持续发布进度及托管恢复保证。 | [归档](archive/feat-baseliner-single-source.md) |
+| [x] | NPI 报文头布局与安全解析 (`npi-wire-layout`) | P1 | 为通过 NPI 和 NPM 直接读取网络报文的调用方，消除任意偏移下的未对齐访问及固定字段裸偏移造成的可读性下降；交付符合协议布局的具名报文头、明确地址值转换和经真实报文验证的分层/识别结果。 | [归档](archive/feat-npi-wire-layout.md) |
+| [ ] | NPM 按 IPv4/IPv6 分析与存储 (`npm-ip-family-pipeline`) | P1 | 为用 npm.basic 分析并保存混合 IPv4/IPv6 离线或实时流量的用户，消除 IPv4 为 IPv6 最大表示、端口嵌套及字符串中间结果承担的存储成本；交付分族地址、会话、分析实体和物理数据库表，使两族在同一任务内正确处理、分别查询，并以真实容量与成本证据验收。 | [规格](specs/feat-npm-ip-family-pipeline.md) |
 | [x] | NPM 运行时检视修复 (`npm-runtime-review-fixes`) | P1 | 为离线批处理和实时终态分析修复已复现的超时顺序、输出内存放大、周期空扫描与标签预算未归还问题，使目标流超时结果稳定、默认预算可交付三万会话结果且资源账目随生命周期归零。 | [归档](archive/feat-npm-runtime-review-fixes.md) |
 | [x] | NPM 数据包契约与解析基础 (`npm-packet-contract`) | P0 | 定义统一的 packet 数据实体、采集元数据、Arrow Schema 及截断/畸形报文语义，并复用现有 NPI 分层与协议识别能力。 | [归档](archive/feat-npm-packet-contract.md) |
 | [x] | NPM 离线数据包全量导入 (`npm-offline-import`) | P0 | 提供 pcap/pcapng 文件的有限流读取与回放，保留原始时间戳、捕获长度、线速长度和报文顺序，接入现有流批任务运行时。 | [归档](archive/feat-npm-offline-import.md) |
@@ -66,6 +65,8 @@
 | [x] | 流式运行时 (`stream-runtime`) | P2 | 提供流式通道、流式算子、共享 source 和 Group DAG 执行能力。 | [归档](archive/feat-stream-runtime.md) |
 | [x] | 通用基线检测 (`baseline`) | P1 | 提供 Value、Ratio、Relation 三类基线的 bootstrap、在线 rolling、可信度和风险融合能力。 | [归档](archive/feat-baseline.md) |
 | [x] | Baseline 插件检视修复 (`baseline-review-fixes`) | P1 | 为使用 Value、Ratio、Relation 进行历史预热和在线检测的调用方，修复观测顺序、训练兼容、检测口径及资源累积问题；交付一致的历史/在线处理、隔离的状态替换、完整状态释放与可选容量约束，以及纳入常规 CTest 的回归保证，保持既有公共接口和数据格式。 | [归档](archive/feat-baseline-review-fixes.md) |
+| [x] | Baseliner 单表与 DataFrame 分析及输出 (`baseliner-single-source`) | P1 | 让测试指定数据库表和上传 CSV 的离线分析用户，直接通过三段数据库或 DataFrame 来源执行基线任务，在 WITH 内配置少量指标并指定模型参数出口，通过单一 INTO 指定评估/预测结果出口；交付可分别查询的最终模型与一致的分析结果，减少重复配置并保持源数据、有限快照、原持续发布进度及托管恢复保证。 | [归档](archive/feat-baseliner-single-source.md) |
+| [x] | Baseline/Baseliner 生命周期与评估契约修复 (`baseliner-contract-safety`) | P1 | 为通过 Scheduler 加载并调度 Baseline 分析的用户，修复停机清理与活动任务冲突、取消与输出会话交接冲突，以及冷启动依赖诊断文本的问题；交付先排空任务再释放插件状态、在途取消结束后再关闭会话、通过插件显式状态输出有效评估结果的保证。 | [归档](archive/feat-baseliner-contract-safety.md) |
 
 ---
 

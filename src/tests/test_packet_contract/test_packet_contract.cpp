@@ -4,8 +4,8 @@
 #include <framework/core/packet_codec.h>
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_manager.h>
-#include <common/loader.hpp>
 #include <plugins/npi/packet_decoder.h>
+#include <common/loader.hpp>
 
 #include <common/network/netbase.h>
 
@@ -19,8 +19,8 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
-#include <memory>
 #include <map>
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <variant>
@@ -67,7 +67,9 @@ class ContractManager final : public flowsql::IBlockStreamManager {
     int AddChannel(const std::string&, const std::string&, const std::string&) override { return ENOTSUP; }
     int ModifyChannel(const std::string&, const std::string&, const std::string&) override { return ENOENT; }
     int RemoveChannel(const std::string&, const std::string&) override { return ENOENT; }
-    void QueryChannels(std::function<void(const std::string&, const std::string&, const std::string&, const std::string&)> callback) override {
+    void QueryChannels(
+        std::function<void(const std::string&, const std::string&, const std::string&, const std::string&)> callback)
+        override {
         if (callback) callback("pcapfile", "contract", "{}", "active");
     }
 };
@@ -122,8 +124,8 @@ void TestBlockStreamPublicContracts() {
     assert(listed == 1);
     assert(manager.AddChannel("unsupported", "x", "{}") == ENOTSUP);
     assert(manager.ModifyChannel("pcapfile", "missing", "{}") == ENOENT);
-    auto batch = arrow::RecordBatch::Make(flowsql::packet::PacketSchema(), 0,
-                                          std::vector<std::shared_ptr<arrow::Array>>{});
+    auto batch =
+        arrow::RecordBatch::Make(flowsql::packet::PacketSchema(), 0, std::vector<std::shared_ptr<arrow::Array>>{});
     assert(channel.ReleaseBlock(batch) == 0);
     assert(channel.ReleaseBlock(batch) != 0);
 }
@@ -432,90 +434,62 @@ void TestPacketRecordBatchEncoding() {
     assert(missing_protocol_id->IsNull(0));
 }
 
+template <size_t N>
+void PacketU16(std::array<uint8_t, N>& bytes, size_t offset, uint16_t value) {
+    bytes[offset] = value >> 8;
+    bytes[offset + 1] = value;
+}
+template <size_t N>
+void PacketIPv4(std::array<uint8_t, N>& bytes, size_t offset, uint8_t next, const char* source,
+                const char* destination) {
+    bytes[offset] = 0x45;
+    bytes[offset + 9] = next;
+    const auto s = inet_addr(source), d = inet_addr(destination);
+    std::memcpy(bytes.data() + offset + 12, &s, sizeof(s));
+    std::memcpy(bytes.data() + offset + 16, &d, sizeof(d));
+}
 std::array<uint8_t, 104> MakeVxlanPacket() {
     std::array<uint8_t, 104> bytes{};
-    auto* outer_eth = reinterpret_cast<flowsql::EthernetHeader*>(bytes.data());
-    outer_eth->s_addr.bytes[0] = 0x01;
-    outer_eth->d_addr.bytes[0] = 0x02;
-    outer_eth->ether_type = htons(flowsql::ethernet::eNext::IPv4);
-    auto* outer_ip = reinterpret_cast<flowsql::Ipv4Header*>(bytes.data() + 14);
-    outer_ip->version = 4;
-    outer_ip->ihl = 5;
-    outer_ip->protocol = flowsql::ipv4::eNext::UDP;
-    outer_ip->src_addr.addr = inet_addr("198.51.100.1");
-    outer_ip->dst_addr.addr = inet_addr("198.51.100.2");
-    auto* outer_udp = reinterpret_cast<flowsql::UdpHeader*>(bytes.data() + 34);
-    outer_udp->src_port = htons(40000);
-    outer_udp->dst_port = htons(4789);
-    outer_udp->length = htons(70);
-    auto* vxlan_header = reinterpret_cast<flowsql::VxlanHeader*>(bytes.data() + 42);
-    vxlan_header->proto = flowsql::vxlan::eNext::ETHERNET;
-    auto* inner_eth = reinterpret_cast<flowsql::EthernetHeader*>(bytes.data() + 50);
-    inner_eth->s_addr.bytes[0] = 0x11;
-    inner_eth->d_addr.bytes[0] = 0x22;
-    inner_eth->ether_type = htons(flowsql::ethernet::eNext::IPv4);
-    auto* inner_ip = reinterpret_cast<flowsql::Ipv4Header*>(bytes.data() + 64);
-    inner_ip->version = 4;
-    inner_ip->ihl = 5;
-    inner_ip->protocol = flowsql::ipv4::eNext::TCP;
-    inner_ip->src_addr.addr = inet_addr("192.0.2.10");
-    inner_ip->dst_addr.addr = inet_addr("192.0.2.20");
-    auto* tcp = reinterpret_cast<flowsql::TcpHeader*>(bytes.data() + 84);
-    tcp->src_port = htons(12345);
-    tcp->dst_port = htons(443);
-    tcp->offset = 5;
+    bytes[6] = 0x01;
+    bytes[0] = 0x02;
+    PacketU16(bytes, 12, flowsql::ethernet::eNext::IPv4);
+    PacketIPv4(bytes, 14, flowsql::ipv4::eNext::UDP, "198.51.100.1", "198.51.100.2");
+    PacketU16(bytes, 34, 40000);
+    PacketU16(bytes, 36, 4789);
+    PacketU16(bytes, 38, 70);
+    bytes[42] = 0x08;
+    bytes[56] = 0x11;
+    bytes[50] = 0x22;
+    PacketU16(bytes, 62, flowsql::ethernet::eNext::IPv4);
+    PacketIPv4(bytes, 64, flowsql::ipv4::eNext::TCP, "192.0.2.10", "192.0.2.20");
+    PacketU16(bytes, 84, 12345);
+    PacketU16(bytes, 86, 443);
+    bytes[96] = 0x50;
     return bytes;
 }
-
 std::array<uint8_t, 78> MakeGrePacket() {
     std::array<uint8_t, 78> bytes{};
-    auto* ethernet = reinterpret_cast<flowsql::EthernetHeader*>(bytes.data());
-    ethernet->s_addr.bytes[0] = 0x31;
-    ethernet->d_addr.bytes[0] = 0x32;
-    ethernet->ether_type = htons(flowsql::ethernet::eNext::IPv4);
-    auto* outer_ip = reinterpret_cast<flowsql::Ipv4Header*>(bytes.data() + 14);
-    outer_ip->version = 4;
-    outer_ip->ihl = 5;
-    outer_ip->protocol = flowsql::ipv4::eNext::GRE;
-    outer_ip->src_addr.addr = inet_addr("198.51.100.10");
-    outer_ip->dst_addr.addr = inet_addr("198.51.100.20");
-    auto* gre = reinterpret_cast<flowsql::GreHeader*>(bytes.data() + 34);
-    gre->proto = htons(flowsql::ethernet::eNext::IPv4);
-    auto* inner_ip = reinterpret_cast<flowsql::Ipv4Header*>(bytes.data() + 38);
-    inner_ip->version = 4;
-    inner_ip->ihl = 5;
-    inner_ip->protocol = flowsql::ipv4::eNext::TCP;
-    inner_ip->src_addr.addr = inet_addr("192.0.2.30");
-    inner_ip->dst_addr.addr = inet_addr("192.0.2.40");
-    auto* tcp = reinterpret_cast<flowsql::TcpHeader*>(bytes.data() + 58);
-    tcp->src_port = htons(2345);
-    tcp->dst_port = htons(8443);
-    tcp->offset = 5;
+    bytes[6] = 0x31;
+    bytes[0] = 0x32;
+    PacketU16(bytes, 12, flowsql::ethernet::eNext::IPv4);
+    PacketIPv4(bytes, 14, flowsql::ipv4::eNext::GRE, "198.51.100.10", "198.51.100.20");
+    PacketU16(bytes, 34 + offsetof(flowsql::GreHeader, proto), flowsql::ethernet::eNext::IPv4);
+    PacketIPv4(bytes, 38, flowsql::ipv4::eNext::TCP, "192.0.2.30", "192.0.2.40");
+    PacketU16(bytes, 58, 2345);
+    PacketU16(bytes, 60, 8443);
+    bytes[70] = 0x50;
     return bytes;
 }
-
 std::array<uint8_t, 74> MakeIpInIpPacket() {
     std::array<uint8_t, 74> bytes{};
-    auto* ethernet = reinterpret_cast<flowsql::EthernetHeader*>(bytes.data());
-    ethernet->s_addr.bytes[0] = 0x41;
-    ethernet->d_addr.bytes[0] = 0x42;
-    ethernet->ether_type = htons(flowsql::ethernet::eNext::IPv4);
-    auto* outer_ip = reinterpret_cast<flowsql::Ipv4Header*>(bytes.data() + 14);
-    outer_ip->version = 4;
-    outer_ip->ihl = 5;
-    outer_ip->protocol = flowsql::ipv4::eNext::IPv4;
-    outer_ip->src_addr.addr = inet_addr("198.51.100.30");
-    outer_ip->dst_addr.addr = inet_addr("198.51.100.40");
-    auto* inner_ip = reinterpret_cast<flowsql::Ipv4Header*>(bytes.data() + 34);
-    inner_ip->version = 4;
-    inner_ip->ihl = 5;
-    inner_ip->protocol = flowsql::ipv4::eNext::TCP;
-    inner_ip->src_addr.addr = inet_addr("192.0.2.50");
-    inner_ip->dst_addr.addr = inet_addr("192.0.2.60");
-    auto* tcp = reinterpret_cast<flowsql::TcpHeader*>(bytes.data() + 54);
-    tcp->src_port = htons(3456);
-    tcp->dst_port = htons(9443);
-    tcp->offset = 5;
+    bytes[6] = 0x41;
+    bytes[0] = 0x42;
+    PacketU16(bytes, 12, flowsql::ethernet::eNext::IPv4);
+    PacketIPv4(bytes, 14, flowsql::ipv4::eNext::IPv4, "198.51.100.30", "198.51.100.40");
+    PacketIPv4(bytes, 34, flowsql::ipv4::eNext::TCP, "192.0.2.50", "192.0.2.60");
+    PacketU16(bytes, 54, 3456);
+    PacketU16(bytes, 56, 9443);
+    bytes[66] = 0x50;
     return bytes;
 }
 
@@ -677,17 +651,16 @@ void TestNpiTunnelEndpointSelection() {
     assert(ipip_protocol.identify_payload == 34);
 
     auto malformed_bytes = gre_bytes;
-    reinterpret_cast<flowsql::Ipv4Header*>(malformed_bytes.data() + 38)->ihl = 4;
+    malformed_bytes[38] = (malformed_bytes[38] & 0xf0) | 4;
     gre_view.bytes = flowsql::Span<const uint8_t>(malformed_bytes.data(), malformed_bytes.size());
-    auto malformed = gre_decoder.Decode(gre_view, packet::LayerDecodeOptions{
-                                                       packet::kExtractMac | packet::kExtractIp | packet::kExtractPort,
-                                                       packet::EndpointScope::kInnermost});
+    auto malformed = gre_decoder.Decode(
+        gre_view, packet::LayerDecodeOptions{packet::kExtractMac | packet::kExtractIp | packet::kExtractPort,
+                                             packet::EndpointScope::kInnermost});
     assert(malformed.status == packet::LayerStatus::kMalformed);
     gre_view.meta.wire_len = gre_bytes.size() + 1;
-    auto malformed_truncated = gre_decoder.Decode(gre_view, packet::LayerDecodeOptions{
-                                                                packet::kExtractMac | packet::kExtractIp |
-                                                                    packet::kExtractPort,
-                                                                packet::EndpointScope::kInnermost});
+    auto malformed_truncated = gre_decoder.Decode(
+        gre_view, packet::LayerDecodeOptions{packet::kExtractMac | packet::kExtractIp | packet::kExtractPort,
+                                             packet::EndpointScope::kInnermost});
     assert(malformed_truncated.status == packet::LayerStatus::kMalformed);
     gre_view.meta.wire_len = gre_bytes.size();
 

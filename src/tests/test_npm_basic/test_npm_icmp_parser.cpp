@@ -220,9 +220,49 @@ void TestErrorTypesAndQuoteBounds() {
     assert(parsed.quote_status == "ip_only" && !parsed.quoted_flow);
 }
 
+void TestShiftedWireQuotes() {
+    for (bool ipv6 : {false, true}) {
+        const auto quote = ipv6 ? Quote6() : Quote4();
+        std::vector<uint8_t> body{
+            static_cast<uint8_t>(ipv6 ? 2 : 3), static_cast<uint8_t>(ipv6 ? 0 : 4), 0, 0, 0, 0, 0x05, 0xdc};
+        body.insert(body.end(), quote.begin(), quote.end());
+        Fixture fixture(ipv6, body);
+        const size_t network_header = ipv6 ? 40 : 20;
+        for (size_t shift = 0; shift < 16; ++shift) {
+            std::vector<uint8_t> storage(shift + fixture.bytes.size());
+            std::copy(fixture.bytes.begin(), fixture.bytes.end(), storage.begin() + shift);
+            auto event = fixture.event;
+            event.packet.bytes = {storage.data() + shift, fixture.bytes.size()};
+            event.body = {storage.data() + shift + network_header, body.size()};
+            npm::NpmIcmpParsedV1 parsed;
+            assert(npm::ParseNpmIcmpControlV1(event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
+            assert(parsed.quote_status == "tuple" && parsed.quoted_flow && parsed.next_hop_mtu == 1500);
+            assert(parsed.quoted_flow->src_port == 0x1234);
+            assert(parsed.quoted_flow->dst_port == (ipv6 ? 53 : 80));
+            if (ipv6) {
+                assert(std::get<IPv6Address>(parsed.quoted_flow->src_ip).bytes[15] == 1);
+                assert(std::get<IPv6Address>(parsed.quoted_flow->dst_ip).bytes[15] == 2);
+            } else {
+                assert(std::get<IPv4Address>(parsed.quoted_flow->src_ip).bytes[0] == 192);
+                assert(std::get<IPv4Address>(parsed.quoted_flow->dst_ip).bytes[3] == 2);
+            }
+            for (size_t length = 8; length < body.size(); ++length) {
+                event.body.size = length;
+                event.body_complete = false;
+                event.packet.bytes.size = network_header + length;
+                event.packet.meta.captured_len = network_header + length;
+                assert(npm::ParseNpmIcmpControlV1(event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
+                assert(!parsed.quoted_flow);
+                assert(parsed.quote_status == (length < 8 + network_header ? "unavailable" : "ip_only"));
+            }
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
+    TestShiftedWireQuotes();
     TestEcho();
     TestErrorsAndQuotes();
     TestErrorTypesAndQuoteBounds();

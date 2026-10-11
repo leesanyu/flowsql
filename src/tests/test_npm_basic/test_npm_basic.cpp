@@ -512,8 +512,8 @@ PacketFixture MakeIpv4TcpPacket(const char* src, uint16_t src_port, const char* 
     ip->ihl = 5;
     ip->total_length = htons(static_cast<uint16_t>(fixture.bytes.size()));
     ip->protocol = flowsql::ipv4::eNext::TCP;
-    ip->src_addr = ParseIpv4(src);
-    ip->dst_addr = ParseIpv4(dst);
+    std::memcpy(ip->src_addr.bytes, ParseIpv4(src).bytes, sizeof(ip->src_addr.bytes));
+    std::memcpy(ip->dst_addr.bytes, ParseIpv4(dst).bytes, sizeof(ip->dst_addr.bytes));
     auto* tcp = reinterpret_cast<flowsql::TcpHeader*>(fixture.bytes.data() + sizeof(flowsql::Ipv4Header));
     tcp->src_port = htons(src_port);
     tcp->dst_port = htons(dst_port);
@@ -534,8 +534,8 @@ PacketFixture MakeIpv4TcpPacket(const char* src, uint16_t src_port, const char* 
     fixture.layer.network_layer_index = 0;
     fixture.layer.transport_layer_index = 1;
     fixture.layer.payload_offset = sizeof(flowsql::Ipv4Header) + sizeof(flowsql::TcpHeader);
-    fixture.layer.src_ip = ip->src_addr;
-    fixture.layer.dst_ip = ip->dst_addr;
+    fixture.layer.src_ip = flowsql::wire::ToAnalysis(ip->src_addr);
+    fixture.layer.dst_ip = flowsql::wire::ToAnalysis(ip->dst_addr);
     fixture.layer.transport_protocol = flowsql::ipv4::eNext::TCP;
     fixture.layer.src_port = src_port;
     fixture.layer.dst_port = dst_port;
@@ -554,8 +554,8 @@ PacketFixture MakeIpv6UdpPacket(const char* src, uint16_t src_port, const char* 
     fixture.bytes[0] = 0x60;
     ip->payload = htons(static_cast<uint16_t>(fixture.bytes.size() - sizeof(flowsql::Ipv6Header)));
     ip->protocol = fragmented ? flowsql::ipv6::eNext::IPv6_EXT_FRAGMENT : flowsql::ipv6::eNext::UDP;
-    ip->src_addr = ParseIpv6(src);
-    ip->dst_addr = ParseIpv6(dst);
+    std::memcpy(ip->src_addr.bytes, ParseIpv6(src).bytes, sizeof(ip->src_addr.bytes));
+    std::memcpy(ip->dst_addr.bytes, ParseIpv6(dst).bytes, sizeof(ip->dst_addr.bytes));
 
     size_t udp_offset = sizeof(flowsql::Ipv6Header);
     if (fragmented) {
@@ -585,8 +585,8 @@ PacketFixture MakeIpv6UdpPacket(const char* src, uint16_t src_port, const char* 
     fixture.layer.network_layer_index = 0;
     fixture.layer.transport_layer_index = transport_index;
     fixture.layer.payload_offset = static_cast<uint32_t>(udp_offset + sizeof(flowsql::UdpHeader));
-    fixture.layer.src_ip = ip->src_addr;
-    fixture.layer.dst_ip = ip->dst_addr;
+    fixture.layer.src_ip = flowsql::wire::ToAnalysis(ip->src_addr);
+    fixture.layer.dst_ip = flowsql::wire::ToAnalysis(ip->dst_addr);
     fixture.layer.transport_protocol = flowsql::ipv6::eNext::UDP;
     fixture.layer.src_port = src_port;
     fixture.layer.dst_port = dst_port;
@@ -1505,6 +1505,26 @@ void TestSessionPacketCanonicalizationAndObservationDomains() {
            npm::NpmSessionPacketError::kInvalidObservationDomainMap);
     assert(npm::BuildNpmSessionPacketBinding(domain_map, forward.View(1), forward.layer, nullptr) ==
            npm::NpmSessionPacketError::kNullOutput);
+    for (auto* fixture : {&forward, &ipv6_forward}) {
+        npm::NpmSessionPacketBinding reference;
+        assert(npm::BuildNpmSessionPacketBinding(domain_map, fixture->View(1), fixture->layer, &reference) ==
+               npm::NpmSessionPacketError::kNone);
+        for (size_t shift = 0; shift < 16; ++shift) {
+            std::vector<uint8_t> storage(fixture->bytes.size() + shift);
+            std::copy(fixture->bytes.begin(), fixture->bytes.end(), storage.begin() + shift);
+            auto view = fixture->View(1);
+            view.bytes.data = storage.data() + shift;
+            npm::NpmSessionPacketBinding shifted;
+            assert(npm::BuildNpmSessionPacketBinding(domain_map, view, fixture->layer, &shifted) ==
+                   npm::NpmSessionPacketError::kNone);
+            assert(SameKey(reference.key, shifted.key) && reference.direction == shifted.direction);
+            assert(reference.transport.payload_wire_bytes == shifted.transport.payload_wire_bytes);
+            assert(reference.transport.tcp.sequence == shifted.transport.tcp.sequence);
+            assert(shifted.payload.size == reference.payload.size);
+            assert(
+                std::equal(shifted.payload.data, shifted.payload.data + shifted.payload.size, reference.payload.data));
+        }
+    }
 }
 
 void TestSessionPacketPayloadAndInvalidInputs() {
@@ -1598,8 +1618,8 @@ PacketFixture MakeTunnelPacket() {
     outer_ip->ihl = 5;
     outer_ip->total_length = htons(fixture.bytes.size());
     outer_ip->protocol = flowsql::ipv4::eNext::UDP;
-    outer_ip->src_addr = ParseIpv4("198.51.100.1");
-    outer_ip->dst_addr = ParseIpv4("198.51.100.2");
+    std::memcpy(outer_ip->src_addr.bytes, ParseIpv4("198.51.100.1").bytes, sizeof(outer_ip->src_addr.bytes));
+    std::memcpy(outer_ip->dst_addr.bytes, ParseIpv4("198.51.100.2").bytes, sizeof(outer_ip->dst_addr.bytes));
     auto* outer_udp = reinterpret_cast<flowsql::UdpHeader*>(fixture.bytes.data() + 20);
     outer_udp->src_port = htons(40000);
     outer_udp->dst_port = htons(4789);
@@ -1609,8 +1629,8 @@ PacketFixture MakeTunnelPacket() {
     inner_ip->ihl = 5;
     inner_ip->total_length = htons(fixture.bytes.size() - 36);
     inner_ip->protocol = flowsql::ipv4::eNext::TCP;
-    inner_ip->src_addr = ParseIpv4("192.0.2.1");
-    inner_ip->dst_addr = ParseIpv4("192.0.2.2");
+    std::memcpy(inner_ip->src_addr.bytes, ParseIpv4("192.0.2.1").bytes, sizeof(inner_ip->src_addr.bytes));
+    std::memcpy(inner_ip->dst_addr.bytes, ParseIpv4("192.0.2.2").bytes, sizeof(inner_ip->dst_addr.bytes));
     auto* inner_tcp = reinterpret_cast<flowsql::TcpHeader*>(fixture.bytes.data() + 56);
     inner_tcp->src_port = htons(12000);
     inner_tcp->dst_port = htons(443);
@@ -1626,8 +1646,8 @@ PacketFixture MakeTunnelPacket() {
     fixture.layer.network_layer_index = 3;
     fixture.layer.transport_layer_index = 4;
     fixture.layer.payload_offset = 76;
-    fixture.layer.src_ip = inner_ip->src_addr;
-    fixture.layer.dst_ip = inner_ip->dst_addr;
+    fixture.layer.src_ip = flowsql::wire::ToAnalysis(inner_ip->src_addr);
+    fixture.layer.dst_ip = flowsql::wire::ToAnalysis(inner_ip->dst_addr);
     fixture.layer.transport_protocol = flowsql::ipv4::eNext::TCP;
     fixture.layer.src_port = 12000;
     fixture.layer.dst_port = 443;

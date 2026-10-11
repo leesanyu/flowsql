@@ -918,7 +918,7 @@ bool BuildLayerEndpoint(const packet::IpAddress& address,
         output->address.ipv4_network_order = value->addr;
     } else if (const auto* value = std::get_if<packet::IPv6Address>(&address)) {
         output->address.family = packet::AddressFamily::kIPv6;
-        std::copy(std::begin(value->bytes), std::end(value->bytes), output->address.ipv6.begin());
+        std::copy_n(value->bytes, sizeof(value->bytes), output->address.ipv6.begin());
     } else {
         return false;
     }

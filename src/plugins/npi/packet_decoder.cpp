@@ -59,8 +59,7 @@ template <typename Header>
 const Header* HeaderAt(const protocol::Layers& layers, uint16_t index, const uint8_t* data, size_t size) {
     if (index >= layers.layercount) return nullptr;
     const size_t offset = layers.layers[index].offset;
-    if (offset > size || sizeof(Header) > size - offset) return nullptr;
-    return reinterpret_cast<const Header*>(data + offset);
+    return wire::View<Header>(data, size, offset);
 }
 
 int FindNetworkLayer(const protocol::Layers& layers, packet::EndpointScope scope) {
@@ -124,9 +123,7 @@ void MarkMalformed(packet::PacketLayerInfo* result) {
     if (result->status != packet::LayerStatus::kUnsupportedLinkType) result->status = packet::LayerStatus::kMalformed;
 }
 
-packet::PacketProtocolInfo UnknownProtocol() {
-    return {packet::ProtocolStatus::kUnknown, 0, 0};
-}
+packet::PacketProtocolInfo UnknownProtocol() { return {packet::ProtocolStatus::kUnknown, 0, 0}; }
 
 bool HasBytes(const packet::PacketView& packet_view, uint32_t offset, size_t length) {
     return offset <= packet_view.bytes.size && length <= packet_view.bytes.size - offset;
@@ -144,11 +141,14 @@ size_t MinimumHeaderSize(eLayer layer) {
             return sizeof(Ipv6Header);
         case eLayer::IPv6_EXT_HOPOPTS:
         case eLayer::IPv6_EXT_ROUTING:
-        case eLayer::IPv6_EXT_FRAGMENT:
-        case eLayer::IPv6_EXT_ESP:
-        case eLayer::IPv6_EXT_AH:
         case eLayer::IPv6_EXT_DSTOPTS:
-            return 2;
+            return sizeof(Ipv6ExtensionPrefix);
+        case eLayer::IPv6_EXT_FRAGMENT:
+            return sizeof(Ipv6FragmentHeader);
+        case eLayer::IPv6_EXT_ESP:
+            return sizeof(Ipv6EspHeader);
+        case eLayer::IPv6_EXT_AH:
+            return sizeof(Ipv6AuthenticationHeader);
         case eLayer::PPPoE_Session:
             return sizeof(PppoeHeader);
         case eLayer::PPP:
@@ -228,8 +228,7 @@ bool BuildProtocolLayers(const packet::PacketView& packet_view, const packet::Pa
     }
     for (uint16_t index = 0; index < source.layer_count; ++index) {
         const auto& layer = source.layers[index];
-        if (layer.offset > packet_view.meta.captured_len ||
-            layer.offset > std::numeric_limits<uint16_t>::max()) {
+        if (layer.offset > packet_view.meta.captured_len || layer.offset > std::numeric_limits<uint16_t>::max()) {
             return false;
         }
     }
@@ -259,7 +258,7 @@ NpiPacketLayerDecoder::NpiPacketLayerDecoder(IProtocol* protocol, int32_t pipeno
     : protocol_(protocol), pipeno_(pipeno) {}
 
 packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& packet_view,
-                                                       const packet::LayerDecodeOptions& options) {
+                                                      const packet::LayerDecodeOptions& options) {
     packet::PacketLayerInfo result;
     result.endpoint_scope = options.endpoint_scope;
 
@@ -292,8 +291,8 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
     }
 
     protocol::Layers parsed{};
-    const int32_t decoded = protocol_->Layer(pipeno_, packet_view.bytes.data,
-                                             static_cast<int32_t>(packet_view.bytes.size), &parsed);
+    const int32_t decoded =
+        protocol_->Layer(pipeno_, packet_view.bytes.data, static_cast<int32_t>(packet_view.bytes.size), &parsed);
     if (decoded < 0 || decoded > MAX_LAYERS || parsed.layercount > MAX_LAYERS) {
         result.status = packet::LayerStatus::kMalformed;
         return result;
@@ -325,8 +324,8 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
             const auto* ethernet = HeaderAt<EthernetHeader>(parsed, static_cast<uint16_t>(ethernet_index),
                                                             packet_view.bytes.data, packet_view.bytes.size);
             if (ethernet) {
-                result.src_mac.value = ethernet->s_addr;
-                result.dst_mac.value = ethernet->d_addr;
+                result.src_mac.value = wire::ToAnalysis(ethernet->s_addr);
+                result.dst_mac.value = wire::ToAnalysis(ethernet->d_addr);
                 result.src_mac.valid = 1;
                 result.dst_mac.valid = 1;
             } else {
@@ -339,7 +338,7 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
     if (network_layer == eLayer::IPv4) {
         const auto* header = HeaderAt<Ipv4Header>(parsed, static_cast<uint16_t>(network_index), packet_view.bytes.data,
                                                   packet_view.bytes.size);
-        if (header == nullptr) {
+        if (!header) {
             MarkTruncated(&result);
         } else if (header->version != 4 || header->ihl < 5) {
             MarkMalformed(&result);
@@ -349,15 +348,17 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
         } else {
             result.transport_protocol = header->protocol;
             if (options.field_mask & packet::kExtractIp) {
-                result.src_ip = header->src_addr;
-                result.dst_ip = header->dst_addr;
+                result.src_ip = wire::ToAnalysis(header->src_addr);
+                result.dst_ip = wire::ToAnalysis(header->dst_addr);
             }
         }
     } else if (network_layer == eLayer::IPv6) {
         const auto* header = HeaderAt<Ipv6Header>(parsed, static_cast<uint16_t>(network_index), packet_view.bytes.data,
                                                   packet_view.bytes.size);
-        if (header == nullptr) {
+        if (!header) {
             MarkTruncated(&result);
+        } else if (header->version != 6) {
+            MarkMalformed(&result);
         } else {
             result.transport_protocol = header->protocol;
             if (transport_index >= 0) {
@@ -365,8 +366,8 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
                 if (mapped != 0) result.transport_protocol = mapped;
             }
             if (options.field_mask & packet::kExtractIp) {
-                result.src_ip = header->src_addr;
-                result.dst_ip = header->dst_addr;
+                result.src_ip = wire::ToAnalysis(header->src_addr);
+                result.dst_ip = wire::ToAnalysis(header->dst_addr);
             }
         }
     }
@@ -378,7 +379,7 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
             if (transport_layer == eLayer::TCP) {
                 const auto* header = HeaderAt<TcpHeader>(parsed, static_cast<uint16_t>(transport_index),
                                                          packet_view.bytes.data, packet_view.bytes.size);
-                if (header == nullptr) {
+                if (!header) {
                     MarkTruncated(&result);
                 } else if (header->offset < 5) {
                     MarkMalformed(&result);
@@ -393,7 +394,7 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
             } else if (transport_layer == eLayer::UDP) {
                 const auto* header = HeaderAt<UdpHeader>(parsed, static_cast<uint16_t>(transport_index),
                                                          packet_view.bytes.data, packet_view.bytes.size);
-                if (header == nullptr) {
+                if (!header) {
                     MarkTruncated(&result);
                 } else if (n2h16(header->length) < sizeof(UdpHeader)) {
                     MarkMalformed(&result);
@@ -405,7 +406,7 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
             } else if (transport_layer == eLayer::SCTP) {
                 const auto* header = HeaderAt<SctpHeader>(parsed, static_cast<uint16_t>(transport_index),
                                                           packet_view.bytes.data, packet_view.bytes.size);
-                if (header == nullptr) {
+                if (!header) {
                     MarkTruncated(&result);
                 } else {
                     result.src_port = n2h16(header->src_port);
@@ -445,8 +446,8 @@ packet::PacketProtocolInfo NpiPacketProtocolIdentifier::Identify(const packet::P
     protocol::Layers npi_layers{};
     if (!BuildProtocolLayers(packet_view, layer, &npi_layers)) return UnknownProtocol();
 
-    const auto identified = protocol_->Identify(pipeno_, packet_view.bytes.data,
-                                                static_cast<int32_t>(packet_view.bytes.size), &npi_layers);
+    const auto identified =
+        protocol_->Identify(pipeno_, packet_view.bytes.data, static_cast<int32_t>(packet_view.bytes.size), &npi_layers);
     if (identified.id == 0) return UnknownProtocol();
     return {packet::ProtocolStatus::kIdentified, identified.id, identified.subid};
 }
