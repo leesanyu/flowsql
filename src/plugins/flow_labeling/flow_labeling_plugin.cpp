@@ -1090,7 +1090,7 @@ class ConfigCompiler {
     uint32_t max_compiled_rules_ = 0;
 };
 
-void CopyEndpoint(const FlowLabelEndpointFactsV1& source, bool source_side, AclTuple* tuple) {
+void CopyEndpoint(const FlowLabelEndpointFactsV1& source, bool source_side, uint8_t family, AclTuple* tuple) {
     const uint32_t mac_present = source_side ? kSourceMacPresent : kDestinationMacPresent;
     const uint32_t ip_present = source_side ? kSourceIpPresent : kDestinationIpPresent;
     const uint32_t port_present = source_side ? kSourcePortPresent : kDestinationPortPresent;
@@ -1109,9 +1109,9 @@ void CopyEndpoint(const FlowLabelEndpointFactsV1& source, bool source_side, AclT
         *mac_head = rte_cpu_to_be_16(head);
         *mac_tail = rte_cpu_to_be_32(tail);
     }
-    if (source.ip_valid) {
+    if (source.ip_valid && source.ip && (family == 4 || family == 6)) {
         tuple->presence_bits |= rte_cpu_to_be_32(ip_present);
-        std::memcpy(ip_prefix, source.ip, 16);
+        std::memcpy(ip_prefix, source.ip, family == 4 ? 4 : 16);
         std::memcpy(ipv4_range, source.ip, sizeof(*ipv4_range));
         std::memcpy(ipv4_bitmask, source.ip, sizeof(*ipv4_bitmask));
     }
@@ -1145,8 +1145,8 @@ AclTuple EncodeTuple(const FlowLabelFactsV1& facts) {
             *vid = rte_cpu_to_be_16(vlan.vid);
         }
     }
-    CopyEndpoint(facts.source, true, &tuple);
-    CopyEndpoint(facts.destination, false, &tuple);
+    CopyEndpoint(facts.source, true, facts.ip_family, &tuple);
+    CopyEndpoint(facts.destination, false, facts.ip_family, &tuple);
     return tuple;
 }
 

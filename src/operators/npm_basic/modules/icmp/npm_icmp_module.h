@@ -13,7 +13,7 @@
 
 namespace flowsql::npm {
 
-class NpmIcmpProtocolModuleV1 final : public INpmProtocolModuleV1, private INpmIcmpActiveSessionLookupV1 {
+class NpmIcmpProtocolModuleV1 final : public INpmProtocolModuleV1, private INpmFamilyIcmpActiveSessionLookup {
  public:
     NpmIcmpProtocolModuleV1(NpmIcmpConfigV1 config, std::shared_ptr<INpmTaskBudget> budget);
     void BindSessions(const NpmSessionTable* sessions, std::string input_namespace);
@@ -27,8 +27,14 @@ class NpmIcmpProtocolModuleV1 final : public INpmProtocolModuleV1, private INpmI
     void Abort() noexcept override;
 
  private:
-    std::optional<uint64_t> FindActive(const NpmIcmpQuotedFlowV1&) const override;
-    int Emit(const NpmIcmpEventV1&, INpmResultEmitterV1&);
+    std::optional<uint64_t> FindActive(const NpmIcmpQuotedFlow4&) const override;
+    std::optional<uint64_t> FindActive(const NpmIcmpQuotedFlow6&) const override;
+    template <typename Address>
+    std::optional<uint64_t> Lookup(const NpmIcmpFamilyQuotedFlow<Address>&) const;
+    template <typename Address>
+    int OnFamilyInput(const NpmInputEventV1&, INpmResultEmitterV1&);
+    template <typename Address>
+    int Emit(const NpmIcmpFamilyEvent<Address>&, INpmResultEmitterV1&);
 
     std::shared_ptr<INpmTaskBudget> budget_;
     NpmIcmpEchoTrackerV1 echoes_;

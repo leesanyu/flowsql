@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "npm_tls_contract.h"
+#include <operators/npm_basic/npm_family_result_contract.h>
 
 #include <arrow/api.h>
 #include <rapidjson/document.h>
@@ -86,42 +87,10 @@ NpmTlsConfigStatusV1 ParseNpmTlsConfigV1(std::string_view json, NpmTlsConfigV1* 
     }
 }
 
-NpmEntityDescriptorV1 NpmTlsHandshakeEntityDescriptorV1() {
-    static const std::shared_ptr<arrow::Schema> schema = arrow::schema(
-        {arrow::field("entity_instance_id", arrow::uint64(), false),
-         arrow::field("revision", arrow::uint64(), false),
-         arrow::field("observed_at", arrow::int64(), false),
-         arrow::field("is_final", arrow::boolean(), false),
-         arrow::field("session_id", arrow::uint64(), false),
-         arrow::field("observation_domain_id", arrow::uint64(), false),
-         arrow::field("a_ip", arrow::utf8(), false),
-         arrow::field("b_ip", arrow::utf8(), false),
-         arrow::field("a_port", arrow::uint16(), false),
-         arrow::field("b_port", arrow::uint16(), false),
-         arrow::field("outcome", arrow::utf8(), false),
-         arrow::field("hello_retry_count", arrow::uint8(), false),
-         arrow::field("incomplete_reason", arrow::utf8(), true),
-         arrow::field("client_direction", arrow::uint8(), false),
-         arrow::field("client_hello_at_ns", arrow::int64(), true),
-         arrow::field("server_hello_at_ns", arrow::int64(), true),
-         arrow::field("server_hello_latency_ns", arrow::int64(), true),
-         arrow::field("client_sni", arrow::utf8(), true),
-         arrow::field("client_alpn_protocols", arrow::utf8(), true),
-         arrow::field("client_offered_tls13", arrow::boolean(), true),
-         arrow::field("selected_version", arrow::uint16(), true),
-         arrow::field("cipher_suite", arrow::uint16(), true),
-         arrow::field("selected_alpn", arrow::utf8(), true),
-         arrow::field("alert_level", arrow::uint8(), true),
-         arrow::field("alert_description", arrow::uint8(), true)},
-        arrow::key_value_metadata({"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit",
-                                   "flowsql.revision_semantics", "flowsql.measurement_scope"},
-                                  {"tls_handshake", "1", "ns", "event", "single_capture_observed_packets"}));
-    NpmEntityDescriptorV1 entity;
-    entity.entity_id = "tls_handshake";
-    entity.module_id = "tls";
-    entity.schema = schema;
-    entity.revision_semantics = NpmRevisionSemanticsV1::kEvent;
-    return entity;
+NpmEntityDescriptorV1 NpmTlsHandshakeEntityDescriptorV1(packet::AddressFamily family) {
+    static const auto v4 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kTls, packet::AddressFamily::kIPv4);
+    static const auto v6 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kTls, packet::AddressFamily::kIPv6);
+    return family == packet::AddressFamily::kIPv4 ? v4 : v6;
 }
 
 NpmModulePlanV1 NpmTlsModulePlanV1(const NpmTlsConfigV1& config) {
@@ -131,7 +100,8 @@ NpmModulePlanV1 NpmTlsModulePlanV1(const NpmTlsConfigV1& config) {
     plan.requires_labeling = true;
     plan.requires_tcp_stream = true;
     plan.primary_label_ids = config.primary_label_ids;
-    plan.entities.push_back(NpmTlsHandshakeEntityDescriptorV1());
+    plan.entities = {NpmTlsHandshakeEntityDescriptorV1(packet::AddressFamily::kIPv4),
+                     NpmTlsHandshakeEntityDescriptorV1(packet::AddressFamily::kIPv6)};
     return plan;
 }
 

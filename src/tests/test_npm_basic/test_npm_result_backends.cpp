@@ -19,11 +19,18 @@
 #include <vector>
 
 #include <operators/npm_basic/npm_basic_result_consumer.h>
+#include <operators/npm_basic/npm_family_result_contract.h>
 #include <operators/npm_basic/npm_result_progress.h>
 #include <operators/npm_basic/output/npm_basic_result_encoder.h>
 #include <services/database/database_plugin.h>
 
 namespace {
+int PublishForRun(flowsql::npm::INpmFamilyProgressConsumer* publisher, const flowsql::npm::NpmResultContextV1& context,
+                  flowsql::npm::NpmFamilyPublicationRequest request) {
+    request.key = {"basic_ipv4", "npm_basic_ipv4_history_v1", context.run_id};
+    flowsql::npm::NpmFamilyPublishedProgress confirmed;
+    return publisher->PublishProgress(request, &confirmed);
+}
 
 using flowsql::DatabaseParameterKindV1;
 using flowsql::DatabaseParameterV1;
@@ -126,10 +133,15 @@ void AppendValue(arrow::ArrayBuilder* builder, const arrow::Field& field, uint64
             assert(static_cast<arrow::UInt16Builder*>(builder)->Append(16).ok());
             break;
         case arrow::Type::UINT32:
-            assert(static_cast<arrow::UInt32Builder*>(builder)->Append(32).ok());
+            assert(static_cast<arrow::UInt32Builder*>(builder)
+                       ->Append(name == "a_ip" || name == "src_ip" ? UINT32_MAX : 0)
+                       .ok());
             break;
         case arrow::Type::UINT64: {
-            const uint64_t value = name == "session_id" ? identity : (name == "revision" ? revision : 64);
+            const uint64_t value = (name == "session_id" || name == "transaction_id" || name == "handshake_id" ||
+                                    name == "event_id" || name == "entity_instance_id")
+                                       ? identity
+                                       : (name == "revision" ? revision : 64);
             assert(static_cast<arrow::UInt64Builder*>(builder)->Append(value).ok());
             break;
         }
@@ -142,6 +154,11 @@ void AppendValue(arrow::ArrayBuilder* builder, const arrow::Field& field, uint64
         case arrow::Type::STRING:
             assert(static_cast<arrow::StringBuilder*>(builder)->Append("quote' slash\\ unicode-结果").ok());
             break;
+        case arrow::Type::FIXED_SIZE_BINARY: {
+            const uint8_t address[16] = {0, 0x80, 0xff, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 10, 11, 12};
+            assert(static_cast<arrow::FixedSizeBinaryBuilder*>(builder)->Append(address).ok());
+            break;
+        }
         case arrow::Type::BINARY:
             assert(
                 static_cast<arrow::BinaryBuilder*>(builder)->Append(reinterpret_cast<const uint8_t*>("a\0b"), 3).ok());
@@ -196,7 +213,8 @@ std::vector<std::shared_ptr<arrow::RecordBatch>> Query(IDatabaseChannel* channel
         const int next = reader->Next(&data, &size);
         if (next == 1) break;
         assert(next == 0 && data != nullptr && size != 0);
-        auto input = std::make_shared<arrow::io::BufferReader>(arrow::Buffer::Wrap(data, size));
+        auto input = std::make_shared<arrow::io::BufferReader>(
+            arrow::Buffer::FromString(std::string(reinterpret_cast<const char*>(data), size)));
         auto opened = arrow::ipc::RecordBatchStreamReader::Open(input);
         assert(opened.ok());
         while (true) {
@@ -280,16 +298,26 @@ void Execute(IDatabaseChannel* channel, const std::string& sql) {
 }
 
 void Cleanup(const Backend& backend) {
+    for (const auto kind : {flowsql::npm::NpmFamilyEntityKind::kBasic, flowsql::npm::NpmFamilyEntityKind::kSession,
+                            flowsql::npm::NpmFamilyEntityKind::kDns, flowsql::npm::NpmFamilyEntityKind::kHttp1,
+                            flowsql::npm::NpmFamilyEntityKind::kTls, flowsql::npm::NpmFamilyEntityKind::kIcmp})
+        for (const auto family : {flowsql::packet::AddressFamily::kIPv4, flowsql::packet::AddressFamily::kIPv6}) {
+            const auto entity = flowsql::npm::NpmFamilyEntityDescriptor(kind, family);
+            for (const char* relation : {"history", "latest", "final"})
+                Execute(backend.channel.get(), "DROP VIEW IF EXISTS npm_" + entity.entity_id + '_' + relation + "_v1");
+            Execute(backend.channel.get(), "DROP TABLE IF EXISTS npm_" + entity.entity_id + "_v1_data");
+        }
     for (const char* relation :
-         {"npm_basic_history_v1", "npm_basic_latest_v1", "npm_basic_final_v1", "npm_session_history_v1",
-          "npm_session_latest_v1", "npm_session_final_v1", "npm_basic_history_v2", "npm_basic_latest_v2",
-          "npm_basic_final_v2", "npm_conflict_history_v9", "npm_conflict_latest_v9", "npm_conflict_final_v9"}) {
+         {"npm_basic_ipv4_history_v1", "npm_basic_ipv4_latest_v1", "npm_basic_ipv4_final_v1",
+          "npm_session_ipv4_history_v1", "npm_session_ipv4_latest_v1", "npm_session_ipv4_final_v1",
+          "npm_basic_ipv4_history_v2", "npm_basic_ipv4_latest_v2", "npm_basic_ipv4_final_v2", "npm_conflict_history_v9",
+          "npm_conflict_latest_v9", "npm_conflict_final_v9"}) {
         Execute(backend.channel.get(), "DROP VIEW IF EXISTS " + std::string(relation));
         Execute(backend.channel.get(), "DROP TABLE IF EXISTS " + std::string(relation));
     }
-    for (const char* table : {"npm_basic_v1_data", "npm_session_v1_data", "npm_basic_v2_data", "npm_conflict_v9_data",
-                              "npm_t3_parameter_probe", "npm_t3_atomic_probe", "npm_result_progress_v1",
-                              "npm_result_entities", "npm_result_runs"}) {
+    for (const char* table : {"npm_basic_ipv4_v1_data", "npm_session_ipv4_v1_data", "npm_basic_ipv4_v2_data",
+                              "npm_conflict_v9_data", "npm_t3_parameter_probe", "npm_t3_atomic_probe",
+                              "npm_result_progress_v1", "npm_result_entities", "npm_result_runs"}) {
         Execute(backend.channel.get(), "DROP TABLE IF EXISTS " + std::string(table));
     }
 }
@@ -370,8 +398,9 @@ void TestRelations(const Backend& backend, const std::vector<NpmEntityDescriptor
     assert(consumer->Finish() == 0);
     AssertSummary(*consumer, run, "completed", 3, 2);
 
-    const auto history = Query(backend.channel.get(), backend.category,
-                               "SELECT * FROM npm_basic_history_v1 WHERE __npm_run_id='" + run + "' ORDER BY revision");
+    const auto history =
+        Query(backend.channel.get(), backend.category,
+              "SELECT * FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + run + "' ORDER BY revision");
     assert(RowCount(history) == 2);
     const auto& history_batch = *history.front();
     const auto identity = history_batch.GetColumnByName("session_id");
@@ -379,18 +408,18 @@ void TestRelations(const Backend& backend, const std::vector<NpmEntityDescriptor
     assert(identity && identity->type_id() == arrow::Type::UINT64 && UIntValue(*identity, 0) == maximum);
     assert(revision && UIntValue(*revision, 1) == maximum);
     const auto ip = history_batch.GetColumnByName("a_ip");
-    assert(ip && StringValue(*ip, 1) == "quote' slash\\ unicode-结果");
+    assert(ip && ip->type_id() == arrow::Type::UINT32 && UIntValue(*ip, 1) == UINT32_MAX);
     const auto nullable_protocol = history_batch.GetColumnByName("protocol");
     assert(nullable_protocol && nullable_protocol->IsNull(0) && !nullable_protocol->IsNull(1));
     const auto status = history_batch.GetColumnByName("__npm_run_status");
     assert(status && StringValue(*status, 0) == "completed");
 
     assert(RowCount(Query(backend.channel.get(), backend.category,
-                          "SELECT * FROM npm_basic_latest_v1 WHERE __npm_run_id='" + run + "'")) == 1);
+                          "SELECT * FROM npm_basic_ipv4_latest_v1 WHERE __npm_run_id='" + run + "'")) == 1);
     assert(RowCount(Query(backend.channel.get(), backend.category,
-                          "SELECT * FROM npm_basic_final_v1 WHERE __npm_run_id='" + run + "'")) == 1);
+                          "SELECT * FROM npm_basic_ipv4_final_v1 WHERE __npm_run_id='" + run + "'")) == 1);
     assert(RowCount(Query(backend.channel.get(), backend.category,
-                          "SELECT * FROM npm_session_history_v1 WHERE __npm_run_id='" + run + "'")) == 1);
+                          "SELECT * FROM npm_session_ipv4_history_v1 WHERE __npm_run_id='" + run + "'")) == 1);
 
     const std::string other_run = prefix + "-other";
     auto other = CreateConsumer(backend.channel.get(), "pcapfile.other", {"task-other", other_run}, entities);
@@ -398,7 +427,8 @@ void TestRelations(const Backend& backend, const std::vector<NpmEntityDescriptor
     assert(other->Consume({"task-other", other_run}, basic, *other_rows) == 0);
     assert(other->Finish() == 0);
     assert(RowCount(Query(backend.channel.get(), backend.category,
-                          "SELECT * FROM npm_basic_latest_v1 WHERE session_id=" + std::to_string(maximum))) == 2);
+                          "SELECT * FROM npm_basic_ipv4_latest_v1 WHERE session_id=" + std::to_string(maximum) +
+                              " AND __npm_run_id IN ('" + run + "','" + other_run + "')")) == 2);
 
     const std::string incomplete_run = prefix + "-incomplete";
     auto incomplete =
@@ -409,11 +439,11 @@ void TestRelations(const Backend& backend, const std::vector<NpmEntityDescriptor
     AssertSummary(*incomplete, incomplete_run, "incomplete", 1, 2);
     const auto incomplete_rows =
         Query(backend.channel.get(), backend.category,
-              "SELECT * FROM npm_session_history_v1 WHERE __npm_run_id='" + incomplete_run + "'");
+              "SELECT * FROM npm_session_ipv4_history_v1 WHERE __npm_run_id='" + incomplete_run + "'");
     assert(RowCount(incomplete_rows) == 1);
     assert(StringValue(*incomplete_rows.front()->GetColumnByName("__npm_run_status"), 0) == "incomplete");
 
-    const auto labeled_basic = flowsql::npm::NpmBasicEntityDescriptorV1();
+    const auto labeled_basic = flowsql::npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
     assert(labeled_basic.schema->Equals(*basic.schema, true) && labeled_basic.schema_version == 1);
     for (int labels : {0, 1, 2}) {
         const std::string periodic_run = prefix + "-periodic-" + std::to_string(labels);
@@ -427,7 +457,7 @@ void TestRelations(const Backend& backend, const std::vector<NpmEntityDescriptor
                                              std::make_shared<TestBudget>(), &duplicate) == EEXIST);
             assert(!duplicate);
         }
-        flowsql::npm::NpmBasicResult row;
+        flowsql::npm::NpmBasicResult4 row;
         row.session_id = 101;
         row.revision = 1;
         row.protocol_status = flowsql::npm::NpmProtocolStatus::kUnknown;
@@ -436,7 +466,7 @@ void TestRelations(const Backend& backend, const std::vector<NpmEntityDescriptor
         row.wire_bytes_total = maximum - 10;
         row.packets_ab = 1;
         row.period = flowsql::npm::NpmBasicPeriodStats{0, 30000000000LL, true, 1, 0, maximum - 10, 0, maximum - 10};
-        std::vector<flowsql::npm::NpmBasicResult> records{row};
+        std::vector<flowsql::npm::NpmBasicResult4> records{row};
         row.revision = 2;
         row.packets_ba = 1;
         row.wire_bytes_ba = 10;
@@ -453,24 +483,24 @@ void TestRelations(const Backend& backend, const std::vector<NpmEntityDescriptor
         assert(flowsql::npm::EncodeNpmBasicResults(records, &encoded, nullptr, labels != 0) ==
                flowsql::npm::NpmBasicEncodeError::kNone);
         assert(periodic->Consume({"task-periodic", periodic_run}, labeled_basic, *encoded) == 0);
-        auto* publisher = dynamic_cast<flowsql::npm::INpmResultProgressConsumerV1*>(periodic.get());
+        auto* publisher = dynamic_cast<flowsql::npm::INpmFamilyProgressConsumer*>(periodic.get());
         assert(publisher);
-        flowsql::npm::NpmResultProgressV1 progress;
+        flowsql::npm::NpmFamilyPublicationRequest progress;
         progress.period_ns = 30000000000LL;
         progress.closed_before_ns = 60000000000LL;
-        assert(publisher->PublishProgress({"task-periodic", periodic_run}, progress) == 0);
-        assert(publisher->PublishProgress({"task-periodic", periodic_run}, progress) == 0);  // idempotent boundary
-        assert(publisher->PublishProgress({"other-task", periodic_run}, progress) == EINVAL);
+        assert(PublishForRun(publisher, {"task-periodic", periodic_run}, progress) == 0);
+        assert(PublishForRun(publisher, {"task-periodic", periodic_run}, progress) == 0);  // idempotent boundary
+        assert(PublishForRun(publisher, {"task-periodic", "wrong-run"}, progress) == EINVAL);
         progress.closed_before_ns = 90000000000LL;
-        assert(publisher->PublishProgress({"task-periodic", periodic_run}, progress) == 0);  // no data progression
+        assert(PublishForRun(publisher, {"task-periodic", periodic_run}, progress) == 0);  // no data progression
         const auto published = Query(
             backend.channel.get(), backend.category,
             "SELECT epoch,position,closed_before_ns FROM npm_result_progress_v1 WHERE run_id='" + periodic_run + "'");
         assert(RowCount(published) == 2);
         assert(periodic->Finish() == 0);
-        const auto stored =
-            Query(backend.channel.get(), backend.category,
-                  "SELECT * FROM npm_basic_history_v1 WHERE __npm_run_id='" + periodic_run + "' ORDER BY revision");
+        const auto stored = Query(
+            backend.channel.get(), backend.category,
+            "SELECT * FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + periodic_run + "' ORDER BY revision");
         assert(RowCount(stored) == 3);
         uint64_t summed = 0;
         for (const auto& batch : stored) {
@@ -485,9 +515,9 @@ void TestRelations(const Backend& backend, const std::vector<NpmEntityDescriptor
         }
         assert(summed == maximum);
         const auto latest = Query(backend.channel.get(), backend.category,
-                                  "SELECT * FROM npm_basic_latest_v1 WHERE __npm_run_id='" + periodic_run + "'");
+                                  "SELECT * FROM npm_basic_ipv4_latest_v1 WHERE __npm_run_id='" + periodic_run + "'");
         const auto terminal = Query(backend.channel.get(), backend.category,
-                                    "SELECT * FROM npm_basic_final_v1 WHERE __npm_run_id='" + periodic_run + "'");
+                                    "SELECT * FROM npm_basic_ipv4_final_v1 WHERE __npm_run_id='" + periodic_run + "'");
         assert(RowCount(latest) == 1 && RowCount(terminal) == 1);
         assert(UIntValue(*terminal.front()->GetColumnByName("wire_bytes_total"), 0) == maximum);
         assert(UIntValue(*terminal.front()->GetColumnByName("interval_wire_bytes_total"), 0) == 0);
@@ -517,8 +547,8 @@ void TestRetention(const Backend& backend, const std::vector<NpmEntityDescriptor
                                          "','" + writing_run + "')";
     Execute(backend.channel.get(), update);
     assert(RowCount(Query(backend.channel.get(), backend.category,
-                          "SELECT * FROM npm_basic_history_v1 WHERE __npm_run_id='" + expired_run + "'")) == 0);
-    for (int step = 0; step < 5; ++step) {
+                          "SELECT * FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + expired_run + "'")) == 0);
+    for (int step = 0; step < 16; ++step) {
         auto next = CreateConsumer(backend.channel.get(), "pcapfile.advance",
                                    {"task-advance", prefix + "-advance-" + std::to_string(step)}, {basic});
         assert(next->Finish() == 0);
@@ -526,14 +556,14 @@ void TestRetention(const Backend& backend, const std::vector<NpmEntityDescriptor
     assert(RowCount(Query(backend.channel.get(), backend.category,
                           "SELECT * FROM npm_result_runs WHERE run_id='" + expired_run + "'")) == 0);
     assert(RowCount(Query(backend.channel.get(), backend.category,
-                          "SELECT * FROM npm_basic_v1_data WHERE __npm_run_id='" + expired_run + "'")) == 0);
+                          "SELECT * FROM npm_basic_ipv4_v1_data WHERE __npm_run_id='" + expired_run + "'")) == 0);
     assert(RowCount(Query(backend.channel.get(), backend.category,
                           "SELECT * FROM npm_result_runs WHERE run_id='" + writing_run + "'")) == 1);
     assert(writing->Finish() == 0);
 }
 
 void TestConflicts(const Backend& backend) {
-    auto conflict = flowsql::npm::NpmBasicEntityDescriptorV1();
+    auto conflict = flowsql::npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
     conflict.entity_id = "conflict";
     conflict.schema_version = 9;
     Execute(backend.channel.get(),
@@ -560,8 +590,8 @@ void TestConflicts(const Backend& backend) {
                 std::string(backend.category == "clickhouse" ? ") ENGINE=MergeTree ORDER BY tuple()" : ")"));
     factory = flowsql::npm::MakeNpmDatabaseResultConsumerFactory(backend.channel.get(), "pcapfile.catalog-conflict");
     assert(factory->Create({"task-catalog-conflict", "run-catalog-conflict"},
-                           {flowsql::npm::NpmBasicEntityDescriptorV1()}, std::make_shared<TestBudget>(),
-                           &consumer) != 0);
+                           {flowsql::npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4)},
+                           std::make_shared<TestBudget>(), &consumer) != 0);
     assert(!consumer);
 }
 
@@ -588,10 +618,56 @@ void TestBackend(const Backend& backend) {
                 "error_code Nullable(Int64),error_stage Nullable(String),error_message Nullable(String),"
                 "metadata_status String) ENGINE=MergeTree ORDER BY run_id");
     }
-    const std::vector<NpmEntityDescriptorV1> entities = {flowsql::npm::NpmBasicEntityDescriptorV1(),
-                                                         flowsql::npm::NpmSessionEntityDescriptorV1()};
+    const std::vector<NpmEntityDescriptorV1> entities = {
+        flowsql::npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4),
+        flowsql::npm::NpmSessionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4)};
     const std::string prefix = "t3-" + backend.category + '-' + std::to_string(getpid());
     TestConcurrentOpen(backend, entities, prefix);
+    {
+        std::vector<NpmEntityDescriptorV1> families;
+        for (const auto kind : {flowsql::npm::NpmFamilyEntityKind::kBasic, flowsql::npm::NpmFamilyEntityKind::kSession,
+                                flowsql::npm::NpmFamilyEntityKind::kDns, flowsql::npm::NpmFamilyEntityKind::kHttp1,
+                                flowsql::npm::NpmFamilyEntityKind::kTls, flowsql::npm::NpmFamilyEntityKind::kIcmp})
+            for (const auto family : {flowsql::packet::AddressFamily::kIPv4, flowsql::packet::AddressFamily::kIPv6})
+                families.push_back(flowsql::npm::NpmFamilyEntityDescriptor(kind, family));
+        const NpmResultContextV1 context{"task-family", prefix + "-family"};
+        auto budget = std::make_shared<TestBudget>();
+        auto storage = CreateConsumer(backend.channel.get(), "pcapfile.family", context, families, budget);
+        for (const auto& entity : families) {
+            auto expected = MakeRows(entity, UINT64_MAX, {1, 2}, {false, true});
+            const int consumed = storage->Consume(context, entity, *expected);
+            if (consumed)
+                std::fprintf(stderr, "%s %s Consume=%d error=%s\n", backend.category.c_str(), entity.entity_id.c_str(),
+                             consumed, backend.channel->GetLastError());
+            assert(consumed == 0);
+            assert(budget->Usage().pending_output_bytes == 0);
+            auto batches = Query(backend.channel.get(), backend.category,
+                                 "SELECT * FROM npm_" + entity.entity_id + "_history_v1 WHERE __npm_run_id='" +
+                                     context.run_id + "' ORDER BY revision");
+            assert(RowCount(batches) == 2 && batches.size() == 1);
+            const auto& actual = batches.front();
+            for (int i = 0; i < expected->num_columns(); ++i) {
+                const auto index = actual->schema()->GetFieldIndex(entity.schema->field(i)->name());
+                assert(index >= 0 && actual->schema()->field(index)->Equals(*entity.schema->field(i), true));
+                if (!actual->column(index)->Equals(expected->column(i)))
+                    std::fprintf(stderr, "%s %s.%s actual=%s expected=%s\n", backend.category.c_str(),
+                                 entity.entity_id.c_str(), entity.schema->field(i)->name().c_str(),
+                                 actual->column(index)->ToString().c_str(), expected->column(i)->ToString().c_str());
+                assert(actual->column(index)->Equals(expected->column(i)));
+            }
+            assert(actual->schema()->metadata()->Equals(*entity.schema->metadata()));
+            if (backend.category == "postgres") {
+                const auto address = entity.schema->GetFieldByName("a_ip") ? "a_ip" : "src_ip";
+                const auto invalid = entity.schema->GetFieldByName(address)->type()->id() == arrow::Type::UINT32
+                                         ? "4294967296"
+                                         : "decode('0080ff','hex')";
+                assert(backend.channel->ExecuteSql(("UPDATE npm_" + entity.entity_id + "_v1_data SET " + address + '=' +
+                                                    invalid + " WHERE __npm_run_id='" + context.run_id + "'")
+                                                       .c_str()) < 0);
+            }
+        }
+        assert(storage->Finish() == 0);
+    }
     assert(RowCount(Query(backend.channel.get(), backend.category,
                           "SELECT purge_cursor FROM npm_result_runs WHERE run_id='missing'")) == 0);
     TestRelations(backend, entities, prefix);
@@ -607,11 +683,11 @@ int main() {
     DatabasePlugin plugin;
     const char* options =
         "type=mysql;name=t3mysql;host=127.0.0.1;port=3306;user=flowsql_user;password=flowSQL@user;"
-        "database=flowsql_db|"
+        "database=flowsql_npm_family_t4|"
         "type=postgres;name=t3postgres;host=127.0.0.1;port=5432;user=flowsql_user;password=flowSQL@postgres;"
-        "database=flowsql_db|"
+        "database=flowsql_npm_family_t4|"
         "type=clickhouse;name=t3clickhouse;host=127.0.0.1;port=8123;user=flowsql_user;password=flowSQL@user;"
-        "database=flowsql_db";
+        "database=flowsql_npm_family_t4";
     assert(plugin.Option(options) == 0);
     assert(plugin.Load(nullptr) == 0);
     assert(plugin.Start() == 0);

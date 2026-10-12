@@ -1,9 +1,11 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <common/network/analysis_address.h>
 #include <framework/interfaces/iflow_labeling.h>
 #include <plugins/flow_labeling/flow_labeling_plugin.h>
 #include <common/loader.hpp>
+#include <deque>
 
 #include <arpa/inet.h>
 #include <sched.h>
@@ -530,12 +532,18 @@ spec:
 }
 
 void SetIpv4(const char* value, flowsql::FlowLabelEndpointFactsV1* endpoint) {
-    assert(inet_pton(AF_INET, value, endpoint->ip) == 1);
+    static std::deque<flowsql::network::IPv4Address> owners;
+    owners.emplace_back();
+    assert(inet_pton(AF_INET, value, owners.back().bytes) == 1);
+    endpoint->ip = owners.back().bytes;
     endpoint->ip_valid = 1;
 }
 
 void SetIpv6(const char* value, flowsql::FlowLabelEndpointFactsV1* endpoint) {
-    assert(inet_pton(AF_INET6, value, endpoint->ip) == 1);
+    static std::deque<flowsql::network::IPv6Address> owners;
+    owners.emplace_back();
+    assert(inet_pton(AF_INET6, value, owners.back().bytes) == 1);
+    endpoint->ip = owners.back().bytes;
     endpoint->ip_valid = 1;
 }
 

@@ -150,11 +150,9 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
             return status;
         }
         NpmBasicTaskConfig frozen = config;
-        const std::string observing =
-            config.features.observing_entity.empty()
-                ? (config.features.observing == NpmResultEntity::kSession ? "session" : "basic")
-                : config.features.observing_entity;
+        const std::string observing = config.features.observing_entity;
         std::shared_ptr<arrow::Schema> result_schema;
+        if (observing.empty() && consumer_factory) result_schema = arrow::schema({});
         NpmModuleCapabilitiesV1 capabilities;
         capabilities.labeling_enabled = config.features.labeling_enabled;
         capabilities.labeling_available = matcher != nullptr;
@@ -366,6 +364,20 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::s
                         "npm.basic input batch has a negative Arrow buffer size");
         }
         status.input_bytes = static_cast<uint64_t>(signed_bytes);
+        const auto packet_schema = packet::PacketFamilySchema();
+        if (input->schema()->Equals(*packet_schema, true) && input->num_columns() == packet_schema->num_fields()) {
+            const auto endpoints =
+                std::dynamic_pointer_cast<arrow::DenseUnionArray>(input->GetColumnByName("ip_endpoints"));
+            if (endpoints && endpoints->num_fields() == 3) {
+                const uint64_t address_bytes =
+                    static_cast<uint64_t>(endpoints->field(1)->length()) * sizeof(packet::PacketIpEndpoints4) +
+                    static_cast<uint64_t>(endpoints->field(2)->length()) * sizeof(packet::PacketIpEndpoints6);
+                if (address_bytes > std::numeric_limits<uint64_t>::max() - status.input_bytes)
+                    return fail(NpmBasicOfflineBatchError::kInvalidBufferSize,
+                                "npm.basic address buffer size overflow");
+                status.input_bytes += address_bytes;
+            }
+        }
 
         InputBatchLease input_lease(budget_, status.input_bytes);
         status.budget_error = input_lease.Reserve();
@@ -389,7 +401,7 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::s
             if (status.process_status.packet_status.session_error == NpmSessionTableError::kLatePacket &&
                 status.process_status.row >= 0) {
                 packet::PacketView late_packet;
-                packet::PacketLayerInfo late_layer;
+                packet::PacketFamilyLayerView late_layer;
                 if (batch->Get(status.process_status.row, &late_packet, &late_layer) == NpmPacketBatchError::kNone) {
                     stream_error_ = "late npm.basic packet source=" + std::to_string(late_packet.meta.source_id) +
                                     " timestamp_ns=" + std::to_string(late_packet.meta.timestamp_ns) +
@@ -538,13 +550,12 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
             status.active_sessions = active.size();
             for (size_t index = 0; index < active.size(); ++index) {
                 if (config_.features.basic_enabled && !periodic_) {
-                    NpmBasicResult result;
-                    status.projection_error = projector_->ProjectActive(active[index], input.observed_at_ns, &result);
+                    status.projection_error = projector_->ProjectAndWrite(
+                        active[index], input.observed_at_ns, std::nullopt, *collector_, &status.writer_error);
                     if (status.projection_error != NpmBasicProjectionError::kNone) {
                         status.active_session_index = static_cast<int64_t>(index);
                         return fail(NpmBasicRealtimeMaintenanceError::kProjectionError, kRealtimeProjectionError);
                     }
-                    status.writer_error = collector_->WriteBasic(result);
                     if (status.writer_error != 0) {
                         status.active_session_index = static_cast<int64_t>(index);
                         return fail(NpmBasicRealtimeMaintenanceError::kWriterError, kRealtimeWriterError);
@@ -562,12 +573,13 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
 
         const bool should_emit = !progress.ended_sessions.empty() || collector_->pending_results() != 0;
         const auto publish_progress = [&]() {
-            if (!periodic_ || progress.disposition != NpmCaptureProgressDisposition::kAdvanced) return 0;
-            NpmResultProgressV1 published;
-            published.period_ns = config_.analysis.output_interval_ns;
-            published.closed_before_ns =
-                std::max<int64_t>(0, progress.watermark_ns - progress.watermark_ns % published.period_ns);
-            return router_->PublishProgress(published);
+            if (!periodic_ || progress.disposition != NpmCaptureProgressDisposition::kAdvanced ||
+                progress.watermark_ns < 0)
+                return 0;
+            const auto period = config_.analysis.output_interval_ns;
+            const auto closed = std::max<int64_t>(0, progress.watermark_ns - progress.watermark_ns % period);
+            const NpmFamilyPublicationProof proof{true, progress.watermark_ns, true, true, false};
+            return router_->PublishProgress(period, closed, proof);
         };
         if (!should_emit) {
             if (publish_progress() != 0)

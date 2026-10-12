@@ -32,7 +32,7 @@ enum class FlowLabelingErrorV1 : uint8_t {
 struct FlowLabelEndpointFactsV1 {
     uint8_t mac[6]{};
     uint8_t mac_valid = 0;
-    uint8_t ip[16]{};
+    const uint8_t* ip = nullptr;  // Call-borrowed, 4 or 16 bytes according to FlowLabelFactsV1::ip_family.
     uint8_t ip_valid = 0;
     uint16_t port = 0;
     uint8_t port_valid = 0;

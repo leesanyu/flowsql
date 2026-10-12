@@ -4,7 +4,7 @@
 #ifndef FLOWSQL_NPM_DNS_RESULT_ENCODER_H_
 #define FLOWSQL_NPM_DNS_RESULT_ENCODER_H_
 
-#include "npm_dns_udp.h"
+#include <operators/npm_basic/npm_family_result_contract.h>
 
 #include <memory>
 #include <string>
@@ -16,18 +16,10 @@ class MemoryPool;
 namespace flowsql::npm {
 
 /** Owned session facts retained for DNS rows that outlive the borrowed session view. */
-struct NpmDnsSessionIdentityV1 {
-    uint64_t session_id = 0;
-    uint64_t observation_domain_id = 0;
-    uint8_t transport_protocol = 0;
-    std::string a_ip;
-    std::string b_ip;
-    uint16_t a_port = 0;
-    uint16_t b_port = 0;
-};
 
 /** Builds and emits one final event row; the temporary module-state charge spans the emitter call. */
-int EmitNpmDnsTransactionV1(const NpmDnsUdpResultV1& result, const NpmDnsSessionIdentityV1& session,
+template <typename Address>
+int EmitNpmDnsTransactionV1(const NpmDnsFamilyResult<Address>& family_result,
                             const std::shared_ptr<INpmTaskBudget>& budget, INpmResultEmitterV1& emitter,
                             arrow::MemoryPool* pool = nullptr);
 

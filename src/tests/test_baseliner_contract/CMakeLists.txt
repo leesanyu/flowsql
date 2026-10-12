@@ -68,6 +68,8 @@ add_test(NAME test_baseliner_aggregation COMMAND $<TARGET_FILE:test_baseliner_ag
 set_tests_properties(test_baseliner_aggregation PROPERTIES LABELS "baseliner;aggregation" TIMEOUT 30)
 
 add_executable(test_baseliner_poll test_baseliner_poll.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_output_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_basic_result_encoder.cpp)

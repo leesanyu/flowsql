@@ -7,6 +7,7 @@
 
 #include <cassert>
 #include <cerrno>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,16 +37,27 @@ class Budget final : public npm::INpmTaskBudget {
 class Emitter final : public npm::INpmResultEmitterV1 {
  public:
     int Emit(std::string_view entity, const arrow::RecordBatch& rows) override {
-        assert(entity == "http1_transaction" && rows.num_rows() == 1);
-        assert(npm::ValidateNpmEntityRowsV1("http1", npm::NpmHttp1TransactionEntityDescriptorV1(), rows).error ==
+        assert(entity == (family == flowsql::packet::AddressFamily::kIPv4 ? "http1_transaction_ipv4"
+                                                                          : "http1_transaction_ipv6") &&
+               rows.num_rows() == 1);
+        assert(npm::ValidateNpmEntityRowsV1("http1", npm::NpmHttp1TransactionEntityDescriptorV1(family), rows).error ==
                npm::NpmProtocolContractErrorV1::kNone);
         ++calls;
         domains.push_back(
             std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("observation_domain_id"))->Value(0));
         outcomes.push_back(std::static_pointer_cast<arrow::StringArray>(rows.GetColumnByName("outcome"))->GetString(0));
+        const auto address = rows.GetColumnByName("a_ip");
+        if (family == flowsql::packet::AddressFamily::kIPv4) {
+            assert(std::static_pointer_cast<arrow::UInt32Array>(address)->Value(0) == 0xc0000201U);
+        } else {
+            const uint8_t expected[16] = {192, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff};
+            assert(std::memcmp(std::static_pointer_cast<arrow::FixedSizeBinaryArray>(address)->GetValue(0), expected,
+                               16) == 0);
+        }
         return error;
     }
     int calls = 0;
+    flowsql::packet::AddressFamily family = flowsql::packet::AddressFamily::kIPv4;
     int error = 0;
     std::vector<uint64_t> domains;
     std::vector<std::string> outcomes;
@@ -81,11 +93,12 @@ npm::NpmHttp1ConfigV1 Config() {
     return config;
 }
 
-npm::NpmSessionKey Key(uint64_t domain) {
-    npm::NpmSessionKey key;
-    key.ip_family = flowsql::packet::AddressFamily::kIPv4;
+template <typename KeyType>
+KeyType Key(uint64_t domain) {
+    KeyType key;
+
     key.transport_protocol = 6;
-    flowsql::packet::IPv4Address a{}, b{};
+    decltype(key.a_ip) a{}, b{};
     a.bytes[0] = 192;
     a.bytes[1] = 0;
     a.bytes[2] = 2;
@@ -94,10 +107,14 @@ npm::NpmSessionKey Key(uint64_t domain) {
     b.bytes[1] = 51;
     b.bytes[2] = 100;
     b.bytes[3] = 2;
-    key.a.ip = a;
-    key.b.ip = b;
-    key.a.port = 50000;
-    key.b.port = 80;
+    if constexpr (sizeof(a) == 16) {
+        a.bytes[15] = 0xff;
+        b.bytes[15] = 0x80;
+    }
+    key.a_ip = a;
+    key.b_ip = b;
+    key.a_port = 50000;
+    key.b_port = 80;
     key.observation_domain_id = domain;
     return key;
 }
@@ -115,14 +132,17 @@ int Send(npm::NpmHttp1ProtocolModuleV1* module, const npm::NpmSessionView& sessi
     return error;
 }
 
+template <typename KeyType>
 void TestStreamLifecycleAndFailure() {
     auto budget = std::make_shared<Budget>();
     npm::NpmHttp1ProtocolModuleV1 module(Config(), budget);
-    auto key = Key(44);
+    auto key = Key<KeyType>(44);
     npm::NpmSessionView session;
     session.session_id = 7;
-    session.key = &key;
+    session.key = npm::NpmSessionKeyView(key);
     Emitter emitter;
+    emitter.family =
+        sizeof(key.a_ip) == 4 ? flowsql::packet::AddressFamily::kIPv4 : flowsql::packet::AddressFamily::kIPv6;
     npm::NpmPacketView packet;
     npm::NpmInputEventV1 input;
     input.kind = npm::NpmInputKindV1::kTcpPacket;
@@ -164,4 +184,7 @@ void TestStreamLifecycleAndFailure() {
 
 }  // namespace
 
-int main() { TestStreamLifecycleAndFailure(); }
+int main() {
+    TestStreamLifecycleAndFailure<npm::NpmSessionKey4>();
+    TestStreamLifecycleAndFailure<npm::NpmSessionKey6>();
+}

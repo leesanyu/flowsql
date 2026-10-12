@@ -15,11 +15,11 @@ namespace flowsql::npm {
 enum class NpmIcmpMessageKindV1 : uint8_t { kIgnored = 0, kEchoRequest, kEchoReply, kError };
 enum class NpmIcmpParseErrorV1 : uint8_t { kNone = 0, kInvalidInput };
 
-struct NpmIcmpParsedV1 {
+template <typename Address>
+struct NpmIcmpFamilyParsed {
     NpmIcmpMessageKindV1 kind = NpmIcmpMessageKindV1::kIgnored;
-    uint8_t ip_family = 0;
-    packet::IpAddress src_ip;
-    packet::IpAddress dst_ip;
+    Address src_ip;
+    Address dst_ip;
     uint8_t icmp_type = 0;
     uint8_t icmp_code = 0;
     bool outer_truncated = false;
@@ -29,13 +29,17 @@ struct NpmIcmpParsedV1 {
     std::string quote_status;
     std::optional<uint8_t> quoted_ip_family;
     std::optional<uint8_t> quoted_protocol;
-    std::optional<packet::IpAddress> quoted_src_ip;
-    std::optional<packet::IpAddress> quoted_dst_ip;
-    std::optional<NpmIcmpQuotedFlowV1> quoted_flow;
+    std::optional<Address> quoted_src_ip;
+    std::optional<Address> quoted_dst_ip;
+    std::optional<NpmIcmpFamilyQuotedFlow<Address>> quoted_flow;
 };
 
+using NpmIcmpParsed4 = NpmIcmpFamilyParsed<network::IPv4Address>;
+using NpmIcmpParsed6 = NpmIcmpFamilyParsed<network::IPv6Address>;
+
 /** Parses only captured bytes; ignored control messages and incomplete headers are not task errors. */
-NpmIcmpParseErrorV1 ParseNpmIcmpControlV1(const NpmInputEventV1& input, NpmIcmpParsedV1* output);
+template <typename Address>
+NpmIcmpParseErrorV1 ParseNpmIcmpControlV1(const NpmInputEventV1& input, NpmIcmpFamilyParsed<Address>* output);
 
 }  // namespace flowsql::npm
 

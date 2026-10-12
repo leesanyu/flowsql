@@ -14,6 +14,13 @@
 using namespace flowsql;
 using namespace flowsql::baseliner;
 namespace {
+int PublishForRun(flowsql::npm::INpmFamilyProgressConsumer* publisher, const flowsql::npm::NpmResultContextV1& context,
+                  flowsql::npm::NpmFamilyPublicationRequest request) {
+    request.key = {"basic_ipv4", "npm_basic_ipv4_history_v1", context.run_id};
+    flowsql::npm::NpmFamilyPublishedProgress confirmed;
+    return publisher->PublishProgress(request, &confirmed);
+}
+
 constexpr int64_t second = 1000000000LL;
 void CheckAt(bool ok, const std::string& error, int line) {
     if (!ok) {
@@ -38,7 +45,7 @@ ConfigSnapshot Config(const std::string& source, const std::string& run, int64_t
     c.config.read.poll_interval_ms = 1;
     Dataset d;
     d.id = "basic";
-    d.table = "npm_basic_history_v1";
+    d.table = "npm_basic_ipv4_history_v1";
     d.scope.run_ids = {run};
     d.row_semantics = "npm_period_increment";
     d.bucket_column = "period_start_ns";
@@ -201,21 +208,26 @@ void Test(database::DatabasePlugin& plugin, const std::string& category, const s
     Check(source && source->IsConnected(), "required source unavailable: " + category);
     const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
     npm::NpmResultContextV1 context{"baseline-t3", "baseliner-t3-" + category + "-" + std::to_string(stamp)};
-    auto entity = npm::NpmBasicEntityDescriptorV1();
+    auto entity = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+    auto entity6 = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv6);
     auto factory = npm::MakeNpmDatabaseResultConsumerFactory(source.get(), "netadapter.baseliner-t3");
     std::unique_ptr<npm::INpmManagedResultConsumerV1> consumer;
-    const int created = factory->Create(context, {entity}, std::make_shared<Budget>(), &consumer);
+    const int created = factory->Create(context, {entity, entity6}, std::make_shared<Budget>(), &consumer);
     Check(created == 0, category + ": " + factory->LastError());
-    auto* publisher = dynamic_cast<npm::INpmResultProgressConsumerV1*>(consumer.get());
+    auto* publisher = dynamic_cast<npm::INpmFamilyProgressConsumer*>(consumer.get());
     assert(publisher);
     auto publish = [&](int64_t closed) {
-        npm::NpmResultProgressV1 p;
+        npm::NpmFamilyPublicationRequest p;
         p.period_ns = 30 * second;
         p.closed_before_ns = closed * second;
-        Check(publisher->PublishProgress(context, p) == 0, "publish");
+        Check(PublishForRun(publisher, context, p) == 0, "publish");
+        p.key = {entity6.entity_id, "npm_basic_ipv6_history_v1", context.run_id};
+        npm::NpmFamilyPublishedProgress confirmed;
+        Check(publisher->PublishProgress(p, &confirmed) == 0, "publish empty IPv6 family");
+        assert(confirmed.publication.closed_before_ns == p.closed_before_ns && confirmed.epoch == context.run_id);
     };
     auto write = [&](uint64_t revision, int64_t start, uint64_t bytes, bool metadata = false) {
-        npm::NpmBasicResult row;
+        npm::NpmBasicResult4 row;
         row.session_id = 1;
         row.revision = revision;
         row.primary_label_id = 17;
@@ -237,6 +249,15 @@ void Test(database::DatabasePlugin& plugin, const std::string& category, const s
     publish(0);
     write(1, 0, 10);
     publish(30);
+    {
+        auto family6 = Config(category + "." + name, context.run_id);
+        family6.config.datasets.front().table = "npm_basic_ipv6_history_v1";
+        PollInput empty_family;
+        Check(empty_family.Initialize(family6, source, family6.config.source) == 0, empty_family.LastError());
+        auto boundary = Boundary(empty_family);
+        assert(boundary.datasets.size() == 1 && boundary.datasets.front().closed_before_bucket == 0);
+        assert(empty_family.PollBlock(0).kind == BlockPollEvent::kTimeout);
+    }
     PollInput input;
     Check(input.Initialize(c, source, c.config.source) == 0, input.LastError());
     auto p2 = Boundary(input);

@@ -101,7 +101,7 @@ struct NpmTlsConfigStatusV1 {
 
 /** Parses one borrowed parameters.tls object and replaces output only on success. */
 NpmTlsConfigStatusV1 ParseNpmTlsConfigV1(std::string_view json, NpmTlsConfigV1* output);
-NpmEntityDescriptorV1 NpmTlsHandshakeEntityDescriptorV1();
+NpmEntityDescriptorV1 NpmTlsHandshakeEntityDescriptorV1(packet::AddressFamily family);
 NpmModulePlanV1 NpmTlsModulePlanV1(const NpmTlsConfigV1& config);
 
 }  // namespace flowsql::npm

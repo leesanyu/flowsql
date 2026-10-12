@@ -191,6 +191,7 @@ const char* SqliteType(const arrow::DataType& type) {
         case arrow::Type::STRING:
             return "TEXT";
         case arrow::Type::BINARY:
+        case arrow::Type::FIXED_SIZE_BINARY:
             return "BLOB";
         default:
             return nullptr;
@@ -265,6 +266,13 @@ std::string DatabaseType(DatabaseBackend backend, const arrow::DataType& type, b
                      : backend == DatabaseBackend::kPostgres ? "BYTEA"
                                                              : "String";
             break;
+        case arrow::Type::FIXED_SIZE_BINARY: {
+            const auto width = static_cast<const arrow::FixedSizeBinaryType&>(type).byte_width();
+            mapped = backend == DatabaseBackend::kMysql      ? "BINARY(" + std::to_string(width) + ')'
+                     : backend == DatabaseBackend::kPostgres ? "BYTEA"
+                                                             : "FixedString(" + std::to_string(width) + ')';
+            break;
+        }
         default:
             return {};
     }
@@ -355,6 +363,11 @@ bool AppendArrayValue(const arrow::Array& array, int64_t row, DatabaseParameterV
             *parameter = StringParameter(value);
             return true;
         }
+        case arrow::Type::FIXED_SIZE_BINARY: {
+            const auto& values = static_cast<const arrow::FixedSizeBinaryArray&>(array);
+            *parameter = BlobParameter(values.GetValue(row), values.byte_width());
+            return true;
+        }
         case arrow::Type::BINARY: {
             const auto value = static_cast<const arrow::BinaryArray&>(array).GetView(row);
             *parameter = BlobParameter(value.data(), value.size());
@@ -393,6 +406,9 @@ struct EntityStorage {
     std::string final_relation;
     std::string insert_sql;
     int64_t rows_written = 0;
+    bool invalid_periods = false;
+    int64_t observed_period_ns = 0;
+    NpmFamilyPublicationCursor publication;
 };
 
 struct SqliteTableColumn {
@@ -755,6 +771,60 @@ struct ExpectedColumn {
     bool key = false;
 };
 
+std::string ColumnCheck(DatabaseBackend backend, const arrow::Field& field) {
+    if (backend != DatabaseBackend::kSqlite && backend != DatabaseBackend::kPostgres) return {};
+    const auto name = QuoteIdentifier(backend, field.name());
+    if (field.type()->id() == arrow::Type::UINT32) return name + ">=0 AND " + name + "<=4294967295";
+    if (field.type()->id() == arrow::Type::FIXED_SIZE_BINARY)
+        return "length(" + name +
+               ")=" + std::to_string(static_cast<const arrow::FixedSizeBinaryType&>(*field.type()).byte_width());
+    return {};
+}
+
+std::string NormalizeCheck(std::string value) {
+    value = NormalizeType(std::move(value));
+    for (const std::string cast : {"::BIGINT", "::INTEGER"}) {
+        size_t at;
+        while ((at = value.find(cast)) != std::string::npos) value.erase(at, cast.size());
+    }
+    value.erase(std::remove_if(value.begin(), value.end(),
+                               [](char ch) { return ch == '(' || ch == ')' || ch == '"' || ch == '\''; }),
+                value.end());
+    return value;
+}
+
+int ValidateDataChecks(IDatabaseChannel* channel, DatabaseBackend backend, const EntityStorage& entity,
+                       std::string* error) {
+    if (backend != DatabaseBackend::kSqlite && backend != DatabaseBackend::kPostgres) return 0;
+    const bool needed =
+        std::any_of(entity.descriptor.schema->fields().begin(), entity.descriptor.schema->fields().end(),
+                    [&](const auto& field) { return !ColumnCheck(backend, *field).empty(); });
+    if (!needed) return 0;
+    StringRows rows;
+    const auto sql = backend == DatabaseBackend::kSqlite
+                         ? "SELECT sql FROM sqlite_master WHERE type='table' AND name='" + entity.data_table + "'"
+                         : "SELECT conname::text,pg_get_constraintdef(oid)::text FROM pg_constraint WHERE conrelid='" +
+                               entity.data_table + "'::regclass AND contype='c'";
+    if (ReadStringRows(channel, backend, sql, backend == DatabaseBackend::kSqlite ? 1 : 2, &rows, error)) return EIO;
+    for (const auto& field : entity.descriptor.schema->fields()) {
+        const auto check = ColumnCheck(backend, *field);
+        if (check.empty()) continue;
+        const auto name = "npm_" + field->name() + "_domain";
+        const auto expected = NormalizeCheck("CHECK(" + check + ')');
+        const bool found = std::any_of(rows.begin(), rows.end(), [&](const auto& row) {
+            if (backend == DatabaseBackend::kPostgres)
+                return row.size() == 2 && row[0] == name && NormalizeCheck(row[1]) == expected;
+            return row.size() == 1 &&
+                   NormalizeCheck(row[0]).find("CONSTRAINT" + NormalizeCheck(name) + expected) != std::string::npos;
+        });
+        if (!found) {
+            *error = "missing or incompatible address domain: " + field->name();
+            return EINVAL;
+        }
+    }
+    return 0;
+}
+
 int ValidateDatabaseColumns(DatabaseBackend backend, std::string_view object, const StringRows& actual,
                             const std::vector<ExpectedColumn>& expected, std::string* error) {
     if (actual.size() != expected.size()) {
@@ -820,7 +890,7 @@ std::string ObjectTypeQuery(DatabaseBackend backend, std::string_view name) {
            std::string(name) + "'";
 }
 
-class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, public INpmResultProgressConsumerV1 {
+class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, public INpmFamilyProgressConsumer {
  public:
     NpmDatabaseResultConsumer(IDatabaseChannel* channel, IDatabasePreparedCommandV1* commands, DatabaseBackend backend,
                               NpmResultContextV1 context, std::vector<EntityStorage> entities,
@@ -854,7 +924,9 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
         if (found == entities_.end() || !rows.schema()->Equals(*found->descriptor.schema, true)) return EINVAL;
         if (rows.num_rows() == 0) return 0;
 
-        if (entity.entity_id == "basic") {
+        if (entity.entity_id == "basic_ipv4" || entity.entity_id == "basic_ipv6") {
+            const auto closed =
+                found->publication.last_confirmed ? found->publication.last_confirmed->publication.closed_before_ns : 0;
             auto starts = std::dynamic_pointer_cast<arrow::Int64Array>(rows.GetColumnByName("period_start_ns"));
             auto ends = std::dynamic_pointer_cast<arrow::Int64Array>(rows.GetColumnByName("period_end_ns"));
             auto ab = std::dynamic_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("interval_packets_ab"));
@@ -863,25 +935,28 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
             for (int64_t row = 0; row < rows.num_rows(); ++row) {
                 if (!starts || !ends || !ab || !ba || !finals || starts->IsNull(row) || ends->IsNull(row) ||
                     ab->IsNull(row) || ba->IsNull(row)) {
-                    invalid_periods_ = true;
+                    found->invalid_periods = true;
                     continue;
                 }
                 const auto start = starts->Value(row), end = ends->Value(row);
-                if (start < 0 || end <= start || (observed_period_ns_ && end - start != observed_period_ns_) ||
+                if (start < 0 || end <= start ||
+                    (found->observed_period_ns && end - start != found->observed_period_ns) ||
                     start % (end - start) != 0) {
-                    invalid_periods_ = true;
+                    found->invalid_periods = true;
                     continue;
                 }
-                observed_period_ns_ = end - start;
+                found->observed_period_ns = end - start;
                 const bool metadata_only = finals->Value(row) && ab->Value(row) == 0 && ba->Value(row) == 0;
-                if (start < closed_before_ns_ && !metadata_only) {
+                if (start < closed && !metadata_only) {
                     error_ = "late NPM period run=" + context_.run_id + " start=" + std::to_string(start) +
-                             " closed_before_ns=" + std::to_string(closed_before_ns_);
+                             " closed_before_ns=" + std::to_string(closed);
                     publication_failed_ = true;
                     return EINVAL;
                 }
             }
-            if (position_ && (invalid_periods_ || observed_period_ns_ != period_ns_)) {
+            if (found->publication.last_confirmed &&
+                (found->invalid_periods ||
+                 found->observed_period_ns != found->publication.last_confirmed->publication.period_ns)) {
                 publication_failed_ = true;
                 return EINVAL;
             }
@@ -922,41 +997,58 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
         }
     }
 
-    int PublishProgress(const NpmResultContextV1& context, const NpmResultProgressV1& progress) override {
+    int PublishProgress(const NpmFamilyPublicationRequest& request, NpmFamilyPublishedProgress* confirmed) override {
+        if (!confirmed) return EINVAL;
+        *confirmed = {};
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminal_ || publication_failed_) return EPIPE;
         if (cancelled_.load(std::memory_order_acquire)) return ECANCELED;
-        auto basic = std::find_if(entities_.begin(), entities_.end(),
-                                  [](const auto& entity) { return entity.descriptor.entity_id == "basic"; });
-        if (context.run_id != context_.run_id || context.task_id != context_.task_id ||
-            progress.contract_version != 1 || progress.entity_id != "basic" || basic == entities_.end() ||
-            progress.period_ns <= 0 || progress.closed_before_ns < closed_before_ns_ ||
-            progress.closed_before_ns % progress.period_ns != 0 || invalid_periods_ ||
-            (observed_period_ns_ && observed_period_ns_ != progress.period_ns) ||
-            (position_ && period_ns_ != progress.period_ns) || position_ == std::numeric_limits<int64_t>::max())
+        auto basic = std::find_if(entities_.begin(), entities_.end(), [&](const auto& entity) {
+            return entity.descriptor.entity_id == request.key.entity_id;
+        });
+        const auto& progress = request;
+        const auto previous = basic != entities_.end() ? basic->publication.last_confirmed : std::nullopt;
+        if (request.key.run_id != context_.run_id || basic == entities_.end() ||
+            request.key.relation_name != basic->history_relation || basic->invalid_periods ||
+            (basic->observed_period_ns && basic->observed_period_ns != request.period_ns))
             return EINVAL;
-        if (position_ && progress.closed_before_ns == closed_before_ns_) return 0;
-        const int64_t next = position_ + 1;
+        if (previous && previous->publication.period_ns == request.period_ns &&
+            previous->publication.closed_before_ns == request.closed_before_ns) {
+            *confirmed = *previous;
+            return 0;
+        }
+        const NpmFamilyPublicationProof proof{true, request.closed_before_ns, true, true, false};
+        if (!ValidateNpmFamilyPublication(basic->publication, request, proof).ok()) return EINVAL;
+        const int64_t next = previous ? previous->committed_position + 1 : 1;
         const DatabaseParameterV1 parameters[] = {StringParameter(context_.run_id),
-                                                  StringParameter(progress.entity_id),
+                                                  StringParameter(request.key.entity_id),
                                                   StringParameter(basic->history_relation),
                                                   StringParameter(context_.run_id),
                                                   IntParameter(next),
                                                   IntParameter(progress.period_ns),
                                                   IntParameter(progress.closed_before_ns)};
+        PendingOutputLease lease(budget_, sizeof(parameters));
+        if (!lease.Reserve()) return ENOSPC;
         const int rc = commands_->ExecutePrepared(
             "INSERT INTO "
             "npm_result_progress_v1(run_id,entity_id,relation_name,epoch,position,period_ns,closed_before_ns) "
             "VALUES(?,?,?,?,?,?,?)",
             parameters, 7);
         if (rc < 0 || (backend_ != DatabaseBackend::kClickHouse && rc != 1)) {
-            publication_failed_ = true;  // Includes an unknown commit outcome. Never retry this writer.
+            publication_failed_ = true;
+            basic->publication.terminal_failure = true;
             error_ = channel_->GetLastError();
             return EIO;
         }
-        position_ = next;
-        period_ns_ = progress.period_ns;
-        closed_before_ns_ = progress.closed_before_ns;
+        NpmFamilyPublishedProgress fact{request, context_.run_id, next};
+        auto completed = CompleteNpmFamilyPublication(basic->publication, request, proof,
+                                                      NpmFamilyPublicationOutcome::kCommitted, fact);
+        if (!completed.ok()) {
+            publication_failed_ = true;
+            return EINVAL;
+        }
+        basic->publication = std::move(*completed);
+        *confirmed = std::move(fact);
         return 0;
     }
 
@@ -1068,11 +1160,6 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
     std::atomic<bool> cancelled_{false};
     bool terminal_ = false;
     bool publication_failed_ = false;
-    bool invalid_periods_ = false;
-    int64_t observed_period_ns_ = 0;
-    int64_t position_ = 0;
-    int64_t period_ns_ = 0;
-    int64_t closed_before_ns_ = 0;
     std::string terminal_status_ = "writing";
     std::string metadata_status_ = "known";
     std::string error_;
@@ -1541,6 +1628,9 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
         for (const auto& field : entity->descriptor.schema->fields()) {
             ddl += ',' + quote(field->name()) + ' ' + DatabaseType(backend_, *field->type(), field->nullable());
             if (backend_ != DatabaseBackend::kClickHouse && !field->nullable()) ddl += " NOT NULL";
+            const auto check = ColumnCheck(backend_, *field);
+            if (!check.empty())
+                ddl += " CONSTRAINT " + quote("npm_" + field->name() + "_domain") + " CHECK(" + check + ')';
         }
         if (backend_ == DatabaseBackend::kClickHouse) {
             ddl += ") ENGINE=MergeTree ORDER BY (" + quote("__npm_run_id") + ',' +
@@ -1560,6 +1650,9 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
         if (validation_status != 0) {
             return Fail(validation_status, "managed result data table contract conflict: " + validation_error);
         }
+        const int check_status = ValidateDataChecks(channel_, backend_, *entity, &validation_error);
+        if (check_status != 0)
+            return Fail(check_status, "managed result address contract conflict: " + validation_error);
 
         if (PrepareRelation(entity->history_relation, *entity,
                             BuildRelationSql(backend_, *entity, entity->history_relation, false, false)) != 0 ||

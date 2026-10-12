@@ -925,8 +925,13 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
         return EINVAL;
     }
     if (managed_sink && (!stmt.columns.empty() || transform_filter_text != nullptr)) {
-        if (error) *error = "managed sink requires SELECT * without operator-stage WHERE";
-        return EINVAL;
+        const auto& parameters = stmt.operator_with_params.empty() ? stmt.with_params : stmt.operator_with_params[0];
+        const auto observing = parameters.find("observing");
+        if (stmt.operators.front().category != "npm" || stmt.operators.front().name != "basic" ||
+            observing == parameters.end() || observing->second.empty()) {
+            if (error) *error = "managed sink without observing requires SELECT * without operator-stage WHERE";
+            return EINVAL;
+        }
     }
     for (const auto& filter : stmt.stage_filters) {
         if (filter.after_stage > 1) {
@@ -1324,9 +1329,21 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
         capture_reader ? dynamic_cast<IBlockTransformCaptureFactTaskV2*>(execution.get()) : nullptr;
     config.source_residual = source_residual;
     config.transform_residual = transform_filter_plan.residual_expression;
-    config.output_consumer = [appendable_sink, managed_sink](const BlockTransformOutputV1& output) {
+    config.output_consumer = [appendable_sink, managed_sink,
+                              columns = stmt.columns](const BlockTransformOutputV1& output) {
         if (!output.batch) return EINVAL;
-        if (managed_sink) return 0;
+        if (managed_sink) {
+            if (!columns.empty()) {
+                std::vector<int> indices;
+                for (const auto& name : columns) {
+                    const int index = output.batch->schema()->GetFieldIndex(name);
+                    if (index < 0) return EINVAL;
+                    indices.push_back(index);
+                }
+                if (!output.batch->SelectColumns(indices).ok()) return EINVAL;
+            }
+            return 0;
+        }
         DataFrame frame;
         frame.FromArrow(output.batch);
         return appendable_sink->Append(&frame);

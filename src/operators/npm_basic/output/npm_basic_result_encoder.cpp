@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "npm_basic_result_encoder.h"
+#include "npm_family_address_builder.h"
 
 #include <arrow/api.h>
 #include <arrow/util/byte_size.h>
@@ -19,15 +20,8 @@ NpmBasicEncodeError Fail(NpmBasicEncodeError code, const std::string& message, s
     return code;
 }
 
-bool ValidResultUtf8(const NpmBasicResult& result, std::string* field) {
-    if (!arrow::util::ValidateUTF8(result.a_ip)) {
-        *field = "a_ip";
-        return false;
-    }
-    if (!arrow::util::ValidateUTF8(result.b_ip)) {
-        *field = "b_ip";
-        return false;
-    }
+template <typename Address>
+bool ValidResultUtf8(const NpmBasicFamilyResult<Address>& result, std::string* field) {
     if (result.protocol.has_value() && !arrow::util::ValidateUTF8(*result.protocol)) {
         *field = "protocol";
         return false;
@@ -82,7 +76,8 @@ class PendingOutputOwner {
 
 }  // namespace
 
-NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& results,
+template <typename Address>
+NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicFamilyResult<Address>>& results,
                                           std::shared_ptr<arrow::RecordBatch>* output, std::string* error,
                                           bool labeling_enabled, arrow::MemoryPool* pool) {
     if (output == nullptr) return Fail(NpmBasicEncodeError::kNullOutput, "output is null", error);
@@ -110,10 +105,9 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
         arrow::UInt64Builder revision(pool);
         arrow::Int64Builder observed_at(pool);
         arrow::BooleanBuilder is_final(pool);
-        arrow::UInt8Builder ip_family(pool);
         arrow::UInt8Builder transport_protocol(pool);
-        arrow::StringBuilder a_ip(pool);
-        arrow::StringBuilder b_ip(pool);
+        NpmAddressArrowBuilder<Address> a_ip(pool);
+        NpmAddressArrowBuilder<Address> b_ip(pool);
         arrow::UInt16Builder a_port(pool);
         arrow::UInt16Builder b_port(pool);
         arrow::Int64Builder first_ns(pool);
@@ -156,7 +150,6 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
                 !check(revision.Append(result.revision), "revision") ||
                 !check(observed_at.Append(result.observed_at), "observed_at") ||
                 !check(is_final.Append(result.is_final), "is_final") ||
-                !check(ip_family.Append(result.ip_family), "ip_family") ||
                 !check(transport_protocol.Append(result.transport_protocol), "transport_protocol") ||
                 !check(a_ip.Append(result.a_ip), "a_ip") || !check(b_ip.Append(result.b_ip), "b_ip") ||
                 !check(a_port.Append(result.a_port), "a_port") || !check(b_port.Append(result.b_port), "b_port") ||
@@ -172,9 +165,10 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
                 !append_optional_string(result.protocol, &protocol, "protocol")) {
                 return NpmBasicEncodeError::kArrowError;
             }
-            if (!check(
-                    labeling_enabled ? primary_label_id.Append(result.primary_label_id) : primary_label_id.AppendNull(),
-                    "primary_label_id")) {
+            if (!check(labeling_enabled && result.primary_label_id
+                           ? primary_label_id.Append(result.primary_label_id.value_or(0))
+                           : primary_label_id.AppendNull(),
+                       "primary_label_id")) {
                 return NpmBasicEncodeError::kArrowError;
             }
             if (!check(wire_bytes_total.Append(result.wire_bytes_total), "wire_bytes_total"))
@@ -220,10 +214,9 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
         };
         if (!finish(&session_id, "session_id") || !finish(&observation_domain_id, "observation_domain_id") ||
             !finish(&revision, "revision") || !finish(&observed_at, "observed_at") || !finish(&is_final, "is_final") ||
-            !finish(&ip_family, "ip_family") || !finish(&transport_protocol, "transport_protocol") ||
-            !finish(&a_ip, "a_ip") || !finish(&b_ip, "b_ip") || !finish(&a_port, "a_port") ||
-            !finish(&b_port, "b_port") || !finish(&first_ns, "first_ns") || !finish(&last_ns, "last_ns") ||
-            !finish(&packets_ab, "packets_ab") || !finish(&packets_ba, "packets_ba") ||
+            !finish(&transport_protocol, "transport_protocol") || !finish(&a_ip, "a_ip") || !finish(&b_ip, "b_ip") ||
+            !finish(&a_port, "a_port") || !finish(&b_port, "b_port") || !finish(&first_ns, "first_ns") ||
+            !finish(&last_ns, "last_ns") || !finish(&packets_ab, "packets_ab") || !finish(&packets_ba, "packets_ba") ||
             !finish(&wire_bytes_ab, "wire_bytes_ab") || !finish(&wire_bytes_ba, "wire_bytes_ba")) {
             return NpmBasicEncodeError::kArrowError;
         }
@@ -242,8 +235,8 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
             return NpmBasicEncodeError::kArrowError;
         }
 
-        auto batch =
-            arrow::RecordBatch::Make(NpmBasicResultSchema(), static_cast<int64_t>(results.size()), std::move(arrays));
+        auto batch = arrow::RecordBatch::Make(NpmBasicResultSchema(NpmAddressArrowBuilder<Address>::family),
+                                              static_cast<int64_t>(results.size()), std::move(arrays));
         const auto validation = batch->ValidateFull();
         if (!validation.ok()) {
             return Fail(NpmBasicEncodeError::kArrowError, std::string("encoded batch: ") + validation.ToString(),
@@ -257,7 +250,8 @@ NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult>& res
     }
 }
 
-NpmBasicEncodeError EncodeNpmBasicResultsWithBudget(const std::vector<NpmBasicResult>& results,
+template <typename Address>
+NpmBasicEncodeError EncodeNpmBasicResultsWithBudget(const std::vector<NpmBasicFamilyResult<Address>>& results,
                                                     const std::shared_ptr<INpmTaskBudget>& budget,
                                                     std::shared_ptr<arrow::RecordBatch>* output, std::string* error,
                                                     bool labeling_enabled) {
@@ -292,5 +286,18 @@ NpmBasicEncodeError EncodeNpmBasicResultsWithBudget(const std::vector<NpmBasicRe
         return Fail(NpmBasicEncodeError::kAllocationFailed, "NPM basic pending output allocation failed", error);
     }
 }
+
+template NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult4>&,
+                                                   std::shared_ptr<arrow::RecordBatch>*, std::string*, bool,
+                                                   arrow::MemoryPool*);
+template NpmBasicEncodeError EncodeNpmBasicResultsWithBudget(const std::vector<NpmBasicResult4>&,
+                                                             const std::shared_ptr<INpmTaskBudget>&,
+                                                             std::shared_ptr<arrow::RecordBatch>*, std::string*, bool);
+template NpmBasicEncodeError EncodeNpmBasicResults(const std::vector<NpmBasicResult6>&,
+                                                   std::shared_ptr<arrow::RecordBatch>*, std::string*, bool,
+                                                   arrow::MemoryPool*);
+template NpmBasicEncodeError EncodeNpmBasicResultsWithBudget(const std::vector<NpmBasicResult6>&,
+                                                             const std::shared_ptr<INpmTaskBudget>&,
+                                                             std::shared_ptr<arrow::RecordBatch>*, std::string*, bool);
 
 }  // namespace flowsql::npm

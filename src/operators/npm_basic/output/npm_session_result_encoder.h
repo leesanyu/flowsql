@@ -30,12 +30,14 @@ enum class NpmSessionEncodeError : uint8_t {
 };
 
 /** Encodes valid Session results into the fixed NpmSessionResultSchema. Output is unchanged on error. */
-NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult>& results,
+template <typename Address = network::IPv4Address>
+NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionFamilyResult<Address>>& results,
                                               std::shared_ptr<arrow::RecordBatch>* output, std::string* error = nullptr,
                                               bool labeling_enabled = false, arrow::MemoryPool* pool = nullptr);
 
 /** Encodes, reserves exact Arrow buffer bytes, and releases the reservation with the last output owner. */
-NpmSessionEncodeError EncodeNpmSessionResultsWithBudget(const std::vector<NpmSessionResult>& results,
+template <typename Address = network::IPv4Address>
+NpmSessionEncodeError EncodeNpmSessionResultsWithBudget(const std::vector<NpmSessionFamilyResult<Address>>& results,
                                                         const std::shared_ptr<INpmTaskBudget>& budget,
                                                         std::shared_ptr<arrow::RecordBatch>* output,
                                                         std::string* error = nullptr, bool labeling_enabled = false);

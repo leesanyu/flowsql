@@ -171,7 +171,7 @@ bool ParseFeatures(std::string_view text, NpmBasicFeatureConfig* config, const N
 
 NpmBasicTaskConfigStatus ParseFeatureConfig(
     const std::array<const rapidjson::Value*, static_cast<size_t>(TaskConfigField::kCount)>& values,
-    NpmBasicFeatureConfig* config, const NpmModuleCatalogV1& catalog) {
+    NpmBasicFeatureConfig* config, const NpmModuleCatalogV1& catalog, bool managed_output) {
     if (ValidateNpmModuleCatalogV1(catalog).error != NpmProtocolContractErrorV1::kNone)
         return Fail(NpmBasicTaskConfigError::kInvalidFeatures, "catalog");
     const rapidjson::Value* features = values[FieldIndex(TaskConfigField::kFeatures)];
@@ -182,18 +182,20 @@ NpmBasicTaskConfigStatus ParseFeatureConfig(
     config->observing_entity =
         observing
             ? std::string(TrimAsciiWhitespace(std::string_view(observing->GetString(), observing->GetStringLength())))
-            : "basic";
-    const auto owner = std::find_if(catalog.begin(), catalog.end(), [&](const auto& entry) {
-        return std::find(entry.entity_ids.begin(), entry.entity_ids.end(), config->observing_entity) !=
-               entry.entity_ids.end();
-    });
-    if (owner == catalog.end()) return Fail(NpmBasicTaskConfigError::kInvalidObserving, "observing");
-    if (std::find(config->module_ids.begin(), config->module_ids.end(), owner->module_id) == config->module_ids.end())
-        return Fail(NpmBasicTaskConfigError::kObservingFeatureDisabled, "observing");
-    config->observing = config->observing_entity == "basic"     ? NpmResultEntity::kBasic
-                        : config->observing_entity == "session" ? NpmResultEntity::kSession
-                                                                : NpmResultEntity::kProtocol;
-
+            : "";
+    if (observing || !managed_output) {
+        const auto owner = std::find_if(catalog.begin(), catalog.end(), [&](const auto& entry) {
+            return std::find(entry.entity_ids.begin(), entry.entity_ids.end(), config->observing_entity) !=
+                   entry.entity_ids.end();
+        });
+        if (owner == catalog.end()) return Fail(NpmBasicTaskConfigError::kInvalidObserving, "observing");
+        if (std::find(config->module_ids.begin(), config->module_ids.end(), owner->module_id) ==
+            config->module_ids.end())
+            return Fail(NpmBasicTaskConfigError::kObservingFeatureDisabled, "observing");
+        config->observing = config->observing_entity.rfind("basic_ipv", 0) == 0     ? NpmResultEntity::kBasic
+                            : config->observing_entity.rfind("session_ipv", 0) == 0 ? NpmResultEntity::kSession
+                                                                                    : NpmResultEntity::kProtocol;
+    }
     const rapidjson::Value* range_limit = values[FieldIndex(TaskConfigField::kSessionMaxTcpRangesPerDirection)];
     if (range_limit == nullptr) return {};
     if (!ParseUint32(std::string_view(range_limit->GetString(), range_limit->GetStringLength()),
@@ -347,7 +349,7 @@ NpmBasicTaskConfigStatus ParseIntegerFields(
 
 NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, NpmBasicTaskConfig* output,
                                                  bool labeling_available, const NpmModuleCatalogV1& catalog,
-                                                 std::string_view default_input_namespace) {
+                                                 std::string_view default_input_namespace, bool managed_output) {
     if (with_params_json == nullptr) return Fail(NpmBasicTaskConfigError::kNullInput);
     if (with_params_json[0] == '\0') return Fail(NpmBasicTaskConfigError::kEmptyInput);
     if (output == nullptr) return Fail(NpmBasicTaskConfigError::kNullOutput);
@@ -386,7 +388,7 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
             }
 
             NpmBasicTaskConfig next;
-            auto status = ParseFeatureConfig(values, &next.features, catalog);
+            auto status = ParseFeatureConfig(values, &next.features, catalog, managed_output);
             if (status.error != NpmBasicTaskConfigError::kNone) return status;
             status = ParseDomainConfig(values, default_input_namespace, &next.domains);
             if (status.error != NpmBasicTaskConfigError::kNone) return status;
@@ -464,7 +466,7 @@ NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, N
 
         auto status = ParseIntegerFields(values, &next.analysis);
         if (status.error != NpmBasicTaskConfigError::kNone) return status;
-        status = ParseFeatureConfig(values, &next.features, catalog);
+        status = ParseFeatureConfig(values, &next.features, catalog, managed_output);
         if (status.error != NpmBasicTaskConfigError::kNone) return status;
 
         status = ParseDomainConfig(values, default_input_namespace, &next.domains);

@@ -3,8 +3,6 @@
 
 #include "npm_http1_module.h"
 
-#include <arpa/inet.h>
-
 #include <cerrno>
 #include <new>
 #include <utility>
@@ -12,29 +10,7 @@
 namespace flowsql::npm {
 namespace {
 
-constexpr uint64_t kSessionIdentityCharge = 512;
-
-bool FormatAddress(packet::AddressFamily family, const packet::IpAddress& address, std::string* output) {
-    char text[INET6_ADDRSTRLEN]{};
-    const void* bytes = nullptr;
-    int system_family = AF_UNSPEC;
-    if (family == packet::AddressFamily::kIPv4) {
-        const auto* value = std::get_if<packet::IPv4Address>(&address);
-        if (!value) return false;
-        bytes = value->bytes;
-        system_family = AF_INET;
-    } else if (family == packet::AddressFamily::kIPv6) {
-        const auto* value = std::get_if<packet::IPv6Address>(&address);
-        if (!value) return false;
-        bytes = value->bytes;
-        system_family = AF_INET6;
-    } else {
-        return false;
-    }
-    if (!inet_ntop(system_family, bytes, text, sizeof(text))) return false;
-    *output = text;
-    return true;
-}
+constexpr uint64_t kSessionIdentityCharge = sizeof(NpmTransactionIdentity) + 6 * sizeof(void*);
 
 }  // namespace
 
@@ -46,41 +22,52 @@ NpmHttp1ProtocolModuleV1::~NpmHttp1ProtocolModuleV1() { Abort(); }
 int NpmHttp1ProtocolModuleV1::RememberSession(const NpmSessionView& session) {
     if (!budget_ || !session.key || session.session_id == 0) return EINVAL;
     if (identities_.find(session.session_id) != identities_.end()) return 0;
-    if (budget_->Reserve(NpmBudgetCategory::kModuleState, kSessionIdentityCharge) != NpmBudgetError::kNone)
-        return ENOSPC;
+    const uint64_t charge = kSessionIdentityCharge + session.key->OwnedKeyBytes();
+    if (budget_->Reserve(NpmBudgetCategory::kModuleState, charge) != NpmBudgetError::kNone) return ENOSPC;
     try {
-        NpmHttp1SessionIdentityV1 identity;
-        identity.session_id = session.session_id;
-        identity.observation_domain_id = session.key->observation_domain_id;
-        identity.a_port = session.key->a.port;
-        identity.b_port = session.key->b.port;
-        if (session.key->transport_protocol != 6 ||
-            !FormatAddress(session.key->ip_family, session.key->a.ip, &identity.a_ip) ||
-            !FormatAddress(session.key->ip_family, session.key->b.ip, &identity.b_ip)) {
-            budget_->Release(NpmBudgetCategory::kModuleState, kSessionIdentityCharge);
+        if (session.key->Protocol() != 6) {
+            budget_->Release(NpmBudgetCategory::kModuleState, charge);
             return EINVAL;
         }
+        NpmTransactionIdentity identity;
+        identity.session_id = session.session_id;
+        identity.key = *session.key;
+        identity.charge = charge;
         identities_.emplace(session.session_id, std::move(identity));
         return 0;
     } catch (const std::bad_alloc&) {
-        budget_->Release(NpmBudgetCategory::kModuleState, kSessionIdentityCharge);
+        budget_->Release(NpmBudgetCategory::kModuleState, charge);
         return ENOMEM;
     }
 }
 
 void NpmHttp1ProtocolModuleV1::ForgetSession(uint64_t session_id) noexcept {
-    if (identities_.erase(session_id)) budget_->Release(NpmBudgetCategory::kModuleState, kSessionIdentityCharge);
+    const auto found = identities_.find(session_id);
+    if (found == identities_.end()) return;
+    budget_->Release(NpmBudgetCategory::kModuleState, found->second.charge);
+    identities_.erase(found);
 }
 
 int NpmHttp1ProtocolModuleV1::EmitRows(std::vector<NpmHttp1TransactionResultV1>* rows, INpmResultEmitterV1& emitter) {
     int error = 0;
-    for (const auto& row : *rows) {
+    for (auto& row : *rows) {
         const auto identity = identities_.find(row.session_id);
         if (identity == identities_.end()) {
             error = EINVAL;
             break;
         }
-        error = EmitNpmHttp1TransactionV1(row, identity->second, budget_, emitter);
+        auto emit = [&](auto family_result, const auto& key) {
+            family_result.a_ip = key.a_ip;
+            family_result.b_ip = key.b_ip;
+            family_result.observation_domain_id = key.observation_domain_id;
+            family_result.a_port = key.a_port;
+            family_result.b_port = key.b_port;
+
+            family_result.transaction = std::move(row);
+            return EmitNpmHttp1TransactionV1(family_result, budget_, emitter);
+        };
+        const auto& key = identity->second.key;
+        error = key.Get4() ? emit(NpmHttp1Result4{}, *key.Get4()) : emit(NpmHttp1Result6{}, *key.Get6());
         if (error) break;
     }
     transactions_.ReleaseResults(rows);

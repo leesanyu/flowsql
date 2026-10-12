@@ -3,6 +3,9 @@
 
 #include "filter_executor.h"
 
+#include <framework/interfaces/ipacket_family.h>
+
+#include <arrow/api.h>
 #include <arrow/array/util.h>
 #include <arrow/compute/api.h>
 
@@ -20,22 +23,41 @@ const std::shared_ptr<arrow::DataType> DatumType(const arrow::Datum& datum) {
 class FilterEvaluator {
  public:
     FilterEvaluator(std::shared_ptr<arrow::RecordBatch> batch, std::string* error)
-        : batch_(std::move(batch)), error_(error) {}
+        : batch_(std::move(batch)),
+          error_(error),
+          packet_family_(batch_->schema()->Equals(*packet::PacketFamilySchema(), true)),
+          logical_schema_(packet_family_ ? packet::PacketFamilyFilterSchema() : nullptr) {}
 
     FilterEvalError Evaluate(const std::shared_ptr<const BoundFilterExpr>& expression,
                              std::shared_ptr<arrow::BooleanArray>* output) {
         if (!expression->value_type || expression->value_type->id() != arrow::Type::BOOL) {
-            return Fail(FilterEvalError::kInvalidBoundExpression,
-                        "filter root must produce boolean", expression->node_id);
+            return Fail(FilterEvalError::kInvalidBoundExpression, "filter root must produce boolean",
+                        expression->node_id);
         }
 
+        if (packet_family_) {
+            const auto validation = packet::ValidatePacketFamilyBatch(*batch_);
+            if (!validation.ok()) return Fail(FilterEvalError::kSchemaMismatch, validation.ToString(), 0);
+            arrow::BooleanBuilder mask;
+            for (packet_row_ = 0; packet_row_ < batch_->num_rows(); ++packet_row_) {
+                arrow::Datum value;
+                const auto status = EvaluateNode(expression, &value);
+                if (status != FilterEvalError::kNone) return status;
+                if (!value.is_scalar() || value.scalar()->type->id() != arrow::Type::BOOL)
+                    return Fail(FilterEvalError::kArrowError, "packet predicate did not return a boolean scalar", 0);
+                const auto& scalar = static_cast<const arrow::BooleanScalar&>(*value.scalar());
+                const auto appended = scalar.is_valid ? mask.Append(scalar.value) : mask.AppendNull();
+                if (!appended.ok()) return Fail(FilterEvalError::kArrowError, appended.ToString(), 0);
+            }
+            const auto finished = mask.Finish(output);
+            return finished.ok() ? FilterEvalError::kNone : Fail(FilterEvalError::kArrowError, finished.ToString(), 0);
+        }
         arrow::Datum result;
         auto eval_error = EvaluateNode(expression, &result);
         if (eval_error != FilterEvalError::kNone) return eval_error;
         const auto result_type = DatumType(result);
         if (!result_type || result_type->id() != arrow::Type::BOOL) {
-            return Fail(FilterEvalError::kInvalidBoundExpression,
-                        "filter result is not boolean", expression->node_id);
+            return Fail(FilterEvalError::kInvalidBoundExpression, "filter result is not boolean", expression->node_id);
         }
 
         std::shared_ptr<arrow::Array> result_array;
@@ -45,21 +67,17 @@ class FilterEvaluator {
             auto broadcast = arrow::MakeArrayFromScalar(*result.scalar(), batch_->num_rows());
             if (!broadcast.ok()) {
                 return Fail(FilterEvalError::kArrowError,
-                            "cannot broadcast filter scalar: " +
-                                broadcast.status().ToString(),
-                            expression->node_id);
+                            "cannot broadcast filter scalar: " + broadcast.status().ToString(), expression->node_id);
             }
             result_array = *broadcast;
         } else {
-            return Fail(FilterEvalError::kArrowError,
-                        "Arrow filter kernel returned an unsupported datum",
+            return Fail(FilterEvalError::kArrowError, "Arrow filter kernel returned an unsupported datum",
                         expression->node_id);
         }
 
         if (!result_array || result_array->length() != batch_->num_rows() ||
             result_array->type_id() != arrow::Type::BOOL) {
-            return Fail(FilterEvalError::kArrowError,
-                        "Arrow filter kernel returned an invalid mask",
+            return Fail(FilterEvalError::kArrowError, "Arrow filter kernel returned an invalid mask",
                         expression->node_id);
         }
         *output = std::static_pointer_cast<arrow::BooleanArray>(result_array);
@@ -67,9 +85,7 @@ class FilterEvaluator {
     }
 
  private:
-    FilterEvalError Fail(FilterEvalError code,
-                         const std::string& message,
-                         uint32_t node_id) {
+    FilterEvalError Fail(FilterEvalError code, const std::string& message, uint32_t node_id) {
         if (error_) {
             *error_ = message;
             if (node_id != 0) *error_ += " at node " + std::to_string(node_id);
@@ -77,12 +93,9 @@ class FilterEvaluator {
         return code;
     }
 
-    FilterEvalError EvaluateNode(
-        const std::shared_ptr<const BoundFilterExpr>& expression,
-        arrow::Datum* output) {
+    FilterEvalError EvaluateNode(const std::shared_ptr<const BoundFilterExpr>& expression, arrow::Datum* output) {
         if (!expression || !output || !expression->value_type) {
-            return Fail(FilterEvalError::kInvalidBoundExpression,
-                        "bound expression node is incomplete",
+            return Fail(FilterEvalError::kInvalidBoundExpression, "bound expression node is incomplete",
                         expression ? expression->node_id : 0);
         }
         switch (expression->kind) {
@@ -105,59 +118,74 @@ class FilterEvaluator {
             case FilterExprKind::kIsNull:
                 return EvaluateIsNull(expression, output);
             case FilterExprKind::kCall:
-                return Fail(FilterEvalError::kUnsupportedFunction,
-                            "bound function evaluation is not available",
+                return Fail(FilterEvalError::kUnsupportedFunction, "bound function evaluation is not available",
                             expression->node_id);
         }
-        return Fail(FilterEvalError::kInvalidBoundExpression,
-                    "unknown bound expression kind", expression->node_id);
+        return Fail(FilterEvalError::kInvalidBoundExpression, "unknown bound expression kind", expression->node_id);
     }
 
-    FilterEvalError EvaluateField(
-        const std::shared_ptr<const BoundFilterExpr>& expression,
-        arrow::Datum* output) {
-        if (!expression->operands.empty() || expression->literal ||
-            expression->field_index < 0) {
-            return Fail(FilterEvalError::kInvalidBoundExpression,
-                        "bound field node is invalid", expression->node_id);
+    FilterEvalError EvaluateField(const std::shared_ptr<const BoundFilterExpr>& expression, arrow::Datum* output) {
+        if (!expression->operands.empty() || expression->literal || expression->field_index < 0) {
+            return Fail(FilterEvalError::kInvalidBoundExpression, "bound field node is invalid", expression->node_id);
+        }
+        if (packet_family_) {
+            const auto& logical = logical_schema_;
+            if (expression->field_index >= logical->num_fields() ||
+                !logical->field(expression->field_index)->type()->Equals(expression->value_type))
+                return Fail(FilterEvalError::kSchemaMismatch, "packet logical field mismatch", expression->node_id);
+            const auto& name = logical->field(expression->field_index)->name();
+            const auto common = batch_->GetColumnByName(name);
+            if (common) {
+                auto scalar = common->GetScalar(packet_row_);
+                if (!scalar.ok())
+                    return Fail(FilterEvalError::kArrowError, scalar.status().ToString(), expression->node_id);
+                *output = arrow::Datum(*scalar);
+                return FilterEvalError::kNone;
+            }
+            const auto& endpoints =
+                static_cast<const arrow::DenseUnionArray&>(*batch_->GetColumnByName("ip_endpoints"));
+            const auto family = endpoints.type_code(packet_row_);
+            if (name == "src_ip_family" || name == "dst_ip_family") {
+                *output = arrow::Datum(std::make_shared<arrow::UInt8Scalar>(family));
+            } else if ((name == "src_ip_v4" || name == "dst_ip_v4") ? family == 4 : family == 6) {
+                const auto& pair =
+                    static_cast<const arrow::StructArray&>(*endpoints.field(endpoints.child_id(packet_row_)));
+                auto scalar =
+                    pair.field(name.compare(0, 3, "src") == 0 ? 0 : 1)->GetScalar(endpoints.value_offset(packet_row_));
+                if (!scalar.ok())
+                    return Fail(FilterEvalError::kArrowError, scalar.status().ToString(), expression->node_id);
+                *output = arrow::Datum(*scalar);
+            } else {
+                *output = arrow::Datum(arrow::MakeNullScalar(expression->value_type));
+            }
+            return FilterEvalError::kNone;
         }
         if (expression->field_index >= batch_->num_columns()) {
-            return Fail(FilterEvalError::kSchemaMismatch,
-                        "bound field index is outside the batch Schema",
+            return Fail(FilterEvalError::kSchemaMismatch, "bound field index is outside the batch Schema",
                         expression->node_id);
         }
         const auto& column = batch_->column(expression->field_index);
         if (!column || !column->type()->Equals(expression->value_type)) {
-            return Fail(FilterEvalError::kSchemaMismatch,
-                        "batch column type does not match the bound field",
+            return Fail(FilterEvalError::kSchemaMismatch, "batch column type does not match the bound field",
                         expression->node_id);
         }
         *output = arrow::Datum(column);
         return FilterEvalError::kNone;
     }
 
-    FilterEvalError EvaluateLiteral(
-        const std::shared_ptr<const BoundFilterExpr>& expression,
-        arrow::Datum* output) {
-        if (!expression->operands.empty() || !expression->literal ||
-            !expression->literal->is_valid ||
+    FilterEvalError EvaluateLiteral(const std::shared_ptr<const BoundFilterExpr>& expression, arrow::Datum* output) {
+        if (!expression->operands.empty() || !expression->literal || !expression->literal->is_valid ||
             !expression->literal->type->Equals(expression->value_type)) {
-            return Fail(FilterEvalError::kInvalidBoundExpression,
-                        "bound literal node is invalid", expression->node_id);
+            return Fail(FilterEvalError::kInvalidBoundExpression, "bound literal node is invalid", expression->node_id);
         }
         *output = arrow::Datum(expression->literal);
         return FilterEvalError::kNone;
     }
 
-    FilterEvalError EvaluateLogical(
-        const std::shared_ptr<const BoundFilterExpr>& expression,
-        const char* function,
-        size_t arity,
-        arrow::Datum* output) {
-        if (expression->value_type->id() != arrow::Type::BOOL ||
-            expression->operands.size() != arity) {
-            return Fail(FilterEvalError::kInvalidBoundExpression,
-                        "bound logical node has invalid type or arity",
+    FilterEvalError EvaluateLogical(const std::shared_ptr<const BoundFilterExpr>& expression, const char* function,
+                                    size_t arity, arrow::Datum* output) {
+        if (expression->value_type->id() != arrow::Type::BOOL || expression->operands.size() != arity) {
+            return Fail(FilterEvalError::kInvalidBoundExpression, "bound logical node has invalid type or arity",
                         expression->node_id);
         }
         std::vector<arrow::Datum> operands;
@@ -168,8 +196,7 @@ class FilterEvaluator {
             if (eval_error != FilterEvalError::kNone) return eval_error;
             const auto type = DatumType(value);
             if (!type || type->id() != arrow::Type::BOOL) {
-                return Fail(FilterEvalError::kInvalidBoundExpression,
-                            "logical operand is not boolean",
+                return Fail(FilterEvalError::kInvalidBoundExpression, "logical operand is not boolean",
                             operand ? operand->node_id : expression->node_id);
             }
             operands.push_back(std::move(value));
@@ -177,17 +204,15 @@ class FilterEvaluator {
         return CallBoolean(function, operands, expression->node_id, output);
     }
 
-    FilterEvalError EvaluateCompare(
-        const std::shared_ptr<const BoundFilterExpr>& expression,
-        arrow::Datum* output) {
+    FilterEvalError EvaluateCompare(const std::shared_ptr<const BoundFilterExpr>& expression, arrow::Datum* output) {
         if (expression->operands.size() != 2 || !expression->comparison_type) {
-            return Fail(FilterEvalError::kInvalidBoundExpression,
-                        "bound comparison node is invalid", expression->node_id);
+            return Fail(FilterEvalError::kInvalidBoundExpression, "bound comparison node is invalid",
+                        expression->node_id);
         }
         const char* function = ComparisonFunction(expression->compare_op);
         if (!function) {
-            return Fail(FilterEvalError::kInvalidBoundExpression,
-                        "bound comparison operator is invalid", expression->node_id);
+            return Fail(FilterEvalError::kInvalidBoundExpression, "bound comparison operator is invalid",
+                        expression->node_id);
         }
 
         std::vector<arrow::Datum> operands(2);
@@ -195,58 +220,47 @@ class FilterEvaluator {
             arrow::Datum value;
             auto eval_error = EvaluateNode(expression->operands[i], &value);
             if (eval_error != FilterEvalError::kNone) return eval_error;
-            eval_error = CastForComparison(
-                value, expression->comparison_type, expression->node_id, &operands[i]);
+            eval_error = CastForComparison(value, expression->comparison_type, expression->node_id, &operands[i]);
             if (eval_error != FilterEvalError::kNone) return eval_error;
         }
         return CallBoolean(function, operands, expression->node_id, output);
     }
 
-    FilterEvalError EvaluateIn(
-        const std::shared_ptr<const BoundFilterExpr>& expression,
-        arrow::Datum* output) {
-        if (expression->operands.size() < 2 || !expression->comparison_type ||
-            !expression->operands[0] ||
+    FilterEvalError EvaluateIn(const std::shared_ptr<const BoundFilterExpr>& expression, arrow::Datum* output) {
+        if (expression->operands.size() < 2 || !expression->comparison_type || !expression->operands[0] ||
             expression->operands[0]->kind != FilterExprKind::kField) {
-            return Fail(FilterEvalError::kInvalidBoundExpression,
-                        "bound IN node is invalid", expression->node_id);
+            return Fail(FilterEvalError::kInvalidBoundExpression, "bound IN node is invalid", expression->node_id);
         }
 
         arrow::Datum field;
         auto eval_error = EvaluateNode(expression->operands[0], &field);
         if (eval_error != FilterEvalError::kNone) return eval_error;
         arrow::Datum comparable_field;
-        eval_error = CastForComparison(
-            field, expression->comparison_type, expression->node_id, &comparable_field);
+        eval_error = CastForComparison(field, expression->comparison_type, expression->node_id, &comparable_field);
         if (eval_error != FilterEvalError::kNone) return eval_error;
 
         arrow::Datum accumulated;
         for (size_t i = 1; i < expression->operands.size(); ++i) {
-            if (!expression->operands[i] ||
-                expression->operands[i]->kind != FilterExprKind::kLiteral) {
-                return Fail(FilterEvalError::kInvalidBoundExpression,
-                            "bound IN value is not a literal", expression->node_id);
+            if (!expression->operands[i] || expression->operands[i]->kind != FilterExprKind::kLiteral) {
+                return Fail(FilterEvalError::kInvalidBoundExpression, "bound IN value is not a literal",
+                            expression->node_id);
             }
             arrow::Datum literal;
             eval_error = EvaluateNode(expression->operands[i], &literal);
             if (eval_error != FilterEvalError::kNone) return eval_error;
             arrow::Datum comparable_literal;
-            eval_error = CastForComparison(
-                literal, expression->comparison_type, expression->node_id,
-                &comparable_literal);
+            eval_error =
+                CastForComparison(literal, expression->comparison_type, expression->node_id, &comparable_literal);
             if (eval_error != FilterEvalError::kNone) return eval_error;
 
             arrow::Datum equals;
-            eval_error = CallBoolean(
-                "equal", {comparable_field, comparable_literal},
-                expression->node_id, &equals);
+            eval_error = CallBoolean("equal", {comparable_field, comparable_literal}, expression->node_id, &equals);
             if (eval_error != FilterEvalError::kNone) return eval_error;
             if (i == 1) {
                 accumulated = std::move(equals);
             } else {
                 arrow::Datum combined;
-                eval_error = CallBoolean(
-                    "or_kleene", {accumulated, equals}, expression->node_id, &combined);
+                eval_error = CallBoolean("or_kleene", {accumulated, equals}, expression->node_id, &combined);
                 if (eval_error != FilterEvalError::kNone) return eval_error;
                 accumulated = std::move(combined);
             }
@@ -255,18 +269,12 @@ class FilterEvaluator {
         return FilterEvalError::kNone;
     }
 
-    FilterEvalError EvaluateBetween(
-        const std::shared_ptr<const BoundFilterExpr>& expression,
-        arrow::Datum* output) {
-        if (expression->operands.size() != 3 || !expression->comparison_type ||
-            !expression->operands[0] ||
-            expression->operands[0]->kind != FilterExprKind::kField ||
-            !expression->operands[1] ||
-            expression->operands[1]->kind != FilterExprKind::kLiteral ||
-            !expression->operands[2] ||
+    FilterEvalError EvaluateBetween(const std::shared_ptr<const BoundFilterExpr>& expression, arrow::Datum* output) {
+        if (expression->operands.size() != 3 || !expression->comparison_type || !expression->operands[0] ||
+            expression->operands[0]->kind != FilterExprKind::kField || !expression->operands[1] ||
+            expression->operands[1]->kind != FilterExprKind::kLiteral || !expression->operands[2] ||
             expression->operands[2]->kind != FilterExprKind::kLiteral) {
-            return Fail(FilterEvalError::kInvalidBoundExpression,
-                        "bound BETWEEN node is invalid", expression->node_id);
+            return Fail(FilterEvalError::kInvalidBoundExpression, "bound BETWEEN node is invalid", expression->node_id);
         }
 
         std::vector<arrow::Datum> operands(3);
@@ -274,32 +282,23 @@ class FilterEvaluator {
             arrow::Datum value;
             auto eval_error = EvaluateNode(expression->operands[i], &value);
             if (eval_error != FilterEvalError::kNone) return eval_error;
-            eval_error = CastForComparison(
-                value, expression->comparison_type, expression->node_id, &operands[i]);
+            eval_error = CastForComparison(value, expression->comparison_type, expression->node_id, &operands[i]);
             if (eval_error != FilterEvalError::kNone) return eval_error;
         }
 
         arrow::Datum lower_match;
-        auto eval_error = CallBoolean(
-            "greater_equal", {operands[0], operands[1]}, expression->node_id,
-            &lower_match);
+        auto eval_error = CallBoolean("greater_equal", {operands[0], operands[1]}, expression->node_id, &lower_match);
         if (eval_error != FilterEvalError::kNone) return eval_error;
         arrow::Datum upper_match;
-        eval_error = CallBoolean(
-            "less_equal", {operands[0], operands[2]}, expression->node_id,
-            &upper_match);
+        eval_error = CallBoolean("less_equal", {operands[0], operands[2]}, expression->node_id, &upper_match);
         if (eval_error != FilterEvalError::kNone) return eval_error;
-        return CallBoolean(
-            "and_kleene", {lower_match, upper_match}, expression->node_id, output);
+        return CallBoolean("and_kleene", {lower_match, upper_match}, expression->node_id, output);
     }
 
-    FilterEvalError EvaluateIsNull(
-        const std::shared_ptr<const BoundFilterExpr>& expression,
-        arrow::Datum* output) {
+    FilterEvalError EvaluateIsNull(const std::shared_ptr<const BoundFilterExpr>& expression, arrow::Datum* output) {
         if (expression->operands.size() != 1 || !expression->operands[0] ||
             expression->operands[0]->kind != FilterExprKind::kField) {
-            return Fail(FilterEvalError::kInvalidBoundExpression,
-                        "bound IS NULL node is invalid", expression->node_id);
+            return Fail(FilterEvalError::kInvalidBoundExpression, "bound IS NULL node is invalid", expression->node_id);
         }
         arrow::Datum operand;
         auto eval_error = EvaluateNode(expression->operands[0], &operand);
@@ -307,50 +306,36 @@ class FilterEvaluator {
         return CallBoolean("is_null", {operand}, expression->node_id, output);
     }
 
-    FilterEvalError CastForComparison(
-        const arrow::Datum& input,
-        const std::shared_ptr<arrow::DataType>& target_type,
-        uint32_t node_id,
-        arrow::Datum* output) {
+    FilterEvalError CastForComparison(const arrow::Datum& input, const std::shared_ptr<arrow::DataType>& target_type,
+                                      uint32_t node_id, arrow::Datum* output) {
         const auto input_type = DatumType(input);
         if (!input_type || !target_type || !output) {
-            return Fail(FilterEvalError::kInvalidBoundExpression,
-                        "comparison value has no Arrow type", node_id);
+            return Fail(FilterEvalError::kInvalidBoundExpression, "comparison value has no Arrow type", node_id);
         }
         if (input_type->Equals(target_type)) {
             *output = input;
             return FilterEvalError::kNone;
         }
-        auto cast = arrow::compute::Cast(
-            input, arrow::TypeHolder(target_type), arrow::compute::CastOptions::Safe());
+        auto cast = arrow::compute::Cast(input, arrow::TypeHolder(target_type), arrow::compute::CastOptions::Safe());
         if (!cast.ok()) {
-            return Fail(FilterEvalError::kArrowError,
-                        "safe comparison cast failed: " + cast.status().ToString(),
+            return Fail(FilterEvalError::kArrowError, "safe comparison cast failed: " + cast.status().ToString(),
                         node_id);
         }
         *output = *cast;
         return FilterEvalError::kNone;
     }
 
-    FilterEvalError CallBoolean(
-        const char* function,
-        const std::vector<arrow::Datum>& operands,
-        uint32_t node_id,
-        arrow::Datum* output) {
+    FilterEvalError CallBoolean(const char* function, const std::vector<arrow::Datum>& operands, uint32_t node_id,
+                                arrow::Datum* output) {
         auto result = arrow::compute::CallFunction(function, operands);
         if (!result.ok()) {
             return Fail(FilterEvalError::kArrowError,
-                        std::string("Arrow compute '") + function +
-                            "' failed: " + result.status().ToString(),
-                        node_id);
+                        std::string("Arrow compute '") + function + "' failed: " + result.status().ToString(), node_id);
         }
         const auto type = DatumType(*result);
-        if (!type || type->id() != arrow::Type::BOOL ||
-            (!result->is_array() && !result->is_scalar())) {
+        if (!type || type->id() != arrow::Type::BOOL || (!result->is_array() && !result->is_scalar())) {
             return Fail(FilterEvalError::kArrowError,
-                        std::string("Arrow compute '") + function +
-                            "' did not return boolean values",
-                        node_id);
+                        std::string("Arrow compute '") + function + "' did not return boolean values", node_id);
         }
         *output = *result;
         return FilterEvalError::kNone;
@@ -378,15 +363,16 @@ class FilterEvaluator {
 
     std::shared_ptr<arrow::RecordBatch> batch_;
     std::string* error_ = nullptr;
+    bool packet_family_ = false;
+    int64_t packet_row_ = 0;
+    std::shared_ptr<arrow::Schema> logical_schema_;
 };
 
 }  // namespace
 
-FilterEvalError EvaluateFilterMask(
-    const std::shared_ptr<arrow::RecordBatch>& batch,
-    const std::shared_ptr<const BoundFilterExpr>& expression,
-    std::shared_ptr<arrow::BooleanArray>* output,
-    std::string* error) {
+FilterEvalError EvaluateFilterMask(const std::shared_ptr<arrow::RecordBatch>& batch,
+                                   const std::shared_ptr<const BoundFilterExpr>& expression,
+                                   std::shared_ptr<arrow::BooleanArray>* output, std::string* error) {
     if (output) output->reset();
     if (error) error->clear();
     if (!batch || !expression || !output) {
@@ -397,8 +383,7 @@ FilterEvalError EvaluateFilterMask(
     static const arrow::Status initialize_status = arrow::compute::Initialize();
     if (!initialize_status.ok()) {
         if (error) {
-            *error = "Arrow compute initialization failed: " +
-                     initialize_status.ToString();
+            *error = "Arrow compute initialization failed: " + initialize_status.ToString();
         }
         return FilterEvalError::kArrowError;
     }
@@ -407,11 +392,9 @@ FilterEvalError EvaluateFilterMask(
     return evaluator.Evaluate(expression, output);
 }
 
-FilterEvalError FilterRecordBatch(
-    const std::shared_ptr<arrow::RecordBatch>& batch,
-    const std::shared_ptr<const BoundFilterExpr>& expression,
-    std::shared_ptr<arrow::RecordBatch>* output,
-    std::string* error) {
+FilterEvalError FilterRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch,
+                                  const std::shared_ptr<const BoundFilterExpr>& expression,
+                                  std::shared_ptr<arrow::RecordBatch>* output, std::string* error) {
     if (output) output->reset();
     if (error) error->clear();
     if (!output) {
@@ -423,16 +406,13 @@ FilterEvalError FilterRecordBatch(
     const auto eval_error = EvaluateFilterMask(batch, expression, &mask, error);
     if (eval_error != FilterEvalError::kNone) return eval_error;
 
-    const arrow::compute::FilterOptions options(
-        arrow::compute::FilterOptions::DROP);
-    auto filtered = arrow::compute::Filter(
-        arrow::Datum(batch), arrow::Datum(mask), options);
+    const arrow::compute::FilterOptions options(arrow::compute::FilterOptions::DROP);
+    auto filtered = arrow::compute::Filter(arrow::Datum(batch), arrow::Datum(mask), options);
     if (!filtered.ok()) {
         if (error) *error = "Arrow RecordBatch filter failed: " + filtered.status().ToString();
         return FilterEvalError::kArrowError;
     }
-    if (filtered->kind() != arrow::Datum::RECORD_BATCH ||
-        !filtered->record_batch()) {
+    if (filtered->kind() != arrow::Datum::RECORD_BATCH || !filtered->record_batch()) {
         if (error) *error = "Arrow filter did not return a RecordBatch";
         return FilterEvalError::kArrowError;
     }

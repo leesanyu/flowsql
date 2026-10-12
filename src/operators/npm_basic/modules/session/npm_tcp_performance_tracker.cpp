@@ -523,12 +523,12 @@ NpmTcpPerformanceError NpmTcpPerformanceTracker::Observe(const NpmPacketView& pa
     uint8_t protocol = 0;
     if (packet.transport.tcp.valid) {
         protocol = kTcpProtocol;
-    } else if (session.key != nullptr && session.key->transport_protocol == kUdpProtocol) {
+    } else if (session.key.has_value() && session.key->Protocol() == kUdpProtocol) {
         protocol = kUdpProtocol;
     } else {
         return NpmTcpPerformanceError::kInvalidPacket;
     }
-    if (session.key != nullptr && session.key->transport_protocol != protocol) {
+    if (session.key.has_value() && session.key->Protocol() != protocol) {
         return NpmTcpPerformanceError::kProtocolMismatch;
     }
     const auto iterator = impl_->sessions.find(session.session_id);
@@ -585,13 +585,13 @@ NpmTcpPerformanceError NpmTcpPerformanceTracker::Snapshot(uint64_t session_id,
 NpmTcpPerformanceError NpmTcpPerformanceTracker::Snapshot(const NpmSessionView& session,
                                                           NpmTcpPerformanceSnapshot* output) const {
     if (!output) return NpmTcpPerformanceError::kNullOutput;
-    if (session.session_id == 0 || session.key == nullptr) {
+    if (session.session_id == 0 || !session.key) {
         return NpmTcpPerformanceError::kSessionViewMismatch;
     }
     const auto iterator = impl_->sessions.find(session.session_id);
     if (iterator == impl_->sessions.end()) return NpmTcpPerformanceError::kNotFound;
     const auto& state = iterator->second;
-    if (session.key->transport_protocol != state.transport_protocol) {
+    if (session.key->Protocol() != state.transport_protocol) {
         return NpmTcpPerformanceError::kProtocolMismatch;
     }
     const auto duration = NonnegativeDelta(session.last_ns, session.first_ns);

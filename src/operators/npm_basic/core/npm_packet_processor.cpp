@@ -11,6 +11,26 @@
 namespace flowsql::npm {
 namespace {
 
+class PacketScratchBudget {
+ public:
+    explicit PacketScratchBudget(INpmTaskBudget& budget) : budget_(budget) {}
+    ~PacketScratchBudget() {
+        if (bytes_) budget_.Release(NpmBudgetCategory::kInputBatch, bytes_);
+    }
+    bool Reserve(uint64_t bytes) {
+        if (budget_.Reserve(NpmBudgetCategory::kInputBatch, bytes) != NpmBudgetError::kNone) return false;
+        bytes_ += bytes;
+        return true;
+    }
+
+ private:
+    INpmTaskBudget& budget_;
+    uint64_t bytes_ = 0;
+};
+uint64_t BindingKeyBytes(const packet::PacketFamilyLayerView& layer, const NpmObservationDomainMap& domain) {
+    return (layer.Get4() ? sizeof(NpmSessionKey4) : sizeof(NpmSessionKey6)) + domain.input_namespace.capacity() + 1;
+}
+
 bool IsOfflineProgressDisposition(NpmCaptureProgressDisposition disposition) {
     return disposition == NpmCaptureProgressDisposition::kAdvanced ||
            disposition == NpmCaptureProgressDisposition::kUnchanged;
@@ -38,7 +58,7 @@ int NotifySessionEndRange(const std::vector<NpmSessionSnapshot>& ended_sessions,
 }
 
 NpmSessionTableError SampleTerminalProtocol(bool protocol_was_pending, const NpmPacketView& packet,
-                                            packet::IPacketProtocolIdentifier& identifier,
+                                            packet::IPacketFamilyProtocolIdentifier& identifier,
                                             NpmSessionSnapshot* snapshot) {
     if (!protocol_was_pending || packet.payload.empty()) return NpmSessionTableError::kNone;
     if (packet.payload.data == nullptr || packet.layer == nullptr) {
@@ -65,8 +85,8 @@ NpmSessionTableError SampleTerminalProtocol(bool protocol_was_pending, const Npm
 }  // namespace
 
 NpmPacketProcessStatus ProcessNpmPacket(const NpmObservationDomainMap& domain_map, const packet::PacketView& packet,
-                                        const packet::PacketLayerInfo& layer, NpmSessionTable& sessions,
-                                        packet::IPacketProtocolIdentifier& identifier,
+                                        const packet::PacketFamilyLayerView& layer, NpmSessionTable& sessions,
+                                        packet::IPacketFamilyProtocolIdentifier& identifier,
                                         const std::vector<INpmAnalysisModule*>& modules, INpmResultWriter& writer,
                                         std::vector<NpmSessionSnapshot>* ended_sessions) {
     NpmPacketProcessStatus status;
@@ -91,13 +111,11 @@ NpmPacketProcessStatus ProcessNpmPacket(const NpmObservationDomainMap& domain_ma
     return ProcessNpmBoundPacket(packet, layer, binding, 0, sessions, identifier, modules, writer, ended_sessions);
 }
 
-NpmPacketProcessStatus ProcessNpmBoundPacket(const packet::PacketView& packet, const packet::PacketLayerInfo& layer,
-                                             const NpmSessionPacketBinding& binding,
-                                             uint32_t new_session_primary_label_id, NpmSessionTable& sessions,
-                                             packet::IPacketProtocolIdentifier& identifier,
-                                             const std::vector<INpmAnalysisModule*>& modules, INpmResultWriter& writer,
-                                             std::vector<NpmSessionSnapshot>* ended_sessions,
-                                             NpmTcpStreamProvider* streams) {
+NpmPacketProcessStatus ProcessNpmBoundPacket(
+    const packet::PacketView& packet, const packet::PacketFamilyLayerView& layer,
+    const NpmSessionPacketBinding& binding, uint32_t new_session_primary_label_id, NpmSessionTable& sessions,
+    packet::IPacketFamilyProtocolIdentifier& identifier, const std::vector<INpmAnalysisModule*>& modules,
+    INpmResultWriter& writer, std::vector<NpmSessionSnapshot>* ended_sessions, NpmTcpStreamProvider* streams) {
     NpmPacketProcessStatus status;
     if (ended_sessions == nullptr) {
         status.error = NpmPacketProcessError::kNullOutput;
@@ -218,7 +236,7 @@ NpmPacketProcessStatus ProcessNpmBoundPacket(const packet::PacketView& packet, c
 
 NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
     const NpmObservationDomainMap& domain_map, const NpmPacketBatchView& batch, NpmSessionTable& sessions,
-    packet::IPacketProtocolIdentifier& identifier, const std::vector<INpmAnalysisModule*>& modules,
+    packet::IPacketFamilyProtocolIdentifier& identifier, const std::vector<INpmAnalysisModule*>& modules,
     INpmResultWriter& writer, std::vector<NpmSessionEndEvent>* ended_events, const IFlowLabelMatcherV1* matcher,
     const std::vector<NpmProtocolModuleAdapter*>& protocol_modules, NpmTcpStreamProvider* streams,
     bool advance_offline_progress) {
@@ -236,8 +254,10 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
 
     const bool control_enabled = std::any_of(protocol_modules.begin(), protocol_modules.end(),
                                              [](const auto* module) { return module->AcceptsControl(); });
-    const auto is_control = [&](const packet::PacketLayerInfo& layer) { return control_enabled && !layer.ports_valid; };
-    const auto dispatch_control = [&](const packet::PacketView& packet, packet::PacketLayerInfo layer) {
+    const auto is_control = [&](const packet::PacketFamilyLayerView& layer) {
+        return control_enabled && !layer.ports_valid;
+    };
+    const auto dispatch_control = [&](const packet::PacketView& packet, packet::PacketFamilyLayerView layer) {
         NpmPacketProcessStatus result;
         NpmInputEventV1 event;
         result.binding_error = BuildNpmControlInput(domain_map, packet, layer, &event);
@@ -326,7 +346,7 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
             std::vector<NpmSessionEndEvent> next_events;
             for (current_row = 0; current_row < batch.num_rows(); ++current_row) {
                 packet::PacketView packet;
-                packet::PacketLayerInfo layer;
+                packet::PacketFamilyLayerView layer;
                 status.batch_error = batch.Get(current_row, &packet, &layer);
                 if (status.batch_error != NpmPacketBatchError::kNone) {
                     status.error = NpmPacketBatchProcessError::kBatchViewError;
@@ -366,7 +386,7 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
         }
 
         struct StagedPacket {
-            packet::PacketLayerInfo layer;
+            packet::PacketFamilyLayerView layer;
             NpmSessionPacketBinding binding;
             size_t candidate_index = std::numeric_limits<size_t>::max();
             size_t payload_offset = 0;
@@ -374,11 +394,22 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
             bool control = false;
         };
 
+        PacketScratchBudget scratch_budget(sessions.Budget());
+        const uint64_t rows = static_cast<uint64_t>(batch.num_rows());
+        const uint64_t row_bytes = sizeof(StagedPacket) + sizeof(uint32_t);
+        if (rows > (std::numeric_limits<uint64_t>::max() - 256 * sizeof(FlowLabelFactsV1)) / row_bytes ||
+            !scratch_budget.Reserve(rows * row_bytes + 256 * sizeof(FlowLabelFactsV1))) {
+            status.packet_status.session_error = NpmSessionTableError::kSessionBudgetExceeded;
+            status.packet_status.error = NpmPacketProcessError::kSessionError;
+            status.error = NpmPacketBatchProcessError::kPacketError;
+            return status;
+        }
         std::vector<StagedPacket> staged_packets;
         staged_packets.reserve(static_cast<size_t>(batch.num_rows()));
         std::vector<FlowLabelFactsV1> candidate_facts;
         candidate_facts.reserve(256);
         std::vector<uint32_t> candidate_labels;
+        candidate_labels.reserve(static_cast<size_t>(rows));
         NpmSessionAdmissionPlanner admission_plan(sessions);
         size_t candidate_window_begin = 0;
         const auto classify_candidates = [&]() {
@@ -392,7 +423,7 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
         };
         for (current_row = 0; current_row < batch.num_rows(); ++current_row) {
             packet::PacketView packet;
-            packet::PacketLayerInfo layer;
+            packet::PacketFamilyLayerView layer;
             status.batch_error = batch.Get(current_row, &packet, &layer);
             if (status.batch_error != NpmPacketBatchError::kNone) {
                 status.error = NpmPacketBatchProcessError::kBatchViewError;
@@ -421,6 +452,13 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
                 staged.control = true;
                 staged_packets.push_back(std::move(staged));
                 continue;
+            }
+            if (!scratch_budget.Reserve(BindingKeyBytes(layer, domain_map))) {
+                status.packet_status.session_error = NpmSessionTableError::kSessionBudgetExceeded;
+                status.packet_status.error = NpmPacketProcessError::kSessionError;
+                status.error = NpmPacketBatchProcessError::kPacketError;
+                status.row = current_row;
+                return status;
             }
             status.packet_status.binding_error =
                 BuildNpmSessionPacketBinding(domain_map, packet, layer, &staged.binding);
@@ -468,7 +506,7 @@ NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
         for (current_row = 0; current_row < static_cast<int64_t>(staged_packets.size()); ++current_row) {
             auto& staged = staged_packets[static_cast<size_t>(current_row)];
             packet::PacketView packet;
-            packet::PacketLayerInfo layer;
+            packet::PacketFamilyLayerView layer;
             status.batch_error = batch.Get(current_row, &packet, &layer);
             if (status.batch_error != NpmPacketBatchError::kNone || staged.payload_offset > packet.bytes.size ||
                 staged.payload_size > packet.bytes.size - staged.payload_offset) {

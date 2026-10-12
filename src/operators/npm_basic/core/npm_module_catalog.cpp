@@ -47,21 +47,23 @@ const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1() {
     static const NpmModuleCatalogV1 catalog = {
         {"basic",
          true,
-         {"basic"},
+         {"basic_ipv4", "basic_ipv6"},
          [](const NpmBasicTaskConfig& config, std::string_view, NpmPreparedModuleV1* out) {
              out->plan.module_id = "basic";
              out->plan.input_mask = 3;
-             out->plan.entities = {NpmBasicEntityDescriptorV1()};
+             out->plan.entities = {NpmBasicEntityDescriptorV1(packet::AddressFamily::kIPv4),
+                                   NpmBasicEntityDescriptorV1(packet::AddressFamily::kIPv6)};
              out->create = [](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget>) { return NpmModuleInstanceV1{}; };
              return NpmProtocolContractStatusV1{};
          }},
         {"session",
          true,
-         {"session"},
+         {"session_ipv4", "session_ipv6"},
          [](const NpmBasicTaskConfig& config, std::string_view, NpmPreparedModuleV1* out) {
              out->plan.module_id = "session";
              out->plan.input_mask = 3;
-             out->plan.entities = {NpmSessionEntityDescriptorV1(config.features.labeling_enabled)};
+             out->plan.entities = {NpmSessionEntityDescriptorV1(packet::AddressFamily::kIPv4),
+                                   NpmSessionEntityDescriptorV1(packet::AddressFamily::kIPv6)};
              const auto ranges = config.features.session_max_tcp_ranges_per_direction;
              out->create = [ranges](NpmProtocolContext& context, std::shared_ptr<INpmTaskBudget> budget) {
                  NpmModuleInstanceV1 result;
@@ -72,7 +74,7 @@ const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1() {
          }},
         {"dns",
          true,
-         {"dns_transaction"},
+         {"dns_transaction_ipv4", "dns_transaction_ipv6"},
          [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
              NpmDnsConfigV1 config;
              const auto parsed = ParseNpmDnsConfigV1(json, &config);
@@ -92,7 +94,7 @@ const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1() {
          }},
         {"http1",
          true,
-         {"http1_transaction"},
+         {"http1_transaction_ipv4", "http1_transaction_ipv6"},
          [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
              NpmHttp1ConfigV1 config;
              const auto parsed = ParseNpmHttp1ConfigV1(json, &config);
@@ -112,7 +114,7 @@ const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1() {
          }},
         {"tls",
          true,
-         {"tls_handshake"},
+         {"tls_handshake_ipv4", "tls_handshake_ipv6"},
          [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
              NpmTlsConfigV1 config;
              const auto parsed = ParseNpmTlsConfigV1(json, &config);
@@ -130,7 +132,10 @@ const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1() {
              };
              return NpmProtocolContractStatusV1{};
          }},
-        {"icmp", true, {"icmp_event"}, [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
+        {"icmp",
+         true,
+         {"icmp_event_ipv4", "icmp_event_ipv6"},
+         [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
              NpmIcmpConfigV1 config;
              const auto parsed = ParseNpmIcmpConfigV1(json, &config);
              if (parsed.error != NpmIcmpConfigErrorV1::kNone) {
@@ -251,7 +256,7 @@ void NpmProtocolModuleAdapter::Abort() noexcept {
     module_->Abort();
 }
 bool NpmProtocolModuleAdapter::AcceptsSession(const NpmSessionView& session) const {
-    const uint8_t mask = session.key->transport_protocol == 6 ? 1 : 2;
+    const uint8_t mask = session.key->Protocol() == 6 ? 1 : 2;
     if ((plan_.input_mask & mask) == 0) return false;
     return !plan_.primary_label_ids || std::find(plan_.primary_label_ids->begin(), plan_.primary_label_ids->end(),
                                                  session.primary_label_id) != plan_.primary_label_ids->end();
@@ -260,8 +265,8 @@ int NpmProtocolModuleAdapter::OnPacket(const NpmPacketView& packet, const NpmSes
     if (!AcceptsSession(session)) return 0;
     if (cancellation_requested_->load(std::memory_order_acquire)) return ECANCELED;
     NpmInputEventV1 event;
-    event.kind = session.key->transport_protocol == 6 ? NpmInputKindV1::kTcpPacket : NpmInputKindV1::kUdpDatagram;
-    event.observation_domain_id = session.key->observation_domain_id;
+    event.kind = session.key->Protocol() == 6 ? NpmInputKindV1::kTcpPacket : NpmInputKindV1::kUdpDatagram;
+    event.observation_domain_id = session.key->Domain();
     event.packet = packet.packet;
     event.layer = packet.layer;
     event.body = packet.payload;

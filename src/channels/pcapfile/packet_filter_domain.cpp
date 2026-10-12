@@ -12,8 +12,8 @@
 #include <arpa/inet.h>
 
 #include <algorithm>
-#include <charconv>
 #include <cerrno>
+#include <charconv>
 #include <cstddef>
 #include <cstring>
 #include <limits>
@@ -52,9 +52,7 @@ bool ParseDigits(std::string_view text, size_t offset, size_t count, int* output
     return true;
 }
 
-bool IsLeapYear(int year) {
-    return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-}
+bool IsLeapYear(int year) { return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0); }
 
 int DaysInMonth(int year, int month) {
     static constexpr int kDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
@@ -69,8 +67,7 @@ int64_t DaysFromCivil(int year, unsigned month, unsigned day) {
     const unsigned year_of_era = static_cast<unsigned>(year - era * 400);
     const unsigned shifted_month = month > 2 ? month - 3 : month + 9;
     const unsigned day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
-    const unsigned day_of_era =
-        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    const unsigned day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     return static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(day_of_era) - 719468;
 }
 
@@ -86,10 +83,7 @@ bool PacketIpLess(const packet::PacketIpKey& lhs, const packet::PacketIpKey& rhs
         return static_cast<uint8_t>(lhs.family) < static_cast<uint8_t>(rhs.family);
     }
     if (lhs.family == packet::AddressFamily::kIPv4) {
-        const auto* lhs_bytes = reinterpret_cast<const uint8_t*>(&lhs.ipv4_network_order);
-        const auto* rhs_bytes = reinterpret_cast<const uint8_t*>(&rhs.ipv4_network_order);
-        return std::lexicographical_compare(lhs_bytes, lhs_bytes + sizeof(lhs.ipv4_network_order),
-                                            rhs_bytes, rhs_bytes + sizeof(rhs.ipv4_network_order));
+        return lhs.ipv4_value < rhs.ipv4_value;
     }
     if (lhs.family == packet::AddressFamily::kIPv6) return lhs.ipv6 < rhs.ipv6;
     return false;
@@ -98,26 +92,23 @@ bool PacketIpLess(const packet::PacketIpKey& lhs, const packet::PacketIpKey& rhs
 bool PacketIpEqual(const packet::PacketIpKey& lhs, const packet::PacketIpKey& rhs) {
     if (lhs.family != rhs.family) return false;
     if (lhs.family == packet::AddressFamily::kIPv4) {
-        return lhs.ipv4_network_order == rhs.ipv4_network_order;
+        return lhs.ipv4_value == rhs.ipv4_value;
     }
     if (lhs.family == packet::AddressFamily::kIPv6) return lhs.ipv6 == rhs.ipv6;
     return true;
 }
 
-bool PacketEndpointLess(const packet::PacketEndpointKey& lhs,
-                        const packet::PacketEndpointKey& rhs) {
+bool PacketEndpointLess(const packet::PacketEndpointKey& lhs, const packet::PacketEndpointKey& rhs) {
     if (PacketIpLess(lhs.address, rhs.address)) return true;
     if (PacketIpLess(rhs.address, lhs.address)) return false;
     return lhs.port < rhs.port;
 }
 
-bool PacketEndpointEqual(const packet::PacketEndpointKey& lhs,
-                         const packet::PacketEndpointKey& rhs) {
+bool PacketEndpointEqual(const packet::PacketEndpointKey& lhs, const packet::PacketEndpointKey& rhs) {
     return PacketIpEqual(lhs.address, rhs.address) && lhs.port == rhs.port;
 }
 
-bool TransportPairLess(const packet::TransportPairKey& lhs,
-                       const packet::TransportPairKey& rhs) {
+bool TransportPairLess(const packet::TransportPairKey& lhs, const packet::TransportPairKey& rhs) {
     if (lhs.transport_protocol != rhs.transport_protocol) {
         return lhs.transport_protocol < rhs.transport_protocol;
     }
@@ -126,10 +117,9 @@ bool TransportPairLess(const packet::TransportPairKey& lhs,
     return PacketEndpointLess(lhs.second, rhs.second);
 }
 
-bool TransportPairEqual(const packet::TransportPairKey& lhs,
-                        const packet::TransportPairKey& rhs) {
-    return lhs.transport_protocol == rhs.transport_protocol &&
-           PacketEndpointEqual(lhs.first, rhs.first) && PacketEndpointEqual(lhs.second, rhs.second);
+bool TransportPairEqual(const packet::TransportPairKey& lhs, const packet::TransportPairKey& rhs) {
+    return lhs.transport_protocol == rhs.transport_protocol && PacketEndpointEqual(lhs.first, rhs.first) &&
+           PacketEndpointEqual(lhs.second, rhs.second);
 }
 
 template <typename T, typename Less, typename Equal>
@@ -168,9 +158,8 @@ class CanonicalFilterPlanParser {
         if (document.HasParseError() || !document.IsObject()) {
             return Fail("canonical filter plan must be a JSON object");
         }
-        if (document.MemberCount() != 2 || !document.HasMember("version") ||
-            !document["version"].IsUint() || document["version"].GetUint() != 1 ||
-            !document.HasMember("root")) {
+        if (document.MemberCount() != 2 || !document.HasMember("version") || !document["version"].IsUint() ||
+            document["version"].GetUint() != 1 || !document.HasMember("root")) {
             return Fail("canonical filter plan must contain only version 1 and root");
         }
         if (document["root"].IsNull()) {
@@ -240,11 +229,9 @@ class CanonicalFilterPlanParser {
     }
 
     bool ParseNode(const rapidjson::Value& value, CanonicalFilterNode* output) {
-        if (!value.IsObject() || !value.HasMember("node_id") ||
-            !value["node_id"].IsUint() || value["node_id"].GetUint() == 0 ||
-            !ReadString(value, "kind", &output->kind) ||
-            !ReadString(value, "type", &output->type) ||
-            !value.HasMember("nullable") || !value["nullable"].IsBool()) {
+        if (!value.IsObject() || !value.HasMember("node_id") || !value["node_id"].IsUint() ||
+            value["node_id"].GetUint() == 0 || !ReadString(value, "kind", &output->kind) ||
+            !ReadString(value, "type", &output->type) || !value.HasMember("nullable") || !value["nullable"].IsBool()) {
             Fail("canonical filter node is incomplete");
             return false;
         }
@@ -270,14 +257,14 @@ class CanonicalFilterPlanParser {
                 return false;
             }
             output->field_index = value["field_index"].GetInt();
-            const auto schema = packet::PacketSchema();
+            const auto schema = packet::PacketFamilyFilterSchema();
             if (!schema || output->field_index < 0 || output->field_index >= schema->num_fields()) {
                 Fail("canonical field index is outside packet Schema", output->node_id);
                 return false;
             }
             const auto& field = schema->field(output->field_index);
-            if (!field || field->name() != output->field_name ||
-                field->type()->ToString() != output->type || field->nullable() != output->nullable) {
+            if (!field || field->name() != output->field_name || field->type()->ToString() != output->type ||
+                field->nullable() != output->nullable) {
                 Fail("canonical field does not match packet Schema", output->node_id);
                 return false;
             }
@@ -287,8 +274,7 @@ class CanonicalFilterPlanParser {
                 return false;
             }
         } else {
-            if (output->type != "bool" || !value.HasMember("operands") ||
-                !value["operands"].IsArray()) {
+            if (output->type != "bool" || !value.HasMember("operands") || !value["operands"].IsArray()) {
                 Fail("canonical predicate node is incomplete", output->node_id);
                 return false;
             }
@@ -325,17 +311,15 @@ class CanonicalFilterPlanParser {
     std::string* error_ = nullptr;
 };
 
-void IndexCanonicalFilterNodes(
-    const CanonicalFilterNode& node,
-    std::unordered_map<uint32_t, const CanonicalFilterNode*>* nodes) {
+void IndexCanonicalFilterNodes(const CanonicalFilterNode& node,
+                               std::unordered_map<uint32_t, const CanonicalFilterNode*>* nodes) {
     nodes->emplace(node.node_id, &node);
     for (const auto& operand : node.operands) {
         IndexCanonicalFilterNodes(operand, nodes);
     }
 }
 
-void FlattenCanonical(const CanonicalFilterNode& node,
-                      const char* kind,
+void FlattenCanonical(const CanonicalFilterNode& node, const char* kind,
                       std::vector<const CanonicalFilterNode*>* output) {
     if (node.kind == kind) {
         for (const auto& operand : node.operands) FlattenCanonical(operand, kind, output);
@@ -360,8 +344,7 @@ bool ParseSignedValue(const CanonicalFilterNode& literal, int64_t* output) {
     return !literal.value.empty() && result.ec == std::errc() && result.ptr == end;
 }
 
-bool MatchEquality(const CanonicalFilterNode& node,
-                   const CanonicalFilterNode** field,
+bool MatchEquality(const CanonicalFilterNode& node, const CanonicalFilterNode** field,
                    const CanonicalFilterNode** literal) {
     if (node.kind != "compare" || node.compare_op != "equal" || node.operands.size() != 2) {
         return false;
@@ -369,8 +352,7 @@ bool MatchEquality(const CanonicalFilterNode& node,
     const auto* lhs = &node.operands[0];
     const auto* rhs = &node.operands[1];
     if (lhs->kind == "literal" && rhs->kind == "field") std::swap(lhs, rhs);
-    if (lhs->kind != "field" || rhs->kind != "literal" || lhs->type != rhs->type ||
-        node.comparison_type != lhs->type) {
+    if (lhs->kind != "field" || rhs->kind != "literal" || lhs->type != rhs->type || node.comparison_type != lhs->type) {
         return false;
     }
     *field = lhs;
@@ -402,8 +384,7 @@ bool MatchMacRule(const CanonicalFilterNode& node, packet::PacketFilterRule* out
             return false;
         }
     }
-    if (!src_literal || !dst_literal || src_literal->value != dst_literal->value ||
-        src_literal->value.size() != 6) {
+    if (!src_literal || !dst_literal || src_literal->value != dst_literal->value || src_literal->value.size() != 6) {
         return false;
     }
     output->kind = packet::PacketFilterRuleKind::kMacAnyOf;
@@ -413,8 +394,7 @@ bool MatchMacRule(const CanonicalFilterNode& node, packet::PacketFilterRule* out
     return true;
 }
 
-bool BuildIpKey(const std::unordered_map<std::string, const CanonicalFilterNode*>& fields,
-                const char* prefix,
+bool BuildIpKey(const std::unordered_map<std::string, const CanonicalFilterNode*>& fields, const char* prefix,
                 packet::PacketIpKey* output) {
     const std::string family_name = std::string(prefix) + "_ip_family";
     const auto family_it = fields.find(family_name);
@@ -425,12 +405,11 @@ bool BuildIpKey(const std::unordered_map<std::string, const CanonicalFilterNode*
         const auto address_it = fields.find(std::string(prefix) + "_ip_v4");
         uint64_t address = 0;
         if (address_it == fields.end() || fields.count(std::string(prefix) + "_ip_v6") != 0 ||
-            !ParseUnsignedValue(*address_it->second, &address) ||
-            address > std::numeric_limits<uint32_t>::max()) {
+            !ParseUnsignedValue(*address_it->second, &address) || address > std::numeric_limits<uint32_t>::max()) {
             return false;
         }
         output->family = packet::AddressFamily::kIPv4;
-        output->ipv4_network_order = static_cast<uint32_t>(address);
+        output->ipv4_value = static_cast<uint32_t>(address);
         return true;
     }
     if (family == static_cast<uint8_t>(packet::AddressFamily::kIPv6)) {
@@ -440,8 +419,7 @@ bool BuildIpKey(const std::unordered_map<std::string, const CanonicalFilterNode*
             return false;
         }
         output->family = packet::AddressFamily::kIPv6;
-        std::copy(address_it->second->value.begin(), address_it->second->value.end(),
-                  output->ipv6.begin());
+        std::copy(address_it->second->value.begin(), address_it->second->value.end(), output->ipv6.begin());
         return true;
     }
     return false;
@@ -452,17 +430,14 @@ bool CollectEqualities(const std::vector<const CanonicalFilterNode*>& terms,
     for (const auto* term : terms) {
         const CanonicalFilterNode* field = nullptr;
         const CanonicalFilterNode* literal = nullptr;
-        if (!MatchEquality(*term, &field, &literal) ||
-            !fields->emplace(field->field_name, literal).second) {
+        if (!MatchEquality(*term, &field, &literal) || !fields->emplace(field->field_name, literal).second) {
             return false;
         }
     }
     return true;
 }
 
-bool MatchIpDirection(const CanonicalFilterNode& node,
-                      const char* prefix,
-                      packet::PacketIpKey* output) {
+bool MatchIpDirection(const CanonicalFilterNode& node, const char* prefix, packet::PacketIpKey* output) {
     std::vector<const CanonicalFilterNode*> terms;
     FlattenCanonical(node, "and", &terms);
     if (terms.size() != 2) return false;
@@ -484,12 +459,10 @@ bool MatchIpRule(const CanonicalFilterNode& node, packet::PacketFilterRule* outp
     if (node.kind != "or" || terms.size() != 2) return false;
     packet::PacketIpKey source;
     packet::PacketIpKey destination;
-    if (!MatchIpDirection(*terms[0], "src", &source) ||
-        !MatchIpDirection(*terms[1], "dst", &destination)) {
+    if (!MatchIpDirection(*terms[0], "src", &source) || !MatchIpDirection(*terms[1], "dst", &destination)) {
         source = {};
         destination = {};
-        if (!MatchIpDirection(*terms[1], "src", &source) ||
-            !MatchIpDirection(*terms[0], "dst", &destination)) {
+        if (!MatchIpDirection(*terms[1], "src", &source) || !MatchIpDirection(*terms[0], "dst", &destination)) {
             return false;
         }
     }
@@ -546,15 +519,13 @@ bool MatchPortRule(const CanonicalFilterNode& node, packet::PacketFilterRule* ou
     return true;
 }
 
-bool MatchTransportDirection(const CanonicalFilterNode& node,
-                             packet::PacketEndpointKey* source,
+bool MatchTransportDirection(const CanonicalFilterNode& node, packet::PacketEndpointKey* source,
                              packet::PacketEndpointKey* destination) {
     std::vector<const CanonicalFilterNode*> terms;
     FlattenCanonical(node, "and", &terms);
     if (terms.size() != 6) return false;
     std::unordered_map<std::string, const CanonicalFilterNode*> fields;
-    if (!CollectEqualities(terms, &fields) || fields.size() != 6 ||
-        !BuildIpKey(fields, "src", &source->address) ||
+    if (!CollectEqualities(terms, &fields) || fields.size() != 6 || !BuildIpKey(fields, "src", &source->address) ||
         !BuildIpKey(fields, "dst", &destination->address)) {
         return false;
     }
@@ -562,8 +533,7 @@ bool MatchTransportDirection(const CanonicalFilterNode& node,
     const auto dst_port = fields.find("dst_port");
     uint64_t source_value = 0;
     uint64_t destination_value = 0;
-    if (src_port == fields.end() || dst_port == fields.end() ||
-        !ParseUnsignedValue(*src_port->second, &source_value) ||
+    if (src_port == fields.end() || dst_port == fields.end() || !ParseUnsignedValue(*src_port->second, &source_value) ||
         !ParseUnsignedValue(*dst_port->second, &destination_value) ||
         source_value > std::numeric_limits<uint16_t>::max() ||
         destination_value > std::numeric_limits<uint16_t>::max() ||
@@ -591,8 +561,7 @@ bool MatchTransportRule(const CanonicalFilterNode& node, packet::PacketFilterRul
         }
         const CanonicalFilterNode* field = nullptr;
         const CanonicalFilterNode* literal = nullptr;
-        if (MatchEquality(*term, &field, &literal) &&
-            field->field_name == "transport_protocol") {
+        if (MatchEquality(*term, &field, &literal) && field->field_name == "transport_protocol") {
             if (have_protocol || !ParseUnsignedValue(*literal, &protocol)) return false;
             have_protocol = true;
             continue;
@@ -600,8 +569,7 @@ bool MatchTransportRule(const CanonicalFilterNode& node, packet::PacketFilterRul
         if (direction_or || term->kind != "or") return false;
         direction_or = term;
     }
-    if (!have_ports_valid || !have_protocol || (protocol != 6 && protocol != 17) ||
-        !direction_or) {
+    if (!have_ports_valid || !have_protocol || (protocol != 6 && protocol != 17) || !direction_or) {
         return false;
     }
     std::vector<const CanonicalFilterNode*> directions;
@@ -649,9 +617,7 @@ class PacketPlanCompiler {
         return false;
     }
 
-    bool MakeTimeRange(const CanonicalFilterNode& node,
-                       const std::string& op,
-                       int64_t value,
+    bool MakeTimeRange(const CanonicalFilterNode& node, const std::string& op, int64_t value,
                        packet::PacketFilterRule* output) {
         output->kind = packet::PacketFilterRuleKind::kTimeRange;
         if (op == "equal") {
@@ -676,11 +642,8 @@ class PacketPlanCompiler {
         return true;
     }
 
-    bool MakeUnsignedRange(const CanonicalFilterNode& node,
-                           packet::PacketUnsignedField field,
-                           const std::string& op,
-                           uint64_t value,
-                           packet::PacketFilterRule* output) {
+    bool MakeUnsignedRange(const CanonicalFilterNode& node, packet::PacketUnsignedField field, const std::string& op,
+                           uint64_t value, packet::PacketFilterRule* output) {
         output->kind = packet::PacketFilterRuleKind::kUnsignedRange;
         output->unsigned_range.field = field;
         if (op == "equal") {
@@ -705,8 +668,7 @@ class PacketPlanCompiler {
         return true;
     }
 
-    bool ResolveUnsignedField(const CanonicalFilterNode& field,
-                              packet::PacketUnsignedField* output) const {
+    bool ResolveUnsignedField(const CanonicalFilterNode& field, packet::PacketUnsignedField* output) const {
         if (field.field_name == "captured_len") {
             *output = packet::PacketUnsignedField::kCapturedLen;
         } else if (field.field_name == "wire_len") {
@@ -729,8 +691,7 @@ class PacketPlanCompiler {
         return op;
     }
 
-    bool CompileComparison(const CanonicalFilterNode& node,
-                           packet::PacketFilterRule* output) {
+    bool CompileComparison(const CanonicalFilterNode& node, packet::PacketFilterRule* output) {
         const CanonicalFilterNode* field = &node.operands[0];
         const CanonicalFilterNode* literal = &node.operands[1];
         std::string op = node.compare_op;
@@ -738,15 +699,14 @@ class PacketPlanCompiler {
             std::swap(field, literal);
             op = ReverseComparison(std::move(op));
         }
-        if (field->kind != "field" || literal->kind != "literal" ||
-            field->type != literal->type || node.comparison_type != field->type) {
+        if (field->kind != "field" || literal->kind != "literal" || field->type != literal->type ||
+            node.comparison_type != field->type) {
             return Fail(node, "packet comparison must contain one matching field and literal");
         }
         if (field->field_name == "timestamp_ns" && field->type == "int64") {
             int64_t value = 0;
-            return ParseSignedValue(*literal, &value)
-                       ? MakeTimeRange(node, op, value, output)
-                       : Fail(node, "timestamp comparison literal is invalid");
+            return ParseSignedValue(*literal, &value) ? MakeTimeRange(node, op, value, output)
+                                                      : Fail(node, "timestamp comparison literal is invalid");
         }
         packet::PacketUnsignedField unsigned_field;
         uint64_t value = 0;
@@ -763,19 +723,17 @@ class PacketPlanCompiler {
         return MakeUnsignedRange(node, unsigned_field, op, value, output);
     }
 
-    bool CompileBetween(const CanonicalFilterNode& node,
-                        packet::PacketFilterRule* output) {
+    bool CompileBetween(const CanonicalFilterNode& node, packet::PacketFilterRule* output) {
         const auto& field = node.operands[0];
-        if (field.kind != "field" || node.operands[1].kind != "literal" ||
-            node.operands[2].kind != "literal" || node.comparison_type != field.type ||
-            node.operands[1].type != field.type || node.operands[2].type != field.type) {
+        if (field.kind != "field" || node.operands[1].kind != "literal" || node.operands[2].kind != "literal" ||
+            node.comparison_type != field.type || node.operands[1].type != field.type ||
+            node.operands[2].type != field.type) {
             return Fail(node, "packet BETWEEN must contain one field and two matching literals");
         }
         if (field.field_name == "timestamp_ns" && field.type == "int64") {
             int64_t lower = 0;
             int64_t upper = 0;
-            if (!ParseSignedValue(node.operands[1], &lower) ||
-                !ParseSignedValue(node.operands[2], &upper)) {
+            if (!ParseSignedValue(node.operands[1], &lower) || !ParseSignedValue(node.operands[2], &upper)) {
                 return Fail(node, "timestamp BETWEEN bound is invalid");
             }
             output->kind = packet::PacketFilterRuleKind::kTimeRange;
@@ -788,14 +746,12 @@ class PacketPlanCompiler {
         packet::PacketUnsignedField unsigned_field;
         uint64_t lower = 0;
         uint64_t upper = 0;
-        if (!ResolveUnsignedField(field, &unsigned_field) ||
-            !ParseUnsignedValue(node.operands[1], &lower) ||
+        if (!ResolveUnsignedField(field, &unsigned_field) || !ParseUnsignedValue(node.operands[1], &lower) ||
             !ParseUnsignedValue(node.operands[2], &upper)) {
             return Fail(node, "unsigned BETWEEN bound is invalid or unsupported");
         }
         if ((field.type == "uint32" &&
-             (lower > std::numeric_limits<uint32_t>::max() ||
-              upper > std::numeric_limits<uint32_t>::max())) ||
+             (lower > std::numeric_limits<uint32_t>::max() || upper > std::numeric_limits<uint32_t>::max())) ||
             (field.type != "uint32" && field.type != "uint64")) {
             return Fail(node, "unsigned BETWEEN bound is outside the field type");
         }
@@ -838,8 +794,8 @@ class PacketPlanCompiler {
 
     bool CompileNode(const CanonicalFilterNode& node, packet::PacketFilterRule* output) {
         *output = {};
-        if (MatchTransportRule(node, output) || MatchPortRule(node, output) ||
-            MatchIpRule(node, output) || MatchMacRule(node, output)) {
+        if (MatchTransportRule(node, output) || MatchPortRule(node, output) || MatchIpRule(node, output) ||
+            MatchMacRule(node, output)) {
             return true;
         }
         if (node.kind == "literal" && node.type == "bool") {
@@ -857,9 +813,9 @@ class PacketPlanCompiler {
         if (node.kind == "between") return CompileBetween(node, output);
         if (node.kind == "in") return CompileIn(node, output);
         if (node.kind == "and" || node.kind == "or" || node.kind == "not") {
-            output->kind = node.kind == "and"   ? packet::PacketFilterRuleKind::kAnd
+            output->kind = node.kind == "and"  ? packet::PacketFilterRuleKind::kAnd
                            : node.kind == "or" ? packet::PacketFilterRuleKind::kOr
-                                                : packet::PacketFilterRuleKind::kNot;
+                                               : packet::PacketFilterRuleKind::kNot;
             output->operands.resize(node.operands.size());
             for (size_t index = 0; index < node.operands.size(); ++index) {
                 if (!CompileNode(node.operands[index], &output->operands[index])) return false;
@@ -873,18 +829,14 @@ class PacketPlanCompiler {
 };
 
 template <typename T>
-bool InClosedOrOpenRange(T value,
-                         const std::optional<T>& lower,
-                         bool lower_inclusive,
-                         const std::optional<T>& upper,
+bool InClosedOrOpenRange(T value, const std::optional<T>& lower, bool lower_inclusive, const std::optional<T>& upper,
                          bool upper_inclusive) {
     if (lower && (value < *lower || (!lower_inclusive && value == *lower))) return false;
     if (upper && (value > *upper || (!upper_inclusive && value == *upper))) return false;
     return true;
 }
 
-uint64_t PacketUnsignedValue(packet::PacketUnsignedField field,
-                             const packet::PacketMeta& meta) {
+uint64_t PacketUnsignedValue(packet::PacketUnsignedField field, const packet::PacketMeta& meta) {
     switch (field) {
         case packet::PacketUnsignedField::kCapturedLen:
             return meta.captured_len;
@@ -898,58 +850,48 @@ uint64_t PacketUnsignedValue(packet::PacketUnsignedField field,
     return 0;
 }
 
-bool MatchLayerIp(const packet::IpAddress& address, const packet::PacketIpKey& key) {
-    if (key.family == packet::AddressFamily::kIPv4) {
-        const auto* value = std::get_if<packet::IPv4Address>(&address);
-        return value && value->addr == key.ipv4_network_order;
-    }
-    if (key.family == packet::AddressFamily::kIPv6) {
-        const auto* value = std::get_if<packet::IPv6Address>(&address);
-        return value && std::equal(key.ipv6.begin(), key.ipv6.end(), value->bytes);
+bool MatchLayerIp(const packet::PacketFamilyLayerView& layer, bool source, const packet::PacketIpKey& key) {
+    if (const auto* pair = layer.Get4(); pair && key.family == packet::AddressFamily::kIPv4)
+        return (source ? pair->src : pair->dst).ToUInt32() == key.ipv4_value;
+    if (const auto* pair = layer.Get6(); pair && key.family == packet::AddressFamily::kIPv6) {
+        const auto& value = source ? pair->src : pair->dst;
+        return std::equal(key.ipv6.begin(), key.ipv6.end(), value.bytes);
     }
     return false;
 }
-
-bool BuildLayerEndpoint(const packet::IpAddress& address,
-                        uint16_t port,
+bool BuildLayerEndpoint(const packet::PacketFamilyLayerView& layer, bool source, uint16_t port,
                         packet::PacketEndpointKey* output) {
-    if (const auto* value = std::get_if<packet::IPv4Address>(&address)) {
+    if (const auto* pair = layer.Get4()) {
         output->address.family = packet::AddressFamily::kIPv4;
-        output->address.ipv4_network_order = value->addr;
-    } else if (const auto* value = std::get_if<packet::IPv6Address>(&address)) {
+        output->address.ipv4_value = (source ? pair->src : pair->dst).ToUInt32();
+    } else if (const auto* pair = layer.Get6()) {
         output->address.family = packet::AddressFamily::kIPv6;
-        std::copy_n(value->bytes, sizeof(value->bytes), output->address.ipv6.begin());
-    } else {
+        const auto& value = source ? pair->src : pair->dst;
+        std::copy_n(value.bytes, 16, output->address.ipv6.begin());
+    } else
         return false;
-    }
     output->port = port;
     return true;
 }
 
-bool EvaluateDecodedRule(const packet::PacketFilterRule& rule,
-                         const packet::PacketMeta& meta,
-                         const packet::PacketLayerInfo& layer);
+bool EvaluateDecodedRule(const packet::PacketFilterRule& rule, const packet::PacketMeta& meta,
+                         const packet::PacketFamilyLayerView& layer);
 
-PacketHeaderFilterResult EvaluateHeaderRule(const packet::PacketFilterRule& rule,
-                                            const packet::PacketMeta& meta) {
+PacketHeaderFilterResult EvaluateHeaderRule(const packet::PacketFilterRule& rule, const packet::PacketMeta& meta) {
     switch (rule.kind) {
         case packet::PacketFilterRuleKind::kMatchAll:
             return PacketHeaderFilterResult::kMatch;
         case packet::PacketFilterRuleKind::kMatchNone:
             return PacketHeaderFilterResult::kReject;
         case packet::PacketFilterRuleKind::kTimeRange:
-            return InClosedOrOpenRange(meta.timestamp_ns, rule.time_range.lower_ns,
-                                       rule.time_range.lower_inclusive,
-                                       rule.time_range.upper_ns,
-                                       rule.time_range.upper_inclusive)
+            return InClosedOrOpenRange(meta.timestamp_ns, rule.time_range.lower_ns, rule.time_range.lower_inclusive,
+                                       rule.time_range.upper_ns, rule.time_range.upper_inclusive)
                        ? PacketHeaderFilterResult::kMatch
                        : PacketHeaderFilterResult::kReject;
         case packet::PacketFilterRuleKind::kUnsignedRange: {
             const uint64_t value = PacketUnsignedValue(rule.unsigned_range.field, meta);
-            return InClosedOrOpenRange(value, rule.unsigned_range.lower,
-                                       rule.unsigned_range.lower_inclusive,
-                                       rule.unsigned_range.upper,
-                                       rule.unsigned_range.upper_inclusive)
+            return InClosedOrOpenRange(value, rule.unsigned_range.lower, rule.unsigned_range.lower_inclusive,
+                                       rule.unsigned_range.upper, rule.unsigned_range.upper_inclusive)
                        ? PacketHeaderFilterResult::kMatch
                        : PacketHeaderFilterResult::kReject;
         }
@@ -960,8 +902,7 @@ PacketHeaderFilterResult EvaluateHeaderRule(const packet::PacketFilterRule& rule
                 if (result == PacketHeaderFilterResult::kReject) return result;
                 unknown = unknown || result == PacketHeaderFilterResult::kNeedDecoded;
             }
-            return unknown ? PacketHeaderFilterResult::kNeedDecoded
-                           : PacketHeaderFilterResult::kMatch;
+            return unknown ? PacketHeaderFilterResult::kNeedDecoded : PacketHeaderFilterResult::kMatch;
         }
         case packet::PacketFilterRuleKind::kOr: {
             bool unknown = false;
@@ -970,8 +911,7 @@ PacketHeaderFilterResult EvaluateHeaderRule(const packet::PacketFilterRule& rule
                 if (result == PacketHeaderFilterResult::kMatch) return result;
                 unknown = unknown || result == PacketHeaderFilterResult::kNeedDecoded;
             }
-            return unknown ? PacketHeaderFilterResult::kNeedDecoded
-                           : PacketHeaderFilterResult::kReject;
+            return unknown ? PacketHeaderFilterResult::kNeedDecoded : PacketHeaderFilterResult::kReject;
         }
         case packet::PacketFilterRuleKind::kNot: {
             const auto result = EvaluateHeaderRule(rule.operands.front(), meta);
@@ -988,9 +928,8 @@ PacketHeaderFilterResult EvaluateHeaderRule(const packet::PacketFilterRule& rule
     return PacketHeaderFilterResult::kReject;
 }
 
-bool EvaluateDecodedRule(const packet::PacketFilterRule& rule,
-                         const packet::PacketMeta& meta,
-                         const packet::PacketLayerInfo& layer) {
+bool EvaluateDecodedRule(const packet::PacketFilterRule& rule, const packet::PacketMeta& meta,
+                         const packet::PacketFamilyLayerView& layer) {
     switch (rule.kind) {
         case packet::PacketFilterRuleKind::kMatchAll:
             return true;
@@ -1000,27 +939,23 @@ bool EvaluateDecodedRule(const packet::PacketFilterRule& rule,
         case packet::PacketFilterRuleKind::kUnsignedRange:
             return EvaluateHeaderRule(rule, meta) == PacketHeaderFilterResult::kMatch;
         case packet::PacketFilterRuleKind::kAnd:
-            return std::all_of(rule.operands.begin(), rule.operands.end(), [&](const auto& operand) {
-                return EvaluateDecodedRule(operand, meta, layer);
-            });
+            return std::all_of(rule.operands.begin(), rule.operands.end(),
+                               [&](const auto& operand) { return EvaluateDecodedRule(operand, meta, layer); });
         case packet::PacketFilterRuleKind::kOr:
-            return std::any_of(rule.operands.begin(), rule.operands.end(), [&](const auto& operand) {
-                return EvaluateDecodedRule(operand, meta, layer);
-            });
+            return std::any_of(rule.operands.begin(), rule.operands.end(),
+                               [&](const auto& operand) { return EvaluateDecodedRule(operand, meta, layer); });
         case packet::PacketFilterRuleKind::kNot:
             return !EvaluateDecodedRule(rule.operands.front(), meta, layer);
         case packet::PacketFilterRuleKind::kMacAnyOf:
             if (layer.status != packet::LayerStatus::kDecoded) return false;
             return std::any_of(rule.mac_keys.begin(), rule.mac_keys.end(), [&](const auto& key) {
-                return (layer.src_mac.valid &&
-                        std::equal(key.bytes.begin(), key.bytes.end(), layer.src_mac.value.bytes)) ||
-                       (layer.dst_mac.valid &&
-                        std::equal(key.bytes.begin(), key.bytes.end(), layer.dst_mac.value.bytes));
+                return (layer.src_mac_valid && std::equal(key.bytes.begin(), key.bytes.end(), layer.src_mac.bytes)) ||
+                       (layer.dst_mac_valid && std::equal(key.bytes.begin(), key.bytes.end(), layer.dst_mac.bytes));
             });
         case packet::PacketFilterRuleKind::kIpAnyOf:
             if (layer.status != packet::LayerStatus::kDecoded) return false;
             return std::any_of(rule.ip_keys.begin(), rule.ip_keys.end(), [&](const auto& key) {
-                return MatchLayerIp(layer.src_ip, key) || MatchLayerIp(layer.dst_ip, key);
+                return MatchLayerIp(layer, true, key) || MatchLayerIp(layer, false, key);
             });
         case packet::PacketFilterRuleKind::kPortAnyOf:
             if (layer.status != packet::LayerStatus::kDecoded || !layer.ports_valid) return false;
@@ -1030,18 +965,16 @@ bool EvaluateDecodedRule(const packet::PacketFilterRule& rule,
             if (layer.status != packet::LayerStatus::kDecoded || !layer.ports_valid) return false;
             packet::PacketEndpointKey first;
             packet::PacketEndpointKey second;
-            if (!BuildLayerEndpoint(layer.src_ip, layer.src_port, &first) ||
-                !BuildLayerEndpoint(layer.dst_ip, layer.dst_port, &second) ||
+            if (!BuildLayerEndpoint(layer, true, layer.src_port, &first) ||
+                !BuildLayerEndpoint(layer, false, layer.dst_port, &second) ||
                 first.address.family != second.address.family) {
                 return false;
             }
             if (PacketEndpointLess(second, first)) std::swap(first, second);
-            return std::any_of(rule.transport_pairs.begin(), rule.transport_pairs.end(),
-                               [&](const auto& pair) {
-                                   return pair.transport_protocol == layer.transport_protocol &&
-                                          PacketEndpointEqual(pair.first, first) &&
-                                          PacketEndpointEqual(pair.second, second);
-                               });
+            return std::any_of(rule.transport_pairs.begin(), rule.transport_pairs.end(), [&](const auto& pair) {
+                return pair.transport_protocol == layer.transport_protocol && PacketEndpointEqual(pair.first, first) &&
+                       PacketEndpointEqual(pair.second, second);
+            });
         }
     }
     return false;
@@ -1049,9 +982,7 @@ bool EvaluateDecodedRule(const packet::PacketFilterRule& rule,
 
 class PcapFilterAstLowerer {
  public:
-    int Lower(const std::shared_ptr<const FilterExpr>& input,
-              std::shared_ptr<FilterExpr>* output,
-              std::string* error) {
+    int Lower(const std::shared_ptr<const FilterExpr>& input, std::shared_ptr<FilterExpr>* output, std::string* error) {
         if (output) output->reset();
         if (error) error->clear();
         error_ = error;
@@ -1096,10 +1027,8 @@ class PcapFilterAstLowerer {
         return node && node->kind == FilterExprKind::kField && node->field_name == "timestamp_ns";
     }
 
-    bool ValidateTypedLiteralContexts(const std::shared_ptr<const FilterExpr>& node,
-                                      bool timestamp_allowed) {
-        if (node->kind == FilterExprKind::kLiteral &&
-            node->literal.kind == FilterLiteralKind::kTyped) {
+    bool ValidateTypedLiteralContexts(const std::shared_ptr<const FilterExpr>& node, bool timestamp_allowed) {
+        if (node->kind == FilterExprKind::kLiteral && node->literal.kind == FilterLiteralKind::kTyped) {
             if (LowerAscii(node->literal.type_name) == "timestamp" && !timestamp_allowed) {
                 Fail(EINVAL, "TIMESTAMP literal must be compared with timestamp_ns", node->node_id);
                 return false;
@@ -1110,8 +1039,7 @@ class PcapFilterAstLowerer {
             return ValidateTypedLiteralContexts(node->operands[0], IsTimestampField(node->operands[1])) &&
                    ValidateTypedLiteralContexts(node->operands[1], IsTimestampField(node->operands[0]));
         }
-        if ((node->kind == FilterExprKind::kIn || node->kind == FilterExprKind::kBetween) &&
-            !node->operands.empty()) {
+        if ((node->kind == FilterExprKind::kIn || node->kind == FilterExprKind::kBetween) && !node->operands.empty()) {
             if (!ValidateTypedLiteralContexts(node->operands[0], false)) return false;
             const bool values_are_timestamps = IsTimestampField(node->operands[0]);
             for (size_t index = 1; index < node->operands.size(); ++index) {
@@ -1168,8 +1096,7 @@ class PcapFilterAstLowerer {
         return literal;
     }
 
-    std::shared_ptr<FilterExpr> MakeEqual(const std::string& field_name,
-                                          FilterLiteralKind literal_kind,
+    std::shared_ptr<FilterExpr> MakeEqual(const std::string& field_name, FilterLiteralKind literal_kind,
                                           std::string literal_text) {
         auto compare = NewSyntheticNode(FilterExprKind::kCompare);
         auto field = MakeField(field_name);
@@ -1180,12 +1107,9 @@ class PcapFilterAstLowerer {
         return compare;
     }
 
-    std::shared_ptr<FilterExpr> MakeLogical(
-        FilterExprKind kind,
-        std::vector<std::shared_ptr<FilterExpr>> operands,
-        uint32_t root_id) {
-        if ((kind != FilterExprKind::kAnd && kind != FilterExprKind::kOr) ||
-            operands.size() < 2 || root_id == 0) {
+    std::shared_ptr<FilterExpr> MakeLogical(FilterExprKind kind, std::vector<std::shared_ptr<FilterExpr>> operands,
+                                            uint32_t root_id) {
+        if ((kind != FilterExprKind::kAnd && kind != FilterExprKind::kOr) || operands.size() < 2 || root_id == 0) {
             Fail(EINVAL, "generated logical expression is invalid", root_id);
             return nullptr;
         }
@@ -1206,20 +1130,17 @@ class PcapFilterAstLowerer {
         return current;
     }
 
-    std::shared_ptr<FilterExpr> MakeSyntheticLogical(
-        FilterExprKind kind,
-        std::vector<std::shared_ptr<FilterExpr>> operands) {
+    std::shared_ptr<FilterExpr> MakeSyntheticLogical(FilterExprKind kind,
+                                                     std::vector<std::shared_ptr<FilterExpr>> operands) {
         const uint32_t root_id = NewSyntheticId();
         if (root_id == 0) return nullptr;
         return MakeLogical(kind, std::move(operands), root_id);
     }
 
-    const FilterLiteral* RequireLiteral(const std::shared_ptr<const FilterExpr>& call,
-                                        size_t index,
+    const FilterLiteral* RequireLiteral(const std::shared_ptr<const FilterExpr>& call, size_t index,
                                         FilterLiteralKind kind) {
         if (index >= call->operands.size() || !call->operands[index] ||
-            call->operands[index]->kind != FilterExprKind::kLiteral ||
-            call->operands[index]->literal.kind != kind) {
+            call->operands[index]->kind != FilterExprKind::kLiteral || call->operands[index]->literal.kind != kind) {
             Fail(EINVAL, "packet domain function argument has the wrong literal type", call->node_id);
             return nullptr;
         }
@@ -1228,8 +1149,7 @@ class PcapFilterAstLowerer {
 
     std::shared_ptr<FilterExpr> LowerNode(const std::shared_ptr<const FilterExpr>& input) {
         if (input->kind == FilterExprKind::kCall) return LowerCall(input);
-        if (input->kind == FilterExprKind::kLiteral &&
-            input->literal.kind == FilterLiteralKind::kTyped) {
+        if (input->kind == FilterExprKind::kLiteral && input->literal.kind == FilterLiteralKind::kTyped) {
             return LowerTypedLiteral(input);
         }
 
@@ -1244,8 +1164,7 @@ class PcapFilterAstLowerer {
         return output;
     }
 
-    std::shared_ptr<FilterExpr> LowerTypedLiteral(
-        const std::shared_ptr<const FilterExpr>& input) {
+    std::shared_ptr<FilterExpr> LowerTypedLiteral(const std::shared_ptr<const FilterExpr>& input) {
         if (!input->operands.empty() || LowerAscii(input->literal.type_name) != "timestamp") {
             Fail(EINVAL, "pcapfile only supports the TIMESTAMP typed literal", input->node_id);
             return nullptr;
@@ -1294,23 +1213,21 @@ class PcapFilterAstLowerer {
                            call->node_id);
     }
 
-    std::shared_ptr<FilterExpr> MakeAddressMatch(const char* prefix,
-                                                 const packet::PacketIpKey& key) {
+    std::shared_ptr<FilterExpr> MakeAddressMatch(const char* prefix, const packet::PacketIpKey& key) {
         const std::string family_field = std::string(prefix) + "_ip_family";
         const std::string address_field =
             std::string(prefix) + (key.family == packet::AddressFamily::kIPv4 ? "_ip_v4" : "_ip_v6");
         std::string address_value;
         FilterLiteralKind address_kind = FilterLiteralKind::kInteger;
         if (key.family == packet::AddressFamily::kIPv4) {
-            address_value = std::to_string(key.ipv4_network_order);
+            address_value = std::to_string(key.ipv4_value);
         } else {
             address_kind = FilterLiteralKind::kString;
             address_value.assign(reinterpret_cast<const char*>(key.ipv6.data()), key.ipv6.size());
         }
         return MakeSyntheticLogical(
             FilterExprKind::kAnd,
-            {MakeEqual(family_field, FilterLiteralKind::kInteger,
-                       std::to_string(static_cast<uint8_t>(key.family))),
+            {MakeEqual(family_field, FilterLiteralKind::kInteger, std::to_string(static_cast<uint8_t>(key.family))),
              MakeEqual(address_field, address_kind, std::move(address_value))});
     }
 
@@ -1327,8 +1244,7 @@ class PcapFilterAstLowerer {
             Fail(EINVAL, "invalid ip() argument: " + detail, call->node_id);
             return nullptr;
         }
-        return MakeLogical(FilterExprKind::kOr,
-                           {MakeAddressMatch("src", key), MakeAddressMatch("dst", key)},
+        return MakeLogical(FilterExprKind::kOr, {MakeAddressMatch("src", key), MakeAddressMatch("dst", key)},
                            call->node_id);
     }
 
@@ -1346,51 +1262,40 @@ class PcapFilterAstLowerer {
             return nullptr;
         }
         auto either_port = MakeSyntheticLogical(
-            FilterExprKind::kOr,
-            {MakeEqual("src_port", FilterLiteralKind::kInteger, std::to_string(port)),
-             MakeEqual("dst_port", FilterLiteralKind::kInteger, std::to_string(port))});
-        return MakeLogical(FilterExprKind::kAnd,
-                           {MakeField("ports_valid"), std::move(either_port)},
-                           call->node_id);
+            FilterExprKind::kOr, {MakeEqual("src_port", FilterLiteralKind::kInteger, std::to_string(port)),
+                                  MakeEqual("dst_port", FilterLiteralKind::kInteger, std::to_string(port))});
+        return MakeLogical(FilterExprKind::kAnd, {MakeField("ports_valid"), std::move(either_port)}, call->node_id);
     }
 
-    void AppendEndpointMatch(const char* prefix,
-                             const packet::PacketEndpointKey& endpoint,
+    void AppendEndpointMatch(const char* prefix, const packet::PacketEndpointKey& endpoint,
                              std::vector<std::shared_ptr<FilterExpr>>* predicates) {
         const std::string family_field = std::string(prefix) + "_ip_family";
         const std::string address_field =
-            std::string(prefix) +
-            (endpoint.address.family == packet::AddressFamily::kIPv4 ? "_ip_v4" : "_ip_v6");
-        predicates->push_back(MakeEqual(
-            family_field, FilterLiteralKind::kInteger,
-            std::to_string(static_cast<uint8_t>(endpoint.address.family))));
+            std::string(prefix) + (endpoint.address.family == packet::AddressFamily::kIPv4 ? "_ip_v4" : "_ip_v6");
+        predicates->push_back(MakeEqual(family_field, FilterLiteralKind::kInteger,
+                                        std::to_string(static_cast<uint8_t>(endpoint.address.family))));
         if (endpoint.address.family == packet::AddressFamily::kIPv4) {
-            predicates->push_back(MakeEqual(
-                address_field, FilterLiteralKind::kInteger,
-                std::to_string(endpoint.address.ipv4_network_order)));
+            predicates->push_back(
+                MakeEqual(address_field, FilterLiteralKind::kInteger, std::to_string(endpoint.address.ipv4_value)));
         } else {
-            predicates->push_back(MakeEqual(
-                address_field, FilterLiteralKind::kString,
-                std::string(reinterpret_cast<const char*>(endpoint.address.ipv6.data()),
-                            endpoint.address.ipv6.size())));
+            predicates->push_back(MakeEqual(address_field, FilterLiteralKind::kString,
+                                            std::string(reinterpret_cast<const char*>(endpoint.address.ipv6.data()),
+                                                        endpoint.address.ipv6.size())));
         }
-        predicates->push_back(MakeEqual(
-            std::string(prefix) + "_port", FilterLiteralKind::kInteger,
-            std::to_string(endpoint.port)));
+        predicates->push_back(
+            MakeEqual(std::string(prefix) + "_port", FilterLiteralKind::kInteger, std::to_string(endpoint.port)));
     }
 
-    std::shared_ptr<FilterExpr> MakeTransportDirection(
-        const packet::PacketEndpointKey& source,
-        const packet::PacketEndpointKey& destination) {
+    std::shared_ptr<FilterExpr> MakeTransportDirection(const packet::PacketEndpointKey& source,
+                                                       const packet::PacketEndpointKey& destination) {
         std::vector<std::shared_ptr<FilterExpr>> predicates;
         AppendEndpointMatch("src", source, &predicates);
         AppendEndpointMatch("dst", destination, &predicates);
         return MakeSyntheticLogical(FilterExprKind::kAnd, std::move(predicates));
     }
 
-    std::shared_ptr<FilterExpr> LowerTransportPair(
-        const std::shared_ptr<const FilterExpr>& call,
-        const std::string& function) {
+    std::shared_ptr<FilterExpr> LowerTransportPair(const std::shared_ptr<const FilterExpr>& call,
+                                                   const std::string& function) {
         if (call->operands.size() != 4) {
             Fail(EINVAL, function + "() requires IP, port, IP, port arguments", call->node_id);
             return nullptr;
@@ -1403,21 +1308,18 @@ class PcapFilterAstLowerer {
 
         packet::TransportPairKey pair;
         std::string detail;
-        const int rc = CompileTransportPairKey(
-            function, endpoint1_ip->text, endpoint1_port->text, endpoint2_ip->text,
-            endpoint2_port->text, &pair, &detail);
+        const int rc = CompileTransportPairKey(function, endpoint1_ip->text, endpoint1_port->text, endpoint2_ip->text,
+                                               endpoint2_port->text, &pair, &detail);
         if (rc != 0) {
             Fail(rc, "invalid " + function + "() arguments: " + detail, call->node_id);
             return nullptr;
         }
         auto either_direction = MakeSyntheticLogical(
             FilterExprKind::kOr,
-            {MakeTransportDirection(pair.first, pair.second),
-             MakeTransportDirection(pair.second, pair.first)});
+            {MakeTransportDirection(pair.first, pair.second), MakeTransportDirection(pair.second, pair.first)});
         return MakeLogical(
             FilterExprKind::kAnd,
-            {MakeEqual("transport_protocol", FilterLiteralKind::kInteger,
-                       std::to_string(pair.transport_protocol)),
+            {MakeEqual("transport_protocol", FilterLiteralKind::kInteger, std::to_string(pair.transport_protocol)),
              MakeField("ports_valid"), std::move(either_direction)},
             call->node_id);
     }
@@ -1437,8 +1339,8 @@ int ParseRfc3339TimestampNs(const std::string& text, int64_t* output, std::strin
     *output = 0;
 
     const std::string_view value(text);
-    if (value.size() < 20 || value[4] != '-' || value[7] != '-' ||
-        (value[10] != 'T' && value[10] != 't') || value[13] != ':' || value[16] != ':') {
+    if (value.size() < 20 || value[4] != '-' || value[7] != '-' || (value[10] != 'T' && value[10] != 't') ||
+        value[13] != ':' || value[16] != ':') {
         return Fail(output, error, EINVAL, "timestamp must be RFC3339 with an explicit UTC offset");
     }
 
@@ -1448,13 +1350,13 @@ int ParseRfc3339TimestampNs(const std::string& text, int64_t* output, std::strin
     int hour = 0;
     int minute = 0;
     int second = 0;
-    if (!ParseDigits(value, 0, 4, &year) || !ParseDigits(value, 5, 2, &month) ||
-        !ParseDigits(value, 8, 2, &day) || !ParseDigits(value, 11, 2, &hour) ||
-        !ParseDigits(value, 14, 2, &minute) || !ParseDigits(value, 17, 2, &second)) {
+    if (!ParseDigits(value, 0, 4, &year) || !ParseDigits(value, 5, 2, &month) || !ParseDigits(value, 8, 2, &day) ||
+        !ParseDigits(value, 11, 2, &hour) || !ParseDigits(value, 14, 2, &minute) ||
+        !ParseDigits(value, 17, 2, &second)) {
         return Fail(output, error, EINVAL, "timestamp date and time components must be decimal digits");
     }
-    if (year == 0 || month < 1 || month > 12 || day < 1 || day > DaysInMonth(year, month) ||
-        hour > 23 || minute > 59 || second > 59) {
+    if (year == 0 || month < 1 || month > 12 || day < 1 || day > DaysInMonth(year, month) || hour > 23 || minute > 59 ||
+        second > 59) {
         return Fail(output, error, EINVAL, "timestamp date or time component is out of range");
     }
 
@@ -1488,8 +1390,7 @@ int ParseRfc3339TimestampNs(const std::string& text, int64_t* output, std::strin
         int offset_hour = 0;
         int offset_minute = 0;
         if (!ParseDigits(value, position + 1, 2, &offset_hour) ||
-            !ParseDigits(value, position + 4, 2, &offset_minute) || offset_hour > 23 ||
-            offset_minute > 59) {
+            !ParseDigits(value, position + 4, 2, &offset_minute) || offset_hour > 23 || offset_minute > 59) {
             return Fail(output, error, EINVAL, "timestamp UTC offset is invalid");
         }
         offset_minutes = offset_hour * 60 + offset_minute;
@@ -1504,8 +1405,7 @@ int ParseRfc3339TimestampNs(const std::string& text, int64_t* output, std::strin
     const __int128 local_seconds = static_cast<__int128>(days) * 86400 + hour * 3600 + minute * 60 + second;
     const __int128 utc_seconds = local_seconds - static_cast<__int128>(offset_minutes) * 60;
     const __int128 epoch_ns = utc_seconds * 1000000000 + fractional_ns;
-    if (epoch_ns < std::numeric_limits<int64_t>::min() ||
-        epoch_ns > std::numeric_limits<int64_t>::max()) {
+    if (epoch_ns < std::numeric_limits<int64_t>::min() || epoch_ns > std::numeric_limits<int64_t>::max()) {
         return Fail(output, error, EOVERFLOW, "timestamp is outside the epoch-nanosecond int64 range");
     }
 
@@ -1513,9 +1413,7 @@ int ParseRfc3339TimestampNs(const std::string& text, int64_t* output, std::strin
     return 0;
 }
 
-int CompilePacketMacKey(const std::string& text,
-                        packet::PacketMacKey* output,
-                        std::string* error) {
+int CompilePacketMacKey(const std::string& text, packet::PacketMacKey* output, std::string* error) {
     if (error) error->clear();
     if (!output) return FailValue(output, error, EINVAL, "MAC output must not be null");
     *output = {};
@@ -1527,17 +1425,14 @@ int CompilePacketMacKey(const std::string& text,
         const int high = HexDigit(text[offset]);
         const int low = HexDigit(text[offset + 1]);
         if (high < 0 || low < 0 || (index + 1 != output->bytes.size() && text[offset + 2] != ':')) {
-            return FailValue(output, error, EINVAL,
-                             "MAC address must contain six colon-separated hexadecimal bytes");
+            return FailValue(output, error, EINVAL, "MAC address must contain six colon-separated hexadecimal bytes");
         }
         output->bytes[index] = static_cast<uint8_t>((high << 4) | low);
     }
     return 0;
 }
 
-int CompilePacketIpKey(const std::string& text,
-                       packet::PacketIpKey* output,
-                       std::string* error) {
+int CompilePacketIpKey(const std::string& text, packet::PacketIpKey* output, std::string* error) {
     if (error) error->clear();
     if (!output) return FailValue(output, error, EINVAL, "IP output must not be null");
     *output = {};
@@ -1548,7 +1443,7 @@ int CompilePacketIpKey(const std::string& text,
     uint32_t ipv4 = 0;
     if (inet_pton(AF_INET, text.c_str(), &ipv4) == 1) {
         output->family = packet::AddressFamily::kIPv4;
-        output->ipv4_network_order = ipv4;
+        output->ipv4_value = ntohl(ipv4);
         return 0;
     }
     std::array<uint8_t, 16> ipv6{};
@@ -1575,13 +1470,9 @@ int CompilePacketPort(const std::string& text, uint16_t* output, std::string* er
     return 0;
 }
 
-int CompileTransportPairKey(const std::string& function_name,
-                            const std::string& endpoint1_ip,
-                            const std::string& endpoint1_port,
-                            const std::string& endpoint2_ip,
-                            const std::string& endpoint2_port,
-                            packet::TransportPairKey* output,
-                            std::string* error) {
+int CompileTransportPairKey(const std::string& function_name, const std::string& endpoint1_ip,
+                            const std::string& endpoint1_port, const std::string& endpoint2_ip,
+                            const std::string& endpoint2_port, packet::TransportPairKey* output, std::string* error) {
     if (error) error->clear();
     if (!output) return FailValue(output, error, EINVAL, "transport pair output must not be null");
     *output = {};
@@ -1625,9 +1516,7 @@ int CompileTransportPairKey(const std::string& function_name,
     return 0;
 }
 
-int CompilePcapFilterPlanJson(const std::string& canonical_json,
-                              packet::PcapFilterPlan* output,
-                              std::string* error) {
+int CompilePcapFilterPlanJson(const std::string& canonical_json, packet::PcapFilterPlan* output, std::string* error) {
     if (error) error->clear();
     if (!output) {
         if (error) *error = "packet filter plan output must not be null";
@@ -1650,10 +1539,8 @@ int CompilePcapFilterPlanJson(const std::string& canonical_json,
     }
 }
 
-int SelectCompilablePcapFilterNodes(const std::string& canonical_json,
-                                    const std::vector<uint32_t>& candidate_node_ids,
-                                    std::vector<uint32_t>* accepted_node_ids,
-                                    std::string* error) {
+int SelectCompilablePcapFilterNodes(const std::string& canonical_json, const std::vector<uint32_t>& candidate_node_ids,
+                                    std::vector<uint32_t>* accepted_node_ids, std::string* error) {
     if (error) error->clear();
     if (!accepted_node_ids) {
         if (error) *error = "accepted packet filter node output must not be null";
@@ -1674,24 +1561,21 @@ int SelectCompilablePcapFilterNodes(const std::string& canonical_json,
         for (const uint32_t candidate_node_id : candidate_node_ids) {
             if (!requested.insert(candidate_node_id).second) {
                 if (error) {
-                    *error = "packet filter candidate node id is duplicated: " +
-                             std::to_string(candidate_node_id);
+                    *error = "packet filter candidate node id is duplicated: " + std::to_string(candidate_node_id);
                 }
                 return EINVAL;
             }
             const auto node = nodes.find(candidate_node_id);
             if (node == nodes.end()) {
                 if (error) {
-                    *error = "packet filter candidate node id is unknown: " +
-                             std::to_string(candidate_node_id);
+                    *error = "packet filter candidate node id is unknown: " + std::to_string(candidate_node_id);
                 }
                 return EINVAL;
             }
             packet::PcapFilterPlan candidate_plan;
             std::string compile_error;
             PacketPlanCompiler compiler(&compile_error);
-            if (compiler.Compile(std::optional<CanonicalFilterNode>(*node->second),
-                                 &candidate_plan) == 0) {
+            if (compiler.Compile(std::optional<CanonicalFilterNode>(*node->second), &candidate_plan) == 0) {
                 accepted.push_back(candidate_node_id);
             }
         }
@@ -1704,19 +1588,16 @@ int SelectCompilablePcapFilterNodes(const std::string& canonical_json,
     }
 }
 
-PacketHeaderFilterResult EvaluatePcapHeaderFilter(const packet::PcapFilterPlan& plan,
-                                                  const packet::PacketMeta& meta) {
+PacketHeaderFilterResult EvaluatePcapHeaderFilter(const packet::PcapFilterPlan& plan, const packet::PacketMeta& meta) {
     if (plan.version != packet::kPcapFilterPlanVersion) {
         return PacketHeaderFilterResult::kReject;
     }
     return EvaluateHeaderRule(plan.root, meta);
 }
 
-bool EvaluatePcapDecodedFilter(const packet::PcapFilterPlan& plan,
-                               const packet::PacketMeta& meta,
-                               const packet::PacketLayerInfo& layer) {
-    return plan.version == packet::kPcapFilterPlanVersion &&
-           EvaluateDecodedRule(plan.root, meta, layer);
+bool EvaluatePcapDecodedFilter(const packet::PcapFilterPlan& plan, const packet::PacketMeta& meta,
+                               const packet::PacketFamilyLayerView& layer) {
+    return plan.version == packet::kPcapFilterPlanVersion && EvaluateDecodedRule(plan.root, meta, layer);
 }
 
 void CanonicalizePacketFilterRuleKeys(packet::PacketFilterRule* rule) {
@@ -1725,13 +1606,12 @@ void CanonicalizePacketFilterRuleKeys(packet::PacketFilterRule* rule) {
 
     switch (rule->kind) {
         case packet::PacketFilterRuleKind::kMacAnyOf:
-            SortAndUnique(&rule->mac_keys,
-                          [](const packet::PacketMacKey& lhs, const packet::PacketMacKey& rhs) {
-                              return lhs.bytes < rhs.bytes;
-                          },
-                          [](const packet::PacketMacKey& lhs, const packet::PacketMacKey& rhs) {
-                              return lhs.bytes == rhs.bytes;
-                          });
+            SortAndUnique(
+                &rule->mac_keys,
+                [](const packet::PacketMacKey& lhs, const packet::PacketMacKey& rhs) { return lhs.bytes < rhs.bytes; },
+                [](const packet::PacketMacKey& lhs, const packet::PacketMacKey& rhs) {
+                    return lhs.bytes == rhs.bytes;
+                });
             break;
         case packet::PacketFilterRuleKind::kIpAnyOf:
             SortAndUnique(&rule->ip_keys, PacketIpLess, PacketIpEqual);
@@ -1755,26 +1635,23 @@ int PcapFilterDomainResolver::Resolve(const FilterDomainResolveRequestV1& reques
                                       FilterDomainResolveResultV1* result) const {
     if (result) *result = {};
     if (!result) return EINVAL;
-    if (request.contract_version != kFilterDomainResolverContractVersionV1 ||
-        !request.target_category || !request.target_name || !request.output_schema ||
-        !request.expression || request.target_name[0] == '\0') {
+    if (request.contract_version != kFilterDomainResolverContractVersionV1 || !request.target_category ||
+        !request.target_name || !request.output_schema || !request.expression || request.target_name[0] == '\0') {
         result->diagnostic = "pcapfile domain resolve request is incomplete or has the wrong version";
         return EINVAL;
     }
-    if (request.target_kind != FilterDomainTargetKindV1::kSource ||
-        LowerAscii(request.target_category) != "pcapfile") {
+    if (request.target_kind != FilterDomainTargetKindV1::kSource || LowerAscii(request.target_category) != "pcapfile") {
         return ENOTSUP;
     }
-    const auto expected_schema = packet::PacketSchema();
-    if (!expected_schema || !request.output_schema->Equals(*expected_schema, true)) {
+    const auto expected_schema = packet::PacketFamilyFilterSchema();
+    if (!expected_schema || !request.output_schema->Equals(*packet::PacketFamilySchema(), true)) {
         result->diagnostic = "pcapfile domain resolver requires the packet output Schema";
         return EINVAL;
     }
 
     try {
         PcapFilterAstLowerer lowerer;
-        const int rc = lowerer.Lower(
-            request.expression, &result->lowered_expression, &result->diagnostic);
+        const int rc = lowerer.Lower(request.expression, &result->lowered_expression, &result->diagnostic);
         if (rc != 0) {
             result->lowered_expression.reset();
             return rc;

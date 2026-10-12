@@ -36,17 +36,24 @@ class NpmBasicResultProjector final {
     NpmBasicResultProjector& operator=(NpmBasicResultProjector&&) = delete;
 
     /** Emits the next non-final revision. Output and revision state are unchanged on error. */
-    NpmBasicProjectionError ProjectActive(const NpmSessionView& session, int64_t observed_at, NpmBasicResult* output);
+    template <typename Address>
+    NpmBasicProjectionError ProjectActive(const NpmSessionView& session, int64_t observed_at,
+                                          NpmBasicFamilyResult<Address>* output);
 
     /** Emits the next final revision and forgets its revision state after success. */
+    template <typename Address>
     NpmBasicProjectionError ProjectFinal(const NpmSessionView& session, NpmSessionEndReason reason, int64_t observed_at,
-                                         NpmBasicResult* output);
+                                         NpmBasicFamilyResult<Address>* output);
 
+    NpmBasicProjectionError ProjectAndWrite(const NpmSessionView& session, int64_t observed_at,
+                                            std::optional<NpmSessionEndReason> reason, INpmResultWriter& writer,
+                                            int* write_error, std::optional<NpmBasicPeriodStats> period = std::nullopt);
     size_t tracked_sessions() const noexcept;
 
  private:
+    template <typename Address>
     NpmBasicProjectionError Project(const NpmSessionView& session, int64_t observed_at, bool is_final,
-                                    NpmSessionEndReason reason, NpmBasicResult* output);
+                                    NpmSessionEndReason reason, NpmBasicFamilyResult<Address>* output);
 
     const NpmProtocolContext& protocol_context_;
     std::unordered_map<uint64_t, uint64_t> revisions_;

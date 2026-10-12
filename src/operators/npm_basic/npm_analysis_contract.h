@@ -5,7 +5,8 @@
 #define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_ANALYSIS_CONTRACT_H_
 
 #include <common/typedef.h>
-#include <framework/interfaces/ipacket.h>
+#include <framework/interfaces/ipacket_family.h>
+#include <operators/npm_basic/npm_ip_family_contract.h>
 
 #include <cstdint>
 #include <memory>
@@ -117,8 +118,7 @@ enum class NpmObservationDomainError : uint8_t {
 };
 
 NpmObservationDomainError ValidateNpmObservationDomainMap(const NpmObservationDomainMap& domain_map);
-NpmObservationDomainError ResolveNpmObservationDomain(const NpmObservationDomainMap& domain_map,
-                                                      uint32_t source_id,
+NpmObservationDomainError ResolveNpmObservationDomain(const NpmObservationDomainMap& domain_map, uint32_t source_id,
                                                       uint64_t* observation_domain_id);
 
 enum class NpmProtocolStatus : uint8_t {
@@ -145,16 +145,16 @@ struct NpmBasicPeriodStats {
     uint64_t interval_wire_bytes_total = 0;
 };
 
-struct NpmBasicResult {
+template <typename Address>
+struct NpmBasicFamilyResult {
+    Address a_ip;
+    Address b_ip;
     uint64_t session_id = 0;
     uint64_t observation_domain_id = 0;
     uint64_t revision = 0;
     int64_t observed_at = 0;
     bool is_final = false;
-    uint8_t ip_family = 0;
     uint8_t transport_protocol = 0;
-    std::string a_ip;
-    std::string b_ip;
     uint16_t a_port = 0;
     uint16_t b_port = 0;
     int64_t first_ns = 0;
@@ -165,13 +165,15 @@ struct NpmBasicResult {
     uint64_t wire_bytes_ba = 0;
     uint64_t wire_bytes_total = 0;
     std::optional<NpmBasicPeriodStats> period;
-    uint32_t primary_label_id = 0;
+    std::optional<uint32_t> primary_label_id;
     NpmProtocolStatus protocol_status = NpmProtocolStatus::kPending;
     std::optional<uint16_t> protocol_id;
     std::optional<uint16_t> protocol_sub_id;
     std::optional<std::string> protocol;
     std::optional<NpmSessionEndReason> end_reason;
 };
+using NpmBasicResult4 = NpmBasicFamilyResult<network::IPv4Address>;
+using NpmBasicResult6 = NpmBasicFamilyResult<network::IPv6Address>;
 
 enum class NpmBasicResultError : uint8_t {
     kNone = 0,
@@ -187,8 +189,9 @@ enum class NpmBasicResultError : uint8_t {
 
 const char* NpmProtocolStatusName(NpmProtocolStatus status);
 const char* NpmSessionEndReasonName(NpmSessionEndReason reason);
-NpmBasicResultError ValidateNpmBasicResult(const NpmBasicResult& result);
-std::shared_ptr<arrow::Schema> NpmBasicResultSchema();
+template <typename Address>
+NpmBasicResultError ValidateNpmBasicResult(const NpmBasicFamilyResult<Address>& result);
+std::shared_ptr<arrow::Schema> NpmBasicResultSchema(packet::AddressFamily family);
 
 enum class NpmRateStatus : uint8_t {
     kValid = 0,
@@ -226,28 +229,26 @@ constexpr uint32_t kNpmMeasurementTruncatedPayload = 1u << 1;
 constexpr uint32_t kNpmMeasurementTimestampRegression = 1u << 2;
 constexpr uint32_t kNpmMeasurementSequenceAmbiguous = 1u << 3;
 constexpr uint32_t kNpmMeasurementSynRetransmitted = 1u << 4;
-constexpr uint32_t kNpmMeasurementKnownFlags = kNpmMeasurementMidstreamStart |
-                                               kNpmMeasurementTruncatedPayload |
-                                               kNpmMeasurementTimestampRegression |
-                                               kNpmMeasurementSequenceAmbiguous |
+constexpr uint32_t kNpmMeasurementKnownFlags = kNpmMeasurementMidstreamStart | kNpmMeasurementTruncatedPayload |
+                                               kNpmMeasurementTimestampRegression | kNpmMeasurementSequenceAmbiguous |
                                                kNpmMeasurementSynRetransmitted;
 
-struct NpmSessionResult {
+template <typename Address>
+struct NpmSessionFamilyResult {
+    Address a_ip;
+    Address b_ip;
     uint64_t session_id = 0;
     uint64_t observation_domain_id = 0;
     uint64_t revision = 0;
     int64_t observed_at = 0;
     bool is_final = false;
-    uint8_t ip_family = 0;
     uint8_t transport_protocol = 0;
-    std::string a_ip;
-    std::string b_ip;
     uint16_t a_port = 0;
     uint16_t b_port = 0;
     int64_t first_ns = 0;
     int64_t last_ns = 0;
     int64_t duration_ns = 0;
-    uint32_t primary_label_id = 0;
+    std::optional<uint32_t> primary_label_id;
     NpmProtocolStatus protocol_status = NpmProtocolStatus::kPending;
     std::optional<uint16_t> protocol_id;
     std::optional<uint16_t> protocol_sub_id;
@@ -277,14 +278,15 @@ struct NpmSessionResult {
     std::optional<int64_t> tcp_rtt_min_ns;
     std::optional<int64_t> tcp_rtt_mean_ns;
     std::optional<int64_t> tcp_rtt_max_ns;
-    NpmTcpRetransmissionStatus tcp_retransmission_status =
-        NpmTcpRetransmissionStatus::kNotApplicable;
+    NpmTcpRetransmissionStatus tcp_retransmission_status = NpmTcpRetransmissionStatus::kNotApplicable;
     std::optional<uint64_t> tcp_retrans_packets_ab;
     std::optional<uint64_t> tcp_retrans_packets_ba;
     std::optional<uint64_t> tcp_retrans_payload_bytes_ab;
     std::optional<uint64_t> tcp_retrans_payload_bytes_ba;
     uint32_t measurement_flags = 0;
 };
+using NpmSessionResult4 = NpmSessionFamilyResult<network::IPv4Address>;
+using NpmSessionResult6 = NpmSessionFamilyResult<network::IPv6Address>;
 
 enum class NpmSessionResultError : uint8_t {
     kNone = 0,
@@ -316,8 +318,9 @@ const char* NpmTcpHandshakeStatusName(NpmTcpHandshakeStatus status);
 const char* NpmTcpRttStatusName(NpmTcpRttStatus status);
 const char* NpmTcpRetransmissionStatusName(NpmTcpRetransmissionStatus status);
 const char* NpmTcpInitiatorName(NpmTcpInitiator initiator);
-NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result);
-std::shared_ptr<arrow::Schema> NpmSessionResultSchema(bool labeling_enabled = false);
+template <typename Address>
+NpmSessionResultError ValidateNpmSessionResult(const NpmSessionFamilyResult<Address>& result);
+std::shared_ptr<arrow::Schema> NpmSessionResultSchema(packet::AddressFamily family);
 
 enum class NpmBudgetCategory : uint8_t {
     kSessionState = 0,
@@ -343,25 +346,9 @@ enum class NpmBudgetError : uint8_t {
 };
 
 uint64_t NpmTrackedBudgetBytes(const NpmBudgetUsage& usage);
-NpmBudgetError ReserveNpmBudget(const NpmAnalysisConfig& config,
-                                NpmBudgetCategory category,
-                                uint64_t bytes,
+NpmBudgetError ReserveNpmBudget(const NpmAnalysisConfig& config, NpmBudgetCategory category, uint64_t bytes,
                                 NpmBudgetUsage* usage);
 NpmBudgetError ReleaseNpmBudget(NpmBudgetCategory category, uint64_t bytes, NpmBudgetUsage* usage);
-
-struct NpmEndpoint {
-    packet::IpAddress ip;
-    uint16_t port = 0;
-};
-
-struct NpmSessionKey {
-    std::string input_namespace;
-    uint64_t observation_domain_id = 0;
-    packet::AddressFamily ip_family = packet::AddressFamily::kNone;
-    uint8_t transport_protocol = 0;
-    NpmEndpoint a;
-    NpmEndpoint b;
-};
 
 enum class NpmPacketDirection : uint8_t {
     kAToB = 0,
@@ -391,7 +378,7 @@ struct NpmTransportPacketFacts {
 /** Borrowed view valid only during the current module callback. It never owns packet bytes. */
 struct NpmPacketView {
     packet::PacketView packet;
-    const packet::PacketLayerInfo* layer = nullptr;
+    const packet::PacketFamilyLayerView* layer = nullptr;
     Span<const uint8_t> payload;
     NpmPacketDirection direction = NpmPacketDirection::kAToB;
     NpmTransportPacketFacts transport;
@@ -400,7 +387,7 @@ struct NpmPacketView {
 /** Borrowed view valid only during the current module callback. The engine owns key and state. */
 struct NpmSessionView {
     uint64_t session_id = 0;
-    const NpmSessionKey* key = nullptr;
+    std::optional<NpmSessionKeyView> key;
     int64_t first_ns = 0;
     int64_t last_ns = 0;
     uint64_t packets_ab = 0;
@@ -425,8 +412,10 @@ interface INpmResultWriter {
     virtual ~INpmResultWriter() = default;
 
     /** Copies or encodes the call-borrowed result before returning 0; nonzero means it was not accepted. */
-    virtual int WriteBasic(const NpmBasicResult& result) = 0;
-    virtual int WriteSession(const NpmSessionResult& result) = 0;
+    virtual int WriteBasic(const NpmBasicResult4& result) = 0;
+    virtual int WriteBasic(const NpmBasicResult6& result) = 0;
+    virtual int WriteSession(const NpmSessionResult4& result) = 0;
+    virtual int WriteSession(const NpmSessionResult6& result) = 0;
 };
 
 interface INpmAnalysisModule {
@@ -436,15 +425,9 @@ interface INpmAnalysisModule {
      * Do not retain views or their pointers. observed_at_ns is the callback trigger/emission time, not session.last_ns.
      * Return 0 on success; every nonzero value aborts the task.
      */
-    virtual int OnPacket(const NpmPacketView& packet,
-                         const NpmSessionView& session,
-                         INpmResultWriter& writer) = 0;
-    virtual int OnSessionSnapshot(const NpmSessionView& session,
-                                  int64_t observed_at_ns,
-                                  INpmResultWriter& writer) = 0;
-    virtual int OnSessionEnd(const NpmSessionView& session,
-                             NpmSessionEndReason reason,
-                             int64_t observed_at_ns,
+    virtual int OnPacket(const NpmPacketView& packet, const NpmSessionView& session, INpmResultWriter& writer) = 0;
+    virtual int OnSessionSnapshot(const NpmSessionView& session, int64_t observed_at_ns, INpmResultWriter& writer) = 0;
+    virtual int OnSessionEnd(const NpmSessionView& session, NpmSessionEndReason reason, int64_t observed_at_ns,
                              INpmResultWriter& writer) = 0;
     /** Serialized safe event-time progress; never a wall-clock or ordinary poll timeout. */
     virtual int OnTime(int64_t, int64_t, INpmResultWriter&) { return 0; }

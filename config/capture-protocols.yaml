@@ -1,4 +1,5 @@
 # Common-port analysis scope for npm.basic DNS, HTTP/1 and TLS modules.
+# Results persist to separate *_ipv4 / *_ipv6 entities; labels do not change their Schema.
 # Rules match both directions and IPv4/IPv6. Ports select candidate traffic;
 # protocol parsers still determine whether the payload is DNS, HTTP/1 or TLS.
 api_version: flowsql.io/flow-labeling/v1alpha1

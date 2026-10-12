@@ -7,6 +7,7 @@
 #include "npm_dns_result_encoder.h"
 #include "npm_dns_tcp.h"
 
+#include <operators/npm_basic/modules/npm_transaction_identity.h>
 #include <map>
 #include <memory>
 
@@ -37,7 +38,7 @@ class NpmDnsProtocolModuleV1 final : public INpmProtocolModuleV1, public INpmTcp
     std::shared_ptr<INpmTaskBudget> budget_;
     NpmDnsUdpTrackerV1 transactions_;
     NpmDnsTcpFramerV1 framer_;
-    std::map<uint64_t, NpmDnsSessionIdentityV1> identities_;
+    std::map<uint64_t, NpmTransactionIdentity> identities_;
     bool finished_ = false;
     bool aborted_ = false;
 };

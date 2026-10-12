@@ -1,6 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <tests/common/packet_family_test_support.h>
+
 #include <framework/core/packet_codec.h>
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_manager.h>
@@ -130,18 +132,17 @@ void TestBlockStreamPublicContracts() {
     assert(channel.ReleaseBlock(batch) != 0);
 }
 
-class MockLayerDecoder final : public packet::IPacketLayerDecoder {
+class MockLayerDecoder final : public packet::IPacketFamilyLayerDecoder {
  public:
-    packet::PacketLayerInfo Decode(const packet::PacketView& packet_view,
-                                   const packet::LayerDecodeOptions& options) override {
+    int Decode(const packet::PacketView& view, const packet::LayerDecodeOptions& options,
+               packet::PacketLayerFacts* facts, packet::IPacketAddressSink&) override {
         ++decode_count;
-        last_size = packet_view.bytes.size;
+        last_size = view.bytes.size;
         last_options = options;
-        packet::PacketLayerInfo result;
-        result.status = packet::LayerStatus::kDecoded;
-        result.layer_count = 1;
-        result.layers[0] = {1, 0};
-        return result;
+        facts->status = packet::LayerStatus::kDecoded;
+        facts->layer_count = 1;
+        facts->layers[0] = {1, 0};
+        return 0;
     }
 
     int decode_count = 0;
@@ -149,9 +150,9 @@ class MockLayerDecoder final : public packet::IPacketLayerDecoder {
     packet::LayerDecodeOptions last_options;
 };
 
-class MockProtocolIdentifier final : public packet::IPacketProtocolIdentifier {
+class MockProtocolIdentifier final : public packet::IPacketFamilyProtocolIdentifier {
  public:
-    packet::PacketProtocolInfo Identify(const packet::PacketView&, const packet::PacketLayerInfo&) override {
+    packet::PacketProtocolInfo Identify(const packet::PacketView&, const flowsql::packet::PacketLayerFacts&) override {
         ++identify_count;
         return {packet::ProtocolStatus::kUnknown, 0, 0};
     }
@@ -240,7 +241,7 @@ void TestContractDefaultsAndInterfaces() {
     view.bytes = flowsql::Span<const uint8_t>(bytes.data(), bytes.size());
 
     MockLayerDecoder decoder;
-    auto layer = decoder.Decode(view, options);
+    auto layer = flowsql::testing::DecodeLayer(decoder, view, options);
     assert(decoder.decode_count == 1);
     assert(decoder.last_size == bytes.size());
     assert(layer.status == packet::LayerStatus::kDecoded);
@@ -303,13 +304,14 @@ void TestPacketEnvelopeAndSchema() {
 
     auto schema = packet::PacketSchema();
     assert(schema != nullptr);
-    assert(schema->num_fields() == 30);
+    assert(schema->num_fields() == 26);
     assert(schema->metadata()->Get("flowsql.entity").ValueOrDie() == "packet");
-    assert(schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == "1");
+    assert(schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == "2");
     assert(schema->metadata()->Get("flowsql.timestamp_unit").ValueOrDie() == "ns");
     assert(schema->GetFieldByName("src_mac")->nullable());
-    assert(schema->GetFieldByName("src_ip_v4")->type()->id() == arrow::Type::UINT32);
-    assert(schema->GetFieldByName("src_ip_v6")->type()->id() == arrow::Type::BINARY);
+    assert(packet::PacketFamilyFilterSchema()->GetFieldByName("src_ip_v4")->type()->id() == arrow::Type::UINT32);
+    assert(packet::PacketFamilyFilterSchema()->GetFieldByName("src_ip_v6")->type()->id() ==
+           arrow::Type::FIXED_SIZE_BINARY);
     assert(schema->GetFieldByName("layer_ids")->type()->id() == arrow::Type::FIXED_SIZE_LIST);
     assert(schema->GetFieldByName("layer_offsets")->type()->id() == arrow::Type::FIXED_SIZE_LIST);
     assert(schema->GetFieldByName("ports_valid")->type()->id() == arrow::Type::BOOL);
@@ -322,7 +324,7 @@ void TestPacketRecordBatchEncoding() {
     view.meta.wire_len = bytes.size();
     view.bytes = flowsql::Span<const uint8_t>(bytes.data(), bytes.size());
 
-    packet::PacketRecord record;
+    flowsql::testing::PacketRecord record;
     record.meta.timestamp_ns = 123456789;
     record.meta.captured_len = bytes.size();
     record.meta.wire_len = bytes.size();
@@ -339,14 +341,11 @@ void TestPacketRecordBatchEncoding() {
     record.layer.network_layer_index = 1;
     record.layer.transport_layer_index = packet::kNoLayerIndex;
     record.layer.payload_offset = 0;
-    record.layer.src_mac.valid = 1;
-    record.layer.src_mac.value.bytes[0] = 0x10;
-    record.layer.src_mac.value.bytes[5] = 0x15;
-    record.layer.src_ip = packet::IPv4Address(inet_addr("192.0.2.10"));
-    packet::IPv6Address dst_ip;
-    dst_ip.bytes[0] = 0x20;
-    dst_ip.bytes[15] = 0x2f;
-    record.layer.dst_ip = dst_ip;
+    record.layer.src_mac_valid = 1;
+    record.layer.src_mac.bytes[0] = 0x10;
+    record.layer.src_mac.bytes[5] = 0x15;
+    record.layer.SetEndpoints(flowsql::network::IPv4Address::FromUInt32(0xc000020a),
+                              flowsql::network::IPv4Address::FromUInt32(0xc6336402));
     record.layer.transport_protocol = 6;
     record.layer.src_port = 1234;
     record.layer.dst_port = 443;
@@ -357,7 +356,7 @@ void TestPacketRecordBatchEncoding() {
 
     std::shared_ptr<arrow::RecordBatch> batch;
     std::string error;
-    const auto encode_result = packet::EncodePacketBatch({record}, &batch, &error);
+    const auto encode_result = flowsql::testing::EncodePacketBatch({record}, &batch, &error);
     if (encode_result != packet::PacketBatchError::kNone) {
         std::fprintf(stderr, "EncodePacketBatch failed: %d %s\n", static_cast<int>(encode_result), error.c_str());
     }
@@ -365,7 +364,7 @@ void TestPacketRecordBatchEncoding() {
     assert(error.empty());
     assert(batch != nullptr);
     assert(batch->num_rows() == 1);
-    assert(batch->num_columns() == 30);
+    assert(batch->num_columns() == 26);
 
     auto raw = std::static_pointer_cast<arrow::BinaryArray>(batch->GetColumnByName("raw_data"));
     assert(raw->GetView(0) == std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
@@ -374,15 +373,11 @@ void TestPacketRecordBatchEncoding() {
     assert(encoded_src_mac->GetValue(0)[0] == 0x10);
     assert(encoded_src_mac->GetValue(0)[5] == 0x15);
 
-    auto encoded_src_v4 = std::static_pointer_cast<arrow::UInt32Array>(batch->GetColumnByName("src_ip_v4"));
-    assert(!encoded_src_v4->IsNull(0));
-    assert(encoded_src_v4->Value(0) == inet_addr("192.0.2.10"));
-    auto encoded_src_v6 = std::static_pointer_cast<arrow::BinaryArray>(batch->GetColumnByName("src_ip_v6"));
-    assert(encoded_src_v6->IsNull(0));
-    auto encoded_dst_v6 = std::static_pointer_cast<arrow::BinaryArray>(batch->GetColumnByName("dst_ip_v6"));
-    assert(!encoded_dst_v6->IsNull(0));
-    assert(encoded_dst_v6->GetView(0).size() == 16);
-    assert(static_cast<uint8_t>(encoded_dst_v6->GetView(0)[15]) == 0x2f);
+    const auto& endpoints = static_cast<const arrow::DenseUnionArray&>(*batch->GetColumnByName("ip_endpoints"));
+    assert(endpoints.type_code(0) == 4 && endpoints.field(2)->length() == 0);
+    const auto& pair4 = static_cast<const arrow::StructArray&>(*endpoints.field(1));
+    assert(static_cast<const arrow::UInt32Array&>(*pair4.field(0)).Value(0) == 0xc000020a);
+    assert(static_cast<const arrow::UInt32Array&>(*pair4.field(1)).Value(0) == 0xc6336402);
 
     auto encoded_layer_ids = std::static_pointer_cast<arrow::FixedSizeListArray>(batch->GetColumnByName("layer_ids"));
     auto layer_ids_values = std::static_pointer_cast<arrow::UInt16Array>(encoded_layer_ids->values());
@@ -400,36 +395,39 @@ void TestPacketRecordBatchEncoding() {
         std::static_pointer_cast<arrow::UInt16Array>(batch->GetColumnByName("protocol_sub_id"));
     assert(encoded_protocol_sub_id->Value(0) == 8);
 
-    packet::PacketRecord invalid = record;
+    flowsql::testing::PacketRecord invalid = record;
     invalid.raw_data.size = 1;
     batch.reset();
-    assert(packet::EncodePacketBatch({invalid}, &batch, &error) == packet::PacketBatchError::kInvalidRecord);
+    assert(flowsql::testing::EncodePacketBatch({invalid}, &batch, &error) == packet::PacketBatchError::kInvalidRecord);
     assert(batch == nullptr);
     assert(!error.empty());
 
-    packet::PacketRecord mixed_scope = record;
+    flowsql::testing::PacketRecord mixed_scope = record;
     mixed_scope.layer.endpoint_scope = packet::EndpointScope::kOutermost;
-    assert(packet::EncodePacketBatch({record, mixed_scope}, &batch, &error) ==
+    assert(flowsql::testing::EncodePacketBatch({record, mixed_scope}, &batch, &error) ==
            packet::PacketBatchError::kInvalidRecord);
     assert(batch == nullptr);
     assert(!error.empty());
 
-    packet::PacketRecord missing_owner = record;
+    flowsql::testing::PacketRecord missing_owner = record;
     missing_owner.raw_data.owner.reset();
-    assert(packet::EncodePacketBatch({missing_owner}, &batch, &error) == packet::PacketBatchError::kInvalidRecord);
+    assert(flowsql::testing::EncodePacketBatch({missing_owner}, &batch, &error) ==
+           packet::PacketBatchError::kInvalidRecord);
     assert(batch == nullptr);
     assert(!error.empty());
 
-    packet::PacketRecord invalid_scope = record;
+    flowsql::testing::PacketRecord invalid_scope = record;
     invalid_scope.layer.endpoint_scope = static_cast<packet::EndpointScope>(9);
-    assert(packet::EncodePacketBatch({invalid_scope}, &batch, &error) == packet::PacketBatchError::kInvalidRecord);
+    assert(flowsql::testing::EncodePacketBatch({invalid_scope}, &batch, &error) ==
+           packet::PacketBatchError::kInvalidRecord);
     assert(batch == nullptr);
     assert(!error.empty());
 
-    packet::PacketRecord missing;
-    assert(packet::EncodePacketBatch({missing}, &batch, &error) == packet::PacketBatchError::kNone);
-    auto missing_src_v4 = std::static_pointer_cast<arrow::UInt32Array>(batch->GetColumnByName("src_ip_v4"));
-    assert(missing_src_v4->IsNull(0));
+    flowsql::testing::PacketRecord missing;
+    assert(flowsql::testing::EncodePacketBatch({missing}, &batch, &error) == packet::PacketBatchError::kNone);
+    const auto& missing_endpoints = static_cast<const arrow::DenseUnionArray&>(*batch->GetColumnByName("ip_endpoints"));
+    assert(missing_endpoints.type_code(0) == 0 && missing_endpoints.field(1)->length() == 0 &&
+           missing_endpoints.field(2)->length() == 0);
     auto missing_protocol_id = std::static_pointer_cast<arrow::UInt16Array>(batch->GetColumnByName("protocol_id"));
     assert(missing_protocol_id->IsNull(0));
 }
@@ -538,15 +536,15 @@ void TestNpiLayerDecoder() {
     packet::LayerDecodeOptions options;
     options.field_mask = packet::kExtractMac | packet::kExtractIp | packet::kExtractPort;
 
-    auto inner = decoder.Decode(view, options);
+    auto inner = flowsql::testing::DecodeLayer(decoder, view, options);
     assert(protocol.layer_calls == 1);
     assert(inner.status == packet::LayerStatus::kDecoded);
     assert(inner.layer_count == 7);
     assert(inner.network_layer_index == 5);
     assert(inner.transport_layer_index == 6);
-    assert(std::get<packet::IPv4Address>(inner.src_ip).addr == inet_addr("192.0.2.10"));
-    assert(inner.src_mac.valid == 1);
-    assert(inner.src_mac.value.bytes[0] == 0x11);
+    assert(inner.Get4()->src.ToUInt32() == ntohl(inet_addr("192.0.2.10")));
+    assert(inner.src_mac_valid == 1);
+    assert(inner.src_mac.bytes[0] == 0x11);
     assert(inner.transport_protocol == flowsql::ipv4::eNext::TCP);
     assert(inner.src_port == 12345);
     assert(inner.dst_port == 443);
@@ -554,13 +552,13 @@ void TestNpiLayerDecoder() {
     assert(inner.payload_offset == bytes.size());
 
     options.endpoint_scope = packet::EndpointScope::kOutermost;
-    auto outer = decoder.Decode(view, options);
+    auto outer = flowsql::testing::DecodeLayer(decoder, view, options);
     assert(protocol.layer_calls == 2);
     assert(outer.status == packet::LayerStatus::kDecoded);
     assert(outer.network_layer_index == 1);
     assert(outer.transport_layer_index == 2);
-    assert(std::get<packet::IPv4Address>(outer.src_ip).addr == inet_addr("198.51.100.1"));
-    assert(outer.src_mac.value.bytes[0] == 0x01);
+    assert(outer.Get4()->src.ToUInt32() == ntohl(inet_addr("198.51.100.1")));
+    assert(outer.src_mac.bytes[0] == 0x01);
     assert(outer.transport_protocol == flowsql::ipv4::eNext::UDP);
     assert(outer.src_port == 40000);
     assert(outer.dst_port == 4789);
@@ -573,17 +571,17 @@ void TestNpiLayerDecoder() {
     auto truncated_view = view;
     truncated_view.meta.captured_len = 20;
     truncated_view.bytes = flowsql::Span<const uint8_t>(bytes.data(), 20);
-    auto truncated = decoder.Decode(truncated_view, options);
+    auto truncated = flowsql::testing::DecodeLayer(decoder, truncated_view, options);
     assert(truncated.status == packet::LayerStatus::kTruncated);
 
     auto unsupported_view = view;
     unsupported_view.meta.link_type = 113;
-    auto unsupported = decoder.Decode(unsupported_view, options);
+    auto unsupported = flowsql::testing::DecodeLayer(decoder, unsupported_view, options);
     assert(unsupported.status == packet::LayerStatus::kUnsupportedLinkType);
     assert(protocol.layer_calls == 3);
 
     options.endpoint_scope = static_cast<packet::EndpointScope>(9);
-    auto invalid_scope = decoder.Decode(view, options);
+    auto invalid_scope = flowsql::testing::DecodeLayer(decoder, view, options);
     assert(invalid_scope.status == packet::LayerStatus::kMalformed);
     assert(protocol.layer_calls == 3);
 }
@@ -602,20 +600,20 @@ void TestNpiTunnelEndpointSelection() {
     packet::LayerDecodeOptions options;
     options.field_mask = packet::kExtractMac | packet::kExtractIp | packet::kExtractPort;
 
-    auto inner = gre_decoder.Decode(gre_view, options);
+    auto inner = flowsql::testing::DecodeLayer(gre_decoder, gre_view, options);
     assert(inner.status == packet::LayerStatus::kDecoded);
     assert(inner.network_layer_index == 3);
     assert(inner.transport_layer_index == 4);
-    assert(std::get<packet::IPv4Address>(inner.src_ip).addr == inet_addr("192.0.2.30"));
-    assert(inner.src_mac.valid == 0);
+    assert(inner.Get4()->src.ToUInt32() == ntohl(inet_addr("192.0.2.30")));
+    assert(inner.src_mac_valid == 0);
     assert(inner.ports_valid == 1);
 
     options.endpoint_scope = packet::EndpointScope::kOutermost;
-    auto outer = gre_decoder.Decode(gre_view, options);
+    auto outer = flowsql::testing::DecodeLayer(gre_decoder, gre_view, options);
     assert(outer.network_layer_index == 1);
     assert(outer.transport_layer_index == 2);
-    assert(outer.src_mac.valid == 1);
-    assert(std::get<packet::IPv4Address>(outer.src_ip).addr == inet_addr("198.51.100.10"));
+    assert(outer.src_mac_valid == 1);
+    assert(outer.Get4()->src.ToUInt32() == ntohl(inet_addr("198.51.100.10")));
     assert(outer.ports_valid == 0);
     assert(outer.payload_offset == 38);
 
@@ -629,17 +627,18 @@ void TestNpiTunnelEndpointSelection() {
     SetIpInIpLayers(&ipip_protocol.layers);
     flowsql::protocol::NpiPacketLayerDecoder ipip_decoder(&ipip_protocol);
     options.endpoint_scope = packet::EndpointScope::kInnermost;
-    auto ipip_inner = ipip_decoder.Decode(ipip_view, options);
+    auto ipip_inner = flowsql::testing::DecodeLayer(ipip_decoder, ipip_view, options);
     assert(ipip_inner.network_layer_index == 2);
     assert(ipip_inner.transport_layer_index == 3);
-    assert(ipip_inner.src_mac.valid == 0);
+    assert(ipip_inner.src_mac_valid == 0);
     assert(ipip_inner.ports_valid == 1);
-    auto ipip_outer = ipip_decoder.Decode(
-        ipip_view, packet::LayerDecodeOptions{packet::kExtractMac | packet::kExtractIp | packet::kExtractPort,
-                                              packet::EndpointScope::kOutermost});
+    auto ipip_outer = flowsql::testing::DecodeLayer(
+        ipip_decoder, ipip_view,
+        packet::LayerDecodeOptions{packet::kExtractMac | packet::kExtractIp | packet::kExtractPort,
+                                   packet::EndpointScope::kOutermost});
     assert(ipip_outer.network_layer_index == 1);
     assert(ipip_outer.transport_layer_index == packet::kNoLayerIndex);
-    assert(ipip_outer.src_mac.valid == 1);
+    assert(ipip_outer.src_mac_valid == 1);
     assert(ipip_outer.ports_valid == 0);
     assert(ipip_outer.payload_offset == 34);
 
@@ -653,14 +652,16 @@ void TestNpiTunnelEndpointSelection() {
     auto malformed_bytes = gre_bytes;
     malformed_bytes[38] = (malformed_bytes[38] & 0xf0) | 4;
     gre_view.bytes = flowsql::Span<const uint8_t>(malformed_bytes.data(), malformed_bytes.size());
-    auto malformed = gre_decoder.Decode(
-        gre_view, packet::LayerDecodeOptions{packet::kExtractMac | packet::kExtractIp | packet::kExtractPort,
-                                             packet::EndpointScope::kInnermost});
+    auto malformed = flowsql::testing::DecodeLayer(
+        gre_decoder, gre_view,
+        packet::LayerDecodeOptions{packet::kExtractMac | packet::kExtractIp | packet::kExtractPort,
+                                   packet::EndpointScope::kInnermost});
     assert(malformed.status == packet::LayerStatus::kMalformed);
     gre_view.meta.wire_len = gre_bytes.size() + 1;
-    auto malformed_truncated = gre_decoder.Decode(
-        gre_view, packet::LayerDecodeOptions{packet::kExtractMac | packet::kExtractIp | packet::kExtractPort,
-                                             packet::EndpointScope::kInnermost});
+    auto malformed_truncated = flowsql::testing::DecodeLayer(
+        gre_decoder, gre_view,
+        packet::LayerDecodeOptions{packet::kExtractMac | packet::kExtractIp | packet::kExtractPort,
+                                   packet::EndpointScope::kInnermost});
     assert(malformed_truncated.status == packet::LayerStatus::kMalformed);
     gre_view.meta.wire_len = gre_bytes.size();
 
@@ -675,10 +676,10 @@ void TestNpiTunnelEndpointSelection() {
     ethernet_protocol.layers.payload = sizeof(flowsql::EthernetHeader);
     ethernet_protocol.layers.layers[0] = {0, flowsql::eLayer::ETHERNET};
     flowsql::protocol::NpiPacketLayerDecoder ethernet_decoder(&ethernet_protocol);
-    auto ethernet = ethernet_decoder.Decode(ethernet_view, options);
+    auto ethernet = flowsql::testing::DecodeLayer(ethernet_decoder, ethernet_view, options);
     assert(ethernet.status == packet::LayerStatus::kDecoded);
     assert(ethernet.network_layer_index == packet::kNoLayerIndex);
-    assert(ethernet.src_mac.valid == 1);
+    assert(ethernet.src_mac_valid == 1);
 }
 
 void TestNpiProtocolIdentifier() {
@@ -694,7 +695,7 @@ void TestNpiProtocolIdentifier() {
     flowsql::protocol::NpiPacketLayerDecoder layer_decoder(&protocol);
     packet::LayerDecodeOptions options;
     options.field_mask = packet::kExtractMac | packet::kExtractIp | packet::kExtractPort;
-    auto layer = layer_decoder.Decode(view, options);
+    auto layer = flowsql::testing::DecodeLayer(layer_decoder, view, options);
     assert(protocol.layer_calls == 1);
 
     flowsql::protocol::NpiPacketProtocolIdentifier identifier(&protocol);

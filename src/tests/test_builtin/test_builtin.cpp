@@ -1,6 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <tests/common/packet_family_test_support.h>
+
 #include <unistd.h>
 #include <atomic>
 #include <cassert>
@@ -54,24 +56,24 @@ using namespace flowsql::catalog;
 #define FIXTURE_CPP_V2_SO_PATH ""
 #endif
 
-#define ASSERT_TRUE(expr)                                                                   \
-    do {                                                                                    \
-        if (!(expr)) {                                                                      \
-            std::printf("[FAIL] %s:%d %s\n", __FILE__, __LINE__, #expr);                   \
-            std::fflush(stdout);                                                            \
-            assert(false);                                                                  \
-        }                                                                                   \
+#define ASSERT_TRUE(expr)                                                \
+    do {                                                                 \
+        if (!(expr)) {                                                   \
+            std::printf("[FAIL] %s:%d %s\n", __FILE__, __LINE__, #expr); \
+            std::fflush(stdout);                                         \
+            assert(false);                                               \
+        }                                                                \
     } while (0)
 
-#define ASSERT_EQ(a, b)                                                                     \
-    do {                                                                                    \
-        auto _a = (a);                                                                      \
-        auto _b = (b);                                                                      \
-        if (!(_a == _b)) {                                                                  \
-            std::printf("[FAIL] %s:%d %s != %s\n", __FILE__, __LINE__, #a, #b);            \
-            std::fflush(stdout);                                                            \
-            assert(false);                                                                  \
-        }                                                                                   \
+#define ASSERT_EQ(a, b)                                                         \
+    do {                                                                        \
+        auto _a = (a);                                                          \
+        auto _b = (b);                                                          \
+        if (!(_a == _b)) {                                                      \
+            std::printf("[FAIL] %s:%d %s != %s\n", __FILE__, __LINE__, #a, #b); \
+            std::fflush(stdout);                                                \
+            assert(false);                                                      \
+        }                                                                       \
     } while (0)
 
 static std::string MakeTempDir(const char* suffix) {
@@ -109,7 +111,7 @@ static std::shared_ptr<DataFrameChannel> MakeChannel(const std::string& name, in
 }
 
 static std::shared_ptr<DataFrameChannel> MakePacketPreviewChannel(const std::string& name) {
-    std::vector<packet::PacketRecord> records;
+    std::vector<flowsql::testing::PacketRecord> records;
     for (size_t row = 0; row < 3; ++row) {
         const size_t byte_count = row == 0 ? 0 : (row == 1 ? 64 : 65);
         auto bytes = std::make_shared<std::vector<uint8_t>>(byte_count);
@@ -117,7 +119,7 @@ static std::shared_ptr<DataFrameChannel> MakePacketPreviewChannel(const std::str
             (*bytes)[index] = static_cast<uint8_t>(index);
         }
 
-        packet::PacketRecord record;
+        flowsql::testing::PacketRecord record;
         record.meta.timestamp_ns = static_cast<int64_t>(row + 1) * 1000;
         record.meta.captured_len = static_cast<uint32_t>(byte_count);
         record.meta.wire_len = static_cast<uint32_t>(byte_count);
@@ -134,15 +136,15 @@ static std::shared_ptr<DataFrameChannel> MakePacketPreviewChannel(const std::str
     records[1].layer.layer_count = 2;
     records[1].layer.layers[0] = {1, 0};
     records[1].layer.layers[1] = {300, 14};
-    records[1].layer.src_mac.valid = 1;
+    records[1].layer.src_mac_valid = 1;
     const uint8_t mac[] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55};
-    std::memcpy(records[1].layer.src_mac.value.bytes, mac, sizeof(mac));
+    std::memcpy(records[1].layer.src_mac.bytes, mac, sizeof(mac));
 
     packet::IPv6Address ipv6;
     for (size_t index = 0; index < sizeof(ipv6.bytes); ++index) {
         ipv6.bytes[index] = static_cast<uint8_t>(index);
     }
-    records[2].layer.src_ip = ipv6;
+    records[2].layer.SetEndpoints(ipv6, ipv6);
     records[2].layer.transport_protocol = 6;
     records[2].layer.src_port = 3389;
     records[2].layer.dst_port = 49152;
@@ -153,8 +155,7 @@ static std::shared_ptr<DataFrameChannel> MakePacketPreviewChannel(const std::str
 
     std::shared_ptr<arrow::RecordBatch> batch;
     std::string error;
-    ASSERT_EQ(packet::EncodePacketBatch(records, &batch, &error),
-              packet::PacketBatchError::kNone);
+    ASSERT_EQ(flowsql::testing::EncodePacketBatch(records, &batch, &error), packet::PacketBatchError::kNone);
     ASSERT_TRUE(batch != nullptr);
 
     DataFrame frame;
@@ -282,17 +283,14 @@ class TestBuiltinRegistry : public IBuiltinRegistry {
  public:
     int FindStreamChannelType(const std::string&, StreamChannelTypeDescriptor*) override { return -1; }
 
-    void ListStreamChannelTypes(
-        std::function<void(const StreamChannelTypeDescriptor&)>) override {}
+    void ListStreamChannelTypes(std::function<void(const StreamChannelTypeDescriptor&)>) override {}
 
-    void ListBuiltinOperators(
-        std::function<void(const BuiltinOperatorDescriptor&)> callback) override {
+    void ListBuiltinOperators(std::function<void(const BuiltinOperatorDescriptor&)> callback) override {
         if (!callback) return;
         for (const auto& item : descriptors_) callback(item);
     }
 
-    IOperator* CreateBuiltinOperator(const std::string& category,
-                                     const std::string& name) override {
+    IOperator* CreateBuiltinOperator(const std::string& category, const std::string& name) override {
         const std::string full = category + "." + name;
         for (const auto& item : descriptors_) {
             if ((item.category + "." + item.name) == full) {
@@ -304,12 +302,12 @@ class TestBuiltinRegistry : public IBuiltinRegistry {
 
  private:
     const std::vector<BuiltinOperatorDescriptor> descriptors_ = {
-        {"builtin", "passthrough", {"passthrough", "builtin.passthrough"},
+        {"builtin",
+         "passthrough",
+         {"passthrough", "builtin.passthrough"},
          []() -> IOperator* { return new PassthroughOperator(); }},
-        {"builtin", "concat", {"concat", "builtin.concat"},
-         []() -> IOperator* { return new ConcatOperator(); }},
-        {"builtin", "hstack", {"hstack", "builtin.hstack"},
-         []() -> IOperator* { return new HstackOperator(); }},
+        {"builtin", "concat", {"concat", "builtin.concat"}, []() -> IOperator* { return new ConcatOperator(); }},
+        {"builtin", "hstack", {"hstack", "builtin.hstack"}, []() -> IOperator* { return new HstackOperator(); }},
     };
 };
 
@@ -507,9 +505,7 @@ static void TestOperatorCatalog() {
     ASSERT_EQ(p.QueryStatus("ml", "clean"), OperatorStatus::kDeactivated);
 
     std::unordered_map<std::string, fnRouterHandler> routes;
-    p.EnumRoutes([&](const RouteItem& item) {
-        routes[item.method + ":" + item.uri] = item.handler;
-    });
+    p.EnumRoutes([&](const RouteItem& item) { routes[item.method + ":" + item.uri] = item.handler; });
     ASSERT_TRUE(routes.count("POST:/operators/list") == 1);
     ASSERT_TRUE(routes.count("POST:/operators/upload") == 1);
     ASSERT_TRUE(routes.count("POST:/operators/delete") == 1);
@@ -528,8 +524,7 @@ static void TestOperatorCatalog() {
         fwrite(code, 1, strlen(code), fp);
         fclose(fp);
     }
-    const std::string upload_req =
-        "{\"type\":\"python\",\"filename\":\"ml_clean.py\",\"tmp_path\":\"" + tmp_py + "\"}";
+    const std::string upload_req = "{\"type\":\"python\",\"filename\":\"ml_clean.py\",\"tmp_path\":\"" + tmp_py + "\"}";
     ASSERT_EQ(routes["POST:/operators/upload"]("/operators/upload", upload_req, rsp), error::OK);
 
     ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", R"({"name":"ml.clean"})", rsp), error::OK);
@@ -553,8 +548,9 @@ static void TestOperatorCatalog() {
         ASSERT_EQ(d["active"].GetInt(), 1);
     }
 
-    ASSERT_EQ(routes["POST:/operators/update"]("/operators/update",
-              R"({"name":"ml.clean","description":"updated desc","position":"data"})", rsp), error::OK);
+    ASSERT_EQ(routes["POST:/operators/update"](
+                  "/operators/update", R"({"name":"ml.clean","description":"updated desc","position":"data"})", rsp),
+              error::OK);
     ASSERT_EQ(routes["POST:/operators/detail"]("/operators/detail", R"({"name":"ml.clean"})", rsp), error::OK);
     {
         rapidjson::Document d;
@@ -576,24 +572,26 @@ static void TestOperatorCatalog() {
     }
 
     ASSERT_EQ(routes["POST:/operators/upsert_batch"]("/operators/upsert_batch",
-              R"({"operators":[{"category":"ml","name":"x"}]})", rsp), error::BAD_REQUEST);
+                                                     R"({"operators":[{"category":"ml","name":"x"}]})", rsp),
+              error::BAD_REQUEST);
 
     const std::string py_path = RuntimeOperatorPyPath("ml", "clean");
     ASSERT_TRUE(std::filesystem::exists(py_path));
 
     ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", R"({"name":"ml.clean"})", rsp), error::OK);
-    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete",
-              R"({"type":"python","name":"ml.clean"})", rsp), error::CONFLICT);
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete", R"({"type":"python","name":"ml.clean"})", rsp),
+              error::CONFLICT);
     ASSERT_EQ(routes["POST:/operators/deactivate"]("/operators/deactivate", R"({"name":"ml.clean"})", rsp), error::OK);
-    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete",
-              R"({"type":"python","name":"ml.clean"})", rsp), error::OK);
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete", R"({"type":"python","name":"ml.clean"})", rsp),
+              error::OK);
     ASSERT_EQ(p.QueryStatus("ml", "clean"), OperatorStatus::kNotFound);
     ASSERT_TRUE(!std::filesystem::exists(py_path));
     ASSERT_EQ(routes["POST:/operators/detail"]("/operators/detail", R"({"name":"ml.clean"})", rsp), error::NOT_FOUND);
+    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete", R"({"type":"python","name":"ml.clean"})", rsp),
+              error::NOT_FOUND);
     ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete",
-              R"({"type":"python","name":"ml.clean"})", rsp), error::NOT_FOUND);
-    ASSERT_EQ(routes["POST:/operators/delete"]("/operators/delete",
-              R"({"type":"builtin","name":"builtin.passthrough"})", rsp), error::BAD_REQUEST);
+                                               R"({"type":"builtin","name":"builtin.passthrough"})", rsp),
+              error::BAD_REQUEST);
 
     std::puts("[PASS] T18-T23 operator catalog");
 }
@@ -720,8 +718,7 @@ static void TestCppOperatorPluginContracts() {
     ASSERT_EQ(v2_describe(2, &time_transform), 0);
     ASSERT_EQ(std::string(time_transform.category), std::string("fixture"));
     ASSERT_EQ(std::string(time_transform.name), std::string("time_transform"));
-    ASSERT_EQ(std::string(time_transform.description),
-              std::string("V2 fixture time-driven block transform operator"));
+    ASSERT_EQ(std::string(time_transform.description), std::string("V2 fixture time-driven block transform operator"));
     ASSERT_TRUE(std::memcmp(&time_transform.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR_V2, sizeof(Guid)) == 0);
 
     CppOperatorDescriptorV2 undersized{};
@@ -805,7 +802,8 @@ static void TestCppPluginLifecycle() {
 
     const std::string opt = MakeCatalogOption(dir);
     const std::string db_path = (std::filesystem::path(dir) / "catalog" / "operator_catalog.db").string();
-    const std::string binaddon_opt = "operator_db_path=" + db_path + ";upload_dir=" + (std::filesystem::path(upload) / "binaddon").string();
+    const std::string binaddon_opt =
+        "operator_db_path=" + db_path + ";upload_dir=" + (std::filesystem::path(upload) / "binaddon").string();
     ASSERT_EQ(p.Option(opt.c_str()), 0);
     ASSERT_EQ(binaddon.Option(binaddon_opt.c_str()), 0);
     ASSERT_EQ(p.Load(&querier), 0);
@@ -814,9 +812,7 @@ static void TestCppPluginLifecycle() {
     ASSERT_EQ(binaddon.Start(), 0);
 
     std::unordered_map<std::string, fnRouterHandler> routes;
-    p.EnumRoutes([&](const RouteItem& item) {
-        routes[item.method + ":" + item.uri] = item.handler;
-    });
+    p.EnumRoutes([&](const RouteItem& item) { routes[item.method + ":" + item.uri] = item.handler; });
     ASSERT_TRUE(routes.count("POST:/operators/upload") == 1);
     ASSERT_TRUE(routes.count("POST:/operators/list") == 1);
     ASSERT_TRUE(routes.count("POST:/operators/activate") == 1);
@@ -1029,8 +1025,8 @@ static void TestCppPluginLifecycle() {
     ASSERT_EQ(capability_registry->Acquire("fixture", "echo", IID_OPERATOR, &echo_lease), 0);
     ASSERT_EQ(capability_registry->Acquire("fixture", "transform", IID_BLOCK_TRANSFORM_OPERATOR_V1, &transform_lease),
               0);
-    ASSERT_EQ(capability_registry->Acquire(
-                  "fixture", "time_transform", IID_BLOCK_TRANSFORM_OPERATOR_V2, &time_transform_lease),
+    ASSERT_EQ(capability_registry->Acquire("fixture", "time_transform", IID_BLOCK_TRANSFORM_OPERATOR_V2,
+                                           &time_transform_lease),
               0);
     ASSERT_TRUE(echo_lease.capability != nullptr && echo_lease.lifetime != nullptr);
     ASSERT_TRUE(transform_lease.capability != nullptr && transform_lease.lifetime != nullptr);
@@ -1046,9 +1042,9 @@ static void TestCppPluginLifecycle() {
     ASSERT_EQ(time_transform->Name(), std::string("time_transform"));
 
     CppOperatorCapabilityLeaseV1 wrong_contract = time_transform_lease;
-    ASSERT_EQ(capability_registry->Acquire(
-                  "fixture", "time_transform", IID_BLOCK_TRANSFORM_OPERATOR_V1, &wrong_contract),
-              -1);
+    ASSERT_EQ(
+        capability_registry->Acquire("fixture", "time_transform", IID_BLOCK_TRANSFORM_OPERATOR_V1, &wrong_contract),
+        -1);
     ASSERT_TRUE(wrong_contract.capability == nullptr);
     ASSERT_TRUE(!wrong_contract.lifetime);
     echo_lease = {};
@@ -1072,8 +1068,8 @@ static void TestCppPluginLifecycle() {
     ASSERT_EQ(routes["POST:/operators/activate"]("/operators/activate", v2_req, rsp), error::OK);
     ASSERT_EQ(capability_registry->Acquire("fixture", "transform", IID_BLOCK_TRANSFORM_OPERATOR_V1, &transform_lease),
               0);
-    ASSERT_EQ(capability_registry->Acquire(
-                  "fixture", "time_transform", IID_BLOCK_TRANSFORM_OPERATOR_V2, &time_transform_lease),
+    ASSERT_EQ(capability_registry->Acquire("fixture", "time_transform", IID_BLOCK_TRANSFORM_OPERATOR_V2,
+                                           &time_transform_lease),
               0);
     transform_lease = {};
     time_transform_lease = {};
@@ -1158,9 +1154,7 @@ static void TestHttpRoutes() {
     ASSERT_EQ(p.Start(), 0);
 
     std::unordered_map<std::string, fnRouterHandler> routes;
-    p.EnumRoutes([&](const RouteItem& item) {
-        routes[item.method + ":" + item.uri] = item.handler;
-    });
+    p.EnumRoutes([&](const RouteItem& item) { routes[item.method + ":" + item.uri] = item.handler; });
     ASSERT_TRUE(routes.count("GET:/channels/dataframe") == 1);
     ASSERT_TRUE(routes.count("POST:/channels/dataframe/import") == 1);
     ASSERT_TRUE(routes.count("POST:/channels/dataframe/preview") == 1);
@@ -1223,13 +1217,52 @@ static void TestHttpRoutes() {
     }
 
     // npm-packet-dataframe-view T2: packet Arrow values and bounded raw_data hex.
-    ASSERT_EQ(p.Register("packet_preview",
-                         std::static_pointer_cast<IChannel>(MakePacketPreviewChannel("packet_preview"))),
-              0);
-    ASSERT_EQ(routes["POST:/channels/dataframe/preview"](
-                  "/channels/dataframe/preview",
-                  R"({"name":"packet_preview","page":1,"page_size":2})",
-                  rsp),
+    {
+        arrow::UInt32Builder v4;
+        arrow::FixedSizeBinaryBuilder v6(arrow::fixed_size_binary(16));
+        arrow::StringBuilder protocol;
+        arrow::DoubleBuilder rate;
+        ASSERT_TRUE(v4.Append(0x01020304).ok() && v4.AppendNull().ok());
+        const uint8_t bytes[16] = {0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+        ASSERT_TRUE(v6.Append(bytes).ok() && v6.AppendNull().ok());
+        const std::string protocol_name("HTTP\0状态", 11);
+        ASSERT_TRUE(protocol.Append(protocol_name).ok() && protocol.AppendNull().ok());
+        ASSERT_TRUE(rate.Append(12.5).ok() && rate.AppendNull().ok());
+        auto schema = arrow::schema(
+            {arrow::field("v4", arrow::uint32(), true,
+                          arrow::key_value_metadata({"flowsql.semantic", "flowsql.address_encoding"},
+                                                    {"ipv4_address", "unsigned_numeric"})),
+             arrow::field("v6", arrow::fixed_size_binary(16), true,
+                          arrow::key_value_metadata({"flowsql.semantic", "flowsql.address_encoding"},
+                                                    {"ipv6_address", "network_octets"})),
+             arrow::field("protocol_name", arrow::utf8(), true), arrow::field("rate", arrow::float64(), true)});
+        DataFrame addresses;
+        addresses.FromArrow(arrow::RecordBatch::Make(schema, 2,
+                                                     {v4.Finish().ValueOrDie(), v6.Finish().ValueOrDie(),
+                                                      protocol.Finish().ValueOrDie(), rate.Finish().ValueOrDie()}));
+        auto channel = std::make_shared<DataFrameChannel>("dataframe", "address_preview");
+        ASSERT_EQ(channel->Open(), 0);
+        ASSERT_EQ(channel->Write(&addresses), 0);
+        ASSERT_EQ(p.Register("address_preview", std::static_pointer_cast<IChannel>(channel)), 0);
+        ASSERT_EQ(routes["POST:/channels/dataframe/preview"]("/channels/dataframe/preview",
+                                                             R"({"name":"address_preview"})", rsp),
+                  error::OK);
+        rapidjson::Document page;
+        page.Parse(rsp.c_str());
+        ASSERT_TRUE(!page.HasParseError());
+        ASSERT_EQ(std::string(page["data"][0][0].GetString()), "1.2.3.4");
+        ASSERT_EQ(std::string(page["data"][0][1].GetString()), "2001:db8::1");
+        ASSERT_TRUE(page["data"][1][0].IsNull() && page["data"][1][1].IsNull());
+        ASSERT_EQ(std::string(page["data"][0][2].GetString(), page["data"][0][2].GetStringLength()), protocol_name);
+        ASSERT_EQ(page["data"][0][3].GetDouble(), 12.5);
+        ASSERT_TRUE(page["data"][1][2].IsNull() && page["data"][1][3].IsNull());
+        ASSERT_EQ(std::string(page["types"][1].GetString()), "fixed_size_binary[16]");
+    }
+    ASSERT_EQ(
+        p.Register("packet_preview", std::static_pointer_cast<IChannel>(MakePacketPreviewChannel("packet_preview"))),
+        0);
+    ASSERT_EQ(routes["POST:/channels/dataframe/preview"]("/channels/dataframe/preview",
+                                                         R"({"name":"packet_preview","page":1,"page_size":2})", rsp),
               error::OK);
     {
         rapidjson::Document packet_page;
@@ -1271,8 +1304,7 @@ static void TestHttpRoutes() {
         ASSERT_EQ(second_raw["byte_length"].GetUint64(), uint64_t(64));
         ASSERT_TRUE(!second_raw["truncated"].GetBool());
         ASSERT_TRUE(second[status_index].IsUint());
-        ASSERT_EQ(second[status_index].GetUint(),
-                  static_cast<unsigned>(packet::LayerStatus::kDecoded));
+        ASSERT_EQ(second[status_index].GetUint(), static_cast<unsigned>(packet::LayerStatus::kDecoded));
         ASSERT_TRUE(second[layers_index].IsArray());
         ASSERT_EQ(second[layers_index].Size(), rapidjson::SizeType(packet::kMaxLayerDepth));
         ASSERT_EQ(second[layers_index][0].GetUint(), unsigned(1));
@@ -1281,10 +1313,8 @@ static void TestHttpRoutes() {
         ASSERT_EQ(std::string(second[mac_index].GetString()), "001122334455");
     }
 
-    ASSERT_EQ(routes["POST:/channels/dataframe/preview"](
-                  "/channels/dataframe/preview",
-                  R"({"name":"packet_preview","page":2,"page_size":2})",
-                  rsp),
+    ASSERT_EQ(routes["POST:/channels/dataframe/preview"]("/channels/dataframe/preview",
+                                                         R"({"name":"packet_preview","page":2,"page_size":2})", rsp),
               error::OK);
     {
         rapidjson::Document packet_page;
@@ -1293,7 +1323,7 @@ static void TestHttpRoutes() {
         ASSERT_EQ(packet_page["page"].GetInt(), 2);
         ASSERT_EQ(packet_page["data"].Size(), rapidjson::SizeType(1));
         const int raw_index = JsonColumnIndex(packet_page["columns"], "raw_data");
-        const int ipv6_index = JsonColumnIndex(packet_page["columns"], "src_ip_v6");
+        const int ipv6_index = JsonColumnIndex(packet_page["columns"], "ip_endpoints");
         const int port_index = JsonColumnIndex(packet_page["columns"], "src_port");
         const int protocol_index = JsonColumnIndex(packet_page["columns"], "protocol_id");
         ASSERT_TRUE(raw_index >= 0 && ipv6_index >= 0 && port_index >= 0 && protocol_index >= 0);
@@ -1302,20 +1332,18 @@ static void TestHttpRoutes() {
         ASSERT_EQ(std::string(raw["hex"].GetString()), ByteSequenceHex(64));
         ASSERT_EQ(raw["byte_length"].GetUint64(), uint64_t(65));
         ASSERT_TRUE(raw["truncated"].GetBool());
-        ASSERT_EQ(std::string(row[ipv6_index].GetString()), ByteSequenceHex(16));
+        ASSERT_TRUE(row[ipv6_index].IsObject());
+        ASSERT_EQ(row[ipv6_index]["family"].GetInt(), 6);
+        ASSERT_EQ(std::string(row[ipv6_index]["endpoints"]["src"].GetString()), ByteSequenceHex(16));
         ASSERT_EQ(row[port_index].GetUint(), unsigned(3389));
         ASSERT_EQ(row[protocol_index].GetUint(), unsigned(400));
     }
 
-    ASSERT_EQ(routes["POST:/channels/dataframe/preview"](
-                  "/channels/dataframe/preview",
-                  R"({"name":"packet_preview","page":1,"page_size":101})",
-                  rsp),
+    ASSERT_EQ(routes["POST:/channels/dataframe/preview"]("/channels/dataframe/preview",
+                                                         R"({"name":"packet_preview","page":1,"page_size":101})", rsp),
               error::BAD_REQUEST);
-    ASSERT_EQ(routes["POST:/channels/dataframe/preview"](
-                  "/channels/dataframe/preview",
-                  R"({"name":"packet_preview","page":0,"page_size":2})",
-                  rsp),
+    ASSERT_EQ(routes["POST:/channels/dataframe/preview"]("/channels/dataframe/preview",
+                                                         R"({"name":"packet_preview","page":0,"page_size":2})", rsp),
               error::BAD_REQUEST);
     // T30: 预览不存在通道 -> 404
     ASSERT_EQ(routes["POST:/channels/dataframe/preview"]("/channels/dataframe/preview", R"({"name":"not_found"})", rsp),
@@ -1323,28 +1351,32 @@ static void TestHttpRoutes() {
 
     // rename
     ASSERT_EQ(routes["POST:/channels/dataframe/rename"]("/channels/dataframe/rename",
-              R"({"name":"users","new_name":"users_v2"})", rsp), error::OK);
+                                                        R"({"name":"users","new_name":"users_v2"})", rsp),
+              error::OK);
     ASSERT_TRUE(rsp.find("users_v2") != std::string::npos);
     // T32: rename 源不存在 -> 404
     ASSERT_EQ(routes["POST:/channels/dataframe/rename"]("/channels/dataframe/rename",
-              R"({"name":"missing","new_name":"x"})", rsp), error::NOT_FOUND);
+                                                        R"({"name":"missing","new_name":"x"})", rsp),
+              error::NOT_FOUND);
     // T33: rename 目标已存在 -> 409
     ASSERT_EQ(p.Register("exists_name", std::static_pointer_cast<IChannel>(MakeChannel("exists_name", 1))), 0);
     ASSERT_EQ(routes["POST:/channels/dataframe/rename"]("/channels/dataframe/rename",
-              R"({"name":"users_v2","new_name":"exists_name"})", rsp), error::CONFLICT);
+                                                        R"({"name":"users_v2","new_name":"exists_name"})", rsp),
+              error::CONFLICT);
 
     // delete
-    ASSERT_EQ(routes["POST:/channels/dataframe/delete"]("/channels/dataframe/delete",
-              R"({"name":"users_v2"})", rsp), error::OK);
+    ASSERT_EQ(routes["POST:/channels/dataframe/delete"]("/channels/dataframe/delete", R"({"name":"users_v2"})", rsp),
+              error::OK);
     ASSERT_TRUE(rsp.find("\"ok\":true") != std::string::npos);
     ASSERT_TRUE(GetDataFrame(p, "users_v2") == nullptr);
     // T35: 删除不存在 -> 404
-    ASSERT_EQ(routes["POST:/channels/dataframe/delete"]("/channels/dataframe/delete",
-              R"({"name":"users_v2"})", rsp), error::NOT_FOUND);
+    ASSERT_EQ(routes["POST:/channels/dataframe/delete"]("/channels/dataframe/delete", R"({"name":"users_v2"})", rsp),
+              error::NOT_FOUND);
 
     // T27a: import with bad tmp_path -> 400
-    ASSERT_EQ(routes["POST:/channels/dataframe/import"]("/channels/dataframe/import",
-              R"({"filename":"bad.csv","tmp_path":"/tmp/not_exists.csv"})", rsp), error::BAD_REQUEST);
+    ASSERT_EQ(routes["POST:/channels/dataframe/import"](
+                  "/channels/dataframe/import", R"({"filename":"bad.csv","tmp_path":"/tmp/not_exists.csv"})", rsp),
+              error::BAD_REQUEST);
 
     // T36: 全整数列 -> INT64
     {

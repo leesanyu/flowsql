@@ -1,6 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <tests/common/packet_family_test_support.h>
+
 #include <unistd.h>
 #include <cassert>
 #include <cerrno>
@@ -906,7 +908,7 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
      public:
         Reader(SchedulerCaptureFixture* fixture, uint64_t generation) : fixture_(fixture), generation_(generation) {
             auto bytes = std::make_shared<std::vector<uint8_t>>(MakeSchedulerE2eHttp1Packet(false, 0x10, 100, 0, ""));
-            packet::PacketRecord record;
+            flowsql::testing::PacketRecord record;
             record.meta.timestamp_ns = 1'000'000'000;
             record.meta.captured_len = static_cast<uint32_t>(bytes->size());
             record.meta.wire_len = record.meta.captured_len;
@@ -927,14 +929,13 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
             packet::IPv4Address dst;
             std::memcpy(src.bytes, bytes->data() + 26, 4);
             std::memcpy(dst.bytes, bytes->data() + 30, 4);
-            record.layer.src_ip = src;
-            record.layer.dst_ip = dst;
+            record.layer.SetEndpoints(src, dst);
             record.layer.transport_protocol = 6;
             record.layer.src_port = 45000;
             record.layer.dst_port = 80;
             record.layer.ports_valid = 1;
             if (fixture_->mode == Mode::kInvalidPacket) record.layer.status = packet::LayerStatus::kNotDecoded;
-            std::vector<packet::PacketRecord> records;
+            std::vector<flowsql::testing::PacketRecord> records;
             const auto times =
                 fixture_->timeline.empty() ? std::vector<int64_t>{record.meta.timestamp_ns} : fixture_->timeline;
             for (size_t index = 0; index < times.size(); ++index) {
@@ -955,13 +956,12 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
                     record.layer.payload_offset = 34;
                     std::memcpy(src.bytes, control->data() + 26, 4);
                     std::memcpy(dst.bytes, control->data() + 30, 4);
-                    record.layer.src_ip = src;
-                    record.layer.dst_ip = dst;
+                    record.layer.SetEndpoints(src, dst);
                 }
                 records.push_back(record);
                 if (records.size() == fixture_->batch_size || index + 1 == times.size()) {
                     std::shared_ptr<arrow::RecordBatch> batch;
-                    ASSERT_EQ(packet::EncodePacketBatch(records, &batch), packet::PacketBatchError::kNone);
+                    ASSERT_EQ(flowsql::testing::EncodePacketBatch(records, &batch), packet::PacketBatchError::kNone);
                     batches_.push_back(batch);
                     batch_times_.push_back(times[index]);
                     records.clear();
@@ -1125,10 +1125,9 @@ static void AssertSchedulerE2eNpmBasicSchema(const std::shared_ptr<arrow::Schema
         {"revision", arrow::Type::UINT64, false},
         {"observed_at", arrow::Type::INT64, false},
         {"is_final", arrow::Type::BOOL, false},
-        {"ip_family", arrow::Type::UINT8, false},
         {"transport_protocol", arrow::Type::UINT8, false},
-        {"a_ip", arrow::Type::STRING, false},
-        {"b_ip", arrow::Type::STRING, false},
+        {"a_ip", arrow::Type::UINT32, false},
+        {"b_ip", arrow::Type::UINT32, false},
         {"a_port", arrow::Type::UINT16, false},
         {"b_port", arrow::Type::UINT16, false},
         {"first_ns", arrow::Type::INT64, false},
@@ -1162,7 +1161,7 @@ static void AssertSchedulerE2eNpmBasicSchema(const std::shared_ptr<arrow::Schema
         ASSERT_EQ(actual->nullable(), expected[index].nullable);
     }
     ASSERT_TRUE(schema->metadata() != nullptr);
-    ASSERT_EQ(schema->metadata()->Get("flowsql.entity").ValueOrDie(), "npm_basic_result");
+    ASSERT_EQ(schema->metadata()->Get("flowsql.entity").ValueOrDie(), "basic_ipv4");
     ASSERT_EQ(schema->metadata()->Get("flowsql.schema_version").ValueOrDie(), "1");
     ASSERT_EQ(schema->metadata()->Get("flowsql.timestamp_unit").ValueOrDie(), "ns");
 }
@@ -1179,15 +1178,15 @@ static void AssertSchedulerE2eNpmSessionSchema(const std::shared_ptr<arrow::Sche
         {"revision", arrow::Type::UINT64, false},
         {"observed_at", arrow::Type::INT64, false},
         {"is_final", arrow::Type::BOOL, false},
-        {"ip_family", arrow::Type::UINT8, false},
         {"transport_protocol", arrow::Type::UINT8, false},
-        {"a_ip", arrow::Type::STRING, false},
-        {"b_ip", arrow::Type::STRING, false},
+        {"a_ip", arrow::Type::UINT32, false},
+        {"b_ip", arrow::Type::UINT32, false},
         {"a_port", arrow::Type::UINT16, false},
         {"b_port", arrow::Type::UINT16, false},
         {"first_ns", arrow::Type::INT64, false},
         {"last_ns", arrow::Type::INT64, false},
         {"duration_ns", arrow::Type::INT64, false},
+        {"primary_label_id", arrow::Type::UINT32, true},
         {"protocol_status", arrow::Type::STRING, false},
         {"protocol_id", arrow::Type::UINT16, true},
         {"protocol_sub_id", arrow::Type::UINT16, true},
@@ -1233,7 +1232,7 @@ static void AssertSchedulerE2eNpmSessionSchema(const std::shared_ptr<arrow::Sche
         ASSERT_EQ(actual->nullable(), expected[index].nullable);
     }
     ASSERT_TRUE(schema->metadata() != nullptr);
-    ASSERT_EQ(schema->metadata()->Get("flowsql.entity").ValueOrDie(), "npm_session_result");
+    ASSERT_EQ(schema->metadata()->Get("flowsql.entity").ValueOrDie(), "session_ipv4");
     ASSERT_EQ(schema->metadata()->Get("flowsql.schema_version").ValueOrDie(), "1");
     ASSERT_EQ(schema->metadata()->Get("flowsql.timestamp_unit").ValueOrDie(), "ns");
     ASSERT_EQ(schema->metadata()->Get("flowsql.revision_semantics").ValueOrDie(), "cumulative");
@@ -1879,7 +1878,7 @@ int main() {
     const std::filesystem::path pcapng_offset =
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_pcapng_offset_" + suffix + ".pcapng");
     const std::filesystem::path pcap_npm_basic =
-        std::filesystem::temp_directory_path() / ("flowsql_scheduler_npm_basic_" + suffix + ".pcap");
+        std::filesystem::temp_directory_path() / ("flowsql_scheduler_npm_basic_ipv4_" + suffix + ".pcap");
     const std::filesystem::path pcap_npm_http1 =
         std::filesystem::temp_directory_path() / ("flowsql_scheduler_npm_http1_" + suffix + ".pcap");
     const std::filesystem::path pcap_npm_tls =
@@ -2518,23 +2517,24 @@ int main() {
         const std::string input_namespace = "pcapfile." + channel_name;
         const auto make_npm_sql = [&](const std::string& destination) {
             return "SELECT * FROM " + input_namespace + " USING npm.basic WITH input_namespace='" + input_namespace +
-                   "',source_domains='0:77' INTO dataframe." + destination;
+                   "',source_domains='0:77',observing='basic_ipv4' INTO dataframe." + destination;
         };
         const auto make_npm_session_sql = [&](const std::string& destination) {
             return "SELECT * FROM " + input_namespace + " USING npm.basic WITH input_namespace='" + input_namespace +
-                   "',source_domains='0:77',features='basic,session',observing='session'"
+                   "',source_domains='0:77',features='basic,session',observing='session_ipv4'"
                    " WHERE rate_status = 'insufficient_span' INTO dataframe." +
                    destination;
         };
         const auto make_npm_parameters_sql = [&](const std::string& destination, const std::string& parameters) {
             return "SELECT * FROM " + input_namespace + " USING npm.basic WITH input_namespace='" + input_namespace +
-                   "',source_domains='0:77',parameters='" + parameters + "' INTO dataframe." + destination;
+                   "',source_domains='0:77',observing='basic_ipv4',parameters='" + parameters + "' INTO dataframe." +
+                   destination;
         };
         const auto make_npm_session_parameters_sql = [&](const std::string& destination,
                                                          const std::string& parameters) {
             return "SELECT * FROM " + input_namespace + " USING npm.basic WITH input_namespace='" + input_namespace +
-                   "',source_domains='0:77',features='basic,session',observing='session',parameters='" + parameters +
-                   "' WHERE rate_status = 'insufficient_span' INTO dataframe." + destination;
+                   "',source_domains='0:77',features='basic,session',observing='session_ipv4',parameters='" +
+                   parameters + "' WHERE rate_status = 'insufficient_span' INTO dataframe." + destination;
         };
         const auto assert_npm_unavailable = [&](const std::string& destination) {
             const int rc = exec("/scheduler/batch/execute", MakeReq(make_npm_sql(destination)), rsp);
@@ -2560,7 +2560,7 @@ int main() {
         };
 
         const std::filesystem::path bad_upload =
-            std::filesystem::temp_directory_path() / ("flowsql_bad_npm_basic_" + suffix + ".so");
+            std::filesystem::temp_directory_path() / ("flowsql_bad_npm_basic_ipv4_" + suffix + ".so");
         WriteSchedulerE2eBinary(bad_upload, {0x7f, 'B', 'A', 'D'});
         ASSERT_EQ(upload("/operators/upload", make_upload_request(bad_upload), rsp), error::OK);
         rapidjson::Document bad_uploaded;
@@ -2579,7 +2579,7 @@ int main() {
         ASSERT_EQ(detail("/operators/detail", bad_plugin_request, rsp), error::NOT_FOUND);
 
         const std::filesystem::path good_upload =
-            std::filesystem::temp_directory_path() / ("flowsql_good_npm_basic_" + suffix + ".so");
+            std::filesystem::temp_directory_path() / ("flowsql_good_npm_basic_ipv4_" + suffix + ".so");
         std::error_code copy_error;
         std::filesystem::copy_file(FLOWSQL_NPM_BASIC_PLUGIN_PATH, good_upload,
                                    std::filesystem::copy_options::overwrite_existing, copy_error);
@@ -2622,7 +2622,8 @@ int main() {
 
         const std::string realtime_without_capture =
             "SELECT * FROM " + input_namespace +
-            " USING npm.basic WITH run_mode='realtime',source_domains='0:77' INTO dataframe.npm_realtime_no_capture";
+            " USING npm.basic WITH run_mode='realtime',source_domains='0:77',observing='basic_ipv4' INTO "
+            "dataframe.npm_realtime_no_capture";
         ASSERT_TRUE(exec("/scheduler/batch/execute", MakeReq(realtime_without_capture), rsp) != error::OK);
         ASSERT_TRUE(rsp.find("run_mode conflicts with bound source capabilities") != std::string::npos);
 
@@ -2638,8 +2639,8 @@ int main() {
         };
         const auto query_history = [&](const std::string& run_id, const std::string& destination) {
             ASSERT_EQ(exec("/scheduler/batch/execute",
-                           MakeReq("SELECT * FROM sqlite.local.npm_basic_history_v1 WHERE __npm_run_id='" + run_id +
-                                   "' ORDER BY revision INTO dataframe." + destination),
+                           MakeReq("SELECT * FROM sqlite.local.npm_basic_ipv4_history_v1 WHERE __npm_run_id='" +
+                                   run_id + "' ORDER BY revision INTO dataframe." + destination),
                            rsp),
                       error::OK);
             return read_frame(destination);
@@ -2728,11 +2729,12 @@ int main() {
                 rapidjson::Writer<rapidjson::StringBuffer> writer(encoded);
                 add_request.Accept(writer);
                 ASSERT_EQ(stream_add("/channels/stream/add", encoded.GetString(), rsp), error::OK);
-                const std::string sql = "SELECT * FROM pcapfile." + name +
-                                        " USING npm.basic WITH "
-                                        "input_namespace='periodic-equivalence',source_domains='0:77',"
-                                        "output_interval_ns=10000000,out_of_order_tolerance_ns=0 INTO dataframe." +
-                                        name;
+                const std::string sql =
+                    "SELECT * FROM pcapfile." + name +
+                    " USING npm.basic WITH "
+                    "input_namespace='periodic-equivalence',source_domains='0:77',observing='basic_ipv4',"
+                    "output_interval_ns=10000000,out_of_order_tolerance_ns=0 INTO dataframe." +
+                    name;
                 ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
                 auto batch = read_frame(name);
                 AssertSchedulerE2eNpmBasicSchema(batch->schema());
@@ -2808,7 +2810,7 @@ int main() {
             ASSERT_TRUE(!run_id.empty());
             ASSERT_EQ(std::string(running["status"].GetString()), "running");
             ASSERT_EQ(std::string(running["managed_result"]["entities"][0]["history_relation"].GetString()),
-                      "npm_basic_history_v1");
+                      "npm_basic_ipv4_history_v1");
             auto prefix = query_history(run_id, "npm_running_prefix");
             for (int attempt = 0; prefix->num_rows() != 3 && attempt < 100; ++attempt) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -2816,7 +2818,7 @@ int main() {
             }
             ASSERT_EQ(prefix->num_rows(), 3);
             for (int64_t row = 0; row < prefix->num_rows(); ++row) {
-                ASSERT_EQ(prefix->GetColumnByName("is_final")->GetScalar(row).ValueOrDie()->ToString(), "0");
+                ASSERT_EQ(prefix->GetColumnByName("is_final")->GetScalar(row).ValueOrDie()->ToString(), "false");
                 ASSERT_EQ(prefix->GetColumnByName("__npm_run_status")->GetScalar(row).ValueOrDie()->ToString(),
                           "writing");
             }
@@ -2837,7 +2839,7 @@ int main() {
                 ASSERT_EQ(history->GetColumnByName("__npm_run_status")->GetScalar(row).ValueOrDie()->ToString(),
                           cancel ? "incomplete" : "completed");
                 const auto final = history->GetColumnByName("is_final")->GetScalar(row).ValueOrDie()->ToString();
-                ASSERT_EQ(final, !cancel && row == 3 ? "1" : "0");
+                ASSERT_EQ(final, !cancel && row == 3 ? "true" : "false");
             }
             ASSERT_EQ(capture_fixture.release_calls, readers_before + 1);
             ASSERT_EQ(capture_fixture.release_blocks.load(), blocks_before + 4);
@@ -2882,7 +2884,7 @@ int main() {
             }
             ASSERT_TRUE(!run_id.empty());
             ASSERT_EQ(capture_fixture.release_blocks.load(), blocks_before + 1);
-            const auto history_sql = "SELECT * FROM npm_basic_history_v1 WHERE __npm_run_id='" + run_id + "'";
+            const auto history_sql = "SELECT * FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + run_id + "'";
             ASSERT_EQ(QueryCount(db, history_sql), 0);
             const std::string stop_body =
                 "{\"runtime_task_id\":\"" + task_id + "\",\"mode\":\"" + (cancel ? "cancel" : "stop") + "\"}";
@@ -2913,10 +2915,10 @@ int main() {
 
         const auto session_run = run_managed(
             "SELECT * FROM capturetest.live USING npm.basic WITH "
-            "source_domains='7:77',features='basic,session',observing='session' INTO sqlite.local");
+            "source_domains='7:77',features='basic,session',observing='session_ipv4' INTO sqlite.local");
         ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq("SELECT * FROM sqlite.local.npm_session_final_v1 WHERE __npm_run_id='" + session_run +
-                               "' INTO dataframe.npm_live_session"),
+                       MakeReq("SELECT * FROM sqlite.local.npm_session_ipv4_final_v1 WHERE __npm_run_id='" +
+                               session_run + "' INTO dataframe.npm_live_session"),
                        rsp),
                   error::OK);
         ASSERT_EQ(read_frame("npm_live_session")->num_rows(), 1);
@@ -2936,7 +2938,7 @@ int main() {
         capture_fixture.mode = SchedulerCaptureFixture::Mode::kNormal;
 
         const std::string managed_sql = "SELECT * FROM " + input_namespace +
-                                        " USING npm.basic WITH features='basic,session',observing='session' INTO "
+                                        " USING npm.basic WITH features='basic,session',observing='session_ipv4' INTO "
                                         "sqlite.local";
         ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(managed_sql), rsp), error::OK);
         rapidjson::Document managed_completed;
@@ -2949,7 +2951,7 @@ int main() {
         ASSERT_EQ(std::string(managed_result["run_status"].GetString()), "completed");
         ASSERT_EQ(std::string(managed_result["metadata_status"].GetString()), "known");
         ASSERT_TRUE(managed_result["rows_written"].IsInt64() && managed_result["rows_written"].GetInt64() >= 2);
-        ASSERT_TRUE(managed_result["entities"].IsArray() && managed_result["entities"].Size() == 2);
+        ASSERT_TRUE(managed_result["entities"].IsArray() && managed_result["entities"].Size() == 4);
         const std::string managed_run_id = managed_result["run_id"].GetString();
         std::string basic_latest_relation;
         for (const auto& entity : managed_result["entities"].GetArray()) {
@@ -2965,7 +2967,7 @@ int main() {
             ASSERT_EQ(std::string(entity["history_relation"].GetString()), "npm_" + entity_id + "_history_v" + version);
             ASSERT_EQ(std::string(entity["latest_relation"].GetString()), "npm_" + entity_id + "_latest_v" + version);
             ASSERT_EQ(std::string(entity["final_relation"].GetString()), "npm_" + entity_id + "_final_v" + version);
-            if (entity_id == "basic") basic_latest_relation = entity["latest_relation"].GetString();
+            if (entity_id == "basic_ipv4") basic_latest_relation = entity["latest_relation"].GetString();
         }
         ASSERT_TRUE(!managed_run_id.empty() && !basic_latest_relation.empty());
         const std::string managed_query_dataframe = "scheduler_npm_managed_latest";
@@ -2988,13 +2990,13 @@ int main() {
         ASSERT_TRUE(queried_run_ids && queried_run_status);
         ASSERT_EQ(queried_run_ids->GetString(0), managed_run_id);
         ASSERT_EQ(queried_run_status->GetString(0), "completed");
-        const auto queried_domains = std::dynamic_pointer_cast<arrow::StringArray>(
+        const auto queried_domains = std::dynamic_pointer_cast<arrow::UInt64Array>(
             managed_query_batch->GetColumnByName("observation_domain_id"));
         ASSERT_TRUE(queried_domains != nullptr);
-        ASSERT_EQ(queried_domains->GetString(0), "0");
+        ASSERT_EQ(queried_domains->Value(0), 0U);
         ASSERT_EQ(registry->Unregister(managed_query_dataframe.c_str()), 0);
 
-        ASSERT_EQ(db->ExecuteSql("CREATE TRIGGER npm_live_consumer_fail BEFORE INSERT ON npm_basic_v1_data "
+        ASSERT_EQ(db->ExecuteSql("CREATE TRIGGER npm_live_consumer_fail BEFORE INSERT ON npm_basic_ipv4_v1_data "
                                  "BEGIN SELECT RAISE(FAIL, 'fixture consumer failure'); END"),
                   0);
         const int consumer_releases_before = capture_fixture.release_calls;
@@ -3006,7 +3008,7 @@ int main() {
         ASSERT_EQ(capture_fixture.release_calls, consumer_releases_before + 1);
         ASSERT_EQ(db->ExecuteSql("DROP TRIGGER npm_live_consumer_fail"), 0);
 
-        const auto dns_entity = npm::NpmDnsTransactionEntityDescriptorV1();
+        const auto dns_entity = npm::NpmDnsTransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
         auto dns_factory = npm::MakeNpmDatabaseResultConsumerFactory(db, input_namespace);
         auto dns_budget = std::make_shared<SchedulerDnsBudget>();
         const std::string dns_run_id = "scheduler-dns-" + suffix;
@@ -3020,7 +3022,7 @@ int main() {
         ASSERT_EQ(dns_budget->Usage().pending_output_bytes, 0ULL);
         for (const char* relation : {"history", "latest", "final"}) {
             const std::string dataframe_name = std::string("scheduler_dns_") + relation;
-            const std::string sql = "SELECT * FROM sqlite.local.npm_dns_transaction_" + std::string(relation) +
+            const std::string sql = "SELECT * FROM sqlite.local.npm_dns_transaction_ipv4_" + std::string(relation) +
                                     "_v1 WHERE __npm_run_id='" + dns_run_id + "' INTO dataframe." + dataframe_name;
             ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
             auto result_channel = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(dataframe_name.c_str()));
@@ -3034,9 +3036,9 @@ int main() {
             ASSERT_TRUE(batch->GetColumnByName("outcome") != nullptr);
             ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
         }
-        ASSERT_EQ(
-            QueryCount(db, "SELECT * FROM npm_dns_transaction_final_v1 WHERE __npm_run_id='" + managed_run_id + "'"),
-            0);
+        ASSERT_EQ(QueryCount(db, "SELECT * FROM npm_dns_transaction_ipv4_final_v1 WHERE __npm_run_id='" +
+                                     managed_run_id + "'"),
+                  0);
 
         const std::string http1_channel = "scheduler_npm_http1";
         ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(http1_channel, pcap_npm_http1), rsp),
@@ -3044,7 +3046,7 @@ int main() {
         const std::string http1_source = "pcapfile." + http1_channel;
         const std::string http1_with =
             " WITH input_namespace='" + http1_source +
-            "',source_domains='0:77',features='http1,labeling',observing='http1_transaction',parameters='" +
+            "',source_domains='0:77',features='http1,labeling',observing='http1_transaction_ipv4',parameters='" +
             R"({"schema_version":1,"core":{"labeling":"config.http1-e2e@1"},"http1":{"primary_label_ids":[1001]}})" +
             "'";
         const std::string http1_dataframe_name = "scheduler_npm_http1_front";
@@ -3058,7 +3060,7 @@ int main() {
         DataFrame http1_result;
         ASSERT_EQ(http1_output->Read(&http1_result), 0);
         const auto http1_batch = http1_result.ToArrow();
-        const auto http1_entity = npm::NpmHttp1TransactionEntityDescriptorV1();
+        const auto http1_entity = npm::NpmHttp1TransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
         ASSERT_TRUE(http1_batch != nullptr && http1_batch->num_rows() == 1);
         ASSERT_TRUE(http1_batch->schema()->Equals(*http1_entity.schema, true));
         const auto http1_outcome =
@@ -3090,16 +3092,16 @@ int main() {
             const auto& result = completed["result"];
             ASSERT_EQ(std::string(result["run_status"].GetString()), "completed");
             ASSERT_EQ(result["rows_written"].GetInt64(), 1);
-            ASSERT_TRUE(result["entities"].IsArray() && result["entities"].Size() == 1);
+            ASSERT_TRUE(result["entities"].IsArray() && result["entities"].Size() == 2);
             const auto& entity = result["entities"][0];
-            ASSERT_EQ(std::string(entity["entity_id"].GetString()), "http1_transaction");
+            ASSERT_EQ(std::string(entity["entity_id"].GetString()), "http1_transaction_ipv4");
             ASSERT_EQ(entity["schema_version"].GetUint(), 1U);
             http1_run_ids.emplace_back(result["run_id"].GetString());
             ASSERT_TRUE(!http1_run_ids.back().empty());
         }
         ASSERT_TRUE(http1_run_ids[0] != http1_run_ids[1]);
         for (const char* relation : {"history", "latest", "final"}) {
-            const std::string name = "npm_http1_transaction_" + std::string(relation) + "_v1";
+            const std::string name = "npm_http1_transaction_ipv4_" + std::string(relation) + "_v1";
             for (size_t run = 0; run < http1_run_ids.size(); ++run) {
                 const std::string destination = "scheduler_http1_" + std::string(relation) + std::to_string(run);
                 ASSERT_EQ(exec("/scheduler/batch/execute",
@@ -3138,7 +3140,7 @@ int main() {
         const std::string tls_source = "pcapfile." + tls_channel;
         const std::string tls_with =
             " WITH input_namespace='" + tls_source +
-            "',source_domains='0:77',features='tls,labeling',observing='tls_handshake',parameters='" +
+            "',source_domains='0:77',features='tls,labeling',observing='tls_handshake_ipv4',parameters='" +
             R"({"schema_version":1,"core":{"labeling":"config.http1-e2e@1"},"tls":{"primary_label_ids":[1001]}})" + "'";
         const std::string tls_dataframe_name = "scheduler_npm_tls_front";
         ASSERT_EQ(exec("/scheduler/batch/execute",
@@ -3151,7 +3153,7 @@ int main() {
         DataFrame tls_result;
         ASSERT_EQ(tls_output->Read(&tls_result), 0);
         const auto tls_batch = tls_result.ToArrow();
-        const auto tls_entity = npm::NpmTlsHandshakeEntityDescriptorV1();
+        const auto tls_entity = npm::NpmTlsHandshakeEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
         ASSERT_TRUE(tls_batch != nullptr && tls_batch->num_rows() == 1);
         ASSERT_TRUE(tls_batch->schema()->Equals(*tls_entity.schema, true));
         const auto tls_outcome = std::dynamic_pointer_cast<arrow::StringArray>(tls_batch->GetColumnByName("outcome"));
@@ -3185,15 +3187,15 @@ int main() {
             const auto& result = completed["result"];
             ASSERT_EQ(std::string(result["run_status"].GetString()), "completed");
             ASSERT_EQ(result["rows_written"].GetInt64(), 1);
-            ASSERT_TRUE(result["entities"].IsArray() && result["entities"].Size() == 1);
-            ASSERT_EQ(std::string(result["entities"][0]["entity_id"].GetString()), "tls_handshake");
+            ASSERT_TRUE(result["entities"].IsArray() && result["entities"].Size() == 2);
+            ASSERT_EQ(std::string(result["entities"][0]["entity_id"].GetString()), "tls_handshake_ipv4");
             ASSERT_EQ(result["entities"][0]["schema_version"].GetUint(), 1U);
             tls_run_ids.emplace_back(result["run_id"].GetString());
             ASSERT_TRUE(!tls_run_ids.back().empty());
         }
         ASSERT_TRUE(tls_run_ids[0] != tls_run_ids[1]);
         for (const char* relation : {"history", "latest", "final"}) {
-            const std::string name = "npm_tls_handshake_" + std::string(relation) + "_v1";
+            const std::string name = "npm_tls_handshake_ipv4_" + std::string(relation) + "_v1";
             for (size_t run = 0; run < tls_run_ids.size(); ++run) {
                 const std::string destination = "scheduler_tls_" + std::string(relation) + std::to_string(run);
                 ASSERT_EQ(exec("/scheduler/batch/execute",
@@ -3230,9 +3232,10 @@ int main() {
         ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(icmp_channel, pcap_npm_icmp), rsp),
                   error::OK);
         const std::string icmp_source = "pcapfile." + icmp_channel;
-        const std::string icmp_with = " WITH input_namespace='" + icmp_source +
-                                      "',source_domains='0:77',features='icmp',observing='icmp_event',parameters='" +
-                                      R"({"schema_version":1,"icmp":{"echo_timeout_ns":5000000000}})" + "'";
+        const std::string icmp_with =
+            " WITH input_namespace='" + icmp_source +
+            "',source_domains='0:77',features='icmp',observing='icmp_event_ipv4',parameters='" +
+            R"({"schema_version":1,"icmp":{"echo_timeout_ns":5000000000}})" + "'";
         const std::string icmp_dataframe_name = "scheduler_npm_icmp_front";
         ASSERT_EQ(exec("/scheduler/batch/execute",
                        MakeReq("SELECT * FROM " + icmp_source + " USING npm.basic" + icmp_with + " INTO dataframe." +
@@ -3244,7 +3247,7 @@ int main() {
         DataFrame icmp_result;
         ASSERT_EQ(icmp_output->Read(&icmp_result), 0);
         const auto icmp_batch = icmp_result.ToArrow();
-        const auto icmp_entity = npm::NpmIcmpEventEntityDescriptorV1();
+        const auto icmp_entity = npm::NpmIcmpEventEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
         ASSERT_TRUE(icmp_batch != nullptr && icmp_batch->num_rows() == 1);
         ASSERT_TRUE(icmp_batch->schema()->Equals(*icmp_entity.schema, true));
         const auto icmp_outcome = std::dynamic_pointer_cast<arrow::StringArray>(icmp_batch->GetColumnByName("outcome"));
@@ -3272,14 +3275,14 @@ int main() {
             const auto& result = completed["result"];
             ASSERT_EQ(std::string(result["run_status"].GetString()), "completed");
             ASSERT_EQ(result["rows_written"].GetInt64(), 1);
-            ASSERT_TRUE(result["entities"].IsArray() && result["entities"].Size() == 1);
-            ASSERT_EQ(std::string(result["entities"][0]["entity_id"].GetString()), "icmp_event");
+            ASSERT_TRUE(result["entities"].IsArray() && result["entities"].Size() == 2);
+            ASSERT_EQ(std::string(result["entities"][0]["entity_id"].GetString()), "icmp_event_ipv4");
             ASSERT_EQ(result["entities"][0]["schema_version"].GetUint(), 1U);
             icmp_run_ids.emplace_back(result["run_id"].GetString());
         }
         ASSERT_TRUE(icmp_run_ids[0] != icmp_run_ids[1]);
         for (const char* relation : {"history", "latest", "final"}) {
-            const std::string name = "npm_icmp_event_" + std::string(relation) + "_v1";
+            const std::string name = "npm_icmp_event_ipv4_" + std::string(relation) + "_v1";
             for (size_t run = 0; run < icmp_run_ids.size(); ++run) {
                 const std::string destination = "scheduler_icmp_" + std::string(relation) + std::to_string(run);
                 ASSERT_EQ(exec("/scheduler/batch/execute",
@@ -3330,6 +3333,28 @@ int main() {
                  MakeReq("SELECT session_id FROM " + input_namespace + " USING npm.basic INTO sqlite.local"), rsp),
             error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("SELECT *") != std::string::npos);
+        const int filtered_rc =
+            exec("/scheduler/batch/execute",
+                 MakeReq("SELECT * FROM " + input_namespace +
+                         " USING npm.basic WITH observing='basic_ipv4' WHERE session_id > 0 INTO sqlite.local"),
+                 rsp);
+        if (filtered_rc != error::OK) std::fprintf(stderr, "managed observing filter: %s\n", rsp.c_str());
+        ASSERT_EQ(filtered_rc, error::OK);
+        rapidjson::Document filtered_managed;
+        filtered_managed.Parse(rsp.c_str());
+        ASSERT_EQ(filtered_managed["result"]["entities"].Size(), 2U);
+        const std::string filtered_run = filtered_managed["result"]["run_id"].GetString();
+        ASSERT_EQ(QueryCount(db, "SELECT * FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + filtered_run + "'"),
+                  1);
+        ASSERT_EQ(exec("/scheduler/batch/execute",
+                       MakeReq("SELECT session_id FROM " + input_namespace +
+                               " USING npm.basic WITH observing='basic_ipv4' WHERE session_id < 0 INTO sqlite.local"),
+                       rsp),
+                  error::OK);
+        filtered_managed.Parse(rsp.c_str());
+        const std::string projected_run = filtered_managed["result"]["run_id"].GetString();
+        ASSERT_EQ(QueryCount(db, "SELECT * FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + projected_run + "'"),
+                  1);
         ASSERT_EQ(exec("/scheduler/batch/execute",
                        MakeReq("SELECT * FROM " + input_namespace +
                                " USING npm.basic WHERE session_id > 0 INTO sqlite.local"),
@@ -3389,7 +3414,7 @@ int main() {
         ASSERT_EQ(std::string(writing_result["run_status"].GetString()), "writing");
         ASSERT_EQ(std::string(writing_result["metadata_status"].GetString()), "known");
         ASSERT_EQ(writing_result["rows_written"].GetInt64(), 0);
-        ASSERT_TRUE(writing_result["entities"].IsArray() && writing_result["entities"].Size() == 1);
+        ASSERT_TRUE(writing_result["entities"].IsArray() && writing_result["entities"].Size() == 2);
         ASSERT_EQ(deactivate("/operators/deactivate", plugin_request, rsp), error::CONFLICT);
         ASSERT_TRUE(rsp.find("plugin is in use") != std::string::npos);
         live_task->Cancel();
@@ -3439,27 +3464,26 @@ int main() {
         const auto revision = std::dynamic_pointer_cast<arrow::UInt64Array>(batch->GetColumnByName("revision"));
         const auto observed_at = std::dynamic_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("observed_at"));
         const auto is_final = std::dynamic_pointer_cast<arrow::BooleanArray>(batch->GetColumnByName("is_final"));
-        const auto ip_family = std::dynamic_pointer_cast<arrow::UInt8Array>(batch->GetColumnByName("ip_family"));
+        ASSERT_TRUE(batch->GetColumnByName("ip_family") == nullptr);
         const auto transport =
             std::dynamic_pointer_cast<arrow::UInt8Array>(batch->GetColumnByName("transport_protocol"));
-        ASSERT_TRUE(session_id && domain && revision && observed_at && is_final && ip_family && transport);
+        ASSERT_TRUE(session_id && domain && revision && observed_at && is_final && transport);
         ASSERT_EQ(session_id->Value(0), 1);
         ASSERT_EQ(domain->Value(0), 77);
         ASSERT_EQ(revision->Value(0), 1);
         ASSERT_TRUE(observed_at->Value(0) >= result_started_ns && observed_at->Value(0) <= result_finished_ns);
         ASSERT_TRUE(is_final->Value(0));
-        ASSERT_EQ(ip_family->Value(0), 4);
         ASSERT_EQ(transport->Value(0), 6);
 
-        const auto a_ip = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("a_ip"));
-        const auto b_ip = std::dynamic_pointer_cast<arrow::StringArray>(batch->GetColumnByName("b_ip"));
+        const auto a_ip = std::dynamic_pointer_cast<arrow::UInt32Array>(batch->GetColumnByName("a_ip"));
+        const auto b_ip = std::dynamic_pointer_cast<arrow::UInt32Array>(batch->GetColumnByName("b_ip"));
         const auto a_port = std::dynamic_pointer_cast<arrow::UInt16Array>(batch->GetColumnByName("a_port"));
         const auto b_port = std::dynamic_pointer_cast<arrow::UInt16Array>(batch->GetColumnByName("b_port"));
         const auto first_ns = std::dynamic_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("first_ns"));
         const auto last_ns = std::dynamic_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("last_ns"));
         ASSERT_TRUE(a_ip && b_ip && a_port && b_port && first_ns && last_ns);
-        ASSERT_EQ(a_ip->GetString(0), "192.0.2.1");
-        ASSERT_EQ(b_ip->GetString(0), "198.51.100.2");
+        ASSERT_EQ(a_ip->Value(0), 0xc0000201U);
+        ASSERT_EQ(b_ip->Value(0), 0xc6336402U);
         ASSERT_EQ(a_port->Value(0), 41000);
         ASSERT_EQ(b_port->Value(0), 443);
         ASSERT_EQ(first_ns->Value(0), 1'000'000'000);
@@ -3494,7 +3518,8 @@ int main() {
         const std::string default_dataframe = "scheduler_npm_defaults";
         ASSERT_EQ(exec("/scheduler/batch/execute",
                        MakeReq("SELECT * FROM " + input_namespace +
-                               " USING npm.basic WHERE session_id > 0 INTO dataframe." + default_dataframe),
+                               " USING npm.basic WITH observing='basic_ipv4' WHERE session_id > 0 INTO dataframe." +
+                               default_dataframe),
                        rsp),
                   error::OK);
         auto default_output = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(default_dataframe.c_str()));

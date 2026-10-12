@@ -39,7 +39,7 @@ class NpmProtocolContext final {
     NpmProtocolContext(NpmProtocolContext&&) = delete;
     NpmProtocolContext& operator=(NpmProtocolContext&&) = delete;
 
-    packet::IPacketProtocolIdentifier* Identifier();
+    packet::IPacketFamilyProtocolIdentifier* Identifier();
     protocol::IDictionary* Dictionary() const;
     int32_t Pipeno() const;
 

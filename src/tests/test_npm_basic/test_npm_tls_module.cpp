@@ -7,6 +7,7 @@
 
 #include <cassert>
 #include <cerrno>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,8 +37,10 @@ class Budget final : public npm::INpmTaskBudget {
 class Emitter final : public npm::INpmResultEmitterV1 {
  public:
     int Emit(std::string_view entity, const arrow::RecordBatch& rows) override {
-        assert(entity == "tls_handshake" && rows.num_rows() == 1);
-        assert(npm::ValidateNpmEntityRowsV1("tls", npm::NpmTlsHandshakeEntityDescriptorV1(), rows).error ==
+        assert(entity ==
+                   (family == flowsql::packet::AddressFamily::kIPv4 ? "tls_handshake_ipv4" : "tls_handshake_ipv6") &&
+               rows.num_rows() == 1);
+        assert(npm::ValidateNpmEntityRowsV1("tls", npm::NpmTlsHandshakeEntityDescriptorV1(family), rows).error ==
                npm::NpmProtocolContractErrorV1::kNone);
         ++calls;
         auto ids = std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("entity_instance_id"));
@@ -45,9 +48,18 @@ class Emitter final : public npm::INpmResultEmitterV1 {
         auto outcomes = std::static_pointer_cast<arrow::StringArray>(rows.GetColumnByName("outcome"));
         assert(ids->Value(0) == 7 && domains->Value(0) == 44);
         outcome = outcomes->GetString(0);
+        const auto address = rows.GetColumnByName("a_ip");
+        if (family == flowsql::packet::AddressFamily::kIPv4) {
+            assert(std::static_pointer_cast<arrow::UInt32Array>(address)->Value(0) == 0xc0000201U);
+        } else {
+            const uint8_t expected[16] = {192, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff};
+            assert(std::memcmp(std::static_pointer_cast<arrow::FixedSizeBinaryArray>(address)->GetValue(0), expected,
+                               16) == 0);
+        }
         return error;
     }
     int calls = 0;
+    flowsql::packet::AddressFamily family = flowsql::packet::AddressFamily::kIPv4;
     int error = 0;
     std::string outcome;
 };
@@ -119,11 +131,12 @@ std::string Record(bool server) {
     return record;
 }
 
-npm::NpmSessionKey Key() {
-    npm::NpmSessionKey key;
-    key.ip_family = flowsql::packet::AddressFamily::kIPv4;
+template <typename KeyType>
+KeyType Key() {
+    KeyType key;
+
     key.transport_protocol = 6;
-    flowsql::packet::IPv4Address a{}, b{};
+    decltype(key.a_ip) a{}, b{};
     a.bytes[0] = 192;
     a.bytes[2] = 2;
     a.bytes[3] = 1;
@@ -131,10 +144,14 @@ npm::NpmSessionKey Key() {
     b.bytes[1] = 51;
     b.bytes[2] = 100;
     b.bytes[3] = 2;
-    key.a.ip = a;
-    key.b.ip = b;
-    key.a.port = 50000;
-    key.b.port = 443;
+    if constexpr (sizeof(a) == 16) {
+        a.bytes[15] = 0xff;
+        b.bytes[15] = 0x80;
+    }
+    key.a_ip = a;
+    key.b_ip = b;
+    key.a_port = 50000;
+    key.b_port = 443;
     key.observation_domain_id = 44;
     return key;
 }
@@ -152,15 +169,18 @@ int Send(npm::NpmTlsProtocolModuleV1* module, const npm::NpmSessionView& session
     return error;
 }
 
+template <typename KeyType>
 void TestModule() {
     auto budget = std::make_shared<Budget>();
     npm::NpmTlsConfigV1 config;
     config.primary_label_ids = {1001};
-    auto key = Key();
+    auto key = Key<KeyType>();
     npm::NpmSessionView session;
     session.session_id = 7;
-    session.key = &key;
+    session.key = npm::NpmSessionKeyView(key);
     Emitter emitter;
+    emitter.family =
+        sizeof(key.a_ip) == 4 ? flowsql::packet::AddressFamily::kIPv4 : flowsql::packet::AddressFamily::kIPv6;
     npm::NpmTlsProtocolModuleV1 module(config, budget);
     npm::NpmInputEventV1 input;
     npm::NpmPacketView packet;
@@ -185,7 +205,10 @@ void TestModule() {
     assert(budget->used == retained_charge && emitter.calls == 0);
     assert(Send(&module, session, npm::NpmPacketDirection::kBToA, Record(true), 200, &emitter) == 0);
     assert(emitter.calls == 1 && emitter.outcome == "server_hello_observed");
-    assert(!module.NextEventDeadlineNs() && budget->used == 512);
+    assert(!module.NextEventDeadlineNs() && budget->used == sizeof(npm::NpmTransactionIdentity) +
+                                                                sizeof(std::unique_ptr<npm::NpmTlsHandshakeTrackerV1>) +
+                                                                sizeof(uint64_t) + 6 * sizeof(void*) + sizeof(KeyType) +
+                                                                key.input_namespace.capacity() + 1);
     assert(module.OnSessionEnd(session, npm::NpmSessionEndReason::kEof, 300, emitter) == 0);
     assert(module.Finish(300, emitter) == 0 && budget->used == 0);
 
@@ -214,14 +237,23 @@ void TestModule() {
     assert(Send(&non_tls, session, npm::NpmPacketDirection::kAToB, "GET /", 800, &emitter) == 0);
     assert(budget->used > 512);
     assert(Send(&non_tls, session, npm::NpmPacketDirection::kBToA, "GET /", 801, &emitter) == 0);
-    assert(budget->used == 512 && emitter.calls == prior_calls);
+    assert(budget->used == sizeof(npm::NpmTransactionIdentity) +
+                               sizeof(std::unique_ptr<npm::NpmTlsHandshakeTrackerV1>) + sizeof(uint64_t) +
+                               6 * sizeof(void*) + sizeof(KeyType) + key.input_namespace.capacity() + 1 &&
+           emitter.calls == prior_calls);
     assert(Send(&non_tls, session, npm::NpmPacketDirection::kAToB, std::string(1024 * 1024, 'x'), 802, &emitter, 5) ==
            0);
-    assert(budget->used == 512 && emitter.calls == prior_calls);
+    assert(budget->used == sizeof(npm::NpmTransactionIdentity) +
+                               sizeof(std::unique_ptr<npm::NpmTlsHandshakeTrackerV1>) + sizeof(uint64_t) +
+                               6 * sizeof(void*) + sizeof(KeyType) + key.input_namespace.capacity() + 1 &&
+           emitter.calls == prior_calls);
     assert(non_tls.OnSessionEnd(session, npm::NpmSessionEndReason::kEof, 803, emitter) == 0);
     assert(non_tls.Finish(803, emitter) == 0 && budget->used == 0 && emitter.calls == prior_calls);
 }
 
 }  // namespace
 
-int main() { TestModule(); }
+int main() {
+    TestModule<npm::NpmSessionKey4>();
+    TestModule<npm::NpmSessionKey6>();
+}

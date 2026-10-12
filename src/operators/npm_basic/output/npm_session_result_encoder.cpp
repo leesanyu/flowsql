@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "npm_session_result_encoder.h"
+#include "npm_family_address_builder.h"
 
 #include <arrow/api.h>
 #include <arrow/util/byte_size.h>
@@ -19,15 +20,8 @@ NpmSessionEncodeError Fail(NpmSessionEncodeError code, const std::string& messag
     return code;
 }
 
-bool ValidResultUtf8(const NpmSessionResult& result, std::string* field) {
-    if (!arrow::util::ValidateUTF8(result.a_ip)) {
-        *field = "a_ip";
-        return false;
-    }
-    if (!arrow::util::ValidateUTF8(result.b_ip)) {
-        *field = "b_ip";
-        return false;
-    }
+template <typename Address>
+bool ValidResultUtf8(const NpmSessionFamilyResult<Address>& result, std::string* field) {
     if (result.protocol.has_value() && !arrow::util::ValidateUTF8(*result.protocol)) {
         *field = "protocol";
         return false;
@@ -80,7 +74,8 @@ class PendingOutputOwner {
 
 }  // namespace
 
-NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult>& results,
+template <typename Address>
+NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionFamilyResult<Address>>& results,
                                               std::shared_ptr<arrow::RecordBatch>* output, std::string* error,
                                               bool labeling_enabled, arrow::MemoryPool* pool) {
     if (output == nullptr) {
@@ -110,10 +105,9 @@ NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult
         arrow::UInt64Builder revision(pool);
         arrow::Int64Builder observed_at(pool);
         arrow::BooleanBuilder is_final(pool);
-        arrow::UInt8Builder ip_family(pool);
         arrow::UInt8Builder transport_protocol(pool);
-        arrow::StringBuilder a_ip(pool);
-        arrow::StringBuilder b_ip(pool);
+        NpmAddressArrowBuilder<Address> a_ip(pool);
+        NpmAddressArrowBuilder<Address> b_ip(pool);
         arrow::UInt16Builder a_port(pool);
         arrow::UInt16Builder b_port(pool);
         arrow::Int64Builder first_ns(pool);
@@ -188,7 +182,6 @@ NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult
                 !check(revision.Append(result.revision), "revision") ||
                 !check(observed_at.Append(result.observed_at), "observed_at") ||
                 !check(is_final.Append(result.is_final), "is_final") ||
-                !check(ip_family.Append(result.ip_family), "ip_family") ||
                 !check(transport_protocol.Append(result.transport_protocol), "transport_protocol") ||
                 !check(a_ip.Append(result.a_ip), "a_ip") || !check(b_ip.Append(result.b_ip), "b_ip") ||
                 !check(a_port.Append(result.a_port), "a_port") || !check(b_port.Append(result.b_port), "b_port") ||
@@ -201,7 +194,9 @@ NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult
                 !append_optional_string(result.protocol, &protocol, "protocol")) {
                 return NpmSessionEncodeError::kArrowError;
             }
-            if (labeling_enabled && !check(primary_label_id.Append(result.primary_label_id), "primary_label_id")) {
+            if (!check(labeling_enabled && result.primary_label_id ? primary_label_id.Append(*result.primary_label_id)
+                                                                   : primary_label_id.AppendNull(),
+                       "primary_label_id")) {
                 return NpmSessionEncodeError::kArrowError;
             }
             if (result.end_reason.has_value()) {
@@ -275,13 +270,12 @@ NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult
         };
         if (!finish(&session_id, "session_id") || !finish(&observation_domain_id, "observation_domain_id") ||
             !finish(&revision, "revision") || !finish(&observed_at, "observed_at") || !finish(&is_final, "is_final") ||
-            !finish(&ip_family, "ip_family") || !finish(&transport_protocol, "transport_protocol") ||
-            !finish(&a_ip, "a_ip") || !finish(&b_ip, "b_ip") || !finish(&a_port, "a_port") ||
-            !finish(&b_port, "b_port") || !finish(&first_ns, "first_ns") || !finish(&last_ns, "last_ns") ||
-            !finish(&duration_ns, "duration_ns")) {
+            !finish(&transport_protocol, "transport_protocol") || !finish(&a_ip, "a_ip") || !finish(&b_ip, "b_ip") ||
+            !finish(&a_port, "a_port") || !finish(&b_port, "b_port") || !finish(&first_ns, "first_ns") ||
+            !finish(&last_ns, "last_ns") || !finish(&duration_ns, "duration_ns")) {
             return NpmSessionEncodeError::kArrowError;
         }
-        if (labeling_enabled && !finish(&primary_label_id, "primary_label_id")) {
+        if (!finish(&primary_label_id, "primary_label_id")) {
             return NpmSessionEncodeError::kArrowError;
         }
         if (!finish(&protocol_status, "protocol_status") || !finish(&protocol_id, "protocol_id") ||
@@ -310,7 +304,7 @@ NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult
             return NpmSessionEncodeError::kArrowError;
         }
 
-        auto batch = arrow::RecordBatch::Make(NpmSessionResultSchema(labeling_enabled),
+        auto batch = arrow::RecordBatch::Make(NpmSessionResultSchema(NpmAddressArrowBuilder<Address>::family),
                                               static_cast<int64_t>(results.size()), std::move(arrays));
         const auto validation = batch->ValidateFull();
         if (!validation.ok()) {
@@ -325,7 +319,8 @@ NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult
     }
 }
 
-NpmSessionEncodeError EncodeNpmSessionResultsWithBudget(const std::vector<NpmSessionResult>& results,
+template <typename Address>
+NpmSessionEncodeError EncodeNpmSessionResultsWithBudget(const std::vector<NpmSessionFamilyResult<Address>>& results,
                                                         const std::shared_ptr<INpmTaskBudget>& budget,
                                                         std::shared_ptr<arrow::RecordBatch>* output, std::string* error,
                                                         bool labeling_enabled) {
@@ -364,5 +359,20 @@ NpmSessionEncodeError EncodeNpmSessionResultsWithBudget(const std::vector<NpmSes
         return Fail(NpmSessionEncodeError::kAllocationFailed, "NPM Session pending output allocation failed", error);
     }
 }
+
+template NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult4>&,
+                                                       std::shared_ptr<arrow::RecordBatch>*, std::string*, bool,
+                                                       arrow::MemoryPool*);
+template NpmSessionEncodeError EncodeNpmSessionResultsWithBudget(const std::vector<NpmSessionResult4>&,
+                                                                 const std::shared_ptr<INpmTaskBudget>&,
+                                                                 std::shared_ptr<arrow::RecordBatch>*, std::string*,
+                                                                 bool);
+template NpmSessionEncodeError EncodeNpmSessionResults(const std::vector<NpmSessionResult6>&,
+                                                       std::shared_ptr<arrow::RecordBatch>*, std::string*, bool,
+                                                       arrow::MemoryPool*);
+template NpmSessionEncodeError EncodeNpmSessionResultsWithBudget(const std::vector<NpmSessionResult6>&,
+                                                                 const std::shared_ptr<INpmTaskBudget>&,
+                                                                 std::shared_ptr<arrow::RecordBatch>*, std::string*,
+                                                                 bool);
 
 }  // namespace flowsql::npm

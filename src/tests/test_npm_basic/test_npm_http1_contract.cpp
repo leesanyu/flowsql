@@ -124,13 +124,13 @@ void TestConfigAndPlan() {
 }
 
 void TestSchemaAndRows() {
-    const auto entity = npm::NpmHttp1TransactionEntityDescriptorV1();
+    const auto entity = npm::NpmHttp1TransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
     using Error = npm::NpmProtocolContractErrorV1;
     assert(npm::ValidateNpmEntityDescriptorV1(entity).error == Error::kNone);
-    assert(entity.entity_id == "http1_transaction" && entity.module_id == "http1");
+    assert(entity.entity_id == "http1_transaction_ipv4" && entity.module_id == "http1");
     assert(entity.schema_version == 1 && entity.revision_semantics == npm::NpmRevisionSemanticsV1::kEvent);
     for (const auto& [key, value] : std::vector<std::pair<const char*, const char*>>{
-             {"flowsql.entity", "http1_transaction"},
+             {"flowsql.entity", "http1_transaction_ipv4"},
              {"flowsql.schema_version", "1"},
              {"flowsql.timestamp_unit", "ns"},
              {"flowsql.revision_semantics", "event"},
@@ -144,8 +144,8 @@ void TestSchemaAndRows() {
         {"is_final", arrow::Type::BOOL, false},
         {"session_id", arrow::Type::UINT64, false},
         {"observation_domain_id", arrow::Type::UINT64, false},
-        {"a_ip", arrow::Type::STRING, false},
-        {"b_ip", arrow::Type::STRING, false},
+        {"a_ip", arrow::Type::UINT32, false},
+        {"b_ip", arrow::Type::UINT32, false},
         {"a_port", arrow::Type::UINT16, false},
         {"b_port", arrow::Type::UINT16, false},
         {"outcome", arrow::Type::STRING, false},

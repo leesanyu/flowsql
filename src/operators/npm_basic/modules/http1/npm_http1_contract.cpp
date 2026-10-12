@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "npm_http1_contract.h"
+#include <operators/npm_basic/npm_family_result_contract.h>
 
 #include <arrow/api.h>
 #include <rapidjson/document.h>
@@ -96,39 +97,10 @@ NpmHttp1ConfigStatusV1 ParseNpmHttp1ConfigV1(std::string_view json, NpmHttp1Conf
     }
 }
 
-NpmEntityDescriptorV1 NpmHttp1TransactionEntityDescriptorV1() {
-    static const std::shared_ptr<arrow::Schema> schema = arrow::schema(
-        {arrow::field("entity_instance_id", arrow::uint64(), false),
-         arrow::field("revision", arrow::uint64(), false),
-         arrow::field("observed_at", arrow::int64(), false),
-         arrow::field("is_final", arrow::boolean(), false),
-         arrow::field("session_id", arrow::uint64(), false),
-         arrow::field("observation_domain_id", arrow::uint64(), false),
-         arrow::field("a_ip", arrow::utf8(), false),
-         arrow::field("b_ip", arrow::utf8(), false),
-         arrow::field("a_port", arrow::uint16(), false),
-         arrow::field("b_port", arrow::uint16(), false),
-         arrow::field("outcome", arrow::utf8(), false),
-         arrow::field("informational_count", arrow::uint32(), false),
-         arrow::field("request_direction", arrow::uint8(), true),
-         arrow::field("response_direction", arrow::uint8(), true),
-         arrow::field("method", arrow::utf8(), true),
-         arrow::field("target", arrow::utf8(), true),
-         arrow::field("host", arrow::utf8(), true),
-         arrow::field("status_code", arrow::uint16(), true),
-         arrow::field("request_headers_at_ns", arrow::int64(), true),
-         arrow::field("response_headers_at_ns", arrow::int64(), true),
-         arrow::field("latency_ns", arrow::int64(), true),
-         arrow::field("incomplete_reason", arrow::utf8(), true)},
-        arrow::key_value_metadata({"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit",
-                                   "flowsql.revision_semantics", "flowsql.measurement_scope"},
-                                  {"http1_transaction", "1", "ns", "event", "single_capture_observed_packets"}));
-    NpmEntityDescriptorV1 entity;
-    entity.entity_id = "http1_transaction";
-    entity.module_id = "http1";
-    entity.schema = schema;
-    entity.revision_semantics = NpmRevisionSemanticsV1::kEvent;
-    return entity;
+NpmEntityDescriptorV1 NpmHttp1TransactionEntityDescriptorV1(packet::AddressFamily family) {
+    static const auto v4 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kHttp1, packet::AddressFamily::kIPv4);
+    static const auto v6 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kHttp1, packet::AddressFamily::kIPv6);
+    return family == packet::AddressFamily::kIPv4 ? v4 : v6;
 }
 
 NpmModulePlanV1 NpmHttp1ModulePlanV1(const NpmHttp1ConfigV1& config) {
@@ -138,7 +110,8 @@ NpmModulePlanV1 NpmHttp1ModulePlanV1(const NpmHttp1ConfigV1& config) {
     plan.requires_labeling = true;
     plan.requires_tcp_stream = true;
     plan.primary_label_ids = config.primary_label_ids;
-    plan.entities.push_back(NpmHttp1TransactionEntityDescriptorV1());
+    plan.entities = {NpmHttp1TransactionEntityDescriptorV1(packet::AddressFamily::kIPv4),
+                     NpmHttp1TransactionEntityDescriptorV1(packet::AddressFamily::kIPv6)};
     return plan;
 }
 

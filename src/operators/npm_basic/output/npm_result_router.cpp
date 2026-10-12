@@ -119,7 +119,7 @@ int NpmResultRouter::Emit(std::string_view module, std::string_view entity_id, c
 int NpmResultRouter::Drain(std::shared_ptr<arrow::RecordBatch>* output) {
     if (cancelled_) return ECANCELED;
     if (error_code_) return error_code_;
-    std::shared_ptr<arrow::Schema> schema;
+    std::shared_ptr<arrow::Schema> schema = arrow::schema({});
     for (const auto& entity : entities_)
         if (entity.entity_id == observing_) schema = entity.schema;
     std::shared_ptr<arrow::RecordBatch> rows;
@@ -139,20 +139,41 @@ int NpmResultRouter::Drain(std::shared_ptr<arrow::RecordBatch>* output) {
     return 0;
 }
 
-int NpmResultRouter::PublishProgress(const NpmResultProgressV1& progress) {
+int NpmResultRouter::PublishProgress(int64_t period_ns, int64_t closed_before_ns,
+                                     const NpmFamilyPublicationProof& source_proof) {
     if (cancelled_) return ECANCELED;
     if (error_code_) return error_code_;
     if (finished_) return EPIPE;
-    if (progress.contract_version != 1 || progress.entity_id != "basic" || progress.period_ns <= 0 ||
-        progress.closed_before_ns < 0 || progress.closed_before_ns % progress.period_ns != 0 || pending_rows_ != 0)
-        return Fail(EINVAL, "invalid or undrained NPM result progress");
-    if (progress.closed_before_ns < closed_before_ns_) return Fail(EINVAL, "regressing NPM result progress");
-    if (progress.closed_before_ns == closed_before_ns_) return 0;
-    auto* publisher = dynamic_cast<INpmResultProgressConsumerV1*>(consumer_.get());
-    const int rc = publisher ? invoke_([&] { return publisher->PublishProgress(context_, progress); }) : 0;
-    if (rc) return Fail(rc, "consumer progress publication failed");
-    if (cancelled_) return ECANCELED;
-    closed_before_ns_ = progress.closed_before_ns;
+    auto proof = source_proof;
+    proof.foreground_drained = proof.foreground_drained && pending_rows_ == 0;
+    auto* publisher = dynamic_cast<INpmFamilyProgressConsumer*>(consumer_.get());
+    for (const auto& entity : entities_) {
+        if (entity.entity_id != "basic_ipv4" && entity.entity_id != "basic_ipv6") continue;
+        NpmFamilyPublicationRequest request{
+            {entity.entity_id, "npm_" + entity.entity_id + "_history_v" + std::to_string(entity.schema_version),
+             context_.run_id},
+            period_ns,
+            closed_before_ns};
+        auto& cursor = publications_[entity.entity_id];
+        if (cursor.last_confirmed && cursor.last_confirmed->publication.period_ns == period_ns &&
+            cursor.last_confirmed->publication.closed_before_ns == closed_before_ns)
+            continue;
+        const auto valid = ValidateNpmFamilyPublication(cursor, request, proof);
+        if (!valid.ok()) return Fail(EINVAL, valid.ToString());
+        if (!publisher) continue;
+        NpmFamilyPublishedProgress confirmed;
+        const int rc = invoke_([&] { return publisher->PublishProgress(request, &confirmed); });
+        auto complete = CompleteNpmFamilyPublication(
+            cursor, request, proof,
+            rc ? NpmFamilyPublicationOutcome::kCommitUnknown : NpmFamilyPublicationOutcome::kCommitted,
+            rc ? std::nullopt : std::optional<NpmFamilyPublishedProgress>(confirmed));
+        if (complete.ok()) cursor = std::move(*complete);
+        if (rc || !complete.ok()) {
+            cursor.terminal_failure = true;
+            return Fail(rc ? rc : EINVAL, "consumer family progress publication failed");
+        }
+        if (cancelled_) return ECANCELED;
+    }
     return 0;
 }
 int NpmResultRouter::Finish() {

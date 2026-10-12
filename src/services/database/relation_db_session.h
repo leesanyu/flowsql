@@ -1,17 +1,13 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_DATABASE_RELATION_DB_SESSION_H_
 #define _FLOWSQL_SERVICES_DATABASE_RELATION_DB_SESSION_H_
 
-#include "db_session.h"
 #include "capability_interfaces.h"
+#include "db_session.h"
 #include "idb_driver.h"
+#include "managed_query_schema.h"
 
 #include <arrow/api.h>
 
@@ -26,11 +22,9 @@ namespace database {
 
 // RelationDbSessionBase - 行式数据库通用模板基类
 // 使用 traits 模式封装数据库特定的类型和操作
-template<typename Traits>
-class RelationDbSessionBase : public IDbSession,
-                               public IBatchReadable,
-                               public IBatchWritable {
-public:
+template <typename Traits>
+class RelationDbSessionBase : public IDbSession, public IBatchReadable, public IBatchWritable {
+ public:
     RelationDbSessionBase(IDbDriver* driver, typename Traits::ConnectionType conn)
         : driver_(driver), conn_(conn), in_transaction_(false) {}
 
@@ -56,9 +50,7 @@ public:
             return -1;
         }
 
-        *result = CreateResultSet(res, [this](typename Traits::ResultType r) {
-            FreeResult(r);
-        });
+        *result = CreateResultSet(res, [this](typename Traits::ResultType r) { FreeResult(r); });
         if (!*result) {
             FreeResult(res);
             FreeStatement(stmt);
@@ -80,7 +72,10 @@ public:
 
     int BeginTransaction() override {
         last_error_.clear();
-        if (in_transaction_) { last_error_ = "Transaction already in progress"; return -1; }
+        if (in_transaction_) {
+            last_error_ = "Transaction already in progress";
+            return -1;
+        }
         int ret = ExecuteSql("BEGIN");
         if (ret != -1) in_transaction_ = true;
         return (ret != -1) ? 0 : -1;
@@ -88,7 +83,10 @@ public:
 
     int CommitTransaction() override {
         last_error_.clear();
-        if (!in_transaction_) { last_error_ = "No transaction in progress"; return -1; }
+        if (!in_transaction_) {
+            last_error_ = "No transaction in progress";
+            return -1;
+        }
         int ret = ExecuteSql("COMMIT");
         if (ret != -1) in_transaction_ = false;
         return (ret != -1) ? 0 : -1;
@@ -96,15 +94,16 @@ public:
 
     int RollbackTransaction() override {
         last_error_.clear();
-        if (!in_transaction_) { last_error_ = "No transaction in progress"; return -1; }
+        if (!in_transaction_) {
+            last_error_ = "No transaction in progress";
+            return -1;
+        }
         int ret = ExecuteSql("ROLLBACK");
         if (ret != -1) in_transaction_ = false;
         return (ret != -1) ? 0 : -1;
     }
 
-    bool Ping() override {
-        return PingImpl(conn_);
-    }
+    bool Ping() override { return PingImpl(conn_); }
 
     // IBatchReadable 实现
     int CreateReader(const char* query, IBatchReader** reader) override {
@@ -116,6 +115,13 @@ public:
         auto schema = InferSchema(result.get(), &last_error_);
         if (!schema) return -1;
 
+        auto managed = ManagedQuerySchema(this, driver_->DriverName(), query, schema);
+        if (!managed.ok()) {
+            last_error_ = managed.status().ToString();
+            return -1;
+        }
+        schema = std::move(*managed);
+
         *reader = CreateBatchReader(result.release(), schema);
         return (*reader) ? 0 : -1;
     }
@@ -123,25 +129,26 @@ public:
     // IBatchWritable 实现
     int CreateWriter(const char* table, IBatchWriter** writer) override {
         last_error_.clear();
-        if (!table || table[0] == '\0') { *writer = nullptr; return -1; }
+        if (!table || table[0] == '\0') {
+            *writer = nullptr;
+            return -1;
+        }
         *writer = CreateBatchWriter(table);
         return (*writer) ? 0 : -1;
     }
 
-protected:
+ protected:
     // ==================== 钩子方法（子类必须实现） ====================
 
     // 准备 SQL 语句
-    virtual typename Traits::StatementType PrepareStatement(
-        typename Traits::ConnectionType conn, const char* sql, std::string* error) = 0;
+    virtual typename Traits::StatementType PrepareStatement(typename Traits::ConnectionType conn, const char* sql,
+                                                            std::string* error) = 0;
 
     // 执行语句
-    virtual int ExecuteStatement(
-        typename Traits::StatementType stmt, std::string* error) = 0;
+    virtual int ExecuteStatement(typename Traits::StatementType stmt, std::string* error) = 0;
 
     // 获取结果元数据
-    virtual typename Traits::ResultType GetResultMetadata(
-        typename Traits::StatementType stmt, std::string* error) = 0;
+    virtual typename Traits::ResultType GetResultMetadata(typename Traits::StatementType stmt, std::string* error) = 0;
 
     // 获取受影响行数
     virtual int GetAffectedRows(typename Traits::StatementType stmt) {
@@ -166,22 +173,19 @@ protected:
     // ==================== 工厂方法（子类实现） ====================
 
     // 创建结果集
-    virtual IResultSet* CreateResultSet(
-        typename Traits::ResultType result,
-        std::function<void(typename Traits::ResultType)> free_func) = 0;
+    virtual IResultSet* CreateResultSet(typename Traits::ResultType result,
+                                        std::function<void(typename Traits::ResultType)> free_func) = 0;
 
     // 批量读取器工厂
-    virtual IBatchReader* CreateBatchReader(IResultSet* result,
-                                            std::shared_ptr<arrow::Schema> schema) = 0;
+    virtual IBatchReader* CreateBatchReader(IResultSet* result, std::shared_ptr<arrow::Schema> schema) = 0;
 
     // 批量写入器工厂
     virtual IBatchWriter* CreateBatchWriter(const char* table) = 0;
 
     // 推断 Schema（各驱动类型映射不同，子类必须实现）
-    virtual std::shared_ptr<arrow::Schema> InferSchema(IResultSet* result,
-                                                       std::string* error) = 0;
+    virtual std::shared_ptr<arrow::Schema> InferSchema(IResultSet* result, std::string* error) = 0;
 
-protected:
+ protected:
     IDbDriver* driver_;
     typename Traits::ConnectionType conn_;
     bool in_transaction_;

@@ -52,8 +52,10 @@ class NpmBasicResultCollector final : public INpmResultWriter {
     void UsePeriodicBasic() { periodic_basic_ = true; }
     int Finish() { return router_ ? router_->Finish() : 0; }
     bool has_router() const { return router_ != nullptr; }
-    int WriteBasic(const NpmBasicResult& result) override;
-    int WriteSession(const NpmSessionResult& result) override;
+    int WriteBasic(const NpmBasicResult4& result) override;
+    int WriteBasic(const NpmBasicResult6& result) override;
+    int WriteSession(const NpmSessionResult4& result) override;
+    int WriteSession(const NpmSessionResult6& result) override;
 
     /** Success consumes pending module records; failure leaves pending records and caller output unchanged. */
     NpmBasicDrainStatus Drain(const std::vector<NpmSessionEndEvent>& events, NpmBasicResultProjector& projector,
@@ -63,11 +65,17 @@ class NpmBasicResultCollector final : public INpmResultWriter {
     size_t pending_results() const noexcept;
 
  private:
+    template <typename Address>
+    int WriteBasicImpl(const NpmBasicFamilyResult<Address>&, std::vector<NpmBasicFamilyResult<Address>>&);
+    template <typename Address>
+    int WriteSessionImpl(const NpmSessionFamilyResult<Address>&, std::vector<NpmSessionFamilyResult<Address>>&);
     NpmBasicFeatureConfig features_;
     bool periodic_basic_ = false;
     std::shared_ptr<NpmResultRouter> router_;
-    std::vector<NpmBasicResult> pending_basic_;
-    std::vector<NpmSessionResult> pending_session_;
+    std::vector<NpmBasicResult4> pending_basic4_;
+    std::vector<NpmBasicResult6> pending_basic6_;
+    std::vector<NpmSessionResult4> pending_session4_;
+    std::vector<NpmSessionResult6> pending_session6_;
 };
 
 }  // namespace flowsql::npm

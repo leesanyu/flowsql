@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_DATABASE_RELATION_ADAPTERS_H_
 #define _FLOWSQL_SERVICES_DATABASE_RELATION_ADAPTERS_H_
@@ -125,8 +120,8 @@ class RelationBatchReader : public IBatchReader {
                         if (!parsed || (b->type()->id() == arrow::Type::UINT8 && value > UINT8_MAX) ||
                             (b->type()->id() == arrow::Type::UINT16 && value > UINT16_MAX) ||
                             (b->type()->id() == arrow::Type::UINT32 && value > UINT32_MAX)) {
-                            (void)b->AppendNull();
-                            break;
+                            last_error_ = "invalid unsigned database value in " + schema_->field(col)->name();
+                            return -1;
                         }
                         if (b->type()->id() == arrow::Type::UINT8)
                             (void)static_cast<arrow::UInt8Builder*>(b)->Append(static_cast<uint8_t>(value));
@@ -191,6 +186,22 @@ class RelationBatchReader : public IBatchReader {
                             (void)static_cast<arrow::BooleanBuilder*>(b)->Append(val);
                         else
                             (void)b->AppendNull();
+                        break;
+                    }
+                    case arrow::Type::FIXED_SIZE_BINARY: {
+                        const char* value = nullptr;
+                        size_t length = 0;
+                        auto* fixed = static_cast<arrow::FixedSizeBinaryBuilder*>(b);
+                        if (result_->GetString(col, &value, &length) != 0 || !value ||
+                            length != static_cast<size_t>(fixed->byte_width())) {
+                            last_error_ = "invalid fixed binary database value in " + schema_->field(col)->name();
+                            return -1;
+                        }
+                        const auto status = fixed->Append(reinterpret_cast<const uint8_t*>(value));
+                        if (!status.ok()) {
+                            last_error_ = status.ToString();
+                            return -1;
+                        }
                         break;
                     }
                     case arrow::Type::BINARY: {

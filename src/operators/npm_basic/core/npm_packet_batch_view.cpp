@@ -33,12 +33,8 @@ enum PacketColumn : int {
     kPayloadOffset,
     kSrcMac,
     kDstMac,
-    kSrcIpV4,
-    kDstIpV4,
-    kSrcIpV6,
-    kDstIpV6,
-    kSrcIpFamily,
-    kDstIpFamily,
+    kAddressState,
+    kEndpoints,
     kTransportProtocol,
     kSrcPort,
     kDstPort,
@@ -103,12 +99,9 @@ struct NpmPacketBatchView::Columns {
     std::shared_ptr<arrow::UInt32Array> payload_offset;
     std::shared_ptr<arrow::FixedSizeBinaryArray> src_mac;
     std::shared_ptr<arrow::FixedSizeBinaryArray> dst_mac;
-    std::shared_ptr<arrow::UInt32Array> src_ip_v4;
-    std::shared_ptr<arrow::UInt32Array> dst_ip_v4;
-    std::shared_ptr<arrow::BinaryArray> src_ip_v6;
-    std::shared_ptr<arrow::BinaryArray> dst_ip_v6;
-    std::shared_ptr<arrow::UInt8Array> src_ip_family;
-    std::shared_ptr<arrow::UInt8Array> dst_ip_family;
+    std::shared_ptr<arrow::UInt8Array> address_state;
+    std::shared_ptr<arrow::DenseUnionArray> endpoints;
+    packet::PacketFamilyBatch addresses;
     std::shared_ptr<arrow::UInt8Array> transport_protocol;
     std::shared_ptr<arrow::UInt16Array> src_port;
     std::shared_ptr<arrow::UInt16Array> dst_port;
@@ -117,36 +110,6 @@ struct NpmPacketBatchView::Columns {
     std::shared_ptr<arrow::UInt16Array> protocol_id;
     std::shared_ptr<arrow::UInt16Array> protocol_sub_id;
 };
-
-namespace {
-
-NpmPacketBatchError ValidateIp(int64_t row, const char* prefix, const arrow::UInt8Array& family,
-                               const arrow::UInt32Array& v4, const arrow::BinaryArray& v6, std::string* error) {
-    const uint8_t value = family.Value(row);
-    const bool has_v4 = !v4.IsNull(row);
-    const bool has_v6 = !v6.IsNull(row);
-    switch (static_cast<packet::AddressFamily>(value)) {
-        case packet::AddressFamily::kNone:
-            if (!has_v4 && !has_v6) return NpmPacketBatchError::kNone;
-            break;
-        case packet::AddressFamily::kIPv4:
-            if (has_v4 && !has_v6) return NpmPacketBatchError::kNone;
-            break;
-        case packet::AddressFamily::kIPv6:
-            if (!has_v4 && has_v6 && v6.GetView(row).size() == sizeof(packet::IPv6Address)) {
-                return NpmPacketBatchError::kNone;
-            }
-            if (has_v6 && v6.GetView(row).size() != sizeof(packet::IPv6Address)) {
-                return Fail(NpmPacketBatchError::kInvalidRow, std::string(prefix) + "_ip_v6 must contain 16 bytes",
-                            error);
-            }
-            break;
-    }
-    return Fail(NpmPacketBatchError::kInvalidRow,
-                std::string(prefix) + "_ip family does not match nullable address columns", error);
-}
-
-}  // namespace
 
 NpmPacketBatchError NpmPacketBatchView::ValidateRow(int64_t row, const NpmPacketBatchView::Columns& columns,
                                                     std::string* error) {
@@ -188,11 +151,6 @@ NpmPacketBatchError NpmPacketBatchView::ValidateRow(int64_t row, const NpmPacket
     if (columns.payload_offset->Value(row) > captured_len) {
         return Fail(NpmPacketBatchError::kInvalidRow, "payload_offset exceeds captured_len", error);
     }
-
-    auto result = ValidateIp(row, "src", *columns.src_ip_family, *columns.src_ip_v4, *columns.src_ip_v6, error);
-    if (result != NpmPacketBatchError::kNone) return result;
-    result = ValidateIp(row, "dst", *columns.dst_ip_family, *columns.dst_ip_v4, *columns.dst_ip_v6, error);
-    if (result != NpmPacketBatchError::kNone) return result;
 
     const bool ports_valid = columns.ports_valid->Value(row);
     const bool has_src_port = !columns.src_port->IsNull(row);
@@ -236,7 +194,7 @@ NpmPacketBatchError NpmPacketBatchView::Create(const std::shared_ptr<arrow::Reco
     if (batch == nullptr) return Fail(NpmPacketBatchError::kNullInput, "packet batch is null", error);
     if (error != nullptr) error->clear();
 
-    const auto expected_schema = packet::PacketSchema();
+    const auto expected_schema = packet::PacketFamilySchema();
     if (batch->schema() == nullptr || !batch->schema()->Equals(*expected_schema, true)) {
         return Fail(NpmPacketBatchError::kSchemaMismatch, "packet batch schema does not match PacketSchema", error);
     }
@@ -263,6 +221,9 @@ NpmPacketBatchError NpmPacketBatchView::Create(const std::shared_ptr<arrow::Reco
     }
 
     try {
+        const auto family_validation = packet::ValidatePacketFamilyBatch(*batch);
+        if (!family_validation.ok()) return Fail(NpmPacketBatchError::kInvalidRow, family_validation.ToString(), error);
+
         auto columns = std::make_unique<Columns>();
         columns->timestamp_ns = PacketColumnAs<arrow::Int64Array>(batch, kTimestampNs);
         columns->captured_len = PacketColumnAs<arrow::UInt32Array>(batch, kCapturedLen);
@@ -283,12 +244,26 @@ NpmPacketBatchError NpmPacketBatchView::Create(const std::shared_ptr<arrow::Reco
         columns->payload_offset = PacketColumnAs<arrow::UInt32Array>(batch, kPayloadOffset);
         columns->src_mac = PacketColumnAs<arrow::FixedSizeBinaryArray>(batch, kSrcMac);
         columns->dst_mac = PacketColumnAs<arrow::FixedSizeBinaryArray>(batch, kDstMac);
-        columns->src_ip_v4 = PacketColumnAs<arrow::UInt32Array>(batch, kSrcIpV4);
-        columns->dst_ip_v4 = PacketColumnAs<arrow::UInt32Array>(batch, kDstIpV4);
-        columns->src_ip_v6 = PacketColumnAs<arrow::BinaryArray>(batch, kSrcIpV6);
-        columns->dst_ip_v6 = PacketColumnAs<arrow::BinaryArray>(batch, kDstIpV6);
-        columns->src_ip_family = PacketColumnAs<arrow::UInt8Array>(batch, kSrcIpFamily);
-        columns->dst_ip_family = PacketColumnAs<arrow::UInt8Array>(batch, kDstIpFamily);
+        columns->address_state = PacketColumnAs<arrow::UInt8Array>(batch, kAddressState);
+        columns->endpoints = PacketColumnAs<arrow::DenseUnionArray>(batch, kEndpoints);
+        const auto& pair4 = static_cast<const arrow::StructArray&>(*columns->endpoints->field(1));
+        const auto& pair6 = static_cast<const arrow::StructArray&>(*columns->endpoints->field(2));
+        columns->addresses.ipv4.reserve(pair4.length());
+        columns->addresses.ipv6.reserve(pair6.length());
+        for (int64_t index = 0; index < pair4.length(); ++index) {
+            columns->addresses.ipv4.push_back(
+                {network::IPv4Address::FromUInt32(static_cast<const arrow::UInt32Array&>(*pair4.field(0)).Value(index)),
+                 network::IPv4Address::FromUInt32(
+                     static_cast<const arrow::UInt32Array&>(*pair4.field(1)).Value(index))});
+        }
+        for (int64_t index = 0; index < pair6.length(); ++index) {
+            packet::PacketIpEndpoints6 pair;
+            std::memcpy(pair.src.bytes,
+                        static_cast<const arrow::FixedSizeBinaryArray&>(*pair6.field(0)).GetValue(index), 16);
+            std::memcpy(pair.dst.bytes,
+                        static_cast<const arrow::FixedSizeBinaryArray&>(*pair6.field(1)).GetValue(index), 16);
+            columns->addresses.ipv6.push_back(pair);
+        }
         columns->transport_protocol = PacketColumnAs<arrow::UInt8Array>(batch, kTransportProtocol);
         columns->src_port = PacketColumnAs<arrow::UInt16Array>(batch, kSrcPort);
         columns->dst_port = PacketColumnAs<arrow::UInt16Array>(batch, kDstPort);
@@ -321,9 +296,13 @@ NpmPacketBatchError NpmPacketBatchView::Create(const std::shared_ptr<arrow::Reco
 }
 
 int64_t NpmPacketBatchView::num_rows() const { return batch_->num_rows(); }
+uint64_t NpmPacketBatchView::owned_address_bytes() const {
+    return columns_->addresses.ipv4.capacity() * sizeof(packet::PacketIpEndpoints4) +
+           columns_->addresses.ipv6.capacity() * sizeof(packet::PacketIpEndpoints6);
+}
 
 NpmPacketBatchError NpmPacketBatchView::Get(int64_t row, packet::PacketView* packet_view,
-                                            packet::PacketLayerInfo* layer_info) const {
+                                            packet::PacketFamilyLayerView* layer_info) const {
     if (packet_view == nullptr || layer_info == nullptr) return NpmPacketBatchError::kNullOutput;
     if (row < 0 || row >= batch_->num_rows()) return NpmPacketBatchError::kInvalidRow;
 
@@ -338,7 +317,7 @@ NpmPacketBatchError NpmPacketBatchView::Get(int64_t row, packet::PacketView* pac
     const uint8_t* raw_data = columns_->raw_data->GetValue(row, &raw_size);
     next_packet.bytes = Span<const uint8_t>(raw_data, static_cast<size_t>(raw_size));
 
-    packet::PacketLayerInfo next_layer;
+    packet::PacketFamilyLayerView next_layer;
     next_layer.status = static_cast<packet::LayerStatus>(columns_->layer_status->Value(row));
     next_layer.layer_count = columns_->layer_count->Value(row);
     const int64_t id_base = columns_->layer_ids->value_offset(row);
@@ -352,29 +331,21 @@ NpmPacketBatchError NpmPacketBatchView::Get(int64_t row, packet::PacketView* pac
     next_layer.transport_layer_index = columns_->transport_layer_index->Value(row);
     next_layer.payload_offset = columns_->payload_offset->Value(row);
 
-    auto decode_mac = [row](const arrow::FixedSizeBinaryArray& source, packet::MacAddress* destination) {
-        if (source.IsNull(row)) return;
-        std::memcpy(destination->value.bytes, source.GetValue(row), sizeof(destination->value.bytes));
-        destination->valid = 1;
-    };
-    decode_mac(*columns_->src_mac, &next_layer.src_mac);
-    decode_mac(*columns_->dst_mac, &next_layer.dst_mac);
-
-    auto decode_ip = [row](const arrow::UInt8Array& family, const arrow::UInt32Array& v4, const arrow::BinaryArray& v6,
-                           packet::IpAddress* destination) {
-        if (family.Value(row) == static_cast<uint8_t>(packet::AddressFamily::kIPv4)) {
-            packet::IPv4Address address;
-            address.addr = v4.Value(row);
-            *destination = address;
-        } else if (family.Value(row) == static_cast<uint8_t>(packet::AddressFamily::kIPv6)) {
-            packet::IPv6Address address;
-            const auto value = v6.GetView(row);
-            std::memcpy(address.bytes, value.data(), sizeof(address.bytes));
-            *destination = address;
-        }
-    };
-    decode_ip(*columns_->src_ip_family, *columns_->src_ip_v4, *columns_->src_ip_v6, &next_layer.src_ip);
-    decode_ip(*columns_->dst_ip_family, *columns_->dst_ip_v4, *columns_->dst_ip_v6, &next_layer.dst_ip);
+    if (!columns_->src_mac->IsNull(row)) {
+        std::memcpy(next_layer.src_mac.bytes, columns_->src_mac->GetValue(row), 6);
+        next_layer.src_mac_valid = true;
+    }
+    if (!columns_->dst_mac->IsNull(row)) {
+        std::memcpy(next_layer.dst_mac.bytes, columns_->dst_mac->GetValue(row), 6);
+        next_layer.dst_mac_valid = true;
+    }
+    next_layer.address_state = static_cast<packet::PacketAddressState>(columns_->address_state->Value(row));
+    const auto family = columns_->endpoints->type_code(row);
+    const auto index = columns_->endpoints->value_offset(row);
+    if (family == 4)
+        next_layer.endpoints = &columns_->addresses.ipv4[index];
+    else if (family == 6)
+        next_layer.endpoints = &columns_->addresses.ipv6[index];
 
     if (!columns_->transport_protocol->IsNull(row)) {
         next_layer.transport_protocol = columns_->transport_protocol->Value(row);

@@ -1,6 +1,8 @@
 project(flowsql_npm_basic)
 
 add_library(${PROJECT_NAME} SHARED
+    npm_family_result_contract.cpp
+    npm_family_output_contract.cpp
     npm_analysis_contract.cpp
     npm_protocol_contract.cpp
     core/npm_module_catalog.cpp

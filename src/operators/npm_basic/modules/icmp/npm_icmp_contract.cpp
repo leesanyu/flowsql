@@ -64,52 +64,18 @@ NpmIcmpConfigStatusV1 ParseNpmIcmpConfigV1(std::string_view json, NpmIcmpConfigV
     }
 }
 
-NpmEntityDescriptorV1 NpmIcmpEventEntityDescriptorV1() {
-    static const std::shared_ptr<arrow::Schema> schema =
-        arrow::schema({arrow::field("entity_instance_id", arrow::uint64(), false),
-                       arrow::field("revision", arrow::uint64(), false),
-                       arrow::field("observed_at", arrow::int64(), false),
-                       arrow::field("is_final", arrow::boolean(), false),
-                       arrow::field("observation_domain_id", arrow::uint64(), false),
-                       arrow::field("ip_family", arrow::uint8(), false),
-                       arrow::field("src_ip", arrow::utf8(), false),
-                       arrow::field("dst_ip", arrow::utf8(), false),
-                       arrow::field("outcome", arrow::utf8(), false),
-                       arrow::field("icmp_type", arrow::uint8(), false),
-                       arrow::field("icmp_code", arrow::uint8(), false),
-                       arrow::field("outer_truncated", arrow::boolean(), false),
-                       arrow::field("incomplete_reason", arrow::utf8(), true),
-                       arrow::field("echo_id", arrow::uint16(), true),
-                       arrow::field("echo_sequence", arrow::uint16(), true),
-                       arrow::field("echo_retries", arrow::uint32(), true),
-                       arrow::field("request_at_ns", arrow::int64(), true),
-                       arrow::field("reply_at_ns", arrow::int64(), true),
-                       arrow::field("latency_ns", arrow::int64(), true),
-                       arrow::field("quote_status", arrow::utf8(), true),
-                       arrow::field("quoted_ip_family", arrow::uint8(), true),
-                       arrow::field("quoted_protocol", arrow::uint8(), true),
-                       arrow::field("quoted_src_ip", arrow::utf8(), true),
-                       arrow::field("quoted_dst_ip", arrow::utf8(), true),
-                       arrow::field("quoted_src_port", arrow::uint16(), true),
-                       arrow::field("quoted_dst_port", arrow::uint16(), true),
-                       arrow::field("active_quoted_session_id", arrow::uint64(), true),
-                       arrow::field("next_hop_mtu", arrow::uint32(), true)},
-                      arrow::key_value_metadata({"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit",
-                                                 "flowsql.revision_semantics", "flowsql.measurement_scope"},
-                                                {"icmp_event", "1", "ns", "event", "single_capture_observed_packets"}));
-    NpmEntityDescriptorV1 entity;
-    entity.entity_id = "icmp_event";
-    entity.module_id = "icmp";
-    entity.schema = schema;
-    entity.revision_semantics = NpmRevisionSemanticsV1::kEvent;
-    return entity;
+NpmEntityDescriptorV1 NpmIcmpEventEntityDescriptorV1(packet::AddressFamily family) {
+    static const auto ipv4 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kIcmp, packet::AddressFamily::kIPv4);
+    static const auto ipv6 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kIcmp, packet::AddressFamily::kIPv6);
+    return family == packet::AddressFamily::kIPv4 ? ipv4 : ipv6;
 }
 
 NpmModulePlanV1 NpmIcmpModulePlanV1() {
     NpmModulePlanV1 plan;
     plan.module_id = "icmp";
     plan.input_mask = static_cast<uint8_t>(NpmInputKindV1::kControlPacket);
-    plan.entities.push_back(NpmIcmpEventEntityDescriptorV1());
+    plan.entities = {NpmIcmpEventEntityDescriptorV1(packet::AddressFamily::kIPv4),
+                     NpmIcmpEventEntityDescriptorV1(packet::AddressFamily::kIPv6)};
     return plan;
 }
 

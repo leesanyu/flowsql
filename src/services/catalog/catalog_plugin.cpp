@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "catalog_plugin.h"
+#include <common/network/address_display.h>
 
 #include <framework/core/dataframe.h>
 #include <framework/core/dataframe_channel.h>
@@ -11,13 +12,14 @@
 #include <common/error_code.h>
 #include <common/log.h>
 
+#include <unistd.h>
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <charconv>
-#include <cctype>
 #include <cstdio>
-#include <ctime>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -26,7 +28,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#include <unistd.h>
 
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -43,8 +44,7 @@ bool EqualsIgnoreCase(const std::string& a, const char* b) {
     size_t n = a.size();
     if (n != std::strlen(b)) return false;
     for (size_t i = 0; i < n; ++i) {
-        if (std::tolower(static_cast<unsigned char>(a[i])) !=
-            std::tolower(static_cast<unsigned char>(b[i]))) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) {
             return false;
         }
     }
@@ -52,9 +52,7 @@ bool EqualsIgnoreCase(const std::string& a, const char* b) {
 }
 
 std::string ToLowerAscii(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return s;
 }
 
@@ -93,9 +91,7 @@ std::string HexEncode(std::string_view bytes, size_t max_bytes) {
     return output;
 }
 
-bool WritePacketPreviewValue(JsonWriter* writer,
-                             const std::shared_ptr<arrow::Array>& array,
-                             int64_t row,
+bool WritePacketPreviewValue(JsonWriter* writer, const std::shared_ptr<arrow::Array>& array, int64_t row,
                              const std::string& field_name) {
     if (!writer || !array || row < 0 || row >= array->length()) return false;
     if (array->IsNull(row)) {
@@ -106,6 +102,15 @@ bool WritePacketPreviewValue(JsonWriter* writer,
     switch (array->type_id()) {
         case arrow::Type::INT64:
             writer->Int64(std::static_pointer_cast<arrow::Int64Array>(array)->Value(row));
+            return true;
+        case arrow::Type::INT32:
+            writer->Int(static_cast<const arrow::Int32Array&>(*array).Value(row));
+            return true;
+        case arrow::Type::FLOAT:
+            writer->Double(static_cast<const arrow::FloatArray&>(*array).Value(row));
+            return true;
+        case arrow::Type::DOUBLE:
+            writer->Double(static_cast<const arrow::DoubleArray&>(*array).Value(row));
             return true;
         case arrow::Type::UINT8:
             writer->Uint(std::static_pointer_cast<arrow::UInt8Array>(array)->Value(row));
@@ -122,6 +127,11 @@ bool WritePacketPreviewValue(JsonWriter* writer,
         case arrow::Type::BOOL:
             writer->Bool(std::static_pointer_cast<arrow::BooleanArray>(array)->Value(row));
             return true;
+        case arrow::Type::STRING: {
+            const auto view = static_cast<const arrow::StringArray&>(*array).GetView(row);
+            writer->String(view.data(), static_cast<rapidjson::SizeType>(view.size()));
+            return true;
+        }
         case arrow::Type::BINARY: {
             const auto view = std::static_pointer_cast<arrow::BinaryArray>(array)->GetView(row);
             const std::string hex = HexEncode(view, field_name == "raw_data" ? kPacketPreviewBytes : view.size());
@@ -143,6 +153,29 @@ bool WritePacketPreviewValue(JsonWriter* writer,
             const auto view = std::static_pointer_cast<arrow::FixedSizeBinaryArray>(array)->GetView(row);
             const std::string hex = HexEncode(view, view.size());
             writer->String(hex.c_str());
+            return true;
+        }
+        case arrow::Type::DENSE_UNION: {
+            const auto union_array = std::static_pointer_cast<arrow::DenseUnionArray>(array);
+            const auto child = union_array->child_id(row);
+            writer->StartObject();
+            writer->Key("family");
+            writer->Int(union_array->type_code(row));
+            writer->Key("endpoints");
+            if (!WritePacketPreviewValue(writer, union_array->field(child), union_array->value_offset(row), ""))
+                return false;
+            writer->EndObject();
+            return true;
+        }
+        case arrow::Type::STRUCT: {
+            const auto values = std::static_pointer_cast<arrow::StructArray>(array);
+            const auto& type = static_cast<const arrow::StructType&>(*values->type());
+            writer->StartObject();
+            for (int index = 0; index < values->num_fields(); ++index) {
+                writer->Key(type.field(index)->name().c_str());
+                if (!WritePacketPreviewValue(writer, values->field(index), row, "")) return false;
+            }
+            writer->EndObject();
             return true;
         }
         case arrow::Type::FIXED_SIZE_LIST: {
@@ -464,56 +497,40 @@ int CatalogPlugin::SetActive(const std::string& category, const std::string& nam
 }
 
 void CatalogPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
-    cb({"GET", "/channels/dataframe",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"GET", "/channels/dataframe", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleListChannels(u, req, rsp);
         }});
-    cb({"POST", "/channels/dataframe/import",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/channels/dataframe/import", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleImportCsv(u, req, rsp);
         }});
     cb({"POST", "/channels/dataframe/preview",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
-            return HandlePreview(u, req, rsp);
-        }});
+        [this](const std::string& u, const std::string& req, std::string& rsp) { return HandlePreview(u, req, rsp); }});
     cb({"POST", "/channels/dataframe/rename",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
-            return HandleRename(u, req, rsp);
-        }});
+        [this](const std::string& u, const std::string& req, std::string& rsp) { return HandleRename(u, req, rsp); }});
     cb({"POST", "/channels/dataframe/delete",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
-            return HandleDelete(u, req, rsp);
-        }});
-    cb({"POST", "/operators/list",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+        [this](const std::string& u, const std::string& req, std::string& rsp) { return HandleDelete(u, req, rsp); }});
+    cb({"POST", "/operators/list", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleListOperators(u, req, rsp);
         }});
-    cb({"POST", "/operators/upload",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/operators/upload", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleOperatorUpload(u, req, rsp);
         }});
-    cb({"POST", "/operators/delete",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/operators/delete", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleOperatorDelete(u, req, rsp);
         }});
-    cb({"POST", "/operators/detail",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/operators/detail", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleOperatorDetail(u, req, rsp);
         }});
-    cb({"POST", "/operators/activate",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/operators/activate", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleOperatorActivate(u, req, rsp);
         }});
-    cb({"POST", "/operators/deactivate",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/operators/deactivate", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleOperatorDeactivate(u, req, rsp);
         }});
-    cb({"POST", "/operators/update",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/operators/update", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleOperatorUpdate(u, req, rsp);
         }});
-    cb({"POST", "/operators/upsert_batch",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
+    cb({"POST", "/operators/upsert_batch", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleOperatorUpsertBatch(u, req, rsp);
         }});
 }
@@ -563,8 +580,7 @@ int32_t CatalogPlugin::HandleListChannels(const std::string&, const std::string&
 int32_t CatalogPlugin::HandleImportCsv(const std::string&, const std::string& req, std::string& rsp) {
     rapidjson::Document doc;
     doc.Parse(req.c_str());
-    if (doc.HasParseError() || !doc.IsObject() ||
-        !doc.HasMember("filename") || !doc["filename"].IsString() ||
+    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("filename") || !doc["filename"].IsString() ||
         !doc.HasMember("tmp_path") || !doc["tmp_path"].IsString()) {
         rsp = R"({"error":"invalid request, expected {\"filename\":\"...\",\"tmp_path\":\"...\"}"})";
         return error::BAD_REQUEST;
@@ -646,8 +662,7 @@ int32_t CatalogPlugin::HandleImportCsv(const std::string&, const std::string& re
 int32_t CatalogPlugin::HandlePreview(const std::string&, const std::string& req, std::string& rsp) {
     rapidjson::Document doc;
     doc.Parse(req.c_str());
-    if (doc.HasParseError() || !doc.IsObject() ||
-        !doc.HasMember("name") || !doc["name"].IsString()) {
+    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("name") || !doc["name"].IsString()) {
         rsp = R"({"error":"missing 'name'"})";
         return error::BAD_REQUEST;
     }
@@ -662,8 +677,7 @@ int32_t CatalogPlugin::HandlePreview(const std::string&, const std::string& req,
         page = doc["page"].GetUint();
     }
     if (doc.HasMember("page_size")) {
-        if (!doc["page_size"].IsUint() || doc["page_size"].GetUint() == 0 ||
-            doc["page_size"].GetUint() > 100) {
+        if (!doc["page_size"].IsUint() || doc["page_size"].GetUint() == 0 || doc["page_size"].GetUint() > 100) {
             rsp = R"({"error":"page_size must be an integer between 1 and 100"})";
             return error::BAD_REQUEST;
         }
@@ -687,6 +701,10 @@ int32_t CatalogPlugin::HandlePreview(const std::string&, const std::string& req,
     const int rows = data.RowCount();
     const auto batch = data.ToArrow();
     const bool is_packet = batch && batch->schema()->Equals(packet::PacketSchema(), true);
+    const bool has_addresses =
+        batch && std::any_of(batch->schema()->fields().begin(), batch->schema()->fields().end(), [](const auto& field) {
+            return field->metadata() && field->metadata()->Contains("flowsql.address_encoding");
+        });
     const int64_t begin = static_cast<int64_t>(page - 1) * page_size;
     const int64_t end = std::min<int64_t>(rows, begin + page_size);
 
@@ -699,7 +717,7 @@ int32_t CatalogPlugin::HandlePreview(const std::string&, const std::string& req,
     }
     w.Key("columns");
     w.StartArray();
-    if (is_packet) {
+    if (is_packet || has_addresses) {
         for (const auto& field : batch->schema()->fields()) w.String(field->name().c_str());
     } else {
         for (const auto& field : schema) w.String(field.name.c_str());
@@ -707,7 +725,7 @@ int32_t CatalogPlugin::HandlePreview(const std::string&, const std::string& req,
     w.EndArray();
     w.Key("types");
     w.StartArray();
-    if (is_packet) {
+    if (is_packet || has_addresses) {
         for (const auto& field : batch->schema()->fields()) w.String(field->type()->ToString().c_str());
     } else {
         for (const auto& field : schema) w.String(DataTypeName(field.type));
@@ -717,11 +735,15 @@ int32_t CatalogPlugin::HandlePreview(const std::string&, const std::string& req,
     w.StartArray();
     for (int64_t row_index = begin; row_index < end; ++row_index) {
         w.StartArray();
-        if (is_packet) {
+        if (is_packet || has_addresses) {
             for (int column = 0; column < batch->num_columns(); ++column) {
-                if (!WritePacketPreviewValue(&w,
-                                             batch->column(column),
-                                             row_index,
+                const auto address =
+                    network::DisplayAddress(*batch->schema()->field(column), *batch->column(column), row_index);
+                if (address) {
+                    w.String(address->data(), address->size());
+                    continue;
+                }
+                if (!WritePacketPreviewValue(&w, batch->column(column), row_index,
                                              batch->schema()->field(column)->name())) {
                     rsp = R"({"error":"unsupported packet preview value"})";
                     return error::INTERNAL_ERROR;
@@ -733,16 +755,24 @@ int32_t CatalogPlugin::HandlePreview(const std::string&, const std::string& req,
                 std::visit(
                     [&](auto&& item) {
                         using T = std::decay_t<decltype(item)>;
-                        if constexpr (std::is_same_v<T, int32_t>) w.Int(item);
-                        else if constexpr (std::is_same_v<T, int64_t>) w.Int64(item);
-                        else if constexpr (std::is_same_v<T, uint32_t>) w.Uint(item);
-                        else if constexpr (std::is_same_v<T, uint64_t>) w.Uint64(item);
-                        else if constexpr (std::is_same_v<T, float>) w.Double(item);
-                        else if constexpr (std::is_same_v<T, double>) w.Double(item);
-                        else if constexpr (std::is_same_v<T, std::string>) w.String(item.c_str());
+                        if constexpr (std::is_same_v<T, int32_t>)
+                            w.Int(item);
+                        else if constexpr (std::is_same_v<T, int64_t>)
+                            w.Int64(item);
+                        else if constexpr (std::is_same_v<T, uint32_t>)
+                            w.Uint(item);
+                        else if constexpr (std::is_same_v<T, uint64_t>)
+                            w.Uint64(item);
+                        else if constexpr (std::is_same_v<T, float>)
+                            w.Double(item);
+                        else if constexpr (std::is_same_v<T, double>)
+                            w.Double(item);
+                        else if constexpr (std::is_same_v<T, std::string>)
+                            w.String(item.c_str());
                         else if constexpr (std::is_same_v<T, std::vector<uint8_t>>)
                             w.String(reinterpret_cast<const char*>(item.data()), item.size());
-                        else if constexpr (std::is_same_v<T, bool>) w.Bool(item);
+                        else if constexpr (std::is_same_v<T, bool>)
+                            w.Bool(item);
                     },
                     value);
             }
@@ -764,8 +794,7 @@ int32_t CatalogPlugin::HandlePreview(const std::string&, const std::string& req,
 int32_t CatalogPlugin::HandleRename(const std::string&, const std::string& req, std::string& rsp) {
     rapidjson::Document doc;
     doc.Parse(req.c_str());
-    if (doc.HasParseError() || !doc.IsObject() ||
-        !doc.HasMember("name") || !doc["name"].IsString() ||
+    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("name") || !doc["name"].IsString() ||
         !doc.HasMember("new_name") || !doc["new_name"].IsString()) {
         rsp = R"({"error":"invalid request, expected {\"name\":\"x\",\"new_name\":\"y\"}"})";
         return error::BAD_REQUEST;
@@ -793,8 +822,7 @@ int32_t CatalogPlugin::HandleRename(const std::string&, const std::string& req, 
 int32_t CatalogPlugin::HandleDelete(const std::string&, const std::string& req, std::string& rsp) {
     rapidjson::Document doc;
     doc.Parse(req.c_str());
-    if (doc.HasParseError() || !doc.IsObject() ||
-        !doc.HasMember("name") || !doc["name"].IsString()) {
+    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("name") || !doc["name"].IsString()) {
         rsp = R"({"error":"missing 'name'"})";
         return error::BAD_REQUEST;
     }
@@ -822,8 +850,7 @@ bool CatalogPlugin::ParseOperatorRefFromName(const std::string& full_name, std::
 
 bool CatalogPlugin::ParseOperatorRef(const rapidjson::Value& doc, std::string* category, std::string* name) {
     if (!category || !name || !doc.IsObject()) return false;
-    if (doc.HasMember("category") && doc["category"].IsString() &&
-        doc.HasMember("name") && doc["name"].IsString()) {
+    if (doc.HasMember("category") && doc["category"].IsString() && doc.HasMember("name") && doc["name"].IsString()) {
         *category = doc["category"].GetString();
         *name = doc["name"].GetString();
         return !category->empty() && !name->empty();
@@ -928,9 +955,10 @@ int32_t CatalogPlugin::HandleOperatorUpload(const std::string&, const std::strin
     rapidjson::Document doc;
     doc.Parse(req.c_str());
     if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("type") || !doc["type"].IsString() ||
-        !doc.HasMember("filename") || !doc["filename"].IsString() ||
-        !doc.HasMember("tmp_path") || !doc["tmp_path"].IsString()) {
-        rsp = R"({"error":"invalid request, expected {\"type\":\"python|cpp\",\"filename\":\"...\",\"tmp_path\":\"...\"}"})";
+        !doc.HasMember("filename") || !doc["filename"].IsString() || !doc.HasMember("tmp_path") ||
+        !doc["tmp_path"].IsString()) {
+        rsp =
+            R"({"error":"invalid request, expected {\"type\":\"python|cpp\",\"filename\":\"...\",\"tmp_path\":\"...\"}"})";
         return error::BAD_REQUEST;
     }
 
@@ -1178,8 +1206,7 @@ int32_t CatalogPlugin::HandleOperatorActivate(const std::string&, const std::str
         rsp = R"({"error":"invalid request"})";
         return error::BAD_REQUEST;
     }
-    const std::string type =
-        (doc.HasMember("type") && doc["type"].IsString()) ? doc["type"].GetString() : "";
+    const std::string type = (doc.HasMember("type") && doc["type"].IsString()) ? doc["type"].GetString() : "";
     if (EqualsIgnoreCase(type, "cpp")) {
         if (!doc.HasMember("plugin_id") || !doc["plugin_id"].IsString()) {
             rsp = R"({"error":"invalid request, expected {\"type\":\"cpp\",\"plugin_id\":\"...\"}"})";
@@ -1214,8 +1241,7 @@ int32_t CatalogPlugin::HandleOperatorDeactivate(const std::string&, const std::s
         rsp = R"({"error":"invalid request"})";
         return error::BAD_REQUEST;
     }
-    const std::string type =
-        (doc.HasMember("type") && doc["type"].IsString()) ? doc["type"].GetString() : "";
+    const std::string type = (doc.HasMember("type") && doc["type"].IsString()) ? doc["type"].GetString() : "";
     if (EqualsIgnoreCase(type, "cpp")) {
         if (!doc.HasMember("plugin_id") || !doc["plugin_id"].IsString()) {
             rsp = R"({"error":"invalid request, expected {\"type\":\"cpp\",\"plugin_id\":\"...\"}"})";
@@ -1318,9 +1344,8 @@ int32_t CatalogPlugin::HandleOperatorUpsertBatch(const std::string&, const std::
     for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
         const auto& it = arr[i];
         const bool has_category = it.IsObject() && it.HasMember("category") && it["category"].IsString();
-        if (!has_category || !it.HasMember("name") ||
-            !it["name"].IsString() || !it.HasMember("type") || !it["type"].IsString() || !it.HasMember("source") ||
-            !it["source"].IsString()) {
+        if (!has_category || !it.HasMember("name") || !it["name"].IsString() || !it.HasMember("type") ||
+            !it["type"].IsString() || !it.HasMember("source") || !it["source"].IsString()) {
             rsp = R"({"error":"operator item must include category/name/type/source"})";
             return error::BAD_REQUEST;
         }
@@ -1329,7 +1354,8 @@ int32_t CatalogPlugin::HandleOperatorUpsertBatch(const std::string&, const std::
         meta.name = it["name"].GetString();
         meta.type = it["type"].GetString();
         meta.source = it["source"].GetString();
-        if (it.HasMember("description") && it["description"].IsString()) meta.description = it["description"].GetString();
+        if (it.HasMember("description") && it["description"].IsString())
+            meta.description = it["description"].GetString();
         if (it.HasMember("position") && it["position"].IsString()) meta.position = it["position"].GetString();
         ops.push_back(std::move(meta));
     }
@@ -1407,12 +1433,14 @@ int CatalogPlugin::EnsureOperatorCatalogSchema() {
         sqlite3_finalize(info);
     }
     if (!has_category) {
-        if (sqlite3_exec(operator_db_, "ALTER TABLE operator_catalog ADD COLUMN category TEXT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        if (sqlite3_exec(operator_db_, "ALTER TABLE operator_catalog ADD COLUMN category TEXT;", nullptr, nullptr,
+                         nullptr) != SQLITE_OK) {
             return -1;
         }
     }
     if (!has_plugin_id) {
-        if (sqlite3_exec(operator_db_, "ALTER TABLE operator_catalog ADD COLUMN plugin_id TEXT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        if (sqlite3_exec(operator_db_, "ALTER TABLE operator_catalog ADD COLUMN plugin_id TEXT;", nullptr, nullptr,
+                         nullptr) != SQLITE_OK) {
             return -1;
         }
     }
@@ -1433,13 +1461,8 @@ std::string CatalogPlugin::OperatorCatalogDbPath() const {
     return p.string();
 }
 
-int CatalogPlugin::QueryOperatorDetail(const std::string& category,
-                                       const std::string& name,
-                                       OperatorMeta* meta,
-                                       int* active,
-                                       int* editable,
-                                       std::string* created_at,
-                                       std::string* updated_at) {
+int CatalogPlugin::QueryOperatorDetail(const std::string& category, const std::string& name, OperatorMeta* meta,
+                                       int* active, int* editable, std::string* created_at, std::string* updated_at) {
     if (!meta || !active || !editable || !created_at || !updated_at) return -1;
 
     std::lock_guard<std::mutex> lock(mu_);
@@ -1494,10 +1517,8 @@ int CatalogPlugin::SetOperatorActive(const std::string& category, const std::str
     return changed > 0 ? 0 : -1;
 }
 
-int CatalogPlugin::UpdateOperatorFields(const std::string& category,
-                                        const std::string& name,
-                                        const std::string* description,
-                                        const std::string* position) {
+int CatalogPlugin::UpdateOperatorFields(const std::string& category, const std::string& name,
+                                        const std::string* description, const std::string* position) {
     std::lock_guard<std::mutex> lock(mu_);
     if (operator_db_ == nullptr) return -1;
 
@@ -1548,7 +1569,8 @@ std::string CatalogPlugin::OperatorContentPath(const std::string& category, cons
     return p.string();
 }
 
-int CatalogPlugin::LoadOperatorContent(const std::string& category, const std::string& name, std::string* content) const {
+int CatalogPlugin::LoadOperatorContent(const std::string& category, const std::string& name,
+                                       std::string* content) const {
     if (!content) return -1;
     const std::string path = OperatorContentPath(category, name);
     std::ifstream ifs(path, std::ios::in | std::ios::binary);
@@ -1562,7 +1584,8 @@ int CatalogPlugin::LoadOperatorContent(const std::string& category, const std::s
     return 0;
 }
 
-int CatalogPlugin::SaveOperatorContent(const std::string& category, const std::string& name, const std::string& content) const {
+int CatalogPlugin::SaveOperatorContent(const std::string& category, const std::string& name,
+                                       const std::string& content) const {
     std::error_code ec;
     fs::create_directories(OperatorsDirPath(), ec);
     std::ofstream ofs(OperatorContentPath(category, name), std::ios::out | std::ios::binary | std::ios::trunc);
@@ -1595,17 +1618,28 @@ std::string CatalogPlugin::GenerateImportName(const std::string& filename) {
 
 const char* CatalogPlugin::DataTypeName(DataType t) {
     switch (t) {
-        case DataType::INT32: return "INT32";
-        case DataType::INT64: return "INT64";
-        case DataType::UINT32: return "UINT32";
-        case DataType::UINT64: return "UINT64";
-        case DataType::FLOAT: return "FLOAT";
-        case DataType::DOUBLE: return "DOUBLE";
-        case DataType::STRING: return "STRING";
-        case DataType::BYTES: return "BYTES";
-        case DataType::TIMESTAMP: return "TIMESTAMP";
-        case DataType::BOOLEAN: return "BOOLEAN";
-        default: return "UNKNOWN";
+        case DataType::INT32:
+            return "INT32";
+        case DataType::INT64:
+            return "INT64";
+        case DataType::UINT32:
+            return "UINT32";
+        case DataType::UINT64:
+            return "UINT64";
+        case DataType::FLOAT:
+            return "FLOAT";
+        case DataType::DOUBLE:
+            return "DOUBLE";
+        case DataType::STRING:
+            return "STRING";
+        case DataType::BYTES:
+            return "BYTES";
+        case DataType::TIMESTAMP:
+            return "TIMESTAMP";
+        case DataType::BOOLEAN:
+            return "BOOLEAN";
+        default:
+            return "UNKNOWN";
     }
 }
 
@@ -1674,10 +1708,8 @@ std::shared_ptr<IDataFrameChannel> CatalogPlugin::LoadCsvFile(const std::string&
     auto headers = ParseCsvLine(line);
     if (headers.empty()) return nullptr;
     // 去掉 UTF-8 BOM，避免首列表头显示为空/异常字符
-    if (!headers[0].empty() && headers[0].size() >= 3 &&
-        static_cast<unsigned char>(headers[0][0]) == 0xEF &&
-        static_cast<unsigned char>(headers[0][1]) == 0xBB &&
-        static_cast<unsigned char>(headers[0][2]) == 0xBF) {
+    if (!headers[0].empty() && headers[0].size() >= 3 && static_cast<unsigned char>(headers[0][0]) == 0xEF &&
+        static_cast<unsigned char>(headers[0][1]) == 0xBB && static_cast<unsigned char>(headers[0][2]) == 0xBF) {
         headers[0] = headers[0].substr(3);
     }
     // 空表头兜底命名，避免前端出现空列名
@@ -1714,8 +1746,10 @@ std::shared_ptr<IDataFrameChannel> CatalogPlugin::LoadCsvFile(const std::string&
         }
 
         DataType type = DataType::STRING;
-        if (all_int64) type = DataType::INT64;
-        else if (all_double) type = DataType::DOUBLE;
+        if (all_int64)
+            type = DataType::INT64;
+        else if (all_double)
+            type = DataType::DOUBLE;
         schema.push_back({headers[c], type, 0, ""});
     }
 

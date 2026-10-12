@@ -5,8 +5,6 @@
 
 #include <operators/npm_basic/core/npm_protocol_context.h>
 
-#include <arpa/inet.h>
-
 #include <limits>
 #include <new>
 #include <string>
@@ -14,28 +12,6 @@
 
 namespace flowsql::npm {
 namespace {
-
-bool FormatIpAddress(packet::AddressFamily family, const packet::IpAddress& address, std::string* output) {
-    char text[INET6_ADDRSTRLEN]{};
-    const void* bytes = nullptr;
-    int system_family = AF_UNSPEC;
-    if (family == packet::AddressFamily::kIPv4) {
-        const auto* value = std::get_if<packet::IPv4Address>(&address);
-        if (value == nullptr) return false;
-        bytes = value->bytes;
-        system_family = AF_INET;
-    } else if (family == packet::AddressFamily::kIPv6) {
-        const auto* value = std::get_if<packet::IPv6Address>(&address);
-        if (value == nullptr) return false;
-        bytes = value->bytes;
-        system_family = AF_INET6;
-    } else {
-        return false;
-    }
-    if (inet_ntop(system_family, bytes, text, sizeof(text)) == nullptr) return false;
-    *output = text;
-    return true;
-}
 
 bool ValidSessionProtocol(const NpmSessionView& session) {
     switch (session.protocol_status) {
@@ -54,23 +30,27 @@ bool ValidSessionProtocol(const NpmSessionView& session) {
 NpmBasicResultProjector::NpmBasicResultProjector(const NpmProtocolContext& protocol_context)
     : protocol_context_(protocol_context) {}
 
+template <typename Address>
 NpmBasicProjectionError NpmBasicResultProjector::ProjectActive(const NpmSessionView& session, int64_t observed_at,
-                                                               NpmBasicResult* output) {
+                                                               NpmBasicFamilyResult<Address>* output) {
     return Project(session, observed_at, false, NpmSessionEndReason::kEof, output);
 }
 
+template <typename Address>
 NpmBasicProjectionError NpmBasicResultProjector::ProjectFinal(const NpmSessionView& session, NpmSessionEndReason reason,
-                                                              int64_t observed_at, NpmBasicResult* output) {
+                                                              int64_t observed_at,
+                                                              NpmBasicFamilyResult<Address>* output) {
     return Project(session, observed_at, true, reason, output);
 }
 
 size_t NpmBasicResultProjector::tracked_sessions() const noexcept { return revisions_.size(); }
 
+template <typename Address>
 NpmBasicProjectionError NpmBasicResultProjector::Project(const NpmSessionView& session, int64_t observed_at,
                                                          bool is_final, NpmSessionEndReason reason,
-                                                         NpmBasicResult* output) {
+                                                         NpmBasicFamilyResult<Address>* output) {
     if (output == nullptr) return NpmBasicProjectionError::kNullOutput;
-    if (session.key == nullptr || session.session_id == 0 || session.key->input_namespace.empty() ||
+    if (!session.key || session.session_id == 0 || session.key->Namespace().empty() ||
         session.first_ns > session.last_ns || !ValidSessionProtocol(session)) {
         return NpmBasicProjectionError::kInvalidSession;
     }
@@ -82,20 +62,24 @@ NpmBasicProjectionError NpmBasicResultProjector::Project(const NpmSessionView& s
     }
 
     try {
-        NpmBasicResult next;
+        NpmBasicFamilyResult<Address> next;
         next.session_id = session.session_id;
-        next.observation_domain_id = session.key->observation_domain_id;
+        next.observation_domain_id = session.key->Domain();
         next.revision = last_revision + 1;
         next.observed_at = observed_at;
         next.is_final = is_final;
-        next.ip_family = static_cast<uint8_t>(session.key->ip_family);
-        next.transport_protocol = session.key->transport_protocol;
-        if (!FormatIpAddress(session.key->ip_family, session.key->a.ip, &next.a_ip) ||
-            !FormatIpAddress(session.key->ip_family, session.key->b.ip, &next.b_ip)) {
-            return NpmBasicProjectionError::kInvalidAddress;
+        next.transport_protocol = session.key->Protocol();
+        if constexpr (std::is_same_v<Address, network::IPv4Address>) {
+            if (!session.key->Get4()) return NpmBasicProjectionError::kInvalidAddress;
+            next.a_ip = session.key->Get4()->a_ip;
+            next.b_ip = session.key->Get4()->b_ip;
+        } else {
+            if (!session.key->Get6()) return NpmBasicProjectionError::kInvalidAddress;
+            next.a_ip = session.key->Get6()->a_ip;
+            next.b_ip = session.key->Get6()->b_ip;
         }
-        next.a_port = session.key->a.port;
-        next.b_port = session.key->b.port;
+        next.a_port = session.key->APort();
+        next.b_port = session.key->BPort();
         next.first_ns = session.first_ns;
         next.last_ns = session.last_ns;
         next.packets_ab = session.packets_ab;
@@ -136,5 +120,31 @@ NpmBasicProjectionError NpmBasicResultProjector::Project(const NpmSessionView& s
         return NpmBasicProjectionError::kAllocationFailed;
     }
 }
+
+NpmBasicProjectionError NpmBasicResultProjector::ProjectAndWrite(const NpmSessionView& session, int64_t observed_at,
+                                                                 std::optional<NpmSessionEndReason> reason,
+                                                                 INpmResultWriter& writer, int* write_error,
+                                                                 std::optional<NpmBasicPeriodStats> period) {
+    *write_error = 0;
+    if (!session.key) return NpmBasicProjectionError::kInvalidSession;
+    auto emit = [&](auto result) {
+        const auto status = reason ? ProjectFinal(session, *reason, observed_at, &result)
+                                   : ProjectActive(session, observed_at, &result);
+        if (status == NpmBasicProjectionError::kNone) {
+            result.period = period;
+            *write_error = writer.WriteBasic(result);
+        }
+        return status;
+    };
+    return session.key->Get4() ? emit(NpmBasicResult4{}) : emit(NpmBasicResult6{});
+}
+template NpmBasicProjectionError NpmBasicResultProjector::ProjectActive(const NpmSessionView&, int64_t,
+                                                                        NpmBasicResult4*);
+template NpmBasicProjectionError NpmBasicResultProjector::ProjectFinal(const NpmSessionView&, NpmSessionEndReason,
+                                                                       int64_t, NpmBasicResult4*);
+template NpmBasicProjectionError NpmBasicResultProjector::ProjectActive(const NpmSessionView&, int64_t,
+                                                                        NpmBasicResult6*);
+template NpmBasicProjectionError NpmBasicResultProjector::ProjectFinal(const NpmSessionView&, NpmSessionEndReason,
+                                                                       int64_t, NpmBasicResult6*);
 
 }  // namespace flowsql::npm

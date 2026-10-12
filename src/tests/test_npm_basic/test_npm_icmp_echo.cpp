@@ -36,38 +36,49 @@ class Budget final : public npm::INpmTaskBudget {
     }
 };
 
-npm::NpmIcmpParsedV1 Echo(bool request, bool ipv6 = false, uint16_t id = 1, uint16_t sequence = 2) {
-    npm::NpmIcmpParsedV1 parsed;
+template <bool ipv6 = false>
+auto Echo(bool request, uint16_t id = 1, uint16_t sequence = 2) {
+    using Address = std::conditional_t<ipv6, flowsql::network::IPv6Address, flowsql::network::IPv4Address>;
+    npm::NpmIcmpFamilyParsed<Address> parsed;
     parsed.kind = request ? npm::NpmIcmpMessageKindV1::kEchoRequest : npm::NpmIcmpMessageKindV1::kEchoReply;
-    parsed.ip_family = ipv6 ? 6 : 4;
     parsed.icmp_type = ipv6 ? (request ? 128 : 129) : (request ? 8 : 0);
     parsed.echo_id = id;
     parsed.echo_sequence = sequence;
-    if (ipv6) {
-        flowsql::packet::IPv6Address src, dst;
-        src.bytes[15] = request ? 1 : 2;
-        dst.bytes[15] = request ? 2 : 1;
-        parsed.src_ip = src;
-        parsed.dst_ip = dst;
-    } else {
-        flowsql::packet::IPv4Address src, dst;
-        src.bytes[0] = dst.bytes[0] = 10;
-        src.bytes[3] = request ? 1 : 2;
-        dst.bytes[3] = request ? 2 : 1;
-        parsed.src_ip = src;
-        parsed.dst_ip = dst;
-    }
+    if constexpr (!ipv6) parsed.src_ip.bytes[0] = parsed.dst_ip.bytes[0] = 10;
+    parsed.src_ip.bytes[sizeof(Address) - 1] = request ? 1 : 2;
+    parsed.dst_ip.bytes[sizeof(Address) - 1] = request ? 2 : 1;
     return parsed;
 }
+
+struct ObservedEvent {
+    uint64_t entity_instance_id;
+    int64_t observed_at;
+    std::string outcome;
+    std::optional<std::string> incomplete_reason;
+    std::optional<uint32_t> echo_retries;
+    std::optional<int64_t> latency_ns, reply_at_ns;
+    std::vector<uint8_t> src_ip, dst_ip;
+    template <typename Address>
+    ObservedEvent(const npm::NpmIcmpFamilyEvent<Address>& row)
+        : entity_instance_id(row.entity_instance_id),
+          observed_at(row.observed_at),
+          outcome(row.outcome),
+          incomplete_reason(row.incomplete_reason),
+          echo_retries(row.echo_retries),
+          latency_ns(row.latency_ns),
+          reply_at_ns(row.reply_at_ns),
+          src_ip(row.src_ip.bytes, row.src_ip.bytes + sizeof(Address)),
+          dst_ip(row.dst_ip.bytes, row.dst_ip.bytes + sizeof(Address)) {}
+};
 
 void TestMatchRetryAndIsolation() {
     auto budget = std::make_shared<Budget>();
     npm::NpmIcmpConfigV1 config;
     config.echo_timeout_ns = 100;
     npm::NpmIcmpEchoTrackerV1 tracker(config, budget);
-    std::vector<npm::NpmIcmpEventV1> rows;
+    std::vector<ObservedEvent> rows;
     const auto emit = [&](const auto& row) {
-        rows.push_back(row);
+        rows.emplace_back(row);
         return 0;
     };
     auto request = Echo(true);
@@ -82,24 +93,26 @@ void TestMatchRetryAndIsolation() {
     assert(tracker.OnEcho(reply, 7, 120, emit) == 0);
     assert(rows.size() == 2 && rows.back().outcome == "echo_matched");
     assert(rows.back().echo_retries == 1 && rows.back().latency_ns == 20);
-    assert(rows.back().src_ip == "10.0.0.1" && rows.back().dst_ip == "10.0.0.2");
+    assert(rows.back().src_ip == (std::vector<uint8_t>{10, 0, 0, 1}) &&
+           rows.back().dst_ip == (std::vector<uint8_t>{10, 0, 0, 2}));
     assert(rows.back().entity_instance_id != rows.front().entity_instance_id);
     assert(tracker.PendingCount() == 0 && budget->used == 0);
     assert(tracker.OnEcho(reply, 7, 121, emit) == 0);
     assert(rows.back().outcome == "echo_reply_only" && rows.back().reply_at_ns == 121);
 
-    auto distinct_request = Echo(true, false, 1, 9);
+    auto distinct_request = Echo(true, 1, 9);
     assert(tracker.OnEcho(distinct_request, 7, 130, emit) == 0);
-    auto wrong_endpoint = Echo(false, false, 1, 9);
-    auto changed = std::get<flowsql::packet::IPv4Address>(wrong_endpoint.src_ip);
+    auto wrong_endpoint = Echo(false, 1, 9);
+    auto changed = wrong_endpoint.src_ip;
     changed.bytes[3] = 3;
     wrong_endpoint.src_ip = changed;
-    for (const auto& wrong :
-         {Echo(false, false, 2, 9), Echo(false, false, 1, 10), Echo(false, true, 1, 9), wrong_endpoint}) {
+    assert(tracker.OnEcho(Echo<true>(false, 1, 9), 7, 140, emit) == 0);
+    assert(rows.back().outcome == "echo_reply_only" && tracker.PendingCount() == 1);
+    for (const auto& wrong : {Echo(false, 2, 9), Echo(false, 1, 10), wrong_endpoint}) {
         assert(tracker.OnEcho(wrong, 7, 140, emit) == 0);
         assert(rows.back().outcome == "echo_reply_only" && tracker.PendingCount() == 1);
     }
-    assert(tracker.OnEcho(Echo(false, false, 1, 9), 7, 150, emit) == 0);
+    assert(tracker.OnEcho(Echo(false, 1, 9), 7, 150, emit) == 0);
     assert(rows.back().outcome == "echo_matched" && rows.back().latency_ns == 20);
     assert(tracker.PendingCount() == 0 && budget->used == 0);
 }
@@ -109,13 +122,13 @@ void TestTruncationAndTime() {
     npm::NpmIcmpConfigV1 config;
     config.echo_timeout_ns = 100;
     npm::NpmIcmpEchoTrackerV1 tracker(config, budget);
-    std::vector<npm::NpmIcmpEventV1> rows;
+    std::vector<ObservedEvent> rows;
     const auto emit = [&](const auto& row) {
-        rows.push_back(row);
+        rows.emplace_back(row);
         return 0;
     };
-    auto request = Echo(true, true);
-    auto reply = Echo(false, true);
+    auto request = Echo<true>(true);
+    auto reply = Echo<true>(false);
     request.outer_truncated = true;
     assert(tracker.OnEcho(request, 1, 100, emit) == 0);
     assert(rows.back().outcome == "echo_request_only" && rows.back().incomplete_reason == "capture_truncation");
@@ -142,13 +155,13 @@ void TestEofBudgetAndFailure() {
     npm::NpmIcmpConfigV1 config;
     config.max_pending_echo = 1;
     npm::NpmIcmpEchoTrackerV1 tracker(config, budget);
-    std::vector<npm::NpmIcmpEventV1> rows;
+    std::vector<ObservedEvent> rows;
     const auto emit = [&](const auto& row) {
-        rows.push_back(row);
+        rows.emplace_back(row);
         return 0;
     };
     assert(tracker.OnEcho(Echo(true), 1, 100, emit) == 0);
-    assert(tracker.OnEcho(Echo(true, false, 2), 1, 100, emit) == ENOSPC);
+    assert(tracker.OnEcho(Echo(true, 2), 1, 100, emit) == ENOSPC);
     assert(tracker.Finish(150, emit) == 0);
     assert(rows.size() == 1 && rows[0].incomplete_reason == "task_eof");
     assert(budget->used == 0 && tracker.PendingCount() == 0);
@@ -170,9 +183,9 @@ void TestTimestampBounds() {
     npm::NpmIcmpConfigV1 config;
     config.echo_timeout_ns = 100;
     npm::NpmIcmpEchoTrackerV1 tracker(config, budget);
-    std::vector<npm::NpmIcmpEventV1> rows;
+    std::vector<ObservedEvent> rows;
     const auto emit = [&](const auto& row) {
-        rows.push_back(row);
+        rows.emplace_back(row);
         return 0;
     };
     assert(tracker.OnEcho(Echo(true), 1, std::numeric_limits<int64_t>::max() - 1, emit) == 0);
@@ -185,6 +198,35 @@ void TestTimestampBounds() {
     assert(budget->used == 0);
 }
 
+void TestSharedFamilyCapacityAndCharges() {
+    auto budget = std::make_shared<Budget>();
+    npm::NpmIcmpConfigV1 config;
+    config.max_pending_echo = 2;
+    config.echo_timeout_ns = 100;
+    npm::NpmIcmpEchoTrackerV1 tracker(config, budget);
+    std::vector<ObservedEvent> rows;
+    const auto emit = [&](const auto& row) {
+        rows.emplace_back(row);
+        return 0;
+    };
+    assert(tracker.OnEcho(Echo(true), 7, 100, emit) == 0);
+    const uint64_t charge4 = budget->used;
+    assert(tracker.OnEcho(Echo<true>(true), 7, 100, emit) == 0);
+    const uint64_t charge6 = budget->used - charge4;
+    assert(charge6 > charge4 && tracker.PendingCount() == 2);
+    assert(tracker.OnEcho(Echo(true, 2), 7, 101, emit) == ENOSPC);
+    assert(tracker.OnEcho(Echo<true>(true, 2), 7, 101, emit) == ENOSPC);
+    assert(tracker.OnEcho(Echo<true>(false), 7, 110, emit) == 0);
+    assert(budget->used == charge4 && tracker.PendingCount() == 1);
+    assert(tracker.OnEcho(Echo(false), 7, 120, emit) == 0);
+    assert(rows.size() == 2 && rows[0].entity_instance_id != rows[1].entity_instance_id);
+    assert(rows[0].src_ip.size() == 16 && rows[1].src_ip.size() == 4 && budget->used == 0);
+    assert(tracker.OnEcho(Echo(true), 7, 130, emit) == 0);
+    assert(tracker.OnEcho(Echo<true>(true), 7, 130, emit) == 0);
+    assert(tracker.OnTime(230, emit) == 0 && tracker.PendingCount() == 0 && budget->used == 0);
+    assert(rows.size() == 4 && rows[2].entity_instance_id != rows[3].entity_instance_id);
+}
+
 }  // namespace
 
 int main() {
@@ -192,4 +234,5 @@ int main() {
     TestTruncationAndTime();
     TestEofBudgetAndFailure();
     TestTimestampBounds();
+    TestSharedFamilyCapacityAndCharges();
 }

@@ -21,6 +21,10 @@ class NpmPublishedReader final : public IDatabasePublishedProgressReaderV1 {
         if (request.dataset_id.empty() || request.relation.empty() || request.run_id.empty() ||
             request.bucket_ns <= 0 || !request.npm_period_increment)
             return Fail("NPM publication requires an explicit run and period-increment relation");
+        const std::string entity = request.relation == "npm_basic_ipv4_history_v1"   ? "basic_ipv4"
+                                   : request.relation == "npm_basic_ipv6_history_v1" ? "basic_ipv6"
+                                                                                     : "";
+        if (entity.empty()) return Fail("NPM publication requires a concrete basic family history relation");
         auto* capability = dynamic_cast<IDatabaseSnapshotSourceV1*>(source_);
         std::shared_ptr<IDatabaseSnapshotSessionV1> session;
         if (!capability || capability->CreateSnapshotSession(options_, &session) != 0)
@@ -93,7 +97,7 @@ class NpmPublishedReader final : public IDatabasePublishedProgressReaderV1 {
             std::vector<DatabaseParameterV1> values{run, selected_relation};
             std::string sql = "SELECT epoch,position,period_ns,closed_before_ns FROM " +
                               relation("npm_result_progress_v1") + " WHERE " + text("run_id") + "=? AND " +
-                              text("relation_name") + "=? AND entity_id='basic'";
+                              text("relation_name") + "=? AND entity_id='" + entity + "'";
             if (!position.empty()) {
                 int64_t n;
                 auto parsed = std::from_chars(position.data(), position.data() + position.size(), n);

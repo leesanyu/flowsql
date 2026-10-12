@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "clickhouse_driver.h"
+#include "../managed_query_schema.h"
 
 #include <arrow/api.h>
 #include <arrow/io/memory.h>
@@ -187,8 +188,25 @@ std::string ClickHouseParameterValue(const DatabaseParameterV1& parameter) {
             return text.str();
         }
         case DatabaseParameterKindV1::kString:
-        case DatabaseParameterKindV1::kBlob:
-            return std::string(parameter.data ? static_cast<const char*>(parameter.data) : "", parameter.size);
+        case DatabaseParameterKindV1::kBlob: {
+            // ClickHouse parses HTTP String parameters in escaped-text format.
+            // Escape transport control bytes; the prepared value remains a borrowed binary span.
+            const auto bytes =
+                std::string_view(parameter.data ? static_cast<const char*>(parameter.data) : "", parameter.size);
+            constexpr char hex[] = "0123456789ABCDEF";
+            std::string escaped;
+            for (const unsigned char byte : bytes) {
+                if (byte == '\\')
+                    escaped += "\\\\";
+                else if (byte < 32 || byte == 127) {
+                    escaped += "\\x";
+                    escaped += hex[byte >> 4];
+                    escaped += hex[byte & 15];
+                } else
+                    escaped += static_cast<char>(byte);
+            }
+            return escaped;
+        }
         case DatabaseParameterKindV1::kNull:
             return {};
     }
@@ -199,10 +217,27 @@ std::string ClickHouseParameterValue(const DatabaseParameterV1& parameter) {
 
 int ClickHouseSession::ExecuteParameterizedHttp(const std::string& sql, const DatabaseParameterV1* parameters,
                                                 size_t parameter_count) {
+    // HTTP query parameters must encode their entire byte span, including embedded NUL.
+    // httplib::encode_url stops at NUL and leaves '&', '%' and '=' unescaped.
+    const auto encode_parameter = [](std::string_view bytes) {
+        constexpr char hex[] = "0123456789ABCDEF";
+        std::string encoded;
+        for (const unsigned char byte : bytes) {
+            if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') ||
+                byte == '-' || byte == '_' || byte == '.' || byte == '~') {
+                encoded += static_cast<char>(byte);
+            } else {
+                encoded += '%';
+                encoded += hex[byte >> 4];
+                encoded += hex[byte & 15];
+            }
+        }
+        return encoded;
+    };
     std::string path = "/?database=" + httplib::detail::encode_url(database_);
     for (size_t index = 0; index < parameter_count; ++index) {
-        path += "&param_p" + std::to_string(index) + '=' +
-                httplib::detail::encode_url(ClickHouseParameterValue(parameters[index]));
+        path +=
+            "&param_p" + std::to_string(index) + '=' + encode_parameter(ClickHouseParameterValue(parameters[index]));
     }
     httplib::Client client(host_, port_);
     client.set_connection_timeout(10);
@@ -282,7 +317,55 @@ int ClickHouseSession::ExecuteQueryArrow(const char* sql, std::vector<std::share
         return -1;
     }
 
-    return ParseArrowStream(res->body, batches);
+    if (ParseArrowStream(res->body, batches) != 0) return -1;
+    for (auto& batch : *batches) {
+        auto managed = ManagedQuerySchema(this, "clickhouse", sql, batch->schema());
+        if (!managed.ok()) {
+            last_error_ = managed.status().ToString();
+            return -1;
+        }
+        std::vector<std::shared_ptr<arrow::Array>> columns = batch->columns();
+        for (int i = 0; i < batch->num_columns(); ++i) {
+            const auto& field = (*managed)->field(i);
+            if (field->type()->id() == arrow::Type::FIXED_SIZE_BINARY &&
+                columns[i]->type_id() != arrow::Type::FIXED_SIZE_BINARY) {
+                arrow::FixedSizeBinaryBuilder builder(field->type());
+                for (int64_t row = 0; row < batch->num_rows(); ++row) {
+                    arrow::Status status;
+                    if (columns[i]->IsNull(row))
+                        status = builder.AppendNull();
+                    else {
+                        std::string_view value;
+                        if (columns[i]->type_id() == arrow::Type::BINARY)
+                            value = static_cast<const arrow::BinaryArray&>(*columns[i]).GetView(row);
+                        else if (columns[i]->type_id() == arrow::Type::STRING)
+                            value = static_cast<const arrow::StringArray&>(*columns[i]).GetView(row);
+                        else {
+                            last_error_ = "invalid fixed binary physical type";
+                            return -1;
+                        }
+                        if (value.size() != static_cast<size_t>(builder.byte_width())) {
+                            last_error_ = "invalid fixed binary database length";
+                            return -1;
+                        }
+                        status = builder.Append(value);
+                    }
+                    if (!status.ok()) {
+                        last_error_ = status.ToString();
+                        return -1;
+                    }
+                }
+                if (!builder.Finish(&columns[i]).ok()) return -1;
+            }
+        }
+        batch = arrow::RecordBatch::Make(*managed, batch->num_rows(), std::move(columns));
+        const auto valid = batch->ValidateFull();
+        if (!valid.ok()) {
+            last_error_ = valid.ToString();
+            return -1;
+        }
+    }
+    return 0;
 }
 
 int ClickHouseSession::WriteArrowBatches(const char* table,

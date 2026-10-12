@@ -43,16 +43,15 @@ bool ValidOptionalRate(const std::optional<double>& value) {
     return value.has_value() && std::isfinite(*value) && *value >= 0.0;
 }
 
-bool AnyTcpValue(const NpmSessionResult& result) {
-    return result.tcp_unique_payload_bytes_ab.has_value() ||
-           result.tcp_unique_payload_bytes_ba.has_value() ||
-           result.tcp_unique_payload_bps_ab.has_value() ||
-           result.tcp_unique_payload_bps_ba.has_value() || result.tcp_initiator.has_value() ||
-           result.tcp_handshake_duration_ns.has_value() || result.tcp_synack_rtt_ns.has_value() ||
-           result.tcp_rtt_samples.has_value() || result.tcp_rtt_min_ns.has_value() ||
-           result.tcp_rtt_mean_ns.has_value() || result.tcp_rtt_max_ns.has_value() ||
-           result.tcp_retrans_packets_ab.has_value() || result.tcp_retrans_packets_ba.has_value() ||
-           result.tcp_retrans_payload_bytes_ab.has_value() ||
+template <typename Address>
+bool AnyTcpValue(const NpmSessionFamilyResult<Address>& result) {
+    return result.tcp_unique_payload_bytes_ab.has_value() || result.tcp_unique_payload_bytes_ba.has_value() ||
+           result.tcp_unique_payload_bps_ab.has_value() || result.tcp_unique_payload_bps_ba.has_value() ||
+           result.tcp_initiator.has_value() || result.tcp_handshake_duration_ns.has_value() ||
+           result.tcp_synack_rtt_ns.has_value() || result.tcp_rtt_samples.has_value() ||
+           result.tcp_rtt_min_ns.has_value() || result.tcp_rtt_mean_ns.has_value() ||
+           result.tcp_rtt_max_ns.has_value() || result.tcp_retrans_packets_ab.has_value() ||
+           result.tcp_retrans_packets_ba.has_value() || result.tcp_retrans_payload_bytes_ab.has_value() ||
            result.tcp_retrans_payload_bytes_ba.has_value();
 }
 
@@ -84,9 +83,7 @@ NpmAnalysisConfigError ValidateNpmAnalysisConfig(const NpmAnalysisConfig& config
     if (!IsInRange(config.udp_idle_timeout_ns, kNpmMinIdleTimeoutNs, kNpmMaxIdleTimeoutNs)) {
         return NpmAnalysisConfigError::kUdpIdleTimeoutOutOfRange;
     }
-    if (!IsInRange(config.out_of_order_tolerance_ns,
-                   kNpmMinOutOfOrderToleranceNs,
-                   kNpmMaxOutOfOrderToleranceNs)) {
+    if (!IsInRange(config.out_of_order_tolerance_ns, kNpmMinOutOfOrderToleranceNs, kNpmMaxOutOfOrderToleranceNs)) {
         return NpmAnalysisConfigError::kOutOfOrderToleranceOutOfRange;
     }
     if (!IsInRange(config.max_active_sessions, kNpmMinActiveSessions, kNpmMaxActiveSessions)) {
@@ -95,9 +92,7 @@ NpmAnalysisConfigError ValidateNpmAnalysisConfig(const NpmAnalysisConfig& config
     if (!IsInRange(config.max_tracked_bytes, kNpmMinTrackedBytes, kNpmMaxTrackedBytes)) {
         return NpmAnalysisConfigError::kTrackedBytesOutOfRange;
     }
-    if (!IsInRange(config.max_pending_output_bytes,
-                   kNpmMinPendingOutputBytes,
-                   kNpmMaxPendingOutputBytes)) {
+    if (!IsInRange(config.max_pending_output_bytes, kNpmMinPendingOutputBytes, kNpmMaxPendingOutputBytes)) {
         return NpmAnalysisConfigError::kPendingOutputBytesOutOfRange;
     }
     if (config.overload_policy != NpmOverloadPolicy::kFail) {
@@ -123,8 +118,7 @@ NpmObservationDomainError ValidateNpmObservationDomainMap(const NpmObservationDo
     return NpmObservationDomainError::kNone;
 }
 
-NpmObservationDomainError ResolveNpmObservationDomain(const NpmObservationDomainMap& domain_map,
-                                                      uint32_t source_id,
+NpmObservationDomainError ResolveNpmObservationDomain(const NpmObservationDomainMap& domain_map, uint32_t source_id,
                                                       uint64_t* observation_domain_id) {
     if (!observation_domain_id) {
         return NpmObservationDomainError::kNullOutput;
@@ -172,7 +166,8 @@ const char* NpmSessionEndReasonName(NpmSessionEndReason reason) {
     return nullptr;
 }
 
-NpmBasicResultError ValidateNpmBasicResult(const NpmBasicResult& result) {
+template <typename Address>
+NpmBasicResultError ValidateNpmBasicResult(const NpmBasicFamilyResult<Address>& result) {
     if (!NpmProtocolStatusName(result.protocol_status)) {
         return NpmBasicResultError::kInvalidProtocolStatus;
     }
@@ -208,51 +203,6 @@ NpmBasicResultError ValidateNpmBasicResult(const NpmBasicResult& result) {
         }
     }
     return NpmBasicResultError::kNone;
-}
-
-std::shared_ptr<arrow::Schema> NpmBasicResultSchema() {
-    static const std::shared_ptr<arrow::Schema> schema = [] {
-        auto fields = std::vector<std::shared_ptr<arrow::Field>>{
-            arrow::field("session_id", arrow::uint64(), false),
-            arrow::field("observation_domain_id", arrow::uint64(), false),
-            arrow::field("revision", arrow::uint64(), false),
-            arrow::field("observed_at", arrow::int64(), false),
-            arrow::field("is_final", arrow::boolean(), false),
-            arrow::field("ip_family", arrow::uint8(), false),
-            arrow::field("transport_protocol", arrow::uint8(), false),
-            arrow::field("a_ip", arrow::utf8(), false),
-            arrow::field("b_ip", arrow::utf8(), false),
-            arrow::field("a_port", arrow::uint16(), false),
-            arrow::field("b_port", arrow::uint16(), false),
-            arrow::field("first_ns", arrow::int64(), false),
-            arrow::field("last_ns", arrow::int64(), false),
-            arrow::field("packets_ab", arrow::uint64(), false),
-            arrow::field("packets_ba", arrow::uint64(), false),
-            arrow::field("wire_bytes_ab", arrow::uint64(), false),
-            arrow::field("wire_bytes_ba", arrow::uint64(), false),
-            arrow::field("primary_label_id", arrow::uint32(), true),
-            arrow::field("protocol_status", arrow::utf8(), false),
-            arrow::field("protocol_id", arrow::uint16(), true),
-            arrow::field("protocol_sub_id", arrow::uint16(), true),
-            arrow::field("protocol", arrow::utf8(), true),
-            arrow::field("end_reason", arrow::utf8(), true),
-            arrow::field("wire_bytes_total", arrow::uint64(), false),
-            arrow::field("period_start_ns", arrow::int64(), true),
-            arrow::field("period_end_ns", arrow::int64(), true),
-            arrow::field("period_complete", arrow::boolean(), true),
-            arrow::field("interval_packets_ab", arrow::uint64(), true),
-            arrow::field("interval_packets_ba", arrow::uint64(), true),
-            arrow::field("interval_wire_bytes_ab", arrow::uint64(), true),
-            arrow::field("interval_wire_bytes_ba", arrow::uint64(), true),
-            arrow::field("interval_wire_bytes_total", arrow::uint64(), true),
-        };
-        auto metadata = arrow::key_value_metadata(
-            {"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit", "flowsql.cumulative_scope",
-             "flowsql.interval_scope"},
-            {"npm_basic_result", "1", "ns", "session_until_period_boundary", "non_overlapping_period"});
-        return arrow::schema(std::move(fields), std::move(metadata));
-    }();
-    return schema;
 }
 
 const char* NpmRateStatusName(NpmRateStatus status) {
@@ -317,10 +267,9 @@ const char* NpmTcpInitiatorName(NpmTcpInitiator initiator) {
     return nullptr;
 }
 
-NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result) {
-    if (result.session_id == 0 || result.revision == 0 ||
-        (result.ip_family != 4 && result.ip_family != 6) || result.a_ip.empty() ||
-        result.b_ip.empty()) {
+template <typename Address>
+NpmSessionResultError ValidateNpmSessionResult(const NpmSessionFamilyResult<Address>& result) {
+    if (result.session_id == 0 || result.revision == 0) {
         return NpmSessionResultError::kInvalidIdentity;
     }
     if (!NpmProtocolStatusName(result.protocol_status)) {
@@ -336,8 +285,7 @@ NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result) {
         if (!result.protocol_id.has_value() || !result.protocol.has_value()) {
             return NpmSessionResultError::kProtocolFieldsMismatch;
         }
-    } else if (result.protocol_id.has_value() || result.protocol_sub_id.has_value() ||
-               result.protocol.has_value()) {
+    } else if (result.protocol_id.has_value() || result.protocol_sub_id.has_value() || result.protocol.has_value()) {
         return NpmSessionResultError::kProtocolFieldsMismatch;
     }
     if (result.is_final && !result.end_reason.has_value()) {
@@ -350,8 +298,7 @@ NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result) {
     if (result.last_ns < result.first_ns || result.duration_ns < 0) {
         return NpmSessionResultError::kInvalidTimeRange;
     }
-    const uint64_t duration = static_cast<uint64_t>(result.last_ns) -
-                              static_cast<uint64_t>(result.first_ns);
+    const uint64_t duration = static_cast<uint64_t>(result.last_ns) - static_cast<uint64_t>(result.first_ns);
     if (duration > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
         result.duration_ns != static_cast<int64_t>(duration)) {
         return NpmSessionResultError::kInvalidTimeRange;
@@ -364,17 +311,14 @@ NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result) {
     const bool any_rate = result.wire_bps_ab.has_value() || result.wire_bps_ba.has_value() ||
                           result.payload_bps_ab.has_value() || result.payload_bps_ba.has_value();
     if ((result.rate_status == NpmRateStatus::kValid && (result.duration_ns == 0 || !all_rates)) ||
-        (result.rate_status == NpmRateStatus::kInsufficientSpan &&
-         (result.duration_ns != 0 || any_rate))) {
+        (result.rate_status == NpmRateStatus::kInsufficientSpan && (result.duration_ns != 0 || any_rate))) {
         return NpmSessionResultError::kRateFieldsMismatch;
     }
-    if (all_rates &&
-        (!ValidOptionalRate(result.wire_bps_ab) || !ValidOptionalRate(result.wire_bps_ba) ||
-         !ValidOptionalRate(result.payload_bps_ab) || !ValidOptionalRate(result.payload_bps_ba))) {
+    if (all_rates && (!ValidOptionalRate(result.wire_bps_ab) || !ValidOptionalRate(result.wire_bps_ba) ||
+                      !ValidOptionalRate(result.payload_bps_ab) || !ValidOptionalRate(result.payload_bps_ba))) {
         return NpmSessionResultError::kInvalidRateValue;
     }
-    if (result.payload_bytes_ab > result.wire_bytes_ab ||
-        result.payload_bytes_ba > result.wire_bytes_ba) {
+    if (result.payload_bytes_ab > result.wire_bytes_ab || result.payload_bytes_ba > result.wire_bytes_ba) {
         return NpmSessionResultError::kTrafficTotalsMismatch;
     }
     if ((result.measurement_flags & ~kNpmMeasurementKnownFlags) != 0) {
@@ -397,13 +341,12 @@ NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result) {
     }
 
     if (result.transport_protocol == kUdpProtocol) {
-        const uint32_t tcp_flags = kNpmMeasurementMidstreamStart |
-                                   kNpmMeasurementSequenceAmbiguous |
-                                   kNpmMeasurementSynRetransmitted;
+        const uint32_t tcp_flags =
+            kNpmMeasurementMidstreamStart | kNpmMeasurementSequenceAmbiguous | kNpmMeasurementSynRetransmitted;
         if (result.tcp_handshake_status != NpmTcpHandshakeStatus::kNotApplicable ||
             result.tcp_rtt_status != NpmTcpRttStatus::kNotApplicable ||
-            result.tcp_retransmission_status != NpmTcpRetransmissionStatus::kNotApplicable ||
-            AnyTcpValue(result) || (result.measurement_flags & tcp_flags) != 0) {
+            result.tcp_retransmission_status != NpmTcpRetransmissionStatus::kNotApplicable || AnyTcpValue(result) ||
+            (result.measurement_flags & tcp_flags) != 0) {
             return NpmSessionResultError::kTcpFieldsMismatch;
         }
         return NpmSessionResultError::kNone;
@@ -415,35 +358,31 @@ NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result) {
         return NpmSessionResultError::kTcpFieldsMismatch;
     }
 
-    const bool sequence_ambiguous =
-        (result.measurement_flags & kNpmMeasurementSequenceAmbiguous) != 0;
-    const bool any_unique = result.tcp_unique_payload_bytes_ab.has_value() ||
-                            result.tcp_unique_payload_bytes_ba.has_value() ||
-                            result.tcp_unique_payload_bps_ab.has_value() ||
-                            result.tcp_unique_payload_bps_ba.has_value();
+    const bool sequence_ambiguous = (result.measurement_flags & kNpmMeasurementSequenceAmbiguous) != 0;
+    const bool any_unique =
+        result.tcp_unique_payload_bytes_ab.has_value() || result.tcp_unique_payload_bytes_ba.has_value() ||
+        result.tcp_unique_payload_bps_ab.has_value() || result.tcp_unique_payload_bps_ba.has_value();
     if (sequence_ambiguous) {
         if (any_unique || result.tcp_rtt_status != NpmTcpRttStatus::kAmbiguous ||
             result.tcp_retransmission_status != NpmTcpRetransmissionStatus::kAmbiguous) {
             return NpmSessionResultError::kTcpFieldsMismatch;
         }
     } else {
-        if (!result.tcp_unique_payload_bytes_ab.has_value() ||
-            !result.tcp_unique_payload_bytes_ba.has_value()) {
+        if (!result.tcp_unique_payload_bytes_ab.has_value() || !result.tcp_unique_payload_bytes_ba.has_value()) {
             return NpmSessionResultError::kTcpFieldsMismatch;
         }
         if (*result.tcp_unique_payload_bytes_ab > result.payload_bytes_ab ||
             *result.tcp_unique_payload_bytes_ba > result.payload_bytes_ba) {
             return NpmSessionResultError::kTrafficTotalsMismatch;
         }
-        const bool unique_rates = result.tcp_unique_payload_bps_ab.has_value() &&
-                                  result.tcp_unique_payload_bps_ba.has_value();
+        const bool unique_rates =
+            result.tcp_unique_payload_bps_ab.has_value() && result.tcp_unique_payload_bps_ba.has_value();
         if ((result.rate_status == NpmRateStatus::kValid && !unique_rates) ||
             (result.rate_status == NpmRateStatus::kInsufficientSpan && unique_rates)) {
             return NpmSessionResultError::kRateFieldsMismatch;
         }
-        if (unique_rates &&
-            (!ValidOptionalRate(result.tcp_unique_payload_bps_ab) ||
-             !ValidOptionalRate(result.tcp_unique_payload_bps_ba))) {
+        if (unique_rates && (!ValidOptionalRate(result.tcp_unique_payload_bps_ab) ||
+                             !ValidOptionalRate(result.tcp_unique_payload_bps_ba))) {
             return NpmSessionResultError::kInvalidRateValue;
         }
     }
@@ -453,15 +392,14 @@ NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result) {
     switch (result.tcp_handshake_status) {
         case NpmTcpHandshakeStatus::kComplete:
             if (!valid_initiator || !result.tcp_handshake_duration_ns.has_value() ||
-                !result.tcp_synack_rtt_ns.has_value() || *result.tcp_handshake_duration_ns < 0 ||
-                *result.tcp_synack_rtt_ns < 0 ||
-                *result.tcp_synack_rtt_ns > *result.tcp_handshake_duration_ns) {
+                !result.tcp_synack_rtt_ns.has_value() || (*result.tcp_handshake_duration_ns) < 0 ||
+                (*result.tcp_synack_rtt_ns) < 0 || *result.tcp_synack_rtt_ns > *result.tcp_handshake_duration_ns) {
                 return NpmSessionResultError::kHandshakeFieldsMismatch;
             }
             break;
         case NpmTcpHandshakeStatus::kPartial:
             if (!valid_initiator || result.tcp_handshake_duration_ns.has_value() ||
-                (result.tcp_synack_rtt_ns.has_value() && *result.tcp_synack_rtt_ns < 0)) {
+                (result.tcp_synack_rtt_ns.has_value() && (*result.tcp_synack_rtt_ns) < 0)) {
                 return NpmSessionResultError::kHandshakeFieldsMismatch;
             }
             break;
@@ -484,9 +422,9 @@ NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result) {
         case NpmTcpRttStatus::kValid:
             if (!result.tcp_rtt_samples.has_value() || *result.tcp_rtt_samples == 0 ||
                 !result.tcp_rtt_min_ns.has_value() || !result.tcp_rtt_mean_ns.has_value() ||
-                !result.tcp_rtt_max_ns.has_value() || *result.tcp_rtt_min_ns < 0 ||
-                *result.tcp_rtt_mean_ns < *result.tcp_rtt_min_ns ||
-                *result.tcp_rtt_max_ns < *result.tcp_rtt_mean_ns) {
+                !result.tcp_rtt_max_ns.has_value() || (*result.tcp_rtt_min_ns) < 0 ||
+                (*result.tcp_rtt_mean_ns) < *result.tcp_rtt_min_ns ||
+                (*result.tcp_rtt_max_ns) < *result.tcp_rtt_mean_ns) {
                 return NpmSessionResultError::kRttFieldsMismatch;
             }
             break;
@@ -507,12 +445,10 @@ NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result) {
             return NpmSessionResultError::kTcpFieldsMismatch;
     }
 
-    const bool all_retrans = result.tcp_retrans_packets_ab.has_value() &&
-                             result.tcp_retrans_packets_ba.has_value() &&
+    const bool all_retrans = result.tcp_retrans_packets_ab.has_value() && result.tcp_retrans_packets_ba.has_value() &&
                              result.tcp_retrans_payload_bytes_ab.has_value() &&
                              result.tcp_retrans_payload_bytes_ba.has_value();
-    const bool any_retrans = result.tcp_retrans_packets_ab.has_value() ||
-                             result.tcp_retrans_packets_ba.has_value() ||
+    const bool any_retrans = result.tcp_retrans_packets_ab.has_value() || result.tcp_retrans_packets_ba.has_value() ||
                              result.tcp_retrans_payload_bytes_ab.has_value() ||
                              result.tcp_retrans_payload_bytes_ba.has_value();
     if ((result.tcp_retransmission_status == NpmTcpRetransmissionStatus::kValid && !all_retrans) ||
@@ -520,8 +456,7 @@ NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result) {
         return NpmSessionResultError::kRetransmissionFieldsMismatch;
     }
     if (all_retrans &&
-        (*result.tcp_retrans_packets_ab > result.packets_ab ||
-         *result.tcp_retrans_packets_ba > result.packets_ba ||
+        (*result.tcp_retrans_packets_ab > result.packets_ab || *result.tcp_retrans_packets_ba > result.packets_ba ||
          *result.tcp_retrans_payload_bytes_ab > result.payload_bytes_ab ||
          *result.tcp_retrans_payload_bytes_ba > result.payload_bytes_ba)) {
         return NpmSessionResultError::kTrafficTotalsMismatch;
@@ -529,87 +464,11 @@ NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult& result) {
     return NpmSessionResultError::kNone;
 }
 
-std::shared_ptr<arrow::Schema> NpmSessionResultSchema(bool labeling_enabled) {
-    static const std::shared_ptr<arrow::Schema> schema = [] {
-        auto fields = std::vector<std::shared_ptr<arrow::Field>>{
-            arrow::field("session_id", arrow::uint64(), false),
-            arrow::field("observation_domain_id", arrow::uint64(), false),
-            arrow::field("revision", arrow::uint64(), false),
-            arrow::field("observed_at", arrow::int64(), false),
-            arrow::field("is_final", arrow::boolean(), false),
-            arrow::field("ip_family", arrow::uint8(), false),
-            arrow::field("transport_protocol", arrow::uint8(), false),
-            arrow::field("a_ip", arrow::utf8(), false),
-            arrow::field("b_ip", arrow::utf8(), false),
-            arrow::field("a_port", arrow::uint16(), false),
-            arrow::field("b_port", arrow::uint16(), false),
-            arrow::field("first_ns", arrow::int64(), false),
-            arrow::field("last_ns", arrow::int64(), false),
-            arrow::field("duration_ns", arrow::int64(), false),
-            arrow::field("protocol_status", arrow::utf8(), false),
-            arrow::field("protocol_id", arrow::uint16(), true),
-            arrow::field("protocol_sub_id", arrow::uint16(), true),
-            arrow::field("protocol", arrow::utf8(), true),
-            arrow::field("end_reason", arrow::utf8(), true),
-            arrow::field("packets_ab", arrow::uint64(), false),
-            arrow::field("packets_ba", arrow::uint64(), false),
-            arrow::field("wire_bytes_ab", arrow::uint64(), false),
-            arrow::field("wire_bytes_ba", arrow::uint64(), false),
-            arrow::field("payload_bytes_ab", arrow::uint64(), false),
-            arrow::field("payload_bytes_ba", arrow::uint64(), false),
-            arrow::field("rate_status", arrow::utf8(), false),
-            arrow::field("wire_bps_ab", arrow::float64(), true),
-            arrow::field("wire_bps_ba", arrow::float64(), true),
-            arrow::field("payload_bps_ab", arrow::float64(), true),
-            arrow::field("payload_bps_ba", arrow::float64(), true),
-            arrow::field("tcp_unique_payload_bytes_ab", arrow::uint64(), true),
-            arrow::field("tcp_unique_payload_bytes_ba", arrow::uint64(), true),
-            arrow::field("tcp_unique_payload_bps_ab", arrow::float64(), true),
-            arrow::field("tcp_unique_payload_bps_ba", arrow::float64(), true),
-            arrow::field("tcp_handshake_status", arrow::utf8(), false),
-            arrow::field("tcp_initiator", arrow::utf8(), true),
-            arrow::field("tcp_handshake_duration_ns", arrow::int64(), true),
-            arrow::field("tcp_synack_rtt_ns", arrow::int64(), true),
-            arrow::field("tcp_rtt_status", arrow::utf8(), false),
-            arrow::field("tcp_rtt_samples", arrow::uint64(), true),
-            arrow::field("tcp_rtt_min_ns", arrow::int64(), true),
-            arrow::field("tcp_rtt_mean_ns", arrow::int64(), true),
-            arrow::field("tcp_rtt_max_ns", arrow::int64(), true),
-            arrow::field("tcp_retransmission_status", arrow::utf8(), false),
-            arrow::field("tcp_retrans_packets_ab", arrow::uint64(), true),
-            arrow::field("tcp_retrans_packets_ba", arrow::uint64(), true),
-            arrow::field("tcp_retrans_payload_bytes_ab", arrow::uint64(), true),
-            arrow::field("tcp_retrans_payload_bytes_ba", arrow::uint64(), true),
-            arrow::field("measurement_flags", arrow::uint32(), false),
-        };
-        auto metadata = arrow::key_value_metadata(
-            {"flowsql.entity",
-             "flowsql.schema_version",
-             "flowsql.timestamp_unit",
-             "flowsql.revision_semantics",
-             "flowsql.measurement_scope"},
-            {"npm_session_result", "1", "ns", "cumulative", "single_capture_observed_packets"});
-        return arrow::schema(std::move(fields), std::move(metadata));
-    }();
-    static const std::shared_ptr<arrow::Schema> labeled_schema = [&] {
-        auto fields = schema->fields();
-        fields.insert(fields.begin() + 14, arrow::field("primary_label_id", arrow::uint32(), false));
-        auto metadata = arrow::key_value_metadata(
-            {"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit", "flowsql.revision_semantics",
-             "flowsql.measurement_scope"},
-            {"npm_session_result", "2", "ns", "cumulative", "single_capture_observed_packets"});
-        return arrow::schema(std::move(fields), std::move(metadata));
-    }();
-    return labeling_enabled ? labeled_schema : schema;
-}
-
 uint64_t NpmTrackedBudgetBytes(const NpmBudgetUsage& usage) {
     return SaturatingAdd(SaturatingAdd(usage.session_state_bytes, usage.module_state_bytes), usage.input_batch_bytes);
 }
 
-NpmBudgetError ReserveNpmBudget(const NpmAnalysisConfig& config,
-                                NpmBudgetCategory category,
-                                uint64_t bytes,
+NpmBudgetError ReserveNpmBudget(const NpmAnalysisConfig& config, NpmBudgetCategory category, uint64_t bytes,
                                 NpmBudgetUsage* usage) {
     if (!usage) {
         return NpmBudgetError::kNullUsage;
@@ -669,5 +528,11 @@ NpmTimeCapabilityError ValidateNpmTimeCapabilities(const NpmAnalysisConfig& conf
     }
     return NpmTimeCapabilityError::kNone;
 }
+
+template NpmBasicResultError ValidateNpmBasicResult(const NpmBasicResult4&);
+template NpmBasicResultError ValidateNpmBasicResult(const NpmBasicResult6&);
+
+template NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult4&);
+template NpmSessionResultError ValidateNpmSessionResult(const NpmSessionResult6&);
 
 }  // namespace flowsql::npm

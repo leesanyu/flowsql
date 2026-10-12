@@ -2,6 +2,10 @@ project(test_scheduler_e2e)
 
 add_executable(${PROJECT_NAME} test_scheduler_e2e.cpp)
 target_sources(${PROJECT_NAME} PRIVATE
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_output_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/dns/npm_dns_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/http1/npm_http1_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/tls/npm_tls_contract.cpp

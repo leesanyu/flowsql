@@ -1,10 +1,12 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <tests/common/packet_family_test_support.h>
+
 #include <arrow/api.h>
 
-#include <cassert>
 #include <atomic>
+#include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -30,24 +32,24 @@
 #include <framework/interfaces/ifilter_pushdown.h>
 #include <services/scheduler/scheduler_plugin.h>
 
-#define ASSERT_TRUE(expr)                                                                   \
-    do {                                                                                    \
-        if (!(expr)) {                                                                      \
-            std::printf("[FAIL] %s:%d %s\n", __FILE__, __LINE__, #expr);                   \
-            std::fflush(stdout);                                                            \
-            assert(false);                                                                  \
-        }                                                                                   \
+#define ASSERT_TRUE(expr)                                                \
+    do {                                                                 \
+        if (!(expr)) {                                                   \
+            std::printf("[FAIL] %s:%d %s\n", __FILE__, __LINE__, #expr); \
+            std::fflush(stdout);                                         \
+            assert(false);                                               \
+        }                                                                \
     } while (0)
 
-#define ASSERT_EQ(a, b)                                                                     \
-    do {                                                                                    \
-        auto _a = (a);                                                                      \
-        auto _b = (b);                                                                      \
-        if (!(_a == _b)) {                                                                  \
-            std::printf("[FAIL] %s:%d %s != %s\n", __FILE__, __LINE__, #a, #b);            \
-            std::fflush(stdout);                                                            \
-            assert(false);                                                                  \
-        }                                                                                   \
+#define ASSERT_EQ(a, b)                                                         \
+    do {                                                                        \
+        auto _a = (a);                                                          \
+        auto _b = (b);                                                          \
+        if (!(_a == _b)) {                                                      \
+            std::printf("[FAIL] %s:%d %s != %s\n", __FILE__, __LINE__, #a, #b); \
+            std::fflush(stdout);                                                \
+            assert(false);                                                      \
+        }                                                                       \
     } while (0)
 
 namespace flowsql {
@@ -62,8 +64,14 @@ class DummyChannel : public IChannel {
     const char* Name() override { return name_.c_str(); }
     const char* Type() override { return type_.c_str(); }
     const char* Schema() override { return "{}"; }
-    int Open() override { opened_ = true; return 0; }
-    int Close() override { opened_ = false; return 0; }
+    int Open() override {
+        opened_ = true;
+        return 0;
+    }
+    int Close() override {
+        opened_ = false;
+        return 0;
+    }
     bool IsOpened() const override { return opened_; }
     int Flush() override { return 0; }
 
@@ -74,9 +82,7 @@ class DummyChannel : public IChannel {
     bool opened_ = false;
 };
 
-bool SameGuid(const Guid& left, const Guid& right) {
-    return !(left < right) && !(right < left);
-}
+bool SameGuid(const Guid& left, const Guid& right) { return !(left < right) && !(right < left); }
 
 enum class DomainResolverBehavior {
     kNonOwner,
@@ -88,8 +94,7 @@ class DomainResolverFixture final : public IFilterDomainResolverV1 {
  public:
     explicit DomainResolverFixture(DomainResolverBehavior behavior) : behavior_(behavior) {}
 
-    int Resolve(const FilterDomainResolveRequestV1& request,
-                FilterDomainResolveResultV1* result) const override {
+    int Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const override {
         ++calls;
         if (result) *result = {};
         if (!result || !request.expression) return EINVAL;
@@ -148,8 +153,7 @@ class TraversalBlockManager final : public IBlockStreamManager {
  public:
     explicit TraversalBlockManager(int id) : id(id) {}
 
-    int AddChannel(const std::string& requested_type,
-                   const std::string& requested_name,
+    int AddChannel(const std::string& requested_type, const std::string& requested_name,
                    const std::string& requested_option) override {
         ++add_calls;
         last_add_type = requested_type;
@@ -157,8 +161,7 @@ class TraversalBlockManager final : public IBlockStreamManager {
         last_add_option = requested_option;
         return add_rc;
     }
-    int ModifyChannel(const std::string& requested_type,
-                      const std::string& requested_name,
+    int ModifyChannel(const std::string& requested_type, const std::string& requested_name,
                       const std::string& requested_option) override {
         ++modify_calls;
         last_modify_type = requested_type;
@@ -223,8 +226,7 @@ class RoutingBlockChannel final : public IBlockStreamChannel {
 
 class SchemaBlockChannel final : public IBlockStreamChannel {
  public:
-    explicit SchemaBlockChannel(std::shared_ptr<arrow::RecordBatch> batch,
-                                int data_count = 1)
+    explicit SchemaBlockChannel(std::shared_ptr<arrow::RecordBatch> batch, int data_count = 1)
         : batch_(std::move(batch)), data_count_(data_count) {}
 
     const char* Category() override { return "pcapfile"; }
@@ -277,24 +279,20 @@ enum class ReaderFactoryBehavior {
 
 class BlockReaderFactoryFixture final : public IBlockStreamReaderFactoryV1 {
  public:
-    BlockReaderFactoryFixture(ReaderFactoryBehavior behavior,
-                              IBlockStreamChannel* reader = nullptr)
+    BlockReaderFactoryFixture(ReaderFactoryBehavior behavior, IBlockStreamChannel* reader = nullptr)
         : behavior_(behavior), reader_(reader) {}
 
     void SetReader(IBlockStreamChannel* reader) { reader_ = reader; }
 
-    int CreateReader(const BlockStreamReaderConfigV1& config,
-                     IBlockStreamChannel** reader) override {
+    int CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** reader) override {
         ++create_calls;
         if (!reader) return EINVAL;
         *reader = nullptr;
         observed_contract_version = config.contract_version;
         task_ids.emplace_back(config.task_id ? config.task_id : "");
-        source_categories.emplace_back(
-            config.source_category ? config.source_category : "");
+        source_categories.emplace_back(config.source_category ? config.source_category : "");
         source_names.emplace_back(config.source_name ? config.source_name : "");
-        pushed_plans.emplace_back(
-            config.pushed_filter_plan_json ? config.pushed_filter_plan_json : "");
+        pushed_plans.emplace_back(config.pushed_filter_plan_json ? config.pushed_filter_plan_json : "");
         if (behavior_ == ReaderFactoryBehavior::kNonOwner) return ENOTSUP;
         if (behavior_ == ReaderFactoryBehavior::kNonOwnerWithReader) {
             *reader = reader_;
@@ -386,15 +384,10 @@ struct ReleasedTransformTaskSnapshot {
 class SchedulerTransformTask final : public IBlockTransformTaskV2 {
  public:
     SchedulerTransformTask(std::shared_ptr<arrow::Schema> output_schema,
-                           std::vector<std::shared_ptr<arrow::RecordBatch>> process_outputs,
-                           bool passthrough,
-                           std::vector<std::shared_ptr<arrow::RecordBatch>> flush_outputs,
-                           int process_result,
-                           int flush_result,
-                           std::string event_label,
-                           std::vector<std::string>* events,
-                           bool time_armed = false,
-                           std::vector<std::shared_ptr<arrow::RecordBatch>> time_outputs = {},
+                           std::vector<std::shared_ptr<arrow::RecordBatch>> process_outputs, bool passthrough,
+                           std::vector<std::shared_ptr<arrow::RecordBatch>> flush_outputs, int process_result,
+                           int flush_result, std::string event_label, std::vector<std::string>* events,
+                           bool time_armed = false, std::vector<std::shared_ptr<arrow::RecordBatch>> time_outputs = {},
                            int time_result = static_cast<int>(BlockTransformStatusV1::kContinue))
         : output_schema_(std::move(output_schema)),
           process_outputs_(std::move(process_outputs)),
@@ -408,8 +401,7 @@ class SchedulerTransformTask final : public IBlockTransformTaskV2 {
           time_outputs_(std::move(time_outputs)),
           time_result_(time_result) {}
 
-    int Open(std::shared_ptr<arrow::Schema> input_schema,
-             std::shared_ptr<arrow::Schema>* output_schema) override {
+    int Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema>* output_schema) override {
         ++open_calls;
         opened_input_schema = std::move(input_schema);
         RecordEvent("open");
@@ -418,8 +410,7 @@ class SchedulerTransformTask final : public IBlockTransformTaskV2 {
         return 0;
     }
 
-    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
-                     int64_t,
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t,
                      std::vector<BlockTransformOutputV1>* outputs) override {
         ++process_calls;
         if (!input || !outputs || !outputs->empty()) return EINVAL;
@@ -457,8 +448,7 @@ class SchedulerTransformTask final : public IBlockTransformTaskV2 {
     int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
         ++state_calls;
         RecordEvent("state");
-        if (open_calls != 1 || !state ||
-            state->struct_size < kBlockTransformTimeDriveStateV1Size ||
+        if (open_calls != 1 || !state || state->struct_size < kBlockTransformTimeDriveStateV1Size ||
             state->contract_version != kBlockTransformTimeDriveVersionV1) {
             return EINVAL;
         }
@@ -471,8 +461,7 @@ class SchedulerTransformTask final : public IBlockTransformTaskV2 {
         return 0;
     }
 
-    int OnTime(const BlockTransformTimeEventV1& event,
-               std::vector<BlockTransformOutputV1>* outputs) override {
+    int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) override {
         ++time_calls;
         RecordEvent("time");
         if (open_calls != 1 || !time_armed_ || !outputs || !outputs->empty() ||
@@ -513,44 +502,31 @@ class SchedulerTransformTask final : public IBlockTransformTaskV2 {
     int time_result_ = static_cast<int>(BlockTransformStatusV1::kContinue);
 };
 
-class SchedulerTransformProvider final : public IBlockTransformOperatorV1,
-                                         public IFilterPushdownV1 {
+class SchedulerTransformProvider final : public IBlockTransformOperatorV1, public IFilterPushdownV1 {
  public:
     SchedulerTransformProvider(std::shared_ptr<arrow::Schema> output_schema,
-                               std::shared_ptr<arrow::RecordBatch> output_batch,
-                               std::string name = "stage_transform")
-        : output_schema_(std::move(output_schema)),
-          output_batch_(std::move(output_batch)),
-          name_(std::move(name)) {}
+                               std::shared_ptr<arrow::RecordBatch> output_batch, std::string name = "stage_transform")
+        : output_schema_(std::move(output_schema)), output_batch_(std::move(output_batch)), name_(std::move(name)) {}
 
     std::string Category() const override { return "test"; }
     std::string Name() const override { return name_; }
     std::string Description() const override { return "scheduler transform test provider"; }
 
-    int CreateTask(const BlockTransformTaskConfigV1& config,
-                   IBlockTransformTaskV1** task) override {
+    int CreateTask(const BlockTransformTaskConfigV1& config, IBlockTransformTaskV1** task) override {
         ++create_calls;
         if (require_dynamic_lifetime && dynamic_lifetime.expired()) ++lifetime_violations;
-        if (!task || !config.task_id || !config.with_params_json ||
-            !config.pushed_filter_plan_json) {
+        if (!task || !config.task_id || !config.with_params_json || !config.pushed_filter_plan_json) {
             return EINVAL;
         }
         task_ids.emplace_back(config.task_id);
         with_params.emplace_back(config.with_params_json);
         pushed_plans.emplace_back(config.pushed_filter_plan_json);
-        const auto task_schema = create_calls > 1 && execution_output_schema
-                                     ? execution_output_schema
-                                     : output_schema_;
+        const auto task_schema = create_calls > 1 && execution_output_schema ? execution_output_schema : output_schema_;
         auto process_outputs = configured_process_outputs;
         if (process_outputs.empty() && output_batch_) process_outputs.push_back(output_batch_);
-        *task = new SchedulerTransformTask(task_schema,
-                                           std::move(process_outputs),
-                                           passthrough,
-                                           configured_flush_outputs,
-                                           process_result,
-                                           flush_result,
-                                           event_label.empty() ? Name() : event_label,
-                                           events);
+        *task = new SchedulerTransformTask(task_schema, std::move(process_outputs), passthrough,
+                                           configured_flush_outputs, process_result, flush_result,
+                                           event_label.empty() ? Name() : event_label, events);
         ++live_tasks;
         return 0;
     }
@@ -575,12 +551,10 @@ class SchedulerTransformProvider final : public IBlockTransformOperatorV1,
         --live_tasks;
     }
 
-    int EvaluatePushdown(const FilterPushdownRequestV1& request,
-                         FilterPushdownResultV1* result) const override {
+    int EvaluatePushdown(const FilterPushdownRequestV1& request, FilterPushdownResultV1* result) const override {
         ++pushdown_calls;
-        if (!result || request.target_kind != FilterPushdownTargetKindV1::kTransform ||
-            !request.target_category || !request.target_name ||
-            std::string(request.target_category) != Category() ||
+        if (!result || request.target_kind != FilterPushdownTargetKindV1::kTransform || !request.target_category ||
+            !request.target_name || std::string(request.target_category) != Category() ||
             std::string(request.target_name) != Name()) {
             return ENOTSUP;
         }
@@ -623,29 +597,21 @@ class SchedulerTransformProvider final : public IBlockTransformOperatorV1,
 
 class SchedulerTimeTransformProvider final : public IBlockTransformOperatorV2 {
  public:
-    SchedulerTimeTransformProvider(
-        std::shared_ptr<arrow::Schema> output_schema,
-        std::shared_ptr<arrow::RecordBatch> time_output,
-        std::string name = "time_transform")
-        : output_schema_(std::move(output_schema)),
-          time_output_(std::move(time_output)),
-          name_(std::move(name)) {}
+    SchedulerTimeTransformProvider(std::shared_ptr<arrow::Schema> output_schema,
+                                   std::shared_ptr<arrow::RecordBatch> time_output, std::string name = "time_transform")
+        : output_schema_(std::move(output_schema)), time_output_(std::move(time_output)), name_(std::move(name)) {}
 
     std::string Category() const override { return "test"; }
     std::string Name() const override { return name_; }
-    std::string Description() const override {
-        return "scheduler time transform test provider";
-    }
+    std::string Description() const override { return "scheduler time transform test provider"; }
 
-    int CreateTask(const BlockTransformTaskConfigV2& config,
-                   IBlockTransformTaskV2** task) override {
+    int CreateTask(const BlockTransformTaskConfigV2& config, IBlockTransformTaskV2** task) override {
         ++create_calls;
         if (require_dynamic_lifetime && dynamic_lifetime.expired()) ++lifetime_violations;
         if (task) *task = nullptr;
         if (!task || config.struct_size < kBlockTransformTaskConfigV2Size ||
-            config.contract_version != kBlockTransformContractVersionV2 ||
-            !config.task_id || !config.with_params_json ||
-            !config.pushed_filter_plan_json) {
+            config.contract_version != kBlockTransformContractVersionV2 || !config.task_id ||
+            !config.with_params_json || !config.pushed_filter_plan_json) {
             return EINVAL;
         }
         config_struct_sizes.push_back(config.struct_size);
@@ -655,18 +621,10 @@ class SchedulerTimeTransformProvider final : public IBlockTransformOperatorV2 {
         pushed_plans.emplace_back(config.pushed_filter_plan_json);
         std::vector<std::shared_ptr<arrow::RecordBatch>> time_outputs;
         if (time_output_) time_outputs.push_back(time_output_);
-        *task = new SchedulerTransformTask(
-            output_schema_,
-            configured_process_outputs,
-            passthrough,
-            configured_flush_outputs,
-            process_result,
-            flush_result,
-            event_label.empty() ? Name() : event_label,
-            events,
-            time_armed,
-            std::move(time_outputs),
-            time_result);
+        *task = new SchedulerTransformTask(output_schema_, configured_process_outputs, passthrough,
+                                           configured_flush_outputs, process_result, flush_result,
+                                           event_label.empty() ? Name() : event_label, events, time_armed,
+                                           std::move(time_outputs), time_result);
         ++live_tasks;
         return 0;
     }
@@ -722,8 +680,7 @@ class SchedulerTimeTransformProvider final : public IBlockTransformOperatorV2 {
 class DynamicBlockTransformRegistry final : public ICppOperatorPluginRegistryV1 {
  public:
     explicit DynamicBlockTransformRegistry(SchedulerTransformProvider* provider) : provider_(provider) {}
-    explicit DynamicBlockTransformRegistry(SchedulerTimeTransformProvider* provider)
-        : time_provider_(provider) {}
+    explicit DynamicBlockTransformRegistry(SchedulerTimeTransformProvider* provider) : time_provider_(provider) {}
 
     int Acquire(const char* category, const char* name, const Guid& contract_iid,
                 CppOperatorCapabilityLeaseV1* lease) override {
@@ -733,13 +690,11 @@ class DynamicBlockTransformRegistry final : public ICppOperatorPluginRegistryV1 
         if (!category || !name) return ENOENT;
 
         void* capability = nullptr;
-        if (provider_ && SameGuid(contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1) &&
-            provider_->Category() == category && provider_->Name() == name) {
+        if (provider_ && SameGuid(contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1) && provider_->Category() == category &&
+            provider_->Name() == name) {
             capability = static_cast<IBlockTransformOperatorV1*>(provider_);
-        } else if (time_provider_ &&
-                   SameGuid(contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V2) &&
-                   time_provider_->Category() == category &&
-                   time_provider_->Name() == name) {
+        } else if (time_provider_ && SameGuid(contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V2) &&
+                   time_provider_->Category() == category && time_provider_->Name() == name) {
             capability = static_cast<IBlockTransformOperatorV2*>(time_provider_);
         } else {
             return ENOENT;
@@ -793,29 +748,24 @@ class SourceFilterPushdownFixture final : public IFilterPushdownV1 {
 
     explicit SourceFilterPushdownFixture(Behavior behavior) : behavior_(behavior) {}
 
-    int EvaluatePushdown(const FilterPushdownRequestV1& request,
-                         FilterPushdownResultV1* result) const override {
+    int EvaluatePushdown(const FilterPushdownRequestV1& request, FilterPushdownResultV1* result) const override {
         ++calls;
         if (result) *result = {};
-        if (!result || request.target_kind != FilterPushdownTargetKindV1::kSource ||
-            !request.target_category || !request.target_name ||
-            std::string(request.target_category) != "pcapfile" ||
+        if (!result || request.target_kind != FilterPushdownTargetKindV1::kSource || !request.target_category ||
+            !request.target_name || std::string(request.target_category) != "pcapfile" ||
             std::string(request.target_name) != "input") {
             return ENOTSUP;
         }
         observed_schema = request.output_schema;
         observed_candidates = request.candidate_node_ids;
-        observed_canonical_plan = request.canonical_plan_json
-                                      ? request.canonical_plan_json
-                                      : "";
+        observed_canonical_plan = request.canonical_plan_json ? request.canonical_plan_json : "";
         if (behavior_ == Behavior::kError) {
             result->diagnostic = "source pushdown fixture rejected plan";
             return EIO;
         }
         if (behavior_ == Behavior::kAcceptAll) {
             result->accepted_node_ids = request.candidate_node_ids;
-        } else if (behavior_ == Behavior::kAcceptFirst &&
-                   !request.candidate_node_ids.empty()) {
+        } else if (behavior_ == Behavior::kAcceptFirst && !request.candidate_node_ids.empty()) {
             result->accepted_node_ids = {request.candidate_node_ids.front()};
         }
         return 0;
@@ -929,21 +879,17 @@ class BlockProviderQuerier final : public IQuerier {
 };
 
 struct SchedulerPluginTestAccessor {
-    static size_t TraverseBlockFactories(
-        SchedulerPlugin* plugin,
-        const std::function<int(IBlockStreamFactory*)>& visitor) {
+    static size_t TraverseBlockFactories(SchedulerPlugin* plugin,
+                                         const std::function<int(IBlockStreamFactory*)>& visitor) {
         return plugin->TraverseBlockFactories(visitor);
     }
 
-    static size_t TraverseBlockManagers(
-        SchedulerPlugin* plugin,
-        const std::function<int(IBlockStreamManager*)>& visitor) {
+    static size_t TraverseBlockManagers(SchedulerPlugin* plugin,
+                                        const std::function<int(IBlockStreamManager*)>& visitor) {
         return plugin->TraverseBlockManagers(visitor);
     }
 
-    static int TryBeginStreamChannelMutation(SchedulerPlugin* plugin,
-                                             const std::string& key,
-                                             std::string* reason_out) {
+    static int TryBeginStreamChannelMutation(SchedulerPlugin* plugin, const std::string& key, std::string* reason_out) {
         return plugin->TryBeginStreamChannelMutation(key, reason_out);
     }
 
@@ -951,40 +897,27 @@ struct SchedulerPluginTestAccessor {
         plugin->EndStreamChannelMutation(key);
     }
 
-    static int TryAcquireStreamTaskLeases(SchedulerPlugin* plugin,
-                                          const std::string& runtime_task_id,
+    static int TryAcquireStreamTaskLeases(SchedulerPlugin* plugin, const std::string& runtime_task_id,
                                           const std::vector<std::string>& source_keys,
-                                          const std::vector<std::string>& sink_keys,
-                                          std::string* conflict_key_out,
-                                          bool* blocked_by_mutation_out,
-                                          const std::string& lease_owner_id = "",
+                                          const std::vector<std::string>& sink_keys, std::string* conflict_key_out,
+                                          bool* blocked_by_mutation_out, const std::string& lease_owner_id = "",
                                           const std::unordered_map<std::string, uint64_t>* expected_versions = nullptr,
                                           std::string* version_conflict_key_out = nullptr) {
-        return plugin->TryAcquireStreamTaskLeases(runtime_task_id,
-                                                  source_keys,
-                                                  sink_keys,
-                                                  conflict_key_out,
-                                                  blocked_by_mutation_out,
-                                                  lease_owner_id,
-                                                  expected_versions,
+        return plugin->TryAcquireStreamTaskLeases(runtime_task_id, source_keys, sink_keys, conflict_key_out,
+                                                  blocked_by_mutation_out, lease_owner_id, expected_versions,
                                                   version_conflict_key_out);
     }
 
-    static void ReleaseStreamTaskLeases(SchedulerPlugin* plugin,
-                                        const std::string& runtime_task_id) {
+    static void ReleaseStreamTaskLeases(SchedulerPlugin* plugin, const std::string& runtime_task_id) {
         plugin->ReleaseStreamTaskLeases(runtime_task_id);
     }
 
-    static void CaptureStreamChannelVersionSnapshot(
-        SchedulerPlugin* plugin,
-        const std::vector<std::string>& keys,
-        std::unordered_map<std::string, uint64_t>* snapshot_out) {
+    static void CaptureStreamChannelVersionSnapshot(SchedulerPlugin* plugin, const std::vector<std::string>& keys,
+                                                    std::unordered_map<std::string, uint64_t>* snapshot_out) {
         plugin->CaptureStreamChannelVersionSnapshot(keys, snapshot_out);
     }
 
-    static void RegisterChannel(SchedulerPlugin* plugin,
-                                const std::string& key,
-                                std::shared_ptr<IChannel> ch) {
+    static void RegisterChannel(SchedulerPlugin* plugin, const std::string& key, std::shared_ptr<IChannel> ch) {
         plugin->RegisterChannel(key, std::move(ch));
     }
 
@@ -992,110 +925,84 @@ struct SchedulerPluginTestAccessor {
         plugin->EraseManagedChannel(key);
     }
 
-    static IChannel* FindChannelWithOwner(SchedulerPlugin* plugin,
-                                          const std::string& key,
+    static IChannel* FindChannelWithOwner(SchedulerPlugin* plugin, const std::string& key,
                                           std::shared_ptr<IChannel>* owner_out) {
         return plugin->FindChannel(key, owner_out);
     }
 
-    static IChannel* FindChannelWithAmbiguity(SchedulerPlugin* plugin,
-                                              const std::string& key,
-                                              std::shared_ptr<IChannel>* owner_out,
-                                              bool* ambiguous_out) {
+    static IChannel* FindChannelWithAmbiguity(SchedulerPlugin* plugin, const std::string& key,
+                                              std::shared_ptr<IChannel>* owner_out, bool* ambiguous_out) {
         return plugin->FindChannel(key, owner_out, ambiguous_out);
     }
 
-    static int32_t ResolveSourceBindings(SchedulerPlugin* plugin,
-                                         const SqlStatement& stmt,
-                                         std::string* response) {
+    static int32_t ResolveSourceBindings(SchedulerPlugin* plugin, const SqlStatement& stmt, std::string* response) {
         SchedulerPlugin::SourceResolveResult result;
         return plugin->ResolveSourceBindings(stmt, &result, response);
     }
 
-    static int32_t HandleAddStreamChannel(SchedulerPlugin* plugin,
-                                          const std::string& request,
-                                          std::string* response) {
+    static int32_t HandleAddStreamChannel(SchedulerPlugin* plugin, const std::string& request, std::string* response) {
         return plugin->HandleAddStreamChannel("", request, *response);
     }
 
-    static int32_t HandleModifyStreamChannel(SchedulerPlugin* plugin,
-                                             const std::string& request,
+    static int32_t HandleModifyStreamChannel(SchedulerPlugin* plugin, const std::string& request,
                                              std::string* response) {
         return plugin->HandleModifyStreamChannel("", request, *response);
     }
 
-    static int32_t HandleRemoveStreamChannel(SchedulerPlugin* plugin,
-                                             const std::string& request,
+    static int32_t HandleRemoveStreamChannel(SchedulerPlugin* plugin, const std::string& request,
                                              std::string* response) {
         return plugin->HandleRemoveStreamChannel("", request, *response);
     }
 
-    static int32_t HandleExecute(SchedulerPlugin* plugin,
-                                 const std::string& request,
-                                 std::string* response) {
+    static int32_t HandleExecute(SchedulerPlugin* plugin, const std::string& request, std::string* response) {
         return plugin->HandleExecute("", request, *response);
     }
 
-    static int ExecuteBlockOperator(SchedulerPlugin* plugin,
-                                    IBlockStreamChannel* source,
-                                    IBlockStreamOperator* op,
-                                    int64_t* rows_affected,
-                                    std::string* error,
+    static int ExecuteBlockOperator(SchedulerPlugin* plugin, IBlockStreamChannel* source, IBlockStreamOperator* op,
+                                    int64_t* rows_affected, std::string* error,
                                     const std::shared_ptr<const BoundFilterExpr>& source_residual = nullptr) {
         SchedulerPlugin::BlockExecutionTerminal terminal;
-        return plugin->ExecuteBlockOperator(
-            source, op, source_residual, &terminal, rows_affected, error);
+        return plugin->ExecuteBlockOperator(source, op, source_residual, &terminal, rows_affected, error);
     }
 
     static int StartBatchRuntime(SchedulerPlugin* plugin) {
-        return plugin->batch_runtime_.Start(
-            1,
-            [plugin](const std::string& sql, std::string* response) -> int32_t {
-                if (!response) return error::INTERNAL_ERROR;
-                const std::string request = "{\"sql\":\"" + sql + "\"}";
-                return plugin->HandleExecute("", request, *response);
-            });
+        return plugin->batch_runtime_.Start(1, [plugin](const std::string& sql, std::string* response) -> int32_t {
+            if (!response) return error::INTERNAL_ERROR;
+            const std::string request = "{\"sql\":\"" + sql + "\"}";
+            return plugin->HandleExecute("", request, *response);
+        });
     }
 
-    static void StopBatchRuntime(SchedulerPlugin* plugin) {
-        plugin->batch_runtime_.Stop();
-    }
+    static void StopBatchRuntime(SchedulerPlugin* plugin) { plugin->batch_runtime_.Stop(); }
 
-    static int32_t HandleBatchSubmit(SchedulerPlugin* plugin,
-                                     const std::string& request,
-                                     std::string* response) {
+    static int32_t HandleBatchSubmit(SchedulerPlugin* plugin, const std::string& request, std::string* response) {
         return plugin->HandleBatchSubmit("", request, *response);
     }
 
-    static int QueryBatchSnapshot(SchedulerPlugin* plugin,
-                                  const std::string& runtime_task_id,
+    static int QueryBatchSnapshot(SchedulerPlugin* plugin, const std::string& runtime_task_id,
                                   BatchRuntimeSnapshot* snapshot) {
         return plugin->batch_runtime_.Query(runtime_task_id, snapshot);
     }
 
-    static void AddStreamTaskRuntime(SchedulerPlugin* plugin,
-                                     const std::string& runtime_task_id,
+    static void AddStreamTaskRuntime(SchedulerPlugin* plugin, const std::string& runtime_task_id,
                                      std::shared_ptr<StreamTask> task) {
         std::lock_guard<std::mutex> lock(plugin->stream_tasks_mu_);
         plugin->stream_tasks_[runtime_task_id] = std::move(task);
     }
 
-    static void AddStreamGroupRuntime(SchedulerPlugin* plugin,
-                                      const std::string& runtime_task_id,
+    static void AddStreamGroupRuntime(SchedulerPlugin* plugin, const std::string& runtime_task_id,
                                       std::shared_ptr<StreamTaskGroup> group) {
         std::lock_guard<std::mutex> lock(plugin->stream_task_groups_mu_);
         plugin->stream_task_groups_[runtime_task_id] = std::move(group);
     }
 
-    static void AddGroupNodeOwner(SchedulerPlugin* plugin,
-                                  const std::string& node_runtime_task_id,
+    static void AddGroupNodeOwner(SchedulerPlugin* plugin, const std::string& node_runtime_task_id,
                                   const std::string& group_runtime_task_id) {
         std::lock_guard<std::mutex> lock(plugin->stream_group_nodes_mu_);
         plugin->stream_group_node_owners_[node_runtime_task_id] = group_runtime_task_id;
     }
 
-    static void AddGroupNodeSources(SchedulerPlugin* plugin,
-                                    const std::string& group_runtime_task_id) {
+    static void AddGroupNodeSources(SchedulerPlugin* plugin, const std::string& group_runtime_task_id) {
         std::lock_guard<std::mutex> lock(plugin->stream_group_node_sources_mu_);
         GroupNodeResolvedSourceMeta meta;
         meta.sources = {"stream.a"};
@@ -1103,8 +1010,7 @@ struct SchedulerPluginTestAccessor {
         plugin->stream_group_node_sources_[group_runtime_task_id]["n1"] = std::move(meta);
     }
 
-    static void AddGroupShareSnapshot(SchedulerPlugin* plugin,
-                                      const std::string& group_runtime_task_id) {
+    static void AddGroupShareSnapshot(SchedulerPlugin* plugin, const std::string& group_runtime_task_id) {
         std::lock_guard<std::mutex> lock(plugin->stream_group_share_set_snapshots_mu_);
         SharedHubSnapshot snap;
         snap.id = "ss1";
@@ -1129,24 +1035,22 @@ struct SchedulerPluginTestAccessor {
 
     static bool HasGroupNodeSources(SchedulerPlugin* plugin, const std::string& group_runtime_task_id) {
         std::lock_guard<std::mutex> lock(plugin->stream_group_node_sources_mu_);
-        return plugin->stream_group_node_sources_.find(group_runtime_task_id) != plugin->stream_group_node_sources_.end();
+        return plugin->stream_group_node_sources_.find(group_runtime_task_id) !=
+               plugin->stream_group_node_sources_.end();
     }
 
     static bool HasGroupShareSnapshot(SchedulerPlugin* plugin, const std::string& group_runtime_task_id) {
         std::lock_guard<std::mutex> lock(plugin->stream_group_share_set_snapshots_mu_);
-        return plugin->stream_group_share_set_snapshots_.find(group_runtime_task_id) != plugin->stream_group_share_set_snapshots_.end();
+        return plugin->stream_group_share_set_snapshots_.find(group_runtime_task_id) !=
+               plugin->stream_group_share_set_snapshots_.end();
     }
 
-    static void MarkRuntimeTerminal(SchedulerPlugin* plugin,
-                                    const std::string& runtime_task_id,
-                                    const std::string& runtime_kind,
-                                    int64_t terminal_ms = 0) {
+    static void MarkRuntimeTerminal(SchedulerPlugin* plugin, const std::string& runtime_task_id,
+                                    const std::string& runtime_kind, int64_t terminal_ms = 0) {
         plugin->MarkRuntimeTerminal(runtime_task_id, runtime_kind, terminal_ms);
     }
 
-    static void TouchRuntimeAccess(SchedulerPlugin* plugin,
-                                   const std::string& runtime_task_id,
-                                   int64_t now_ms = 0) {
+    static void TouchRuntimeAccess(SchedulerPlugin* plugin, const std::string& runtime_task_id, int64_t now_ms = 0) {
         plugin->TouchRuntimeAccess(runtime_task_id, now_ms);
     }
 
@@ -1154,9 +1058,7 @@ struct SchedulerPluginTestAccessor {
         plugin->SweepRuntimeRetainedObjects(now_ms);
     }
 
-    static int AcquireStreamExecutionLease(SchedulerPlugin* plugin,
-                                           StreamExecutionPlan* plan,
-                                           LeaseToken* lease_token,
+    static int AcquireStreamExecutionLease(SchedulerPlugin* plugin, StreamExecutionPlan* plan, LeaseToken* lease_token,
                                            std::string* err_rsp) {
         return plugin->AcquireStreamExecutionLease(plan, lease_token, err_rsp);
     }
@@ -1180,17 +1082,17 @@ void TestBlockProviderTraversal() {
         ASSERT_EQ(plugin.Load(&querier), 0);
         int factory_visits = 0;
         int manager_visits = 0;
-        ASSERT_EQ(SchedulerPluginTestAccessor::TraverseBlockFactories(
-                      &plugin, [&](IBlockStreamFactory*) {
-                          ++factory_visits;
-                          return 0;
-                      }),
+        ASSERT_EQ(SchedulerPluginTestAccessor::TraverseBlockFactories(&plugin,
+                                                                      [&](IBlockStreamFactory*) {
+                                                                          ++factory_visits;
+                                                                          return 0;
+                                                                      }),
                   0u);
-        ASSERT_EQ(SchedulerPluginTestAccessor::TraverseBlockManagers(
-                      &plugin, [&](IBlockStreamManager*) {
-                          ++manager_visits;
-                          return 0;
-                      }),
+        ASSERT_EQ(SchedulerPluginTestAccessor::TraverseBlockManagers(&plugin,
+                                                                     [&](IBlockStreamManager*) {
+                                                                         ++manager_visits;
+                                                                         return 0;
+                                                                     }),
                   0u);
         ASSERT_EQ(factory_visits, 0);
         ASSERT_EQ(manager_visits, 0);
@@ -1213,13 +1115,15 @@ void TestBlockProviderTraversal() {
         std::vector<int> factory_ids;
         std::vector<int> manager_ids;
         ASSERT_EQ(SchedulerPluginTestAccessor::TraverseBlockFactories(
-                      &plugin, [&](IBlockStreamFactory* provider) {
+                      &plugin,
+                      [&](IBlockStreamFactory* provider) {
                           factory_ids.push_back(static_cast<TraversalBlockFactory*>(provider)->id);
                           return 0;
                       }),
                   1u);
         ASSERT_EQ(SchedulerPluginTestAccessor::TraverseBlockManagers(
-                      &plugin, [&](IBlockStreamManager* provider) {
+                      &plugin,
+                      [&](IBlockStreamManager* provider) {
                           manager_ids.push_back(static_cast<TraversalBlockManager*>(provider)->id);
                           return 0;
                       }),
@@ -1240,24 +1144,24 @@ void TestBlockProviderTraversal() {
         std::vector<int> factory_ids;
         std::vector<int> manager_ids;
         ASSERT_EQ(SchedulerPluginTestAccessor::TraverseBlockFactories(
-                      &plugin, [&](IBlockStreamFactory* provider) {
+                      &plugin,
+                      [&](IBlockStreamFactory* provider) {
                           factory_ids.push_back(static_cast<TraversalBlockFactory*>(provider)->id);
                           return 0;
                       }),
                   2u);
         ASSERT_EQ(SchedulerPluginTestAccessor::TraverseBlockManagers(
-                      &plugin, [&](IBlockStreamManager* provider) {
+                      &plugin,
+                      [&](IBlockStreamManager* provider) {
                           manager_ids.push_back(static_cast<TraversalBlockManager*>(provider)->id);
                           return 0;
                       }),
                   2u);
         ASSERT_EQ(factory_ids, std::vector<int>({1, 2}));
         ASSERT_EQ(manager_ids, std::vector<int>({1, 2}));
-        ASSERT_EQ(SchedulerPluginTestAccessor::TraverseBlockFactories(
-                      &plugin, [](IBlockStreamFactory*) { return -1; }),
+        ASSERT_EQ(SchedulerPluginTestAccessor::TraverseBlockFactories(&plugin, [](IBlockStreamFactory*) { return -1; }),
                   1u);
-        ASSERT_EQ(SchedulerPluginTestAccessor::TraverseBlockManagers(
-                      &plugin, [](IBlockStreamManager*) { return -1; }),
+        ASSERT_EQ(SchedulerPluginTestAccessor::TraverseBlockManagers(&plugin, [](IBlockStreamManager*) { return -1; }),
                   1u);
         ASSERT_EQ(querier.factory_traverse_calls, 2);
         ASSERT_EQ(querier.manager_traverse_calls, 2);
@@ -1281,8 +1185,7 @@ void TestBlockSourceAndManagerRouting() {
         for (const std::string& reference : {std::string("pcapfile.missing"), std::string("missing")}) {
             std::shared_ptr<IChannel> owner;
             bool ambiguous = true;
-            ASSERT_EQ(SchedulerPluginTestAccessor::FindChannelWithAmbiguity(
-                          &plugin, reference, &owner, &ambiguous),
+            ASSERT_EQ(SchedulerPluginTestAccessor::FindChannelWithAmbiguity(&plugin, reference, &owner, &ambiguous),
                       nullptr);
             ASSERT_TRUE(!owner);
             ASSERT_TRUE(!ambiguous);
@@ -1290,8 +1193,7 @@ void TestBlockSourceAndManagerRouting() {
         SqlStatement stmt;
         stmt.sources = {"pcapfile.missing"};
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::ResolveSourceBindings(&plugin, stmt, &response),
-                  error::BAD_REQUEST);
+        ASSERT_EQ(SchedulerPluginTestAccessor::ResolveSourceBindings(&plugin, stmt, &response), error::BAD_REQUEST);
         ASSERT_TRUE(response.find("source channel not found: pcapfile.missing") != std::string::npos);
         ASSERT_EQ(querier.block_factory_first_calls, 0);
     }
@@ -1303,8 +1205,7 @@ void TestBlockSourceAndManagerRouting() {
         for (const std::string& reference : {std::string("pcapfile.input"), std::string("input")}) {
             std::shared_ptr<IChannel> owner;
             bool ambiguous = true;
-            ASSERT_EQ(SchedulerPluginTestAccessor::FindChannelWithAmbiguity(
-                          &plugin, reference, &owner, &ambiguous),
+            ASSERT_EQ(SchedulerPluginTestAccessor::FindChannelWithAmbiguity(&plugin, reference, &owner, &ambiguous),
                       &channel_one);
             ASSERT_EQ(owner.get(), &channel_one);
             ASSERT_TRUE(!ambiguous);
@@ -1323,8 +1224,7 @@ void TestBlockSourceAndManagerRouting() {
         for (const std::string& reference : {std::string("PCAPFILE.input"), std::string("input")}) {
             std::shared_ptr<IChannel> owner;
             bool ambiguous = true;
-            ASSERT_EQ(SchedulerPluginTestAccessor::FindChannelWithAmbiguity(
-                          &plugin, reference, &owner, &ambiguous),
+            ASSERT_EQ(SchedulerPluginTestAccessor::FindChannelWithAmbiguity(&plugin, reference, &owner, &ambiguous),
                       &channel_two);
             ASSERT_EQ(owner.get(), &channel_two);
             ASSERT_TRUE(!ambiguous);
@@ -1344,8 +1244,7 @@ void TestBlockSourceAndManagerRouting() {
         for (const std::string& reference : {std::string("pcapfile.input"), std::string("input")}) {
             std::shared_ptr<IChannel> owner;
             bool ambiguous = false;
-            ASSERT_EQ(SchedulerPluginTestAccessor::FindChannelWithAmbiguity(
-                          &plugin, reference, &owner, &ambiguous),
+            ASSERT_EQ(SchedulerPluginTestAccessor::FindChannelWithAmbiguity(&plugin, reference, &owner, &ambiguous),
                       nullptr);
             ASSERT_TRUE(!owner);
             ASSERT_TRUE(ambiguous);
@@ -1353,9 +1252,7 @@ void TestBlockSourceAndManagerRouting() {
             SqlStatement stmt;
             stmt.sources = {reference};
             std::string response;
-            ASSERT_EQ(SchedulerPluginTestAccessor::ResolveSourceBindings(
-                          &plugin, stmt, &response),
-                      error::CONFLICT);
+            ASSERT_EQ(SchedulerPluginTestAccessor::ResolveSourceBindings(&plugin, stmt, &response), error::CONFLICT);
             ASSERT_TRUE(response.find("multiple block stream sources matched") != std::string::npos);
         }
         ASSERT_EQ(querier.block_factory_first_calls, 0);
@@ -1376,16 +1273,12 @@ void TestBlockSourceAndManagerRouting() {
         for (const char* role : {"sink", "both"}) {
             std::string response;
             const std::string request =
-                std::string("{\"type\":\"pcapfile\",\"name\":\"input\",\"role\":\"") + role +
-                "\",\"options\":{}}";
-            ASSERT_TRUE(SchedulerPluginTestAccessor::HandleAddStreamChannel(
-                            &plugin, request, &response) != error::OK);
+                std::string("{\"type\":\"pcapfile\",\"name\":\"input\",\"role\":\"") + role + "\",\"options\":{}}";
+            ASSERT_TRUE(SchedulerPluginTestAccessor::HandleAddStreamChannel(&plugin, request, &response) != error::OK);
         }
         ASSERT_EQ(manager.add_calls, 0);
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleAddStreamChannel(
-                      &plugin, add_source, &response),
-                  error::OK);
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleAddStreamChannel(&plugin, add_source, &response), error::OK);
         ASSERT_EQ(manager.add_calls, 1);
         ASSERT_EQ(manager.last_add_type, "pcapfile");
         ASSERT_EQ(manager.last_add_name, "input");
@@ -1401,9 +1294,7 @@ void TestBlockSourceAndManagerRouting() {
         SchedulerPlugin plugin;
         ASSERT_EQ(plugin.Load(&querier), 0);
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleAddStreamChannel(
-                      &plugin, add_source, &response),
-                  error::OK);
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleAddStreamChannel(&plugin, add_source, &response), error::OK);
         ASSERT_EQ(unsupported.add_calls, 1);
         ASSERT_EQ(accepted.add_calls, 1);
         ASSERT_EQ(unsupported.last_add_type, "pcapfile");
@@ -1421,9 +1312,7 @@ void TestBlockSourceAndManagerRouting() {
         SchedulerPlugin plugin;
         ASSERT_EQ(plugin.Load(&querier), 0);
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleAddStreamChannel(
-                      &plugin, add_source, &response),
-                  error::CONFLICT);
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleAddStreamChannel(&plugin, add_source, &response), error::CONFLICT);
         ASSERT_EQ(first.add_calls, 1);
         ASSERT_EQ(second.add_calls, 1);
         ASSERT_TRUE(response.find("multiple block stream managers accepted request") != std::string::npos);
@@ -1437,8 +1326,7 @@ void TestBlockSourceAndManagerRouting() {
         SchedulerPlugin plugin;
         ASSERT_EQ(plugin.Load(&querier), 0);
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleAddStreamChannel(
-                      &plugin, add_source, &response),
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleAddStreamChannel(&plugin, add_source, &response),
                   error::UNAVAILABLE);
         ASSERT_EQ(first_unsupported.add_calls, 1);
         ASSERT_EQ(second_unsupported.add_calls, 1);
@@ -1456,17 +1344,13 @@ void TestBlockSourceAndManagerRouting() {
         SchedulerPlugin plugin;
         ASSERT_EQ(plugin.Load(&querier), 0);
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleModifyStreamChannel(
-                      &plugin, modify_source, &response),
-                  error::OK);
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleModifyStreamChannel(&plugin, modify_source, &response), error::OK);
         ASSERT_EQ(owner.modify_calls, 1);
         ASSERT_EQ(absent.modify_calls, 0);
         ASSERT_EQ(owner.last_modify_type, "pcapfile");
         ASSERT_EQ(owner.last_modify_name, "input");
         ASSERT_EQ(owner.last_modify_option, R"({"batch_packets":3})");
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleRemoveStreamChannel(
-                      &plugin, remove, &response),
-                  error::OK);
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleRemoveStreamChannel(&plugin, remove, &response), error::OK);
         ASSERT_EQ(owner.remove_calls, 1);
         ASSERT_EQ(absent.remove_calls, 0);
         ASSERT_EQ(owner.last_remove_type, "pcapfile");
@@ -1485,10 +1369,8 @@ void TestBlockSourceAndManagerRouting() {
         ASSERT_EQ(plugin.Load(&querier), 0);
         std::string response;
         const std::string request =
-            std::string("{\"type\":\"pcapfile\",\"name\":\"input\",\"role\":\"") + role +
-            "\",\"options\":{}}";
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleModifyStreamChannel(
-                      &plugin, request, &response),
+            std::string("{\"type\":\"pcapfile\",\"name\":\"input\",\"role\":\"") + role + "\",\"options\":{}}";
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleModifyStreamChannel(&plugin, request, &response),
                   error::BAD_REQUEST);
         ASSERT_EQ(owner.modify_calls, 0);
     }
@@ -1506,15 +1388,12 @@ void TestBlockSourceAndManagerRouting() {
         SchedulerPlugin plugin;
         ASSERT_EQ(plugin.Load(&querier), 0);
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleModifyStreamChannel(
-                      &plugin, modify_source, &response),
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleModifyStreamChannel(&plugin, modify_source, &response),
                   error::CONFLICT);
         ASSERT_EQ(first_owner.modify_calls, 0);
         ASSERT_EQ(second_owner.modify_calls, 0);
         ASSERT_TRUE(response.find("multiple block stream managers own channel") != std::string::npos);
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleRemoveStreamChannel(
-                      &plugin, remove, &response),
-                  error::CONFLICT);
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleRemoveStreamChannel(&plugin, remove, &response), error::CONFLICT);
         ASSERT_EQ(first_owner.remove_calls, 0);
         ASSERT_EQ(second_owner.remove_calls, 0);
         ASSERT_TRUE(response.find("multiple block stream managers own channel") != std::string::npos);
@@ -1530,14 +1409,11 @@ void TestBlockSourceAndManagerRouting() {
         SchedulerPlugin plugin;
         ASSERT_EQ(plugin.Load(&querier), 0);
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleModifyStreamChannel(
-                      &plugin, modify_source, &response),
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleModifyStreamChannel(&plugin, modify_source, &response),
                   error::NOT_FOUND);
         ASSERT_EQ(first_absent.modify_calls, 1);
         ASSERT_EQ(second_absent.modify_calls, 1);
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleRemoveStreamChannel(
-                      &plugin, remove, &response),
-                  error::NOT_FOUND);
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleRemoveStreamChannel(&plugin, remove, &response), error::NOT_FOUND);
         ASSERT_EQ(first_absent.remove_calls, 1);
         ASSERT_EQ(second_absent.remove_calls, 1);
         ASSERT_TRUE(response.find("block stream channel not found") != std::string::npos);
@@ -1547,9 +1423,7 @@ void TestBlockSourceAndManagerRouting() {
     }
 }
 
-int32_t ExecuteBlockRoute(SchemaBlockChannel* source,
-                          SchemaBlockOperator* op,
-                          std::string* response) {
+int32_t ExecuteBlockRoute(SchemaBlockChannel* source, SchemaBlockOperator* op, std::string* response) {
     TraversalBlockFactory factory(1);
     factory.channel = source;
     BlockProviderQuerier querier;
@@ -1558,17 +1432,13 @@ int32_t ExecuteBlockRoute(SchemaBlockChannel* source,
     SchedulerPlugin plugin;
     ASSERT_EQ(plugin.Load(&querier), 0);
     return SchedulerPluginTestAccessor::HandleExecute(
-        &plugin,
-        R"({"sql":"SELECT * FROM pcapfile.input USING test.schema_guard"})",
-        response);
+        &plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.schema_guard"})", response);
 }
 
-BatchRuntimeSnapshot WaitForBatchTerminal(SchedulerPlugin* plugin,
-                                          const std::string& runtime_task_id) {
+BatchRuntimeSnapshot WaitForBatchTerminal(SchedulerPlugin* plugin, const std::string& runtime_task_id) {
     BatchRuntimeSnapshot snapshot;
     for (int attempt = 0; attempt < 400; ++attempt) {
-        if (SchedulerPluginTestAccessor::QueryBatchSnapshot(
-                plugin, runtime_task_id, &snapshot) == 0 &&
+        if (SchedulerPluginTestAccessor::QueryBatchSnapshot(plugin, runtime_task_id, &snapshot) == 0 &&
             IsTerminalBatchRuntimeStatus(snapshot.status)) {
             return snapshot;
         }
@@ -1578,8 +1448,7 @@ BatchRuntimeSnapshot WaitForBatchTerminal(SchedulerPlugin* plugin,
     return snapshot;
 }
 
-BatchRuntimeSnapshot RunBlockBatchCase(SchemaBlockChannel* source,
-                                       SchemaBlockOperator* op,
+BatchRuntimeSnapshot RunBlockBatchCase(SchemaBlockChannel* source, SchemaBlockOperator* op,
                                        const std::string& runtime_task_id) {
     TraversalBlockFactory factory(1);
     factory.channel = source;
@@ -1590,13 +1459,10 @@ BatchRuntimeSnapshot RunBlockBatchCase(SchemaBlockChannel* source,
     ASSERT_EQ(plugin.Load(&querier), 0);
     ASSERT_EQ(SchedulerPluginTestAccessor::StartBatchRuntime(&plugin), 0);
 
-    const std::string request =
-        "{\"runtime_task_id\":\"" + runtime_task_id +
-        "\",\"sqls\":[\"SELECT * FROM pcapfile.input USING test.schema_guard\"]}";
+    const std::string request = "{\"runtime_task_id\":\"" + runtime_task_id +
+                                "\",\"sqls\":[\"SELECT * FROM pcapfile.input USING test.schema_guard\"]}";
     std::string response;
-    ASSERT_EQ(SchedulerPluginTestAccessor::HandleBatchSubmit(
-                  &plugin, request, &response),
-              error::OK);
+    ASSERT_EQ(SchedulerPluginTestAccessor::HandleBatchSubmit(&plugin, request, &response), error::OK);
     ASSERT_TRUE(response.find("\"status\":\"submitted\"") != std::string::npos);
 
     BatchRuntimeSnapshot snapshot = WaitForBatchTerminal(&plugin, runtime_task_id);
@@ -1605,15 +1471,10 @@ BatchRuntimeSnapshot RunBlockBatchCase(SchemaBlockChannel* source,
 }
 
 void TestBlockOperatorSchemaGate() {
-    const std::string request =
-        R"({"sql":"SELECT * FROM pcapfile.input USING test.schema_guard"})";
-    auto execute = [&](const std::shared_ptr<arrow::Schema>& schema,
-                       int schema_rc,
-                       int data_count,
-                       SchemaBlockOperator* op,
-                       std::string* response) {
-        auto batch = arrow::RecordBatch::Make(
-            schema, 0, std::vector<std::shared_ptr<arrow::Array>>{});
+    const std::string request = R"({"sql":"SELECT * FROM pcapfile.input USING test.schema_guard"})";
+    auto execute = [&](const std::shared_ptr<arrow::Schema>& schema, int schema_rc, int data_count,
+                       SchemaBlockOperator* op, std::string* response) {
+        auto batch = arrow::RecordBatch::Make(schema, 0, std::vector<std::shared_ptr<arrow::Array>>{});
         SchemaBlockChannel source(batch, data_count);
         op->schema_rc = schema_rc;
         TraversalBlockFactory factory(1);
@@ -1641,16 +1502,14 @@ void TestBlockOperatorSchemaGate() {
     {
         SchemaBlockOperator op;
         std::string response;
-        ASSERT_EQ(execute(arrow::schema({}), 0, 1, &op, &response),
-                  error::INTERNAL_ERROR);
+        ASSERT_EQ(execute(arrow::schema({}), 0, 1, &op, &response), error::INTERNAL_ERROR);
         ASSERT_EQ(op.schema_calls, 0);
         ASSERT_EQ(op.process_calls, 0);
     }
     for (const int schema_rc : {EINVAL, -EIO}) {
         SchemaBlockOperator op;
         std::string response;
-        ASSERT_EQ(execute(packet::PacketSchema(), schema_rc, 1, &op, &response),
-                  error::INTERNAL_ERROR);
+        ASSERT_EQ(execute(packet::PacketSchema(), schema_rc, 1, &op, &response), error::INTERNAL_ERROR);
         ASSERT_EQ(op.schema_calls, 1);
         ASSERT_EQ(op.process_calls, 0);
     }
@@ -1658,8 +1517,7 @@ void TestBlockOperatorSchemaGate() {
 
 void TestBlockOperatorPollAndRelease() {
     auto make_batch = []() {
-        return arrow::RecordBatch::Make(
-            packet::PacketSchema(), 0, std::vector<std::shared_ptr<arrow::Array>>{});
+        return arrow::RecordBatch::Make(packet::PacketSchema(), 0, std::vector<std::shared_ptr<arrow::Array>>{});
     };
     SchedulerPlugin plugin;
 
@@ -1670,9 +1528,7 @@ void TestBlockOperatorPollAndRelease() {
         op.process_stop_after = 2;
         int64_t rows = -1;
         std::string error;
-        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(
-                      &plugin, &source, &op, &rows, &error),
-                  0);
+        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(&plugin, &source, &op, &rows, &error), 0);
         ASSERT_EQ(source.poll_calls, 4);
         ASSERT_EQ(source.release_calls, 1);
         ASSERT_EQ(op.process_calls, 1);
@@ -1684,9 +1540,7 @@ void TestBlockOperatorPollAndRelease() {
         SchemaBlockOperator op;
         int64_t rows = -1;
         std::string error;
-        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(
-                      &plugin, &source, &op, &rows, &error),
-                  0);
+        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(&plugin, &source, &op, &rows, &error), 0);
         ASSERT_EQ(source.poll_calls, 1);
         ASSERT_EQ(source.release_calls, 0);
         ASSERT_EQ(op.schema_calls, 0);
@@ -1700,8 +1554,7 @@ void TestBlockOperatorPollAndRelease() {
         source.terminal_err = event_error;
         SchemaBlockOperator op;
         std::string error;
-        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(
-                      &plugin, &source, &op, nullptr, &error),
+        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(&plugin, &source, &op, nullptr, &error),
                   event_error == 0 ? ECANCELED : event_error);
         ASSERT_EQ(source.release_calls, 0);
         ASSERT_EQ(op.flush_calls, 0);
@@ -1712,8 +1565,7 @@ void TestBlockOperatorPollAndRelease() {
         source.terminal_err = event_error;
         SchemaBlockOperator op;
         std::string error;
-        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(
-                      &plugin, &source, &op, nullptr, &error),
+        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(&plugin, &source, &op, nullptr, &error),
                   event_error == 0 ? EIO : event_error);
         ASSERT_EQ(source.release_calls, 0);
         ASSERT_EQ(op.flush_calls, 0);
@@ -1723,9 +1575,7 @@ void TestBlockOperatorPollAndRelease() {
         SchemaBlockOperator op;
         op.process_stop_after = 2;
         std::string error;
-        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(
-                      &plugin, &source, &op, nullptr, &error),
-                  0);
+        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(&plugin, &source, &op, nullptr, &error), 0);
         ASSERT_EQ(source.poll_calls, 2);
         ASSERT_EQ(source.release_calls, 2);
         ASSERT_EQ(op.process_calls, 2);
@@ -1736,9 +1586,7 @@ void TestBlockOperatorPollAndRelease() {
         SchemaBlockOperator op;
         op.process_rc = -EIO;
         std::string error;
-        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(
-                      &plugin, &source, &op, nullptr, &error),
-                  -EIO);
+        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(&plugin, &source, &op, nullptr, &error), -EIO);
         ASSERT_EQ(source.release_calls, 1);
         ASSERT_EQ(op.process_calls, 1);
         ASSERT_EQ(op.flush_calls, 0);
@@ -1748,9 +1596,7 @@ void TestBlockOperatorPollAndRelease() {
         SchemaBlockOperator op;
         op.process_rc = 2;
         std::string error;
-        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(
-                      &plugin, &source, &op, nullptr, &error),
-                  2);
+        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(&plugin, &source, &op, nullptr, &error), 2);
         ASSERT_EQ(source.poll_calls, 1);
         ASSERT_EQ(source.release_calls, 1);
         ASSERT_EQ(op.process_calls, 1);
@@ -1762,9 +1608,7 @@ void TestBlockOperatorPollAndRelease() {
         SchemaBlockOperator op;
         op.process_stop_after = 2;
         std::string error;
-        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(
-                      &plugin, &source, &op, nullptr, &error),
-                  EBUSY);
+        ASSERT_EQ(SchedulerPluginTestAccessor::ExecuteBlockOperator(&plugin, &source, &op, nullptr, &error), EBUSY);
         ASSERT_EQ(source.release_calls, 1);
         ASSERT_EQ(op.process_calls, 1);
         ASSERT_EQ(op.flush_calls, 0);
@@ -1773,8 +1617,7 @@ void TestBlockOperatorPollAndRelease() {
 
 void TestBlockTerminalRouteAndBatchSnapshots() {
     auto make_batch = []() {
-        return arrow::RecordBatch::Make(
-            packet::PacketSchema(), 0, std::vector<std::shared_ptr<arrow::Array>>{});
+        return arrow::RecordBatch::Make(packet::PacketSchema(), 0, std::vector<std::shared_ptr<arrow::Array>>{});
     };
 
     {
@@ -1837,8 +1680,7 @@ void TestBlockTerminalRouteAndBatchSnapshots() {
         SchemaBlockChannel source(make_batch(), 1);
         SchemaBlockOperator op;
         op.process_stop_after = 2;
-        const BatchRuntimeSnapshot snapshot =
-            RunBlockBatchCase(&source, &op, "block_terminal_completed");
+        const BatchRuntimeSnapshot snapshot = RunBlockBatchCase(&source, &op, "block_terminal_completed");
         ASSERT_EQ(snapshot.status, BatchRuntimeStatus::kCompleted);
         ASSERT_TRUE(snapshot.finished_ms > 0);
         ASSERT_EQ(snapshot.last_active_ms, snapshot.finished_ms);
@@ -1848,8 +1690,7 @@ void TestBlockTerminalRouteAndBatchSnapshots() {
     {
         SchemaBlockChannel source(make_batch(), 2);
         SchemaBlockOperator op;
-        const BatchRuntimeSnapshot snapshot =
-            RunBlockBatchCase(&source, &op, "block_terminal_stopped");
+        const BatchRuntimeSnapshot snapshot = RunBlockBatchCase(&source, &op, "block_terminal_stopped");
         ASSERT_EQ(snapshot.status, BatchRuntimeStatus::kStopped);
         ASSERT_TRUE(snapshot.finished_ms > 0);
         ASSERT_EQ(snapshot.last_active_ms, snapshot.finished_ms);
@@ -1862,8 +1703,7 @@ void TestBlockTerminalRouteAndBatchSnapshots() {
         source.terminal_kind = BlockPollEvent::kCancelled;
         source.terminal_err = EINTR;
         SchemaBlockOperator op;
-        const BatchRuntimeSnapshot snapshot =
-            RunBlockBatchCase(&source, &op, "block_terminal_cancelled");
+        const BatchRuntimeSnapshot snapshot = RunBlockBatchCase(&source, &op, "block_terminal_cancelled");
         ASSERT_EQ(snapshot.status, BatchRuntimeStatus::kCancelled);
         ASSERT_TRUE(snapshot.finished_ms > 0);
         ASSERT_EQ(snapshot.last_active_ms, snapshot.finished_ms);
@@ -1874,8 +1714,7 @@ void TestBlockTerminalRouteAndBatchSnapshots() {
         SchemaBlockChannel source(make_batch(), 2);
         SchemaBlockOperator op;
         op.throw_on_process = true;
-        const BatchRuntimeSnapshot snapshot =
-            RunBlockBatchCase(&source, &op, "block_terminal_exception");
+        const BatchRuntimeSnapshot snapshot = RunBlockBatchCase(&source, &op, "block_terminal_exception");
         ASSERT_EQ(snapshot.status, BatchRuntimeStatus::kFailed);
         ASSERT_EQ(snapshot.error_code, "OP_EXEC_FAIL");
         ASSERT_EQ(snapshot.error_stage, "execute");
@@ -1889,8 +1728,7 @@ void TestBlockTerminalRouteAndBatchSnapshots() {
         SchemaBlockChannel source(make_batch(), 2);
         SchemaBlockOperator op;
         op.process_rc = -EIO;
-        const BatchRuntimeSnapshot snapshot =
-            RunBlockBatchCase(&source, &op, "block_terminal_operator_error");
+        const BatchRuntimeSnapshot snapshot = RunBlockBatchCase(&source, &op, "block_terminal_operator_error");
         ASSERT_EQ(snapshot.status, BatchRuntimeStatus::kFailed);
         ASSERT_EQ(snapshot.error_code, "OP_EXEC_FAIL");
         ASSERT_EQ(snapshot.error_stage, "execute");
@@ -1912,23 +1750,19 @@ void TestBlockDirectTransferTimeout() {
     SchedulerPlugin plugin;
     ASSERT_EQ(plugin.Load(&querier), 0);
     std::string response;
-    ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                  &plugin,
-                  R"({"sql":"SELECT * FROM pcapfile.input"})",
-                  &response),
-              error::OK);
+    ASSERT_EQ(
+        SchedulerPluginTestAccessor::HandleExecute(&plugin, R"({"sql":"SELECT * FROM pcapfile.input"})", &response),
+        error::OK);
     ASSERT_EQ(source.poll_calls, 3);
     ASSERT_EQ(source.release_calls, 0);
 }
 
-std::shared_ptr<arrow::RecordBatch> MakePacketLengthBatch(
-    const std::vector<std::pair<uint32_t, uint32_t>>& lengths) {
-    std::vector<packet::PacketRecord> records;
+std::shared_ptr<arrow::RecordBatch> MakePacketLengthBatch(const std::vector<std::pair<uint32_t, uint32_t>>& lengths) {
+    std::vector<flowsql::testing::PacketRecord> records;
     records.reserve(lengths.size());
     for (size_t i = 0; i < lengths.size(); ++i) {
-        auto raw = std::make_shared<std::vector<uint8_t>>(
-            lengths[i].first, static_cast<uint8_t>(i + 1));
-        packet::PacketRecord record;
+        auto raw = std::make_shared<std::vector<uint8_t>>(lengths[i].first, static_cast<uint8_t>(i + 1));
+        flowsql::testing::PacketRecord record;
         record.meta.captured_len = lengths[i].first;
         record.meta.wire_len = lengths[i].second;
         record.meta.sequence = i;
@@ -1939,16 +1773,14 @@ std::shared_ptr<arrow::RecordBatch> MakePacketLengthBatch(
     }
     std::shared_ptr<arrow::RecordBatch> batch;
     std::string packet_error;
-    ASSERT_EQ(packet::EncodePacketBatch(records, &batch, &packet_error),
-              packet::PacketBatchError::kNone);
+    ASSERT_EQ(flowsql::testing::EncodePacketBatch(records, &batch, &packet_error), packet::PacketBatchError::kNone);
     ASSERT_TRUE(batch != nullptr && packet_error.empty());
     return batch;
 }
 
 void TestBlockReaderFactoryLifecycle() {
-    auto raw = std::make_shared<std::vector<uint8_t>>(
-        std::initializer_list<uint8_t>{0x01, 0x02, 0x03});
-    packet::PacketRecord record;
+    auto raw = std::make_shared<std::vector<uint8_t>>(std::initializer_list<uint8_t>{0x01, 0x02, 0x03});
+    flowsql::testing::PacketRecord record;
     record.meta.captured_len = static_cast<uint32_t>(raw->size());
     record.meta.wire_len = static_cast<uint32_t>(raw->size());
     record.raw_data.owner = raw;
@@ -1956,7 +1788,7 @@ void TestBlockReaderFactoryLifecycle() {
     record.raw_data.size = static_cast<uint32_t>(raw->size());
     std::shared_ptr<arrow::RecordBatch> packet_batch;
     std::string packet_error;
-    ASSERT_EQ(packet::EncodePacketBatch({record}, &packet_batch, &packet_error),
+    ASSERT_EQ(flowsql::testing::EncodePacketBatch({record}, &packet_batch, &packet_error),
               packet::PacketBatchError::kNone);
     ASSERT_TRUE(packet_batch != nullptr && packet_error.empty());
 
@@ -1966,8 +1798,7 @@ void TestBlockReaderFactoryLifecycle() {
         SchemaBlockChannel second_reader(packet_batch, 1);
         TraversalBlockFactory legacy_factory(1);
         legacy_factory.channel = &legacy_source;
-        BlockReaderFactoryFixture reader_factory(
-            ReaderFactoryBehavior::kOwn, &first_reader);
+        BlockReaderFactoryFixture reader_factory(ReaderFactoryBehavior::kOwn, &first_reader);
         BlockProviderQuerier querier;
         querier.factories = {&legacy_factory};
         querier.reader_factories = {&reader_factory};
@@ -1976,9 +1807,7 @@ void TestBlockReaderFactoryLifecycle() {
 
         std::string response;
         ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})",
-                      &response),
+                      &plugin, R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})", &response),
                   error::OK);
         ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
         ASSERT_EQ(legacy_source.poll_calls, 0);
@@ -1988,21 +1817,16 @@ void TestBlockReaderFactoryLifecycle() {
         ASSERT_EQ(reader_factory.create_calls, 1);
         ASSERT_EQ(reader_factory.release_calls, 1);
         ASSERT_EQ(reader_factory.live_readers, 0);
-        ASSERT_EQ(reader_factory.observed_contract_version,
-                  kBlockStreamReaderContractVersionV1);
-        ASSERT_EQ(reader_factory.source_categories,
-                  std::vector<std::string>({"pcapfile"}));
+        ASSERT_EQ(reader_factory.observed_contract_version, kBlockStreamReaderContractVersionV1);
+        ASSERT_EQ(reader_factory.source_categories, std::vector<std::string>({"pcapfile"}));
         ASSERT_EQ(reader_factory.source_names, std::vector<std::string>({"input"}));
-        ASSERT_EQ(reader_factory.pushed_plans,
-                  std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
+        ASSERT_EQ(reader_factory.pushed_plans, std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
         ASSERT_TRUE(!reader_factory.task_ids.front().empty());
 
         reader_factory.SetReader(&second_reader);
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input"})",
-                      &response),
-                  error::OK);
+        ASSERT_EQ(
+            SchedulerPluginTestAccessor::HandleExecute(&plugin, R"({"sql":"SELECT * FROM pcapfile.input"})", &response),
+            error::OK);
         ASSERT_EQ(second_reader.poll_calls, 2);
         ASSERT_EQ(second_reader.release_calls, 1);
         ASSERT_EQ(reader_factory.create_calls, 2);
@@ -2026,29 +1850,24 @@ void TestBlockReaderFactoryLifecycle() {
 
         std::string response;
         ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})",
-                      &response),
+                      &plugin, R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})", &response),
                   error::OK);
         ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
         ASSERT_EQ(non_owner.create_calls, 1);
         ASSERT_EQ(non_owner.release_calls, 0);
-        ASSERT_EQ(non_owner.pushed_plans,
-                  std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
+        ASSERT_EQ(non_owner.pushed_plans, std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
         ASSERT_EQ(legacy_source.poll_calls, 2);
         ASSERT_EQ(legacy_source.release_calls, 1);
     }
 
-    for (const BlockPollEvent::Kind terminal_kind :
-         {BlockPollEvent::kCancelled, BlockPollEvent::kError}) {
+    for (const BlockPollEvent::Kind terminal_kind : {BlockPollEvent::kCancelled, BlockPollEvent::kError}) {
         SchemaBlockChannel legacy_source(packet_batch, 1);
         SchemaBlockChannel exclusive_reader(packet_batch, 0);
         exclusive_reader.terminal_kind = terminal_kind;
         exclusive_reader.terminal_err = terminal_kind == BlockPollEvent::kError ? EIO : 0;
         TraversalBlockFactory legacy_factory(1);
         legacy_factory.channel = &legacy_source;
-        BlockReaderFactoryFixture reader_factory(
-            ReaderFactoryBehavior::kOwn, &exclusive_reader);
+        BlockReaderFactoryFixture reader_factory(ReaderFactoryBehavior::kOwn, &exclusive_reader);
         BlockProviderQuerier querier;
         querier.factories = {&legacy_factory};
         querier.reader_factories = {&reader_factory};
@@ -2056,10 +1875,8 @@ void TestBlockReaderFactoryLifecycle() {
         ASSERT_EQ(plugin.Load(&querier), 0);
 
         std::string response;
-        ASSERT_TRUE(SchedulerPluginTestAccessor::HandleExecute(
-                        &plugin,
-                        R"({"sql":"SELECT * FROM pcapfile.input"})",
-                        &response) != error::OK);
+        ASSERT_TRUE(SchedulerPluginTestAccessor::HandleExecute(&plugin, R"({"sql":"SELECT * FROM pcapfile.input"})",
+                                                               &response) != error::OK);
         ASSERT_EQ(legacy_source.poll_calls, 0);
         ASSERT_EQ(exclusive_reader.poll_calls, 1);
         ASSERT_EQ(reader_factory.release_calls, 1);
@@ -2071,8 +1888,7 @@ void TestBlockReaderFactoryLifecycle() {
         SchemaBlockChannel exclusive_reader(packet_batch, 1);
         TraversalBlockFactory legacy_factory(1);
         legacy_factory.channel = &legacy_source;
-        BlockReaderFactoryFixture reader_factory(
-            ReaderFactoryBehavior::kOwn, &exclusive_reader);
+        BlockReaderFactoryFixture reader_factory(ReaderFactoryBehavior::kOwn, &exclusive_reader);
         BlockProviderQuerier querier;
         querier.factories = {&legacy_factory};
         querier.reader_factories = {&reader_factory};
@@ -2081,9 +1897,8 @@ void TestBlockReaderFactoryLifecycle() {
 
         std::string response;
         ASSERT_TRUE(SchedulerPluginTestAccessor::HandleExecute(
-                        &plugin,
-                        R"({"sql":"SELECT * FROM pcapfile.input WHERE missing = 1"})",
-                        &response) != error::OK);
+                        &plugin, R"({"sql":"SELECT * FROM pcapfile.input WHERE missing = 1"})", &response) !=
+                    error::OK);
         ASSERT_EQ(legacy_source.poll_calls, 0);
         ASSERT_EQ(exclusive_reader.poll_calls, 0);
         ASSERT_EQ(reader_factory.create_calls, 0);
@@ -2106,13 +1921,10 @@ void TestBlockReaderFactoryLifecycle() {
         ASSERT_EQ(plugin.Load(&querier), 0);
 
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input"})",
-                      &response),
-                  error::CONFLICT);
-        ASSERT_TRUE(response.find("multiple block stream reader factories") !=
-                    std::string::npos);
+        ASSERT_EQ(
+            SchedulerPluginTestAccessor::HandleExecute(&plugin, R"({"sql":"SELECT * FROM pcapfile.input"})", &response),
+            error::CONFLICT);
+        ASSERT_TRUE(response.find("multiple block stream reader factories") != std::string::npos);
         ASSERT_EQ(legacy_source.poll_calls, 0);
         ASSERT_EQ(first_reader.poll_calls, 0);
         ASSERT_EQ(second_reader.poll_calls, 0);
@@ -2122,8 +1934,7 @@ void TestBlockReaderFactoryLifecycle() {
         ASSERT_EQ(second.live_readers, 0);
     }
 
-    for (const ReaderFactoryBehavior behavior :
-         {ReaderFactoryBehavior::kError, ReaderFactoryBehavior::kNullSuccess}) {
+    for (const ReaderFactoryBehavior behavior : {ReaderFactoryBehavior::kError, ReaderFactoryBehavior::kNullSuccess}) {
         SchemaBlockChannel legacy_source(packet_batch, 1);
         TraversalBlockFactory legacy_factory(1);
         legacy_factory.channel = &legacy_source;
@@ -2135,11 +1946,9 @@ void TestBlockReaderFactoryLifecycle() {
         ASSERT_EQ(plugin.Load(&querier), 0);
 
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input"})",
-                      &response),
-                  error::INTERNAL_ERROR);
+        ASSERT_EQ(
+            SchedulerPluginTestAccessor::HandleExecute(&plugin, R"({"sql":"SELECT * FROM pcapfile.input"})", &response),
+            error::INTERNAL_ERROR);
         ASSERT_TRUE(response.find("reader factory") != std::string::npos);
         ASSERT_EQ(legacy_source.poll_calls, 0);
         ASSERT_EQ(rejected.release_calls, 0);
@@ -2150,8 +1959,7 @@ void TestBlockReaderFactoryLifecycle() {
         SchemaBlockChannel invalid_reader(packet_batch, 1);
         TraversalBlockFactory legacy_factory(1);
         legacy_factory.channel = &legacy_source;
-        BlockReaderFactoryFixture rejected(
-            ReaderFactoryBehavior::kNonOwnerWithReader, &invalid_reader);
+        BlockReaderFactoryFixture rejected(ReaderFactoryBehavior::kNonOwnerWithReader, &invalid_reader);
         BlockProviderQuerier querier;
         querier.factories = {&legacy_factory};
         querier.reader_factories = {&rejected};
@@ -2159,11 +1967,9 @@ void TestBlockReaderFactoryLifecycle() {
         ASSERT_EQ(plugin.Load(&querier), 0);
 
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input"})",
-                      &response),
-                  error::INTERNAL_ERROR);
+        ASSERT_EQ(
+            SchedulerPluginTestAccessor::HandleExecute(&plugin, R"({"sql":"SELECT * FROM pcapfile.input"})", &response),
+            error::INTERNAL_ERROR);
         ASSERT_TRUE(response.find("reader with ENOTSUP") != std::string::npos);
         ASSERT_EQ(legacy_source.poll_calls, 0);
         ASSERT_EQ(invalid_reader.poll_calls, 0);
@@ -2182,13 +1988,10 @@ void TestBlockReaderFactoryLifecycle() {
         ASSERT_EQ(plugin.Load(&querier), 0);
 
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input"})",
-                      &response),
-                  error::INTERNAL_ERROR);
-        ASSERT_TRUE(response.find("reader factory traversal failed") !=
-                    std::string::npos);
+        ASSERT_EQ(
+            SchedulerPluginTestAccessor::HandleExecute(&plugin, R"({"sql":"SELECT * FROM pcapfile.input"})", &response),
+            error::INTERNAL_ERROR);
+        ASSERT_TRUE(response.find("reader factory traversal failed") != std::string::npos);
         ASSERT_EQ(legacy_source.poll_calls, 0);
     }
 }
@@ -2204,10 +2007,8 @@ void TestBlockSourceFilterPlanning() {
         SchemaBlockChannel exclusive_reader(pushed_input, 1);
         TraversalBlockFactory factory(1);
         factory.channel = &legacy_source;
-        BlockReaderFactoryFixture reader_factory(
-            ReaderFactoryBehavior::kOwn, &exclusive_reader);
-        SourceFilterPushdownFixture pushdown(
-            SourceFilterPushdownFixture::Behavior::kAcceptAll);
+        BlockReaderFactoryFixture reader_factory(ReaderFactoryBehavior::kOwn, &exclusive_reader);
+        SourceFilterPushdownFixture pushdown(SourceFilterPushdownFixture::Behavior::kAcceptAll);
         BlockProviderQuerier querier;
         querier.factories = {&factory};
         querier.reader_factories = {&reader_factory};
@@ -2217,18 +2018,14 @@ void TestBlockSourceFilterPlanning() {
 
         std::string response;
         ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})",
-                      &response),
+                      &plugin, R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})", &response),
                   error::OK);
         ASSERT_TRUE(response.find("\"rows\":2") != std::string::npos);
         ASSERT_EQ(pushdown.calls, 1);
         ASSERT_EQ(pushdown.observed_candidates.size(), 1u);
-        ASSERT_TRUE(pushdown.observed_schema &&
-                    pushdown.observed_schema->Equals(*packet::PacketSchema(), true));
+        ASSERT_TRUE(pushdown.observed_schema && pushdown.observed_schema->Equals(*packet::PacketSchema(), true));
         ASSERT_EQ(reader_factory.pushed_plans.size(), 1u);
-        ASSERT_TRUE(reader_factory.pushed_plans[0].find(
-                        "\"field_name\":\"captured_len\"") != std::string::npos);
+        ASSERT_TRUE(reader_factory.pushed_plans[0].find("\"field_name\":\"captured_len\"") != std::string::npos);
         ASSERT_EQ(legacy_source.poll_calls, 0);
         ASSERT_EQ(exclusive_reader.release_calls, 1);
         ASSERT_EQ(reader_factory.release_calls, 1);
@@ -2240,10 +2037,8 @@ void TestBlockSourceFilterPlanning() {
         SchemaBlockChannel exclusive_reader(pushed_input, 1);
         TraversalBlockFactory factory(1);
         factory.channel = &legacy_source;
-        BlockReaderFactoryFixture reader_factory(
-            ReaderFactoryBehavior::kOwn, &exclusive_reader);
-        SourceFilterPushdownFixture pushdown(
-            SourceFilterPushdownFixture::Behavior::kAcceptFirst);
+        BlockReaderFactoryFixture reader_factory(ReaderFactoryBehavior::kOwn, &exclusive_reader);
+        SourceFilterPushdownFixture pushdown(SourceFilterPushdownFixture::Behavior::kAcceptFirst);
         BlockProviderQuerier querier;
         querier.factories = {&factory};
         querier.reader_factories = {&reader_factory};
@@ -2252,16 +2047,12 @@ void TestBlockSourceFilterPlanning() {
         ASSERT_EQ(plugin.Load(&querier), 0);
 
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin, partial_sql, &response),
-                  error::OK);
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(&plugin, partial_sql, &response), error::OK);
         ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
         ASSERT_EQ(pushdown.observed_candidates.size(), 2u);
         ASSERT_EQ(reader_factory.pushed_plans.size(), 1u);
-        ASSERT_TRUE(reader_factory.pushed_plans[0].find(
-                        "\"field_name\":\"captured_len\"") != std::string::npos);
-        ASSERT_TRUE(reader_factory.pushed_plans[0].find(
-                        "\"field_name\":\"wire_len\"") == std::string::npos);
+        ASSERT_TRUE(reader_factory.pushed_plans[0].find("\"field_name\":\"captured_len\"") != std::string::npos);
+        ASSERT_TRUE(reader_factory.pushed_plans[0].find("\"field_name\":\"wire_len\"") == std::string::npos);
         ASSERT_EQ(exclusive_reader.release_calls, 1);
         ASSERT_EQ(reader_factory.release_calls, 1);
     }
@@ -2271,10 +2062,8 @@ void TestBlockSourceFilterPlanning() {
         SchemaBlockChannel exclusive_reader(unfiltered_input, 1);
         TraversalBlockFactory factory(1);
         factory.channel = &legacy_source;
-        BlockReaderFactoryFixture reader_factory(
-            ReaderFactoryBehavior::kOwn, &exclusive_reader);
-        SourceFilterPushdownFixture pushdown(
-            SourceFilterPushdownFixture::Behavior::kAcceptNone);
+        BlockReaderFactoryFixture reader_factory(ReaderFactoryBehavior::kOwn, &exclusive_reader);
+        SourceFilterPushdownFixture pushdown(SourceFilterPushdownFixture::Behavior::kAcceptNone);
         BlockProviderQuerier querier;
         querier.factories = {&factory};
         querier.reader_factories = {&reader_factory};
@@ -2284,14 +2073,11 @@ void TestBlockSourceFilterPlanning() {
 
         std::string response;
         ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})",
-                      &response),
+                      &plugin, R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})", &response),
                   error::OK);
         ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
         ASSERT_EQ(pushdown.calls, has_zero_owner ? 1 : 0);
-        ASSERT_EQ(reader_factory.pushed_plans,
-                  std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
+        ASSERT_EQ(reader_factory.pushed_plans, std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
         ASSERT_EQ(exclusive_reader.release_calls, 1);
         ASSERT_EQ(reader_factory.release_calls, 1);
     }
@@ -2301,8 +2087,7 @@ void TestBlockSourceFilterPlanning() {
         TraversalBlockFactory factory(1);
         factory.channel = &legacy_source;
         BlockReaderFactoryFixture non_owner(ReaderFactoryBehavior::kNonOwner);
-        SourceFilterPushdownFixture pushdown(
-            SourceFilterPushdownFixture::Behavior::kAcceptFirst);
+        SourceFilterPushdownFixture pushdown(SourceFilterPushdownFixture::Behavior::kAcceptFirst);
         BlockProviderQuerier querier;
         querier.factories = {&factory};
         querier.reader_factories = {&non_owner};
@@ -2311,9 +2096,7 @@ void TestBlockSourceFilterPlanning() {
         ASSERT_EQ(plugin.Load(&querier), 0);
 
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin, partial_sql, &response),
-                  error::OK);
+        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(&plugin, partial_sql, &response), error::OK);
         ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
         ASSERT_EQ(non_owner.pushed_plans.size(), 1u);
         ASSERT_TRUE(non_owner.pushed_plans[0] != kEmptyCanonicalFilterPlanV1);
@@ -2327,8 +2110,7 @@ void TestBlockSourceFilterPlanning() {
         TraversalBlockFactory factory(1);
         factory.channel = &legacy_source;
         BlockReaderFactoryFixture reader_factory(ReaderFactoryBehavior::kOwn);
-        SourceFilterPushdownFixture pushdown(
-            SourceFilterPushdownFixture::Behavior::kError);
+        SourceFilterPushdownFixture pushdown(SourceFilterPushdownFixture::Behavior::kError);
         BlockProviderQuerier querier;
         querier.factories = {&factory};
         querier.reader_factories = {&reader_factory};
@@ -2339,9 +2121,7 @@ void TestBlockSourceFilterPlanning() {
 
         std::string response;
         ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})",
-                      &response),
+                      &plugin, R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})", &response),
                   error::INTERNAL_ERROR);
         ASSERT_TRUE(response.find("pushdown") != std::string::npos);
         ASSERT_EQ(reader_factory.create_calls, 0);
@@ -2354,8 +2134,7 @@ void TestBlockSourceFilterPlanning() {
         SchemaBlockChannel exclusive_reader(unfiltered_input, 1);
         TraversalBlockFactory factory(1);
         factory.channel = &legacy_source;
-        BlockReaderFactoryFixture reader_factory(
-            ReaderFactoryBehavior::kOwn, &exclusive_reader);
+        BlockReaderFactoryFixture reader_factory(ReaderFactoryBehavior::kOwn, &exclusive_reader);
         BlockProviderQuerier querier;
         querier.factories = {&factory};
         querier.reader_factories = {&reader_factory};
@@ -2364,9 +2143,7 @@ void TestBlockSourceFilterPlanning() {
 
         std::string response;
         ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input USING test.missing"})",
-                      &response),
+                      &plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.missing"})", &response),
                   error::NOT_FOUND);
         ASSERT_EQ(exclusive_reader.poll_calls, 0);
         ASSERT_EQ(reader_factory.release_calls, 1);
@@ -2377,8 +2154,7 @@ void TestBlockSourceFilterPlanning() {
         SchemaBlockChannel source(unfiltered_input, 1);
         TraversalBlockFactory factory(1);
         factory.channel = &source;
-        SchedulerTransformProvider provider(
-            packet::PacketSchema(), nullptr, "source_residual_transform");
+        SchedulerTransformProvider provider(packet::PacketSchema(), nullptr, "source_residual_transform");
         provider.passthrough = true;
         BlockProviderQuerier querier;
         querier.factories = {&factory};
@@ -2394,8 +2170,7 @@ void TestBlockSourceFilterPlanning() {
                       &response),
                   error::OK);
         ASSERT_EQ(provider.release_calls, 1);
-        ASSERT_EQ(provider.released[0].process_input_rows_history,
-                  std::vector<int64_t>({1}));
+        ASSERT_EQ(provider.released[0].process_input_rows_history, std::vector<int64_t>({1}));
         ASSERT_EQ(source.release_calls, 1);
     }
 
@@ -2412,11 +2187,11 @@ void TestBlockSourceFilterPlanning() {
         ASSERT_EQ(plugin.Load(&querier), 0);
 
         std::string response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2 USING test.schema_guard"})",
-                      &response),
-                  error::OK);
+        ASSERT_EQ(
+            SchedulerPluginTestAccessor::HandleExecute(
+                &plugin, R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2 USING test.schema_guard"})",
+                &response),
+            error::OK);
         ASSERT_EQ(op.process_calls, 1);
         ASSERT_EQ(op.process_input_rows, std::vector<int64_t>({1}));
         ASSERT_EQ(source.release_calls, 1);
@@ -2424,9 +2199,8 @@ void TestBlockSourceFilterPlanning() {
 }
 
 void TestBlockTransformSchedulerPipeline() {
-    auto raw = std::make_shared<std::vector<uint8_t>>(
-        std::initializer_list<uint8_t>{0x01, 0x02, 0x03});
-    packet::PacketRecord record;
+    auto raw = std::make_shared<std::vector<uint8_t>>(std::initializer_list<uint8_t>{0x01, 0x02, 0x03});
+    flowsql::testing::PacketRecord record;
     record.meta.captured_len = static_cast<uint32_t>(raw->size());
     record.meta.wire_len = static_cast<uint32_t>(raw->size());
     record.raw_data.owner = raw;
@@ -2434,7 +2208,7 @@ void TestBlockTransformSchedulerPipeline() {
     record.raw_data.size = static_cast<uint32_t>(raw->size());
     std::shared_ptr<arrow::RecordBatch> packet_batch;
     std::string packet_error;
-    ASSERT_EQ(packet::EncodePacketBatch({record}, &packet_batch, &packet_error),
+    ASSERT_EQ(flowsql::testing::EncodePacketBatch({record}, &packet_batch, &packet_error),
               packet::PacketBatchError::kNone);
     ASSERT_TRUE(packet_batch != nullptr && packet_error.empty());
 
@@ -2450,9 +2224,7 @@ void TestBlockTransformSchedulerPipeline() {
         ASSERT_EQ(plugin.Load(&querier), 0);
         std::string response;
         ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"JSON({"sql":"SELECT * FROM pcapfile.input WHERE owned()"})JSON",
-                      &response),
+                      &plugin, R"JSON({"sql":"SELECT * FROM pcapfile.input WHERE owned()"})JSON", &response),
                   error::OK);
         ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
         ASSERT_EQ(resolver.calls, 1);
@@ -2477,9 +2249,7 @@ void TestBlockTransformSchedulerPipeline() {
         ASSERT_EQ(plugin.Load(&querier), 0);
         std::string response;
         ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})",
-                      &response),
+                      &plugin, R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2"})", &response),
                   error::OK);
         ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
         ASSERT_EQ(resolver.calls, 1);
@@ -2507,11 +2277,8 @@ void TestBlockTransformSchedulerPipeline() {
             ASSERT_EQ(plugin.Load(&querier), 0);
             std::string response;
             ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                          &plugin,
-                          R"JSON({"sql":"SELECT * FROM pcapfile.input WHERE owned()"})JSON",
-                          &response),
-                      failure_case == 1 ? error::BAD_REQUEST
-                                        : error::INTERNAL_ERROR);
+                          &plugin, R"JSON({"sql":"SELECT * FROM pcapfile.input WHERE owned()"})JSON", &response),
+                      failure_case == 1 ? error::BAD_REQUEST : error::INTERNAL_ERROR);
             ASSERT_TRUE(response.find("domain") != std::string::npos);
             ASSERT_EQ(source.poll_calls, 0);
             ASSERT_EQ(source.release_calls, 0);
@@ -2530,23 +2297,18 @@ void TestBlockTransformSchedulerPipeline() {
     std::shared_ptr<arrow::Array> protocol;
     ASSERT_TRUE(score_builder.Finish(&score).ok());
     ASSERT_TRUE(protocol_builder.Finish(&protocol).ok());
-    auto output_batch = arrow::RecordBatch::Make(
-        output_schema, 2, {score, protocol});
+    auto output_batch = arrow::RecordBatch::Make(output_schema, 2, {score, protocol});
 
     {
         SchemaBlockChannel priority_source(packet_batch, 1);
         TraversalBlockFactory priority_factory(1);
         priority_factory.channel = &priority_source;
-        SchedulerTransformProvider v1_provider(
-            output_schema, output_batch, "version_preferred");
-        SchedulerTimeTransformProvider v2_provider(
-            output_schema, output_batch, "version_preferred");
+        SchedulerTransformProvider v1_provider(output_schema, output_batch, "version_preferred");
+        SchedulerTimeTransformProvider v2_provider(output_schema, output_batch, "version_preferred");
         BlockProviderQuerier priority_querier;
         priority_querier.factories = {&priority_factory};
-        priority_querier.transforms = {
-            static_cast<IBlockTransformOperatorV1*>(&v1_provider)};
-        priority_querier.time_transforms = {
-            static_cast<IBlockTransformOperatorV2*>(&v2_provider)};
+        priority_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&v1_provider)};
+        priority_querier.time_transforms = {static_cast<IBlockTransformOperatorV2*>(&v2_provider)};
         SchedulerPlugin priority_plugin;
         ASSERT_EQ(priority_plugin.Load(&priority_querier), 0);
 
@@ -2556,8 +2318,7 @@ void TestBlockTransformSchedulerPipeline() {
                       R"({"sql":"SELECT * FROM pcapfile.input USING test.version_preferred WHERE score >= 10"})",
                       &priority_response),
                   error::OK);
-        ASSERT_TRUE(priority_response.find("\"status\":\"stopped\"") !=
-                    std::string::npos);
+        ASSERT_TRUE(priority_response.find("\"status\":\"stopped\"") != std::string::npos);
         ASSERT_TRUE(priority_response.find("\"rows\":2") != std::string::npos);
         ASSERT_EQ(priority_source.poll_calls, 0);
         ASSERT_EQ(priority_querier.time_transform_traverse_calls, 1);
@@ -2566,10 +2327,8 @@ void TestBlockTransformSchedulerPipeline() {
         ASSERT_EQ(v2_provider.create_calls, 2);
         ASSERT_EQ(v2_provider.release_calls, 2);
         ASSERT_EQ(v2_provider.live_tasks, 0);
-        ASSERT_EQ(v2_provider.config_struct_sizes,
-                  std::vector<uint32_t>(2, kBlockTransformTaskConfigV2Size));
-        ASSERT_EQ(v2_provider.contract_versions,
-                  std::vector<uint32_t>(2, kBlockTransformContractVersionV2));
+        ASSERT_EQ(v2_provider.config_struct_sizes, std::vector<uint32_t>(2, kBlockTransformTaskConfigV2Size));
+        ASSERT_EQ(v2_provider.contract_versions, std::vector<uint32_t>(2, kBlockTransformContractVersionV2));
         ASSERT_EQ(v2_provider.released.size(), 2u);
         ASSERT_EQ(v2_provider.released[0].state_calls, 0);
         ASSERT_EQ(v2_provider.released[0].time_calls, 0);
@@ -2584,28 +2343,23 @@ void TestBlockTransformSchedulerPipeline() {
         SchemaBlockChannel mixed_source(packet_batch, 1);
         TraversalBlockFactory mixed_factory(1);
         mixed_factory.channel = &mixed_source;
-        SchedulerTimeTransformProvider time_provider(
-            output_schema, output_batch, "mixed_time");
-        SchedulerTransformProvider v1_provider(
-            output_schema, nullptr, "mixed_v1");
+        SchedulerTimeTransformProvider time_provider(output_schema, output_batch, "mixed_time");
+        SchedulerTransformProvider v1_provider(output_schema, nullptr, "mixed_v1");
         v1_provider.passthrough = true;
         BlockProviderQuerier mixed_querier;
         mixed_querier.factories = {&mixed_factory};
-        mixed_querier.time_transforms = {
-            static_cast<IBlockTransformOperatorV2*>(&time_provider)};
-        mixed_querier.transforms = {
-            static_cast<IBlockTransformOperatorV1*>(&v1_provider)};
+        mixed_querier.time_transforms = {static_cast<IBlockTransformOperatorV2*>(&time_provider)};
+        mixed_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&v1_provider)};
         SchedulerPlugin mixed_plugin;
         ASSERT_EQ(mixed_plugin.Load(&mixed_querier), 0);
 
         std::string mixed_response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &mixed_plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input USING test.mixed_time THEN test.mixed_v1"})",
-                      &mixed_response),
-                  error::OK);
-        ASSERT_TRUE(mixed_response.find("\"status\":\"stopped\"") !=
-                    std::string::npos);
+        ASSERT_EQ(
+            SchedulerPluginTestAccessor::HandleExecute(
+                &mixed_plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.mixed_time THEN test.mixed_v1"})",
+                &mixed_response),
+            error::OK);
+        ASSERT_TRUE(mixed_response.find("\"status\":\"stopped\"") != std::string::npos);
         ASSERT_TRUE(mixed_response.find("\"rows\":2") != std::string::npos);
         ASSERT_EQ(mixed_source.poll_calls, 0);
         ASSERT_EQ(time_provider.create_calls, 2);
@@ -2623,14 +2377,11 @@ void TestBlockTransformSchedulerPipeline() {
         SchemaBlockChannel dynamic_time_source(packet_batch, 1);
         TraversalBlockFactory dynamic_time_factory(1);
         dynamic_time_factory.channel = &dynamic_time_source;
-        SchedulerTimeTransformProvider dynamic_time_provider(
-            output_schema, output_batch, "dynamic_time");
-        DynamicBlockTransformRegistry dynamic_time_registry(
-            &dynamic_time_provider);
+        SchedulerTimeTransformProvider dynamic_time_provider(output_schema, output_batch, "dynamic_time");
+        DynamicBlockTransformRegistry dynamic_time_registry(&dynamic_time_provider);
         BlockProviderQuerier dynamic_time_querier;
         dynamic_time_querier.factories = {&dynamic_time_factory};
-        dynamic_time_querier.cpp_operator_registries = {
-            &dynamic_time_registry};
+        dynamic_time_querier.cpp_operator_registries = {&dynamic_time_registry};
         SchedulerPlugin dynamic_time_plugin;
         ASSERT_EQ(dynamic_time_plugin.Load(&dynamic_time_querier), 0);
 
@@ -2640,8 +2391,7 @@ void TestBlockTransformSchedulerPipeline() {
                       R"({"sql":"SELECT * FROM pcapfile.input USING test.dynamic_time WHERE score >= 10"})",
                       &dynamic_time_response),
                   error::OK);
-        ASSERT_TRUE(dynamic_time_response.find("\"status\":\"stopped\"") !=
-                    std::string::npos);
+        ASSERT_TRUE(dynamic_time_response.find("\"status\":\"stopped\"") != std::string::npos);
         ASSERT_EQ(dynamic_time_source.poll_calls, 0);
         ASSERT_EQ(dynamic_time_registry.acquire_calls, 1);
         ASSERT_EQ(dynamic_time_registry.successful_acquires, 1);
@@ -2657,31 +2407,23 @@ void TestBlockTransformSchedulerPipeline() {
         SchemaBlockChannel duplicate_time_source(packet_batch, 1);
         TraversalBlockFactory duplicate_time_factory(1);
         duplicate_time_factory.channel = &duplicate_time_source;
-        SchedulerTimeTransformProvider first_time_provider(
-            output_schema, output_batch, "duplicate_time");
-        SchedulerTimeTransformProvider second_time_provider(
-            output_schema, output_batch, "duplicate_time");
-        SchedulerTransformProvider fallback_provider(
-            output_schema, output_batch, "duplicate_time");
+        SchedulerTimeTransformProvider first_time_provider(output_schema, output_batch, "duplicate_time");
+        SchedulerTimeTransformProvider second_time_provider(output_schema, output_batch, "duplicate_time");
+        SchedulerTransformProvider fallback_provider(output_schema, output_batch, "duplicate_time");
         BlockProviderQuerier duplicate_time_querier;
         duplicate_time_querier.factories = {&duplicate_time_factory};
-        duplicate_time_querier.time_transforms = {
-            static_cast<IBlockTransformOperatorV2*>(&first_time_provider),
-            static_cast<IBlockTransformOperatorV2*>(&second_time_provider)};
-        duplicate_time_querier.transforms = {
-            static_cast<IBlockTransformOperatorV1*>(&fallback_provider)};
+        duplicate_time_querier.time_transforms = {static_cast<IBlockTransformOperatorV2*>(&first_time_provider),
+                                                  static_cast<IBlockTransformOperatorV2*>(&second_time_provider)};
+        duplicate_time_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&fallback_provider)};
         SchedulerPlugin duplicate_time_plugin;
         ASSERT_EQ(duplicate_time_plugin.Load(&duplicate_time_querier), 0);
 
         std::string duplicate_time_response;
         ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &duplicate_time_plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input USING test.duplicate_time"})",
+                      &duplicate_time_plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.duplicate_time"})",
                       &duplicate_time_response),
                   error::CONFLICT);
-        ASSERT_TRUE(duplicate_time_response.find(
-                        "multiple block transform operators matched") !=
-                    std::string::npos);
+        ASSERT_TRUE(duplicate_time_response.find("multiple block transform operators matched") != std::string::npos);
         ASSERT_EQ(duplicate_time_source.poll_calls, 0);
         ASSERT_EQ(first_time_provider.create_calls, 0);
         ASSERT_EQ(second_time_provider.create_calls, 0);
@@ -2693,30 +2435,23 @@ void TestBlockTransformSchedulerPipeline() {
         SchemaBlockChannel invalid_time_source(packet_batch, 1);
         TraversalBlockFactory invalid_time_factory(1);
         invalid_time_factory.channel = &invalid_time_source;
-        SchedulerTimeTransformProvider invalid_time_provider(
-            output_schema, output_batch, "invalid_time_lease");
-        DynamicBlockTransformRegistry invalid_time_registry(
-            &invalid_time_provider);
+        SchedulerTimeTransformProvider invalid_time_provider(output_schema, output_batch, "invalid_time_lease");
+        DynamicBlockTransformRegistry invalid_time_registry(&invalid_time_provider);
         invalid_time_registry.return_invalid_lease = true;
-        SchedulerTransformProvider fallback_provider(
-            output_schema, output_batch, "invalid_time_lease");
+        SchedulerTransformProvider fallback_provider(output_schema, output_batch, "invalid_time_lease");
         BlockProviderQuerier invalid_time_querier;
         invalid_time_querier.factories = {&invalid_time_factory};
-        invalid_time_querier.transforms = {
-            static_cast<IBlockTransformOperatorV1*>(&fallback_provider)};
-        invalid_time_querier.cpp_operator_registries = {
-            &invalid_time_registry};
+        invalid_time_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&fallback_provider)};
+        invalid_time_querier.cpp_operator_registries = {&invalid_time_registry};
         SchedulerPlugin invalid_time_plugin;
         ASSERT_EQ(invalid_time_plugin.Load(&invalid_time_querier), 0);
 
         std::string invalid_time_response;
         ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &invalid_time_plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input USING test.invalid_time_lease"})",
+                      &invalid_time_plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.invalid_time_lease"})",
                       &invalid_time_response),
                   error::INTERNAL_ERROR);
-        ASSERT_TRUE(invalid_time_response.find("operator discovery failed") !=
-                    std::string::npos);
+        ASSERT_TRUE(invalid_time_response.find("operator discovery failed") != std::string::npos);
         ASSERT_EQ(invalid_time_source.poll_calls, 0);
         ASSERT_EQ(invalid_time_registry.acquire_calls, 1);
         ASSERT_EQ(invalid_time_provider.create_calls, 0);
@@ -2867,13 +2602,13 @@ void TestBlockTransformSchedulerPipeline() {
     ASSERT_EQ(plugin.Load(&querier), 0);
 
     std::string response;
-    ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                  &plugin,
-                  R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2 )"
-                  R"(USING test.stage_transform WITH mode=fast )"
-                  R"(WHERE score >= 10 AND protocol = 'HTTP'"})",
-                  &response),
-              error::OK);
+    ASSERT_EQ(
+        SchedulerPluginTestAccessor::HandleExecute(&plugin,
+                                                   R"({"sql":"SELECT * FROM pcapfile.input WHERE captured_len >= 2 )"
+                                                   R"(USING test.stage_transform WITH mode=fast )"
+                                                   R"(WHERE score >= 10 AND protocol = 'HTTP'"})",
+                                                   &response),
+        error::OK);
     ASSERT_TRUE(response.find("\"status\":\"completed\"") != std::string::npos);
     ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
     ASSERT_TRUE(response.find("HTTP") != std::string::npos);
@@ -2885,20 +2620,16 @@ void TestBlockTransformSchedulerPipeline() {
     ASSERT_EQ(querier.filter_pushdown_traverse_calls, 2);
     ASSERT_EQ(querier.filter_domain_resolver_traverse_calls, 2);
     ASSERT_EQ(provider.pushdown_calls, 2);
-    ASSERT_TRUE(provider.observed_output_schema != nullptr &&
-                provider.observed_output_schema->Equals(output_schema));
+    ASSERT_TRUE(provider.observed_output_schema != nullptr && provider.observed_output_schema->Equals(output_schema));
     ASSERT_EQ(provider.observed_candidates, std::vector<uint32_t>({2, 5}));
     ASSERT_EQ(provider.create_calls, 2);
     ASSERT_EQ(provider.release_calls, 2);
     ASSERT_EQ(provider.live_tasks, 0);
     ASSERT_EQ(provider.pushed_plans.size(), 2u);
     ASSERT_EQ(provider.pushed_plans[0], std::string(kEmptyCanonicalFilterPlanV1));
-    ASSERT_TRUE(provider.pushed_plans[1].find("\"field_name\":\"score\"") !=
-                std::string::npos);
-    ASSERT_TRUE(provider.pushed_plans[1].find("\"field_name\":\"protocol\"") ==
-                std::string::npos);
-    ASSERT_TRUE(provider.with_params[0].find("\"mode\":\"fast\"") !=
-                std::string::npos);
+    ASSERT_TRUE(provider.pushed_plans[1].find("\"field_name\":\"score\"") != std::string::npos);
+    ASSERT_TRUE(provider.pushed_plans[1].find("\"field_name\":\"protocol\"") == std::string::npos);
+    ASSERT_TRUE(provider.with_params[0].find("\"mode\":\"fast\"") != std::string::npos);
     ASSERT_EQ(provider.released.size(), 2u);
     ASSERT_EQ(provider.released[0].open_calls, 1);
     ASSERT_EQ(provider.released[0].process_calls, 0);
@@ -2915,21 +2646,18 @@ void TestBlockTransformSchedulerPipeline() {
     SchedulerTransformProvider unfiltered_provider(output_schema, output_batch);
     BlockProviderQuerier unfiltered_querier;
     unfiltered_querier.factories = {&factory};
-    unfiltered_querier.transforms = {
-        static_cast<IBlockTransformOperatorV1*>(&unfiltered_provider)};
+    unfiltered_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&unfiltered_provider)};
     SchedulerPlugin unfiltered_plugin;
     ASSERT_EQ(unfiltered_plugin.Load(&unfiltered_querier), 0);
-    ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                  &unfiltered_plugin,
-                  R"({"sql":"SELECT * FROM pcapfile.input USING test.stage_transform"})",
-                  &response),
-              error::OK);
+    ASSERT_EQ(
+        SchedulerPluginTestAccessor::HandleExecute(
+            &unfiltered_plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.stage_transform"})", &response),
+        error::OK);
     ASSERT_TRUE(response.find("\"rows\":2") != std::string::npos);
     ASSERT_EQ(unfiltered_provider.create_calls, 1);
     ASSERT_EQ(unfiltered_provider.release_calls, 1);
     ASSERT_EQ(unfiltered_provider.pushdown_calls, 0);
-    ASSERT_EQ(unfiltered_provider.pushed_plans,
-              std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
+    ASSERT_EQ(unfiltered_provider.pushed_plans, std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
     ASSERT_EQ(unfiltered_provider.released[0].open_calls, 1);
     ASSERT_EQ(unfiltered_provider.released[0].process_calls, 1);
     ASSERT_EQ(unfiltered_provider.released[0].flush_calls, 1);
@@ -2940,18 +2668,15 @@ void TestBlockTransformSchedulerPipeline() {
     SchedulerTransformProvider invalid_provider(output_schema, output_batch);
     BlockProviderQuerier invalid_querier;
     invalid_querier.factories = {&factory};
-    invalid_querier.transforms = {
-        static_cast<IBlockTransformOperatorV1*>(&invalid_provider)};
+    invalid_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&invalid_provider)};
     SchedulerPlugin invalid_plugin;
     ASSERT_EQ(invalid_plugin.Load(&invalid_querier), 0);
     ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
                   &invalid_plugin,
-                  R"({"sql":"SELECT * FROM pcapfile.input USING test.stage_transform WHERE missing = 1"})",
-                  &response),
+                  R"({"sql":"SELECT * FROM pcapfile.input USING test.stage_transform WHERE missing = 1"})", &response),
               error::BAD_REQUEST);
     ASSERT_TRUE(response.find("unknown field") != std::string::npos);
-    ASSERT_TRUE(response.find("\"error_stage\":\"capability_check\"") !=
-                std::string::npos);
+    ASSERT_TRUE(response.find("\"error_stage\":\"capability_check\"") != std::string::npos);
     ASSERT_EQ(invalid_source.poll_calls, 0);
     ASSERT_EQ(invalid_provider.create_calls, 1);
     ASSERT_EQ(invalid_provider.release_calls, 1);
@@ -2965,19 +2690,15 @@ void TestBlockTransformSchedulerPipeline() {
     });
     BlockProviderQuerier changed_schema_querier;
     changed_schema_querier.factories = {&factory};
-    changed_schema_querier.transforms = {
-        static_cast<IBlockTransformOperatorV1*>(&changed_schema_provider)};
-    changed_schema_querier.filter_pushdowns = {
-        static_cast<IFilterPushdownV1*>(&changed_schema_provider)};
+    changed_schema_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&changed_schema_provider)};
+    changed_schema_querier.filter_pushdowns = {static_cast<IFilterPushdownV1*>(&changed_schema_provider)};
     SchedulerPlugin changed_schema_plugin;
     ASSERT_EQ(changed_schema_plugin.Load(&changed_schema_querier), 0);
     ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
                   &changed_schema_plugin,
-                  R"({"sql":"SELECT * FROM pcapfile.input USING test.stage_transform WHERE score >= 10"})",
-                  &response),
+                  R"({"sql":"SELECT * FROM pcapfile.input USING test.stage_transform WHERE score >= 10"})", &response),
               error::INTERNAL_ERROR);
-    ASSERT_TRUE(response.find("differs from its planning Schema") !=
-                std::string::npos);
+    ASSERT_TRUE(response.find("differs from its planning Schema") != std::string::npos);
     ASSERT_EQ(changed_schema_source.poll_calls, 0);
     ASSERT_EQ(changed_schema_provider.create_calls, 2);
     ASSERT_EQ(changed_schema_provider.release_calls, 2);
@@ -2989,27 +2710,22 @@ void TestBlockTransformSchedulerPipeline() {
     SchedulerTransformProvider traversal_provider(output_schema, output_batch);
     BlockProviderQuerier traversal_querier;
     traversal_querier.factories = {&factory};
-    traversal_querier.transforms = {
-        static_cast<IBlockTransformOperatorV1*>(&traversal_provider)};
+    traversal_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&traversal_provider)};
     traversal_querier.transform_traverse_return_code = EIO;
     SchedulerPlugin traversal_plugin;
     ASSERT_EQ(traversal_plugin.Load(&traversal_querier), 0);
     ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                  &traversal_plugin,
-                  R"({"sql":"SELECT * FROM pcapfile.input USING test.stage_transform"})",
-                  &response),
+                  &traversal_plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.stage_transform"})", &response),
               error::INTERNAL_ERROR);
     ASSERT_TRUE(response.find("operator discovery failed") != std::string::npos);
-    ASSERT_TRUE(response.find("\"error_stage\":\"capability_check\"") !=
-                std::string::npos);
+    ASSERT_TRUE(response.find("\"error_stage\":\"capability_check\"") != std::string::npos);
     ASSERT_EQ(traversal_source.poll_calls, 0);
     ASSERT_EQ(traversal_provider.create_calls, 0);
 }
 
 void TestMultiBlockTransformSchedulerPipeline() {
-    auto raw = std::make_shared<std::vector<uint8_t>>(
-        std::initializer_list<uint8_t>{0x10, 0x20, 0x30});
-    packet::PacketRecord record;
+    auto raw = std::make_shared<std::vector<uint8_t>>(std::initializer_list<uint8_t>{0x10, 0x20, 0x30});
+    flowsql::testing::PacketRecord record;
     record.meta.captured_len = static_cast<uint32_t>(raw->size());
     record.meta.wire_len = static_cast<uint32_t>(raw->size());
     record.raw_data.owner = raw;
@@ -3017,7 +2733,7 @@ void TestMultiBlockTransformSchedulerPipeline() {
     record.raw_data.size = static_cast<uint32_t>(raw->size());
     std::shared_ptr<arrow::RecordBatch> packet_batch;
     std::string packet_error;
-    ASSERT_EQ(packet::EncodePacketBatch({record}, &packet_batch, &packet_error),
+    ASSERT_EQ(flowsql::testing::EncodePacketBatch({record}, &packet_batch, &packet_error),
               packet::PacketBatchError::kNone);
     ASSERT_TRUE(packet_batch != nullptr && packet_error.empty());
 
@@ -3025,8 +2741,7 @@ void TestMultiBlockTransformSchedulerPipeline() {
         arrow::field("score", arrow::int32(), false),
         arrow::field("protocol", arrow::utf8(), false),
     });
-    auto make_stage_batch = [&](const std::vector<int32_t>& scores,
-                                const std::vector<std::string>& protocols) {
+    auto make_stage_batch = [&](const std::vector<int32_t>& scores, const std::vector<std::string>& protocols) {
         ASSERT_EQ(scores.size(), protocols.size());
         arrow::Int32Builder score_builder;
         arrow::StringBuilder protocol_builder;
@@ -3036,8 +2751,7 @@ void TestMultiBlockTransformSchedulerPipeline() {
         std::shared_ptr<arrow::Array> protocol;
         ASSERT_TRUE(score_builder.Finish(&score).ok());
         ASSERT_TRUE(protocol_builder.Finish(&protocol).ok());
-        return arrow::RecordBatch::Make(
-            stage_schema, static_cast<int64_t>(scores.size()), {score, protocol});
+        return arrow::RecordBatch::Make(stage_schema, static_cast<int64_t>(scores.size()), {score, protocol});
     };
     auto http_batch = make_stage_batch({20}, {"HTTP"});
     auto drop_dns_batch = make_stage_batch({20, 20}, {"DROP", "DNS"});
@@ -3048,14 +2762,12 @@ void TestMultiBlockTransformSchedulerPipeline() {
     TraversalBlockFactory factory(1);
     factory.channel = &source;
     std::vector<std::string> events;
-    SchedulerTransformProvider first_provider(
-        stage_schema, http_batch, "first_transform");
+    SchedulerTransformProvider first_provider(stage_schema, http_batch, "first_transform");
     first_provider.configured_process_outputs = {http_batch, drop_dns_batch};
     first_provider.configured_flush_outputs = {flush1_batch};
     first_provider.event_label = "first";
     first_provider.events = &events;
-    SchedulerTransformProvider second_provider(
-        stage_schema, nullptr, "second_transform");
+    SchedulerTransformProvider second_provider(stage_schema, nullptr, "second_transform");
     second_provider.passthrough = true;
     second_provider.accept_first_candidate = false;
     second_provider.process_result = static_cast<int>(BlockTransformStatusV1::kStop);
@@ -3108,30 +2820,23 @@ void TestMultiBlockTransformSchedulerPipeline() {
     ASSERT_EQ(second_provider.release_calls, 2);
     ASSERT_EQ(second_provider.live_tasks, 0);
     ASSERT_EQ(first_provider.pushed_plans[0], std::string(kEmptyCanonicalFilterPlanV1));
-    ASSERT_TRUE(first_provider.pushed_plans[1].find("\"field_name\":\"score\"") !=
-                std::string::npos);
-    ASSERT_TRUE(first_provider.pushed_plans[1].find("\"field_name\":\"protocol\"") ==
-                std::string::npos);
+    ASSERT_TRUE(first_provider.pushed_plans[1].find("\"field_name\":\"score\"") != std::string::npos);
+    ASSERT_TRUE(first_provider.pushed_plans[1].find("\"field_name\":\"protocol\"") == std::string::npos);
     ASSERT_EQ(second_provider.pushed_plans,
-              std::vector<std::string>({kEmptyCanonicalFilterPlanV1,
-                                        kEmptyCanonicalFilterPlanV1}));
-    ASSERT_TRUE(first_provider.with_params[1].find("\"mode\":\"first\"") !=
-                std::string::npos);
-    ASSERT_TRUE(second_provider.with_params[1].find("\"mode\":\"second\"") !=
-                std::string::npos);
+              std::vector<std::string>({kEmptyCanonicalFilterPlanV1, kEmptyCanonicalFilterPlanV1}));
+    ASSERT_TRUE(first_provider.with_params[1].find("\"mode\":\"first\"") != std::string::npos);
+    ASSERT_TRUE(second_provider.with_params[1].find("\"mode\":\"second\"") != std::string::npos);
 
     ASSERT_TRUE(first_provider.released[0].opened_input_schema->Equals(packet::PacketSchema()));
     ASSERT_TRUE(first_provider.released[1].opened_input_schema->Equals(packet::PacketSchema()));
     ASSERT_TRUE(second_provider.released[0].opened_input_schema->Equals(stage_schema));
     ASSERT_TRUE(second_provider.released[1].opened_input_schema->Equals(stage_schema));
     ASSERT_EQ(first_provider.released[0].cancel_calls, 1);
-    ASSERT_EQ(first_provider.released[1].process_input_rows_history,
-              std::vector<int64_t>({1}));
+    ASSERT_EQ(first_provider.released[1].process_input_rows_history, std::vector<int64_t>({1}));
     ASSERT_EQ(first_provider.released[1].flush_calls, 1);
     ASSERT_EQ(first_provider.released[1].cancel_calls, 0);
     ASSERT_EQ(second_provider.released[0].cancel_calls, 1);
-    ASSERT_EQ(second_provider.released[1].process_input_rows_history,
-              std::vector<int64_t>({1, 1, 1}));
+    ASSERT_EQ(second_provider.released[1].process_input_rows_history, std::vector<int64_t>({1, 1, 1}));
     ASSERT_EQ(second_provider.released[1].flush_calls, 1);
     ASSERT_EQ(second_provider.released[1].cancel_calls, 0);
     ASSERT_TRUE(events.size() >= 3);
@@ -3141,10 +2846,8 @@ void TestMultiBlockTransformSchedulerPipeline() {
 
     SchemaBlockChannel failing_source(packet_batch, 1);
     factory.channel = &failing_source;
-    SchedulerTransformProvider before_failure(
-        stage_schema, http_batch, "before_failure");
-    SchedulerTransformProvider failing_provider(
-        stage_schema, nullptr, "failing_transform");
+    SchedulerTransformProvider before_failure(stage_schema, http_batch, "before_failure");
+    SchedulerTransformProvider failing_provider(stage_schema, nullptr, "failing_transform");
     failing_provider.passthrough = true;
     failing_provider.process_result = -EIO;
     BlockProviderQuerier failing_querier;
@@ -3155,11 +2858,10 @@ void TestMultiBlockTransformSchedulerPipeline() {
     };
     SchedulerPlugin failing_plugin;
     ASSERT_EQ(failing_plugin.Load(&failing_querier), 0);
-    ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                  &failing_plugin,
-                  R"({"sql":"SELECT * FROM pcapfile.input )"
-                  R"(USING test.before_failure THEN test.failing_transform"})",
-                  &response),
+    ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(&failing_plugin,
+                                                         R"({"sql":"SELECT * FROM pcapfile.input )"
+                                                         R"(USING test.before_failure THEN test.failing_transform"})",
+                                                         &response),
               error::INTERNAL_ERROR);
     ASSERT_TRUE(response.find("\"error_stage\":\"execute\"") != std::string::npos);
     ASSERT_EQ(failing_source.poll_calls, 1);
@@ -3197,7 +2899,9 @@ int main() {
     const std::vector<std::string> sink_keys = {sink_key};
 
     std::string reason;
-    ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::TryBeginStreamChannelMutation(&plugin, source_key, &reason), 0);
+    ASSERT_EQ(
+        flowsql::scheduler::SchedulerPluginTestAccessor::TryBeginStreamChannelMutation(&plugin, source_key, &reason),
+        0);
     ASSERT_TRUE(reason.empty());
 
     std::string conflict_key;
@@ -3218,7 +2922,9 @@ int main() {
     ASSERT_TRUE(!blocked_by_mutation);
 
     reason.clear();
-    ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::TryBeginStreamChannelMutation(&plugin, source_key, &reason), EBUSY);
+    ASSERT_EQ(
+        flowsql::scheduler::SchedulerPluginTestAccessor::TryBeginStreamChannelMutation(&plugin, source_key, &reason),
+        EBUSY);
     ASSERT_EQ(reason, "in_use");
 
     flowsql::scheduler::SchedulerPluginTestAccessor::ReleaseStreamTaskLeases(&plugin, "stream_task_2");
@@ -3228,31 +2934,16 @@ int main() {
     conflict_key.clear();
     blocked_by_mutation = false;
     ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::TryAcquireStreamTaskLeases(
-                  &plugin,
-                  "stream_group_node_1",
-                  source_keys,
-                  sink_keys,
-                  &conflict_key,
-                  &blocked_by_mutation,
+                  &plugin, "stream_group_node_1", source_keys, sink_keys, &conflict_key, &blocked_by_mutation,
                   "stream_group_1"),
               0);
     ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::TryAcquireStreamTaskLeases(
-                  &plugin,
-                  "stream_group_node_2",
-                  source_keys,
-                  sink_keys,
-                  &conflict_key,
-                  &blocked_by_mutation,
+                  &plugin, "stream_group_node_2", source_keys, sink_keys, &conflict_key, &blocked_by_mutation,
                   "stream_group_1"),
               0);
     conflict_key.clear();
     ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::TryAcquireStreamTaskLeases(
-                  &plugin,
-                  "stream_group_other",
-                  source_keys,
-                  sink_keys,
-                  &conflict_key,
-                  &blocked_by_mutation,
+                  &plugin, "stream_group_other", source_keys, sink_keys, &conflict_key, &blocked_by_mutation,
                   "stream_group_2"),
               EBUSY);
     ASSERT_EQ(conflict_key, source_key);
@@ -3262,50 +2953,36 @@ int main() {
     // TOCTOU version guard: stale snapshot should be rejected with EAGAIN.
     const std::vector<std::string> lease_keys = {source_key, sink_key};
     std::unordered_map<std::string, uint64_t> snapshot_before;
-    flowsql::scheduler::SchedulerPluginTestAccessor::CaptureStreamChannelVersionSnapshot(
-        &plugin, lease_keys, &snapshot_before);
+    flowsql::scheduler::SchedulerPluginTestAccessor::CaptureStreamChannelVersionSnapshot(&plugin, lease_keys,
+                                                                                         &snapshot_before);
     const uint64_t baseline_version = snapshot_before[source_key];
 
     reason.clear();
-    ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::TryBeginStreamChannelMutation(
-                  &plugin, source_key, &reason),
-              0);
+    ASSERT_EQ(
+        flowsql::scheduler::SchedulerPluginTestAccessor::TryBeginStreamChannelMutation(&plugin, source_key, &reason),
+        0);
     flowsql::scheduler::SchedulerPluginTestAccessor::EndStreamChannelMutation(&plugin, source_key);
 
     std::string version_conflict_key;
     conflict_key.clear();
     blocked_by_mutation = false;
     ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::TryAcquireStreamTaskLeases(
-                  &plugin,
-                  "stream_task_version_old",
-                  source_keys,
-                  sink_keys,
-                  &conflict_key,
-                  &blocked_by_mutation,
-                  "",
-                  &snapshot_before,
-                  &version_conflict_key),
+                  &plugin, "stream_task_version_old", source_keys, sink_keys, &conflict_key, &blocked_by_mutation, "",
+                  &snapshot_before, &version_conflict_key),
               EAGAIN);
     ASSERT_EQ(conflict_key, source_key);
     ASSERT_EQ(version_conflict_key, source_key);
 
     std::unordered_map<std::string, uint64_t> snapshot_after;
-    flowsql::scheduler::SchedulerPluginTestAccessor::CaptureStreamChannelVersionSnapshot(
-        &plugin, lease_keys, &snapshot_after);
+    flowsql::scheduler::SchedulerPluginTestAccessor::CaptureStreamChannelVersionSnapshot(&plugin, lease_keys,
+                                                                                         &snapshot_after);
     ASSERT_EQ(snapshot_after[source_key], baseline_version + 1u);
     conflict_key.clear();
     version_conflict_key.clear();
     blocked_by_mutation = false;
     ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::TryAcquireStreamTaskLeases(
-                  &plugin,
-                  "stream_task_version_new",
-                  source_keys,
-                  sink_keys,
-                  &conflict_key,
-                  &blocked_by_mutation,
-                  "",
-                  &snapshot_after,
-                  &version_conflict_key),
+                  &plugin, "stream_task_version_new", source_keys, sink_keys, &conflict_key, &blocked_by_mutation, "",
+                  &snapshot_after, &version_conflict_key),
               0);
     flowsql::scheduler::SchedulerPluginTestAccessor::ReleaseStreamTaskLeases(&plugin, "stream_task_version_new");
 
@@ -3323,13 +3000,13 @@ int main() {
             ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::AcquireStreamExecutionLease(
                           &plugin, &plan, &lease_token, &lease_err),
                       0);
-            ASSERT_TRUE(flowsql::scheduler::SchedulerPluginTestAccessor::HasTaskLease(
-                &plugin, "stream_task_raii_no_commit"));
+            ASSERT_TRUE(
+                flowsql::scheduler::SchedulerPluginTestAccessor::HasTaskLease(&plugin, "stream_task_raii_no_commit"));
             ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::ChannelRefCount(&plugin, source_key), 1u);
             ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::ChannelRefCount(&plugin, sink_key), 1u);
         }
-        ASSERT_TRUE(!flowsql::scheduler::SchedulerPluginTestAccessor::HasTaskLease(
-            &plugin, "stream_task_raii_no_commit"));
+        ASSERT_TRUE(
+            !flowsql::scheduler::SchedulerPluginTestAccessor::HasTaskLease(&plugin, "stream_task_raii_no_commit"));
         ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::ChannelRefCount(&plugin, source_key), 0u);
         ASSERT_EQ(flowsql::scheduler::SchedulerPluginTestAccessor::ChannelRefCount(&plugin, sink_key), 0u);
     }
@@ -3350,24 +3027,21 @@ int main() {
                       0);
             lease_token.Commit();
         }
-        ASSERT_TRUE(flowsql::scheduler::SchedulerPluginTestAccessor::HasTaskLease(
-            &plugin, "stream_task_raii_commit"));
-        flowsql::scheduler::SchedulerPluginTestAccessor::ReleaseStreamTaskLeases(
-            &plugin, "stream_task_raii_commit");
-        ASSERT_TRUE(!flowsql::scheduler::SchedulerPluginTestAccessor::HasTaskLease(
-            &plugin, "stream_task_raii_commit"));
+        ASSERT_TRUE(flowsql::scheduler::SchedulerPluginTestAccessor::HasTaskLease(&plugin, "stream_task_raii_commit"));
+        flowsql::scheduler::SchedulerPluginTestAccessor::ReleaseStreamTaskLeases(&plugin, "stream_task_raii_commit");
+        ASSERT_TRUE(!flowsql::scheduler::SchedulerPluginTestAccessor::HasTaskLease(&plugin, "stream_task_raii_commit"));
     }
 
     // Managed channel owner should remain alive after map erase if caller holds shared owner.
     {
         const std::string managed_key = "stream.test_managed";
-        auto managed = std::make_shared<flowsql::scheduler::DummyChannel>(
-            "stream", "test_managed", flowsql::ChannelType::kStream);
+        auto managed =
+            std::make_shared<flowsql::scheduler::DummyChannel>("stream", "test_managed", flowsql::ChannelType::kStream);
         flowsql::scheduler::SchedulerPluginTestAccessor::RegisterChannel(&plugin, managed_key, managed);
 
         std::shared_ptr<flowsql::IChannel> owner;
-        flowsql::IChannel* raw = flowsql::scheduler::SchedulerPluginTestAccessor::FindChannelWithOwner(
-            &plugin, managed_key, &owner);
+        flowsql::IChannel* raw =
+            flowsql::scheduler::SchedulerPluginTestAccessor::FindChannelWithOwner(&plugin, managed_key, &owner);
         ASSERT_TRUE(raw != nullptr);
         ASSERT_TRUE(owner != nullptr);
         ASSERT_EQ(raw, owner.get());
@@ -3386,10 +3060,7 @@ int main() {
 
         std::atomic<int> submit_calls{0};
         flowsql::scheduler::StreamTaskGroup group(
-            "g_stop",
-            "g_stop",
-            nodes,
-            0,
+            "g_stop", "g_stop", nodes, 0,
             [&submit_calls](const std::string&, const std::string&, std::string* runtime_task_id, std::string*) {
                 submit_calls.fetch_add(1);
                 if (runtime_task_id) *runtime_task_id = "node_rt";
@@ -3422,10 +3093,7 @@ int main() {
         nodes.push_back(n1);
 
         flowsql::scheduler::StreamTaskGroup group(
-            "g_cancel",
-            "g_cancel",
-            nodes,
-            0,
+            "g_cancel", "g_cancel", nodes, 0,
             [](const std::string&, const std::string&, std::string* runtime_task_id, std::string*) {
                 if (runtime_task_id) *runtime_task_id = "node_rt";
                 return 0;
@@ -3457,19 +3125,15 @@ int main() {
 
         std::atomic<bool> stop_called{false};
         flowsql::scheduler::StreamTaskGroup group(
-            "g_timeout",
-            "g_timeout",
-            nodes,
-            1,
+            "g_timeout", "g_timeout", nodes, 1,
             [](const std::string&, const std::string&, std::string* runtime_task_id, std::string*) {
                 if (runtime_task_id) *runtime_task_id = "node_rt";
                 return 0;
             },
             [&stop_called](const std::string&, flowsql::scheduler::TaskSnapshot* out) {
                 if (!out) return EINVAL;
-                out->status = stop_called.load()
-                                  ? flowsql::scheduler::StreamTaskStatus::kStopped
-                                  : flowsql::scheduler::StreamTaskStatus::kRunning;
+                out->status = stop_called.load() ? flowsql::scheduler::StreamTaskStatus::kStopped
+                                                 : flowsql::scheduler::StreamTaskStatus::kRunning;
                 return 0;
             },
             [&stop_called](const std::string&) { stop_called.store(true); });
@@ -3493,10 +3157,7 @@ int main() {
 
         std::atomic<bool> submit_entered{false};
         flowsql::scheduler::StreamTaskGroup group(
-            "g_snapshot_latency",
-            "g_snapshot_latency",
-            nodes,
-            0,
+            "g_snapshot_latency", "g_snapshot_latency", nodes, 0,
             [&submit_entered](const std::string&, const std::string&, std::string* runtime_task_id, std::string*) {
                 submit_entered.store(true, std::memory_order_release);
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -3525,8 +3186,8 @@ int main() {
 
         const auto begin = std::chrono::steady_clock::now();
         const auto snapshot_mid = group.Snapshot();
-        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - begin).count();
+        const auto elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
         ASSERT_EQ(snapshot_mid.nodes.size(), 1u);
         ASSERT_TRUE(elapsed_ms < 120);
 
@@ -3550,12 +3211,8 @@ int main() {
         hub_opts.overflow_policy = flowsql::OverflowPolicy::kDrop;
         hub_opts.ring_mode = flowsql::RingMode::SPSC;
         auto hub = std::make_shared<flowsql::scheduler::SharedSourceHub>(
-            "shared_cap_hub",
-            flowsql::scheduler::SharedHubMode::kDynamic,
-            "ring.shared_cap_src",
-            std::vector<std::string>{"ring.shared_cap_src"},
-            source,
-            hub_opts);
+            "shared_cap_hub", flowsql::scheduler::SharedHubMode::kDynamic, "ring.shared_cap_src",
+            std::vector<std::string>{"ring.shared_cap_src"}, source, hub_opts);
 
         constexpr int kThreads = 16;
         std::atomic<int> success_count{0};
@@ -3566,13 +3223,7 @@ int main() {
         for (int i = 0; i < kThreads; ++i) {
             workers.emplace_back([i, &hub, &success_count, &busy_count, &unexpected_rc]() {
                 std::string err_msg;
-                const int rc = hub->AddSubscriber(
-                    "runtime_sub_" + std::to_string(i),
-                    "",
-                    true,
-                    nullptr,
-                    &err_msg,
-                    1);
+                const int rc = hub->AddSubscriber("runtime_sub_" + std::to_string(i), "", true, nullptr, &err_msg, 1);
                 if (rc == 0) {
                     success_count.fetch_add(1, std::memory_order_relaxed);
                 } else if (rc == EBUSY) {
@@ -3605,25 +3256,23 @@ int main() {
         auto new_task = std::make_shared<flowsql::scheduler::StreamTask>("runtime_new", &runtime);
         new_task->SetFailedOnce(EIO, "new failed");
 
-        flowsql::scheduler::SchedulerPluginTestAccessor::AddStreamTaskRuntime(
-            &retention_plugin, "runtime_old", old_task);
-        flowsql::scheduler::SchedulerPluginTestAccessor::AddStreamTaskRuntime(
-            &retention_plugin, "runtime_new", new_task);
-        flowsql::scheduler::SchedulerPluginTestAccessor::MarkRuntimeTerminal(
-            &retention_plugin, "runtime_old", "single");
+        flowsql::scheduler::SchedulerPluginTestAccessor::AddStreamTaskRuntime(&retention_plugin, "runtime_old",
+                                                                              old_task);
+        flowsql::scheduler::SchedulerPluginTestAccessor::AddStreamTaskRuntime(&retention_plugin, "runtime_new",
+                                                                              new_task);
+        flowsql::scheduler::SchedulerPluginTestAccessor::MarkRuntimeTerminal(&retention_plugin, "runtime_old",
+                                                                             "single");
         std::this_thread::sleep_for(std::chrono::milliseconds(3));
-        flowsql::scheduler::SchedulerPluginTestAccessor::MarkRuntimeTerminal(
-            &retention_plugin, "runtime_new", "single");
-        flowsql::scheduler::SchedulerPluginTestAccessor::TouchRuntimeAccess(
-            &retention_plugin, "runtime_old");
-        flowsql::scheduler::SchedulerPluginTestAccessor::TouchRuntimeAccess(
-            &retention_plugin, "runtime_new");
+        flowsql::scheduler::SchedulerPluginTestAccessor::MarkRuntimeTerminal(&retention_plugin, "runtime_new",
+                                                                             "single");
+        flowsql::scheduler::SchedulerPluginTestAccessor::TouchRuntimeAccess(&retention_plugin, "runtime_old");
+        flowsql::scheduler::SchedulerPluginTestAccessor::TouchRuntimeAccess(&retention_plugin, "runtime_new");
 
         flowsql::scheduler::SchedulerPluginTestAccessor::SweepRuntimeRetainedObjects(&retention_plugin);
-        ASSERT_TRUE(!flowsql::scheduler::SchedulerPluginTestAccessor::HasStreamTaskRuntime(
-            &retention_plugin, "runtime_old"));
-        ASSERT_TRUE(flowsql::scheduler::SchedulerPluginTestAccessor::HasStreamTaskRuntime(
-            &retention_plugin, "runtime_new"));
+        ASSERT_TRUE(
+            !flowsql::scheduler::SchedulerPluginTestAccessor::HasStreamTaskRuntime(&retention_plugin, "runtime_old"));
+        ASSERT_TRUE(
+            flowsql::scheduler::SchedulerPluginTestAccessor::HasStreamTaskRuntime(&retention_plugin, "runtime_new"));
     }
 
     // Scheduler runtime retention: group GC should cleanup related runtime indexes.
@@ -3637,10 +3286,7 @@ int main() {
         n1.sql = "SELECT 1";
         nodes.push_back(n1);
         auto group = std::make_shared<flowsql::scheduler::StreamTaskGroup>(
-            "runtime_group_old",
-            "runtime_group_old",
-            nodes,
-            0,
+            "runtime_group_old", "runtime_group_old", nodes, 0,
             [](const std::string&, const std::string&, std::string* runtime_task_id, std::string*) {
                 if (runtime_task_id) *runtime_task_id = "node_rt";
                 return 0;
@@ -3653,27 +3299,24 @@ int main() {
             [](const std::string&) {});
         group->MarkExternalFailed(EIO, "group failed", "STREAM_GROUP_EXTERNAL_FAILED");
 
-        flowsql::scheduler::SchedulerPluginTestAccessor::AddStreamGroupRuntime(
-            &retention_plugin, "runtime_group_old", group);
-        flowsql::scheduler::SchedulerPluginTestAccessor::AddGroupNodeOwner(
-            &retention_plugin, "runtime_group_node_old", "runtime_group_old");
-        flowsql::scheduler::SchedulerPluginTestAccessor::AddGroupNodeSources(
-            &retention_plugin, "runtime_group_old");
-        flowsql::scheduler::SchedulerPluginTestAccessor::AddGroupShareSnapshot(
-            &retention_plugin, "runtime_group_old");
-        flowsql::scheduler::SchedulerPluginTestAccessor::MarkRuntimeTerminal(
-            &retention_plugin, "runtime_group_old", "group", 1);
+        flowsql::scheduler::SchedulerPluginTestAccessor::AddStreamGroupRuntime(&retention_plugin, "runtime_group_old",
+                                                                               group);
+        flowsql::scheduler::SchedulerPluginTestAccessor::AddGroupNodeOwner(&retention_plugin, "runtime_group_node_old",
+                                                                           "runtime_group_old");
+        flowsql::scheduler::SchedulerPluginTestAccessor::AddGroupNodeSources(&retention_plugin, "runtime_group_old");
+        flowsql::scheduler::SchedulerPluginTestAccessor::AddGroupShareSnapshot(&retention_plugin, "runtime_group_old");
+        flowsql::scheduler::SchedulerPluginTestAccessor::MarkRuntimeTerminal(&retention_plugin, "runtime_group_old",
+                                                                             "group", 1);
 
-        flowsql::scheduler::SchedulerPluginTestAccessor::SweepRuntimeRetainedObjects(
-            &retention_plugin, 1000);
-        ASSERT_TRUE(!flowsql::scheduler::SchedulerPluginTestAccessor::HasStreamGroupRuntime(
-            &retention_plugin, "runtime_group_old"));
-        ASSERT_TRUE(!flowsql::scheduler::SchedulerPluginTestAccessor::HasGroupNodeOwner(
-            &retention_plugin, "runtime_group_node_old"));
-        ASSERT_TRUE(!flowsql::scheduler::SchedulerPluginTestAccessor::HasGroupNodeSources(
-            &retention_plugin, "runtime_group_old"));
-        ASSERT_TRUE(!flowsql::scheduler::SchedulerPluginTestAccessor::HasGroupShareSnapshot(
-            &retention_plugin, "runtime_group_old"));
+        flowsql::scheduler::SchedulerPluginTestAccessor::SweepRuntimeRetainedObjects(&retention_plugin, 1000);
+        ASSERT_TRUE(!flowsql::scheduler::SchedulerPluginTestAccessor::HasStreamGroupRuntime(&retention_plugin,
+                                                                                            "runtime_group_old"));
+        ASSERT_TRUE(!flowsql::scheduler::SchedulerPluginTestAccessor::HasGroupNodeOwner(&retention_plugin,
+                                                                                        "runtime_group_node_old"));
+        ASSERT_TRUE(!flowsql::scheduler::SchedulerPluginTestAccessor::HasGroupNodeSources(&retention_plugin,
+                                                                                          "runtime_group_old"));
+        ASSERT_TRUE(!flowsql::scheduler::SchedulerPluginTestAccessor::HasGroupShareSnapshot(&retention_plugin,
+                                                                                            "runtime_group_old"));
     }
 
     std::puts("=== Scheduler mutation guard tests passed ===");

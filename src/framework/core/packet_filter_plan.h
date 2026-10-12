@@ -17,7 +17,7 @@ constexpr uint32_t kPcapFilterPlanVersion = 1;
 
 struct PacketIpKey {
     AddressFamily family = AddressFamily::kNone;
-    uint32_t ipv4_network_order = 0;
+    uint32_t ipv4_value = 0;
     std::array<uint8_t, 16> ipv6{};
 };
 

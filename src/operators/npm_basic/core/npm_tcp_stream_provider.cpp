@@ -110,7 +110,7 @@ void NpmTcpStreamProvider::Initialize(Span<const NpmTcpStreamRegistration> regis
 }
 
 NpmTcpStreamProvider::Entries::iterator NpmTcpStreamProvider::AddSession(const NpmSessionView& session) {
-    const uint64_t charge = sizeof(Entries::value_type) + 4 * sizeof(void*) + session.key->input_namespace.size() + 1;
+    const uint64_t charge = sizeof(Entries::value_type) + 4 * sizeof(void*) + session.key->OwnedKeyBytes();
     Reserve(charge);
     try {
         Entry entry;
@@ -148,7 +148,7 @@ void NpmTcpStreamProvider::SaveFailure(const NpmTcpStreamSharedDirection& direct
 int NpmTcpStreamProvider::OnPacket(const NpmPacketView& packet, const NpmSessionView& session) {
     if (aborted_ || (cancellation_requested_ && cancellation_requested_->load(std::memory_order_acquire)))
         return ECANCELED;
-    if (!session.key || session.key->transport_protocol != 6 || !packet.transport.tcp.valid) return 0;
+    if (!session.key || session.key->Protocol() != 6 || !packet.transport.tcp.valid) return 0;
     const auto& tcp = packet.transport.tcp;
     if (!tcp.syn && !tcp.fin && !tcp.rst && packet.transport.payload_wire_bytes == 0) return 0;
     scratch_.clear();

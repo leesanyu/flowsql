@@ -30,7 +30,7 @@ enum class NpmSessionPacketError : uint8_t {
 
 /** Owns the normalized key and borrows payload bytes from the current packet callback. */
 struct NpmSessionPacketBinding {
-    NpmSessionKey key;
+    NpmOwnedSessionKey key;
     NpmPacketDirection direction = NpmPacketDirection::kAToB;
     Span<const uint8_t> payload;
     NpmTransportPacketFacts transport;
@@ -39,12 +39,12 @@ struct NpmSessionPacketBinding {
 
 /** Validates network bounds and normalizes control protocol metadata and exposes a body without a port session. */
 NpmSessionPacketError BuildNpmControlInput(const NpmObservationDomainMap&, const packet::PacketView&,
-                                           packet::PacketLayerInfo&, NpmInputEventV1*);
+                                           packet::PacketFamilyLayerView&, NpmInputEventV1*);
 
 /** Builds one packet-to-session binding. Output remains unchanged on every error. */
 NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap& domain_map,
                                                    const packet::PacketView& packet,
-                                                   const packet::PacketLayerInfo& layer,
+                                                   const packet::PacketFamilyLayerView& layer,
                                                    NpmSessionPacketBinding* output);
 
 }  // namespace flowsql::npm

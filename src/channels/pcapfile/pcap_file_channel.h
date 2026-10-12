@@ -42,9 +42,7 @@ struct PcapFileSourceConfig {
     uint32_t replay_speed_milli = 1000;
 };
 
-int ParsePcapFileSourceConfig(const std::string& option,
-                              PcapFileSourceConfig* out,
-                              std::string* normalized,
+int ParsePcapFileSourceConfig(const std::string& option, PcapFileSourceConfig* out, std::string* normalized,
                               std::string* error);
 
 class PcapFileReader;
@@ -74,8 +72,7 @@ class PcapFileChannel final : public IBlockStreamChannel {
     const std::string& Option() const { return normalized_option_; }
     void SetNormalizedOption(std::string option) { normalized_option_ = std::move(option); }
     PacketHeaderFilterResult EvaluateHeaderFilter(const packet::PacketMeta& meta) const;
-    bool EvaluateDecodedFilter(const packet::PacketMeta& meta,
-                               const packet::PacketLayerInfo& layer) const;
+    bool EvaluateDecodedFilter(const packet::PacketMeta& meta, const packet::PacketFamilyLayerView& layer) const;
 
  private:
     std::string name_;
@@ -119,14 +116,13 @@ class PcapFilePlugin final : public IPlugin,
     int AddChannel(const std::string& type, const std::string& name, const std::string& option) override;
     int ModifyChannel(const std::string& type, const std::string& name, const std::string& option) override;
     int RemoveChannel(const std::string& type, const std::string& name) override;
-    void QueryChannels(std::function<void(const std::string&, const std::string&, const std::string&, const std::string&)> callback) override;
-    int CreateReader(const BlockStreamReaderConfigV1& config,
-                     IBlockStreamChannel** reader) override;
+    void QueryChannels(
+        std::function<void(const std::string&, const std::string&, const std::string&, const std::string&)> callback)
+        override;
+    int CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** reader) override;
     void ReleaseReader(IBlockStreamChannel* reader) override;
-    int Resolve(const FilterDomainResolveRequestV1& request,
-                FilterDomainResolveResultV1* result) const override;
-    int EvaluatePushdown(const FilterPushdownRequestV1& request,
-                         FilterPushdownResultV1* result) const override;
+    int Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const override;
+    int EvaluatePushdown(const FilterPushdownRequestV1& request, FilterPushdownResultV1* result) const override;
 
  private:
     struct ReaderSession {
@@ -139,9 +135,8 @@ class PcapFilePlugin final : public IPlugin,
 
     static std::string MakeKey(const std::string& type, const std::string& name);
     int StopChannelsLocked();
-    int BuildChannel(const std::string& name, const std::string& option,
-                     std::shared_ptr<PcapFileChannel>* out, std::string* error,
-                     std::shared_ptr<const packet::PcapFilterPlan> filter_plan = {});
+    int BuildChannel(const std::string& name, const std::string& option, std::shared_ptr<PcapFileChannel>* out,
+                     std::string* error, std::shared_ptr<const packet::PcapFilterPlan> filter_plan = {});
 
     IQuerier* querier_ = nullptr;
     IProtocol* protocol_ = nullptr;

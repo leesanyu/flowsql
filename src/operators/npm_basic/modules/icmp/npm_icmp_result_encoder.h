@@ -12,7 +12,8 @@ class MemoryPool;
 
 namespace flowsql::npm {
 
-int EmitNpmIcmpEventV1(const NpmIcmpEventV1& event, const std::shared_ptr<INpmTaskBudget>& budget,
+template <typename Address>
+int EmitNpmIcmpEventV1(const NpmIcmpFamilyEvent<Address>& event, const std::shared_ptr<INpmTaskBudget>& budget,
                        INpmResultEmitterV1& emitter, arrow::MemoryPool* pool = nullptr);
 
 }  // namespace flowsql::npm

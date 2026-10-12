@@ -69,7 +69,7 @@ NpmProtocolContext::~NpmProtocolContext() {
     if (pool_ != nullptr && pipeno_ >= 0) pool_->Release(pipeno_);
 }
 
-packet::IPacketProtocolIdentifier* NpmProtocolContext::Identifier() { return &identifier_; }
+packet::IPacketFamilyProtocolIdentifier* NpmProtocolContext::Identifier() { return &identifier_; }
 
 protocol::IDictionary* NpmProtocolContext::Dictionary() const { return dictionary_; }
 

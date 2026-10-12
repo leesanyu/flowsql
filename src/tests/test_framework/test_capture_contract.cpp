@@ -1,6 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <tests/common/packet_family_test_support.h>
+
 #include <framework/core/capture_progress_tracker.h>
 #include <framework/core/capture_reader_state.h>
 #include <framework/core/pipeline.h>
@@ -24,7 +26,7 @@ namespace {
 
 std::shared_ptr<arrow::RecordBatch> MakePacketBatch(uint32_t captured_bytes, uint32_t source_id = 0,
                                                     uint64_t sequence = 1, int64_t timestamp_ns = 10) {
-    packet::PacketRecord record;
+    flowsql::testing::PacketRecord record;
     record.meta.timestamp_ns = timestamp_ns;
     record.meta.captured_len = captured_bytes;
     record.meta.wire_len = captured_bytes;
@@ -37,7 +39,7 @@ std::shared_ptr<arrow::RecordBatch> MakePacketBatch(uint32_t captured_bytes, uin
     record.raw_data.size = captured_bytes;
     record.layer.status = packet::LayerStatus::kTruncated;
     std::shared_ptr<arrow::RecordBatch> batch;
-    assert(packet::EncodePacketBatch({record}, &batch) == packet::PacketBatchError::kNone);
+    assert(flowsql::testing::EncodePacketBatch({record}, &batch) == packet::PacketBatchError::kNone);
     return batch;
 }
 

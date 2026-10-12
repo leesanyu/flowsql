@@ -60,7 +60,7 @@ int NpmBasicPeriodicStats::OnPacket(const NpmPacketView& packet, const NpmSessio
     try {
         auto found = states_.find(view.session_id);
         if (found == states_.end()) {
-            const uint64_t charge = sizeof(State) + 192 + view.key->input_namespace.size();
+            const uint64_t charge = sizeof(State) + 192 + view.key->OwnedKeyBytes();
             if (budget_->Reserve(NpmBudgetCategory::kModuleState, charge) != NpmBudgetError::kNone)
                 return Fail("Basic periodic state budget exceeded");
             try {
@@ -139,12 +139,11 @@ int NpmBasicPeriodicStats::Emit(State& state, bool complete, bool final, int64_t
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
                 .count();
     }
-    NpmBasicResult result;
-    auto error = final ? projector_.ProjectFinal(view, state.snapshot.end_reason, observed_at, &result)
-                       : projector_.ProjectActive(view, observed_at, &result);
+    int rc = 0;
+    auto error = projector_.ProjectAndWrite(
+        view, observed_at, final ? std::optional<NpmSessionEndReason>(state.snapshot.end_reason) : std::nullopt, writer,
+        &rc, period);
     if (error != NpmBasicProjectionError::kNone) return Fail("Basic periodic projection failed");
-    result.period = period;
-    const int rc = writer.WriteBasic(result);
     if (rc != 0) return Fail("Basic periodic consumer failed");
     if (found != state.buckets.end()) {
         state.buckets.erase(found);
@@ -178,8 +177,8 @@ int NpmBasicPeriodicStats::OnSessionEnd(const NpmSessionView& view, NpmSessionEn
     state.snapshot.first_ns = view.first_ns;
     state.snapshot.end_reason = reason;
     if (reason == NpmSessionEndReason::kIdleTimeout) {
-        state.end_ns = End(view.last_ns, view.key->transport_protocol == 6 ? config_.tcp_idle_timeout_ns
-                                                                           : config_.udp_idle_timeout_ns);
+        state.end_ns =
+            End(view.last_ns, view.key->Protocol() == 6 ? config_.tcp_idle_timeout_ns : config_.udp_idle_timeout_ns);
     } else if (reason == NpmSessionEndReason::kTupleReuse) {
         state.end_ns = std::max(view.last_ns, observed_at);
     } else if (reason == NpmSessionEndReason::kEof) {

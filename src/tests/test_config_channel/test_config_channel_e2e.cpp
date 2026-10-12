@@ -1,8 +1,10 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#include <common/loader.hpp>
+#include <tests/common/packet_family_test_support.h>
+
 #include <framework/interfaces/iconfig_channel_registry.h>
+#include <common/loader.hpp>
 
 #ifdef FLOWSQL_CONFIG_LABELING_E2E
 #include <arrow/api.h>
@@ -108,8 +110,8 @@ class Runtime {
         web_port_ = ReservePort();
         while (web_port_ == gateway_port || web_port_ == router_port) web_port_ = ReservePort();
         const std::string gateway = "host=127.0.0.1;port=" + std::to_string(gateway_port);
-        const std::string router = "host=127.0.0.1;port=" + std::to_string(router_port) +
-                                   ";gateway=127.0.0.1:" + std::to_string(gateway_port);
+        const std::string router =
+            "host=127.0.0.1;port=" + std::to_string(router_port) + ";gateway=127.0.0.1:" + std::to_string(gateway_port);
         const std::string config = "db_path=" + (root / "config.db").string();
         const std::string web = "host=127.0.0.1;port=" + std::to_string(web_port_) +
                                 ";gateway=127.0.0.1:" + std::to_string(gateway_port) +
@@ -172,8 +174,8 @@ class Runtime {
     }
 
     flowsql::IConfigChannelRegistryV1* Registry() const {
-        auto* registry = static_cast<flowsql::IConfigChannelRegistryV1*>(
-            loader_->First(flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1));
+        auto* registry =
+            static_cast<flowsql::IConfigChannelRegistryV1*>(loader_->First(flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1));
         assert(registry);
         return registry;
     }
@@ -281,8 +283,8 @@ std::string FlowLabelingConfig(uint32_t label_id) {
            "          max: 443\n";
 }
 
-flowsql::packet::PacketRecord MakeTcpPacket(const char* source, uint16_t source_port, const char* destination,
-                                            uint16_t destination_port, int64_t timestamp_ns, uint64_t sequence) {
+flowsql::testing::PacketRecord MakeTcpPacket(const char* source, uint16_t source_port, const char* destination,
+                                             uint16_t destination_port, int64_t timestamp_ns, uint64_t sequence) {
     auto bytes = std::make_shared<std::vector<uint8_t>>(sizeof(flowsql::Ipv4Header) + sizeof(flowsql::TcpHeader));
     auto* ip = reinterpret_cast<flowsql::Ipv4Header*>(bytes->data());
     ip->version = 4;
@@ -297,7 +299,7 @@ flowsql::packet::PacketRecord MakeTcpPacket(const char* source, uint16_t source_
     tcp->offset = 5;
     tcp->flags.flags_bit.ack = 1;
 
-    flowsql::packet::PacketRecord record;
+    flowsql::testing::PacketRecord record;
     record.meta.timestamp_ns = timestamp_ns;
     record.meta.captured_len = static_cast<uint32_t>(bytes->size());
     record.meta.wire_len = record.meta.captured_len;
@@ -314,8 +316,7 @@ flowsql::packet::PacketRecord MakeTcpPacket(const char* source, uint16_t source_
     record.layer.network_layer_index = 0;
     record.layer.transport_layer_index = 1;
     record.layer.payload_offset = static_cast<uint32_t>(bytes->size());
-    record.layer.src_ip = flowsql::wire::ToAnalysis(ip->src_addr);
-    record.layer.dst_ip = flowsql::wire::ToAnalysis(ip->dst_addr);
+    record.layer.SetEndpoints(flowsql::wire::ToAnalysis(ip->src_addr), flowsql::wire::ToAnalysis(ip->dst_addr));
     record.layer.transport_protocol = flowsql::ipv4::eNext::TCP;
     record.layer.src_port = source_port;
     record.layer.dst_port = destination_port;
@@ -324,14 +325,14 @@ flowsql::packet::PacketRecord MakeTcpPacket(const char* source, uint16_t source_
 }
 
 std::shared_ptr<arrow::RecordBatch> LabelingInput() {
-    const std::vector<flowsql::packet::PacketRecord> records = {
+    const std::vector<flowsql::testing::PacketRecord> records = {
         MakeTcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, 100, 1),
         MakeTcpPacket("198.51.100.2", 443, "192.0.2.1", 50000, 200, 2),
         MakeTcpPacket("192.0.2.9", 50001, "198.51.100.2", 80, 300, 3),
     };
     std::shared_ptr<arrow::RecordBatch> batch;
     std::string error;
-    assert(flowsql::packet::EncodePacketBatch(records, &batch, &error) == flowsql::packet::PacketBatchError::kNone);
+    assert(flowsql::testing::EncodePacketBatch(records, &batch, &error) == flowsql::packet::PacketBatchError::kNone);
     assert(batch != nullptr && error.empty());
     return batch;
 }
@@ -350,7 +351,8 @@ void RunPublishedLabelingTask(Runtime* runtime, const char* reference, uint32_t 
 
     const std::string task_id = std::string("config-labeling-") + reference;
     const std::string with_json =
-        std::string(R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"basic,labeling",)") +
+        std::string(
+            R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"basic,labeling","observing":"basic_ipv4",)") +
         R"("parameters":"{\"schema_version\":1,\"core\":{\"labeling\":\")" + reference + R"(\"}}"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
     flowsql::BlockTransformTaskConfigV1 config;
@@ -361,7 +363,7 @@ void RunPublishedLabelingTask(Runtime* runtime, const char* reference, uint32_t 
     assert(provider->CreateTask(config, &task) == 0 && task != nullptr);
     std::shared_ptr<arrow::Schema> output_schema;
     assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
-    assert(output_schema != nullptr && output_schema->GetFieldIndex("primary_label_id") == 17);
+    assert(output_schema != nullptr && output_schema->GetFieldByName("primary_label_id") != nullptr);
 
     std::vector<flowsql::BlockTransformOutputV1> outputs;
     assert(task->ProcessBlock(LabelingInput(), 1, &outputs) ==
@@ -370,7 +372,7 @@ void RunPublishedLabelingTask(Runtime* runtime, const char* reference, uint32_t 
     assert(task->Flush(&outputs) == 0 && outputs.size() == 1);
     const auto& output = outputs[0].batch;
     assert(output != nullptr && output->num_rows() == 2);
-    auto labels = std::static_pointer_cast<arrow::UInt32Array>(output->column(17));
+    auto labels = std::static_pointer_cast<arrow::UInt32Array>(output->GetColumnByName("primary_label_id"));
     assert(labels != nullptr && labels->null_count() == 0);
     assert(labels->Value(0) == expected_label && labels->Value(1) == 0);
 
@@ -414,13 +416,12 @@ void Seed(const fs::path& root) {
         std::string error;
         assert(runtime.Registry()->Resolve("config.rules@2", &current, &error) == 0);
         assert(runtime.Registry()->Resolve("config.rules@3", &current, &error) == ENOENT);
-        assert(Parse(runtime.Post("publish", PublishRequest("rules", 2, R"({"value":1})", "json", 1)))
-                   ["revision"].GetUint64() == 3);
-        for (const auto& [name, format, content] : {
-                 std::tuple{"yaml-rules", "yaml", "value: 1\n"},
-                 std::tuple{"xml-rules", "xml", "<root><value>1</value></root>"}}) {
-            assert(Parse(runtime.Post("publish", PublishRequest(name, 0, content, format)))
-                       ["revision"].GetUint64() == 1);
+        assert(Parse(runtime.Post("publish", PublishRequest("rules", 2, R"({"value":1})", "json", 1)))["revision"]
+                   .GetUint64() == 3);
+        for (const auto& [name, format, content] : {std::tuple{"yaml-rules", "yaml", "value: 1\n"},
+                                                    std::tuple{"xml-rules", "xml", "<root><value>1</value></root>"}}) {
+            assert(Parse(runtime.Post("publish", PublishRequest(name, 0, content, format)))["revision"].GetUint64() ==
+                   1);
         }
         const std::string max_content = "\"" + std::string(kMaxContentBytes - 2, 'x') + "\"";
         const auto maximum_result = Parse(runtime.Post("publish", PublishRequest("maximum", 0, max_content)));
@@ -486,8 +487,7 @@ void Recover(const fs::path& root) {
     BoundTask task;
     task.Open(runtime.Registry());
     assert(task.ProcessEvent() == 1 && task.resolve_calls == 1);
-    assert(Parse(runtime.Post("publish", PublishRequest("rules", 3, R"({"value":4})")))
-               ["revision"].GetUint64() == 4);
+    assert(Parse(runtime.Post("publish", PublishRequest("rules", 3, R"({"value":4})")))["revision"].GetUint64() == 4);
     assert(runtime.Post("resolve", SnapshotRequest(1)) == Read(root / "revision-1"));
     for (int event = 0; event < 1000; ++event) assert(task.ProcessEvent() == 1);
     assert(task.resolve_calls == 1);
@@ -510,9 +510,12 @@ void RunChild(const fs::path& root, const char* phase) {
 
 int main(int argc, char** argv) {
     if (argc == 3) {
-        if (std::string(argv[1]) == "seed") Seed(argv[2]);
-        else if (std::string(argv[1]) == "recover") Recover(argv[2]);
-        else return 2;
+        if (std::string(argv[1]) == "seed")
+            Seed(argv[2]);
+        else if (std::string(argv[1]) == "recover")
+            Recover(argv[2]);
+        else
+            return 2;
         return 0;
     }
     char pattern[] = "/tmp/flowsql-config-e2e-XXXXXX";

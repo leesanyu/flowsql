@@ -4,7 +4,7 @@
 #include "pcap_file_channel.h"
 
 #include <common/log.h>
-#include <framework/core/packet_codec.h>
+#include <framework/core/packet_family_codec.h>
 #include <plugins/npi/packet_decoder.h>
 
 #include <arrow/api.h>
@@ -15,8 +15,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <chrono>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -57,21 +57,16 @@ packet::PacketMeta CaptureMeta(const CaptureRecord& capture) {
 }
 
 uint16_t Read16(const uint8_t* p, bool little) {
-    return little ? static_cast<uint16_t>(p[0] | (p[1] << 8))
-                  : static_cast<uint16_t>((p[0] << 8) | p[1]);
+    return little ? static_cast<uint16_t>(p[0] | (p[1] << 8)) : static_cast<uint16_t>((p[0] << 8) | p[1]);
 }
 
 uint32_t Read32(const uint8_t* p, bool little) {
     if (little) {
-        return static_cast<uint32_t>(p[0]) |
-               (static_cast<uint32_t>(p[1]) << 8) |
-               (static_cast<uint32_t>(p[2]) << 16) |
+        return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
                (static_cast<uint32_t>(p[3]) << 24);
     }
-    return (static_cast<uint32_t>(p[0]) << 24) |
-           (static_cast<uint32_t>(p[1]) << 16) |
-           (static_cast<uint32_t>(p[2]) << 8) |
-           static_cast<uint32_t>(p[3]);
+    return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
 }
 
 uint64_t Read64(const uint8_t* p, bool little) {
@@ -84,9 +79,7 @@ uint64_t Read64(const uint8_t* p, bool little) {
     return value;
 }
 
-int64_t ReadSigned64(const uint8_t* p, bool little) {
-    return static_cast<int64_t>(Read64(p, little));
-}
+int64_t ReadSigned64(const uint8_t* p, bool little) { return static_cast<int64_t>(Read64(p, little)); }
 
 bool IsMagic(const uint8_t* p, std::initializer_list<uint8_t> bytes) {
     size_t i = 0;
@@ -124,9 +117,8 @@ int64_t TimestampNs(uint64_t ticks, uint8_t exponent, bool binary, int64_t offse
 }
 
 std::string Lower(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value;
 }
 
@@ -140,10 +132,10 @@ class PcapLayerAdapter final {
  public:
     explicit PcapLayerAdapter(IProtocol* protocol) : decoder_(protocol) {}
 
-    packet::PacketLayerInfo Decode(const packet::PacketView& view) {
-        return decoder_.Decode(view, packet::LayerDecodeOptions{
-            packet::kExtractMac | packet::kExtractIp | packet::kExtractPort,
-            packet::EndpointScope::kInnermost});
+    int Decode(const packet::PacketView& view, packet::PacketFamilyBatch& batch, packet::PacketFamilyRecord* record) {
+        return decoder_.Decode(
+            view, {packet::kExtractMac | packet::kExtractIp | packet::kExtractPort, packet::EndpointScope::kInnermost},
+            batch, record);
     }
 
  private:
@@ -164,9 +156,7 @@ class PcapFileReader {
         }
     }
 
-    int Next(const packet::PcapFilterPlan& filter_plan,
-             CaptureRecord* output,
-             std::string* error) {
+    int Next(const packet::PcapFilterPlan& filter_plan, CaptureRecord* output, std::string* error) {
         if (!output) return EINVAL;
         try {
             return kind_ == Kind::kPcap ? NextClassic(filter_plan, output, error)
@@ -307,9 +297,7 @@ class PcapFileReader {
         return 0;
     }
 
-    int NextClassic(const packet::PcapFilterPlan& filter_plan,
-                    CaptureRecord* output,
-                    std::string* error) {
+    int NextClassic(const packet::PcapFilterPlan& filter_plan, CaptureRecord* output, std::string* error) {
         if (Remaining() == 0) return 0;
         std::array<uint8_t, 16> header{};
         if (ReadExact(header.data(), header.size(), "pcap record header is truncated", error) != 0) return EIO;
@@ -332,15 +320,14 @@ class PcapFileReader {
         output->source_id = 0;
         output->sequence = sequence_;
         const bool rejected =
-            EvaluatePcapHeaderFilter(filter_plan, CaptureMeta(*output)) ==
-            PacketHeaderFilterResult::kReject;
+            EvaluatePcapHeaderFilter(filter_plan, CaptureMeta(*output)) == PacketHeaderFilterResult::kReject;
         int payload_rc = 0;
         if (rejected) {
             payload_rc = SkipExact(captured, "pcap packet bytes are truncated", error);
         } else {
             output->bytes.resize(captured);
-            payload_rc = ReadExact(output->bytes.data(), output->bytes.size(),
-                                   "pcap packet bytes are truncated", error);
+            payload_rc =
+                ReadExact(output->bytes.data(), output->bytes.size(), "pcap packet bytes are truncated", error);
         }
         if (payload_rc != 0) return EIO;
         ++sequence_;
@@ -471,10 +458,8 @@ class PcapFileReader {
         return 0;
     }
 
-    int ReadPcapngPacket(const PcapngBlockHeader& header,
-                         const packet::PcapFilterPlan& filter_plan,
-                         CaptureRecord* output,
-                         std::string* error) {
+    int ReadPcapngPacket(const PcapngBlockHeader& header, const packet::PcapFilterPlan& filter_plan,
+                         CaptureRecord* output, std::string* error) {
         if (header.total < 32) return SetError(error, "pcapng enhanced packet block is truncated");
         std::array<uint8_t, 16> fixed{};
         if (ReadExact(fixed.data(), fixed.size(), "pcapng enhanced packet block is truncated", error) != 0) {
@@ -485,8 +470,8 @@ class PcapFileReader {
             return SetError(error, "pcapng packet references unknown interface");
         }
         auto& info = interfaces_[interface_id];
-        const uint64_t timestamp = (static_cast<uint64_t>(Read32(fixed.data(), little_)) << 32) |
-                                   Read32(fixed.data() + 4, little_);
+        const uint64_t timestamp =
+            (static_cast<uint64_t>(Read32(fixed.data(), little_)) << 32) | Read32(fixed.data() + 4, little_);
         const uint32_t captured = Read32(fixed.data() + 8, little_);
         const uint32_t wire = Read32(fixed.data() + 12, little_);
         if ((info.snaplen != 0 && captured > info.snaplen) || (wire != 0 && wire < captured)) {
@@ -497,8 +482,7 @@ class PcapFileReader {
         if (padded_captured > payload_size) return SetError(error, "pcapng packet bytes are truncated", EIO);
         bool timestamp_ok = false;
         output->timestamp_ns =
-            TimestampNs(timestamp, info.resolution, info.binary_resolution, info.tsoffset,
-                        &timestamp_ok);
+            TimestampNs(timestamp, info.resolution, info.binary_resolution, info.tsoffset, &timestamp_ok);
         if (!timestamp_ok) return SetError(error, "pcapng timestamp overflow");
         output->captured_len = captured;
         output->wire_len = wire;
@@ -506,19 +490,18 @@ class PcapFileReader {
         output->source_id = info.source_id;
         output->sequence = info.sequence;
         const bool rejected =
-            EvaluatePcapHeaderFilter(filter_plan, CaptureMeta(*output)) ==
-            PacketHeaderFilterResult::kReject;
+            EvaluatePcapHeaderFilter(filter_plan, CaptureMeta(*output)) == PacketHeaderFilterResult::kReject;
         int payload_rc = 0;
         if (rejected) {
             payload_rc = SkipExact(captured, "pcapng packet bytes are truncated", error);
         } else {
             output->bytes.resize(captured);
-            payload_rc = ReadExact(output->bytes.data(), output->bytes.size(),
-                                   "pcapng packet bytes are truncated", error);
+            payload_rc =
+                ReadExact(output->bytes.data(), output->bytes.size(), "pcapng packet bytes are truncated", error);
         }
         if (payload_rc != 0) return EIO;
-        if (SkipExact(static_cast<size_t>(padded_captured - captured),
-                      "pcapng packet padding is truncated", error) != 0) {
+        if (SkipExact(static_cast<size_t>(padded_captured - captured), "pcapng packet padding is truncated", error) !=
+            0) {
             return EIO;
         }
         const int options_rc =
@@ -531,9 +514,7 @@ class PcapFileReader {
         return rejected ? kCaptureHeaderRejected : kCaptureRecord;
     }
 
-    int NextPcapng(const packet::PcapFilterPlan& filter_plan,
-                   CaptureRecord* output,
-                   std::string* error) {
+    int NextPcapng(const packet::PcapFilterPlan& filter_plan, CaptureRecord* output, std::string* error) {
         while (true) {
             PcapngBlockHeader header;
             bool eof = false;
@@ -579,17 +560,17 @@ class PcapFileReader {
     std::vector<InterfaceInfo> interfaces_;
 };
 
-int ParsePcapFileSourceConfig(const std::string& option,
-                              PcapFileSourceConfig* out,
-                              std::string* normalized,
+int ParsePcapFileSourceConfig(const std::string& option, PcapFileSourceConfig* out, std::string* normalized,
                               std::string* error) {
     if (!out) return EINVAL;
     rapidjson::Document document;
     document.Parse(option.empty() ? "{}" : option.c_str());
-    if (document.HasParseError() || !document.IsObject()) return SetError(error, "pcapfile option must be a JSON object");
+    if (document.HasParseError() || !document.IsObject())
+        return SetError(error, "pcapfile option must be a JSON object");
     for (auto it = document.MemberBegin(); it != document.MemberEnd(); ++it) {
         const std::string key = it->name.GetString();
-        if (key != "path" && key != "format" && key != "batch_packets" && key != "replay_mode" && key != "replay_speed_milli") {
+        if (key != "path" && key != "format" && key != "batch_packets" && key != "replay_mode" &&
+            key != "replay_speed_milli") {
             return SetError(error, "unknown pcapfile option");
         }
     }
@@ -604,21 +585,27 @@ int ParsePcapFileSourceConfig(const std::string& option,
     if (document.HasMember("format")) {
         if (!document["format"].IsString()) return SetError(error, "format must be string");
         out->format = Lower(document["format"].GetString());
-        if (out->format != "auto" && out->format != "pcap" && out->format != "pcapng") return SetError(error, "invalid format");
+        if (out->format != "auto" && out->format != "pcap" && out->format != "pcapng")
+            return SetError(error, "invalid format");
     }
     if (document.HasMember("batch_packets")) {
-        if (!document["batch_packets"].IsUint() || document["batch_packets"].GetUint() == 0) return SetError(error, "batch_packets must be positive integer");
+        if (!document["batch_packets"].IsUint() || document["batch_packets"].GetUint() == 0)
+            return SetError(error, "batch_packets must be positive integer");
         out->batch_packets = document["batch_packets"].GetUint();
     }
     if (document.HasMember("replay_mode")) {
         if (!document["replay_mode"].IsString()) return SetError(error, "replay_mode must be string");
         const std::string mode = Lower(document["replay_mode"].GetString());
-        if (mode == "fast") out->replay_mode = PcapReplayMode::kFast;
-        else if (mode == "timestamp") out->replay_mode = PcapReplayMode::kTimestamp;
-        else return SetError(error, "invalid replay_mode");
+        if (mode == "fast")
+            out->replay_mode = PcapReplayMode::kFast;
+        else if (mode == "timestamp")
+            out->replay_mode = PcapReplayMode::kTimestamp;
+        else
+            return SetError(error, "invalid replay_mode");
     }
     if (document.HasMember("replay_speed_milli")) {
-        if (!document["replay_speed_milli"].IsUint() || document["replay_speed_milli"].GetUint() == 0) return SetError(error, "replay_speed_milli must be positive integer");
+        if (!document["replay_speed_milli"].IsUint() || document["replay_speed_milli"].GetUint() == 0)
+            return SetError(error, "replay_speed_milli must be positive integer");
         out->replay_speed_milli = document["replay_speed_milli"].GetUint();
     }
     if (out->replay_mode != PcapReplayMode::kTimestamp && document.HasMember("replay_speed_milli")) {
@@ -630,11 +617,16 @@ int ParsePcapFileSourceConfig(const std::string& option,
         rapidjson::StringBuffer buffer;
         rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
         writer.StartObject();
-        writer.Key("path"); writer.String(out->path.c_str());
-        writer.Key("format"); writer.String(out->format.c_str());
-        writer.Key("batch_packets"); writer.Uint(out->batch_packets);
-        writer.Key("replay_mode"); writer.String(out->replay_mode == PcapReplayMode::kTimestamp ? "timestamp" : "fast");
-        writer.Key("replay_speed_milli"); writer.Uint(out->replay_speed_milli);
+        writer.Key("path");
+        writer.String(out->path.c_str());
+        writer.Key("format");
+        writer.String(out->format.c_str());
+        writer.Key("batch_packets");
+        writer.Uint(out->batch_packets);
+        writer.Key("replay_mode");
+        writer.String(out->replay_mode == PcapReplayMode::kTimestamp ? "timestamp" : "fast");
+        writer.Key("replay_speed_milli");
+        writer.Uint(out->replay_speed_milli);
         writer.EndObject();
         *normalized = buffer.GetString();
     }
@@ -699,18 +691,17 @@ bool PcapFileChannel::IsOpened() const {
     return opened_;
 }
 
-PacketHeaderFilterResult PcapFileChannel::EvaluateHeaderFilter(
-    const packet::PacketMeta& meta) const {
+PacketHeaderFilterResult PcapFileChannel::EvaluateHeaderFilter(const packet::PacketMeta& meta) const {
     return EvaluatePcapHeaderFilter(*filter_plan_, meta);
 }
 
 bool PcapFileChannel::EvaluateDecodedFilter(const packet::PacketMeta& meta,
-                                            const packet::PacketLayerInfo& layer) const {
+                                            const packet::PacketFamilyLayerView& layer) const {
     return EvaluatePcapDecodedFilter(*filter_plan_, meta, layer);
 }
 
 BlockPollEvent PcapFileChannel::PollBlock(int timeout_ms) {
-    std::vector<packet::PacketRecord> records;
+    packet::PacketFamilyBatch records;
     std::chrono::nanoseconds replay_delay(0);
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -747,40 +738,33 @@ BlockPollEvent PcapFileChannel::PollBlock(int timeout_ms) {
             }
             return BlockPollEvent{BlockPollEvent::kCancelled, nullptr, ECANCELED};
         }
-        const uint32_t packet_limit =
-            config_.replay_mode == PcapReplayMode::kTimestamp ? 1 : config_.batch_packets;
-        records.reserve(packet_limit);
+        const uint32_t packet_limit = config_.replay_mode == PcapReplayMode::kTimestamp ? 1 : config_.batch_packets;
+        records.rows.reserve(packet_limit);
         PcapLayerAdapter layer_adapter(protocol_);
         std::string error;
         const auto advance_replay = [&](int64_t timestamp_ns) {
-            if (config_.replay_mode == PcapReplayMode::kTimestamp &&
-                have_previous_timestamp_) {
-                const __int128 delta =
-                    static_cast<__int128>(timestamp_ns) - previous_timestamp_ns_;
+            if (config_.replay_mode == PcapReplayMode::kTimestamp && have_previous_timestamp_) {
+                const __int128 delta = static_cast<__int128>(timestamp_ns) - previous_timestamp_ns_;
                 if (delta > 0) {
                     const __int128 scaled = delta * 1000 + replay_remainder_;
                     const __int128 delay_ns = scaled / config_.replay_speed_milli;
-                    replay_remainder_ =
-                        static_cast<uint32_t>(scaled % config_.replay_speed_milli);
-                    const int64_t available = std::numeric_limits<int64_t>::max() -
-                                              replay_delay.count();
-                    const int64_t bounded_delay = delay_ns > available
-                                                      ? available
-                                                      : static_cast<int64_t>(delay_ns);
+                    replay_remainder_ = static_cast<uint32_t>(scaled % config_.replay_speed_milli);
+                    const int64_t available = std::numeric_limits<int64_t>::max() - replay_delay.count();
+                    const int64_t bounded_delay = delay_ns > available ? available : static_cast<int64_t>(delay_ns);
                     replay_delay += std::chrono::nanoseconds(bounded_delay);
                 }
             }
             previous_timestamp_ns_ = timestamp_ns;
             have_previous_timestamp_ = true;
         };
-        while (records.size() < packet_limit) {
+        while (records.rows.size() < packet_limit) {
             CaptureRecord capture;
             const int rc = reader_->Next(*filter_plan_, &capture, &error);
             if (rc != 0 && rc != kCaptureRecord && rc != kCaptureHeaderRejected) {
                 error_code_ = rc;
                 error_message_ = std::move(error);
                 finished_ = true;
-                if (records.empty()) {
+                if (records.rows.empty()) {
                     error_sent_ = true;
                     return BlockPollEvent{BlockPollEvent::kError, nullptr, error_code_};
                 }
@@ -788,7 +772,7 @@ BlockPollEvent PcapFileChannel::PollBlock(int timeout_ms) {
             }
             if (rc == 0) {
                 finished_ = true;
-                if (records.empty()) {
+                if (records.rows.empty()) {
                     eof_sent_ = true;
                     return BlockPollEvent{BlockPollEvent::kEof, nullptr, 0};
                 }
@@ -796,7 +780,8 @@ BlockPollEvent PcapFileChannel::PollBlock(int timeout_ms) {
             }
             advance_replay(capture.timestamp_ns);
             if (rc == kCaptureHeaderRejected) continue;
-            packet::PacketRecord record;
+            packet::PacketFamilyRecord record;
+            const auto old4 = records.ipv4.size(), old6 = records.ipv6.size();
             record.meta = CaptureMeta(capture);
             auto owner = std::make_shared<std::vector<uint8_t>>(std::move(capture.bytes));
             record.raw_data.owner = owner;
@@ -806,13 +791,23 @@ BlockPollEvent PcapFileChannel::PollBlock(int timeout_ms) {
                 packet::PacketView view;
                 view.meta = record.meta;
                 view.bytes = Span<const uint8_t>(record.raw_data.data, record.raw_data.size);
-                record.layer = layer_adapter.Decode(view);
+                const int decode_rc = layer_adapter.Decode(view, records, &record);
+                if (decode_rc != 0) {
+                    error_code_ = decode_rc;
+                    finished_ = true;
+                    break;
+                }
             } else {
                 record.layer.status = record.meta.captured_len == 0 ? packet::LayerStatus::kTruncated
-                                                                      : packet::LayerStatus::kUnsupportedLinkType;
+                                                                    : packet::LayerStatus::kUnsupportedLinkType;
             }
-            if (!EvaluatePcapDecodedFilter(*filter_plan_, record.meta, record.layer)) continue;
-            records.push_back(std::move(record));
+            const auto layer = packet::PacketFamilyBorrowLayer(record.layer, record.address, records);
+            if (!EvaluatePcapDecodedFilter(*filter_plan_, record.meta, layer)) {
+                records.ipv4.resize(old4);
+                records.ipv6.resize(old6);
+                continue;
+            }
+            records.rows.push_back(std::move(record));
         }
         poll_in_progress_ = true;
     }
@@ -840,7 +835,7 @@ BlockPollEvent PcapFileChannel::PollBlock(int timeout_ms) {
     }
     std::shared_ptr<arrow::RecordBatch> batch;
     std::string error;
-    const auto rc = packet::EncodePacketBatch(records, &batch, &error);
+    const auto rc = packet::EncodePacketFamilyBatch(records, &batch, &error);
     if (rc != packet::PacketBatchError::kNone || !batch) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -905,8 +900,7 @@ int PcapFilePlugin::Option(const char* arg) {
         size_t end = plugin_option_.find(';', begin);
         if (end == std::string::npos) end = plugin_option_.size();
         const size_t equal = plugin_option_.find('=', begin);
-        if (equal != std::string::npos && equal < end &&
-            plugin_option_.compare(begin, equal - begin, "db_path") == 0) {
+        if (equal != std::string::npos && equal < end && plugin_option_.compare(begin, equal - begin, "db_path") == 0) {
             db_path_ = plugin_option_.substr(equal + 1, end - equal - 1);
         }
         begin = end < plugin_option_.size() ? end + 1 : end;
@@ -955,8 +949,8 @@ int PcapFilePlugin::Start() {
     std::unordered_map<std::string, std::shared_ptr<PcapFileChannel>> restored_channels;
     for (const auto& record : records) {
         if (record.type != "pcapfile" || record.name.empty()) {
-            LOG_ERROR("PcapFilePlugin::Start: invalid persisted channel identity: %s.%s",
-                      record.type.c_str(), record.name.c_str());
+            LOG_ERROR("PcapFilePlugin::Start: invalid persisted channel identity: %s.%s", record.type.c_str(),
+                      record.name.c_str());
             protocol_ = nullptr;
             return EINVAL;
         }
@@ -964,8 +958,8 @@ int PcapFilePlugin::Start() {
         std::shared_ptr<PcapFileChannel> channel;
         const int build_rc = BuildChannel(record.name, record.option, &channel, &error);
         if (build_rc != 0) {
-            LOG_ERROR("PcapFilePlugin::Start: restore %s.%s failed: %s", record.type.c_str(),
-                      record.name.c_str(), error.c_str());
+            LOG_ERROR("PcapFilePlugin::Start: restore %s.%s failed: %s", record.type.c_str(), record.name.c_str(),
+                      error.c_str());
             protocol_ = nullptr;
             return build_rc;
         }
@@ -996,34 +990,29 @@ int PcapFilePlugin::Stop() {
     return StopChannelsLocked();
 }
 
-int PcapFilePlugin::Resolve(const FilterDomainResolveRequestV1& request,
-                            FilterDomainResolveResultV1* result) const {
+int PcapFilePlugin::Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const {
     return filter_domain_resolver_.Resolve(request, result);
 }
 
-int PcapFilePlugin::EvaluatePushdown(const FilterPushdownRequestV1& request,
-                                     FilterPushdownResultV1* result) const {
+int PcapFilePlugin::EvaluatePushdown(const FilterPushdownRequestV1& request, FilterPushdownResultV1* result) const {
     if (!result) return EINVAL;
     *result = {};
     if (!request.target_category) {
         result->diagnostic = "pcapfile pushdown target category is required";
         return EINVAL;
     }
-    if (request.target_kind != FilterPushdownTargetKindV1::kSource ||
-        Lower(request.target_category) != "pcapfile") {
+    if (request.target_kind != FilterPushdownTargetKindV1::kSource || Lower(request.target_category) != "pcapfile") {
         return ENOTSUP;
     }
-    if (request.contract_version != kFilterPushdownContractVersionV1 ||
-        !request.target_name || request.target_name[0] == '\0' ||
-        !request.output_schema || !request.canonical_plan_json ||
+    if (request.contract_version != kFilterPushdownContractVersionV1 || !request.target_name ||
+        request.target_name[0] == '\0' || !request.output_schema || !request.canonical_plan_json ||
         request.canonical_plan_json[0] == '\0') {
         result->diagnostic = "pcapfile pushdown request is incomplete or has the wrong version";
         return EINVAL;
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (channels_.find(MakeKey(request.target_category, request.target_name)) ==
-            channels_.end()) {
+        if (channels_.find(MakeKey(request.target_category, request.target_name)) == channels_.end()) {
             return ENOTSUP;
         }
     }
@@ -1032,23 +1021,19 @@ int PcapFilePlugin::EvaluatePushdown(const FilterPushdownRequestV1& request,
         result->diagnostic = "pcapfile pushdown requires the packet output Schema";
         return EINVAL;
     }
-    const int rc = SelectCompilablePcapFilterNodes(
-        request.canonical_plan_json, request.candidate_node_ids,
-        &result->accepted_node_ids, &result->diagnostic);
+    const int rc = SelectCompilablePcapFilterNodes(request.canonical_plan_json, request.candidate_node_ids,
+                                                   &result->accepted_node_ids, &result->diagnostic);
     if (rc != 0) return rc;
-    result->diagnostic = result->accepted_node_ids.empty()
-                             ? "pcapfile retained all filter candidates as residual"
-                             : "pcapfile accepted exact filter candidates";
+    result->diagnostic = result->accepted_node_ids.empty() ? "pcapfile retained all filter candidates as residual"
+                                                           : "pcapfile accepted exact filter candidates";
     return 0;
 }
 
-int PcapFilePlugin::CreateReader(const BlockStreamReaderConfigV1& config,
-                                 IBlockStreamChannel** reader) {
+int PcapFilePlugin::CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** reader) {
     if (!reader) return EINVAL;
     *reader = nullptr;
-    if (config.contract_version != kBlockStreamReaderContractVersionV1 ||
-        !config.task_id || !config.source_category || !config.source_name ||
-        !config.pushed_filter_plan_json || config.task_id[0] == '\0' ||
+    if (config.contract_version != kBlockStreamReaderContractVersionV1 || !config.task_id || !config.source_category ||
+        !config.source_name || !config.pushed_filter_plan_json || config.task_id[0] == '\0' ||
         config.source_category[0] == '\0' || config.source_name[0] == '\0' ||
         config.pushed_filter_plan_json[0] == '\0') {
         return EINVAL;
@@ -1057,13 +1042,11 @@ int PcapFilePlugin::CreateReader(const BlockStreamReaderConfigV1& config,
 
     packet::PcapFilterPlan compiled_plan;
     std::string error;
-    const int compile_rc = CompilePcapFilterPlanJson(
-        config.pushed_filter_plan_json, &compiled_plan, &error);
+    const int compile_rc = CompilePcapFilterPlanJson(config.pushed_filter_plan_json, &compiled_plan, &error);
     if (compile_rc != 0) return compile_rc;
     std::shared_ptr<const packet::PcapFilterPlan> immutable_plan;
     try {
-        immutable_plan =
-            std::make_shared<const packet::PcapFilterPlan>(std::move(compiled_plan));
+        immutable_plan = std::make_shared<const packet::PcapFilterPlan>(std::move(compiled_plan));
     } catch (const std::bad_alloc&) {
         return ENOMEM;
     }
@@ -1075,8 +1058,8 @@ int PcapFilePlugin::CreateReader(const BlockStreamReaderConfigV1& config,
     if (channel_it == channels_.end() || option_it == options_.end()) return ENOTSUP;
 
     std::shared_ptr<PcapFileChannel> exclusive_reader;
-    const int rc = BuildChannel(config.source_name, option_it->second,
-                                &exclusive_reader, &error, std::move(immutable_plan));
+    const int rc =
+        BuildChannel(config.source_name, option_it->second, &exclusive_reader, &error, std::move(immutable_plan));
     if (rc != 0) return rc;
     IBlockStreamChannel* value = exclusive_reader.get();
     ReaderSession session;
@@ -1141,8 +1124,8 @@ int PcapFilePlugin::BuildChannel(const std::string& name, const std::string& opt
     std::string normalized;
     const int rc = ParsePcapFileSourceConfig(option, &config, &normalized, error);
     if (rc != 0) return rc;
-    auto channel = std::make_shared<PcapFileChannel>(
-        name, config, protocol_, PcapReplayWaiter{}, std::move(filter_plan));
+    auto channel =
+        std::make_shared<PcapFileChannel>(name, config, protocol_, PcapReplayWaiter{}, std::move(filter_plan));
     channel->SetNormalizedOption(normalized);
     const int open_rc = channel->Open();
     if (open_rc != 0) {
@@ -1167,8 +1150,7 @@ int PcapFilePlugin::AddChannel(const std::string& type, const std::string& name,
     if (store_open_) {
         const int insert_rc = store_.Insert({"pcapfile", name, channel->Option()}, &error);
         if (insert_rc != 0) {
-            LOG_ERROR("PcapFilePlugin::AddChannel: persist pcapfile.%s failed: %s",
-                      name.c_str(), error.c_str());
+            LOG_ERROR("PcapFilePlugin::AddChannel: persist pcapfile.%s failed: %s", name.c_str(), error.c_str());
             return insert_rc;
         }
     }
@@ -1193,8 +1175,7 @@ int PcapFilePlugin::ModifyChannel(const std::string& type, const std::string& na
     if (store_open_) {
         const int update_rc = store_.Update({"pcapfile", name, next->Option()}, &error);
         if (update_rc != 0) {
-            LOG_ERROR("PcapFilePlugin::ModifyChannel: persist pcapfile.%s failed: %s",
-                      name.c_str(), error.c_str());
+            LOG_ERROR("PcapFilePlugin::ModifyChannel: persist pcapfile.%s failed: %s", name.c_str(), error.c_str());
             return update_rc;
         }
     }
@@ -1202,11 +1183,10 @@ int PcapFilePlugin::ModifyChannel(const std::string& type, const std::string& na
     if (close_rc != 0) {
         if (store_open_) {
             std::string rollback_error;
-            const int rollback_rc =
-                store_.Update({"pcapfile", name, old_option}, &rollback_error);
+            const int rollback_rc = store_.Update({"pcapfile", name, old_option}, &rollback_error);
             if (rollback_rc != 0) {
-                LOG_ERROR("PcapFilePlugin::ModifyChannel: rollback pcapfile.%s failed: %s",
-                          name.c_str(), rollback_error.c_str());
+                LOG_ERROR("PcapFilePlugin::ModifyChannel: rollback pcapfile.%s failed: %s", name.c_str(),
+                          rollback_error.c_str());
                 return rollback_rc;
             }
         }
@@ -1242,8 +1222,7 @@ int PcapFilePlugin::RemoveChannel(const std::string& type, const std::string& na
                           name.c_str(), error.c_str(), reopen_rc);
                 return reopen_rc;
             }
-            LOG_ERROR("PcapFilePlugin::RemoveChannel: persist pcapfile.%s failed: %s",
-                      name.c_str(), error.c_str());
+            LOG_ERROR("PcapFilePlugin::RemoveChannel: persist pcapfile.%s failed: %s", name.c_str(), error.c_str());
             return erase_rc;
         }
     }
@@ -1252,7 +1231,8 @@ int PcapFilePlugin::RemoveChannel(const std::string& type, const std::string& na
     return 0;
 }
 
-void PcapFilePlugin::QueryChannels(std::function<void(const std::string&, const std::string&, const std::string&, const std::string&)> callback) {
+void PcapFilePlugin::QueryChannels(
+    std::function<void(const std::string&, const std::string&, const std::string&, const std::string&)> callback) {
     if (!callback) return;
     std::vector<std::tuple<std::string, std::string, std::string, std::string>> values;
     {
@@ -1264,7 +1244,8 @@ void PcapFilePlugin::QueryChannels(std::function<void(const std::string&, const 
             values.emplace_back("pcapfile", name, options_[item.first], status);
         }
     }
-    for (const auto& value : values) callback(std::get<0>(value), std::get<1>(value), std::get<2>(value), std::get<3>(value));
+    for (const auto& value : values)
+        callback(std::get<0>(value), std::get<1>(value), std::get<2>(value), std::get<3>(value));
 }
 
 std::string PcapFilePlugin::MakeKey(const std::string& type, const std::string& name) {

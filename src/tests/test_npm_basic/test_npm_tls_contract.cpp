@@ -131,13 +131,13 @@ std::shared_ptr<arrow::Array> Values(std::initializer_list<std::optional<Value>>
 }
 
 void TestSchemaAndRows() {
-    const auto entity = npm::NpmTlsHandshakeEntityDescriptorV1();
+    const auto entity = npm::NpmTlsHandshakeEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
     using Error = npm::NpmProtocolContractErrorV1;
     assert(npm::ValidateNpmEntityDescriptorV1(entity).error == Error::kNone);
-    assert(entity.entity_id == "tls_handshake" && entity.module_id == "tls");
+    assert(entity.entity_id == "tls_handshake_ipv4" && entity.module_id == "tls");
     assert(entity.schema_version == 1 && entity.revision_semantics == npm::NpmRevisionSemanticsV1::kEvent);
     for (const auto& [key, value] : std::vector<std::pair<const char*, const char*>>{
-             {"flowsql.entity", "tls_handshake"},
+             {"flowsql.entity", "tls_handshake_ipv4"},
              {"flowsql.schema_version", "1"},
              {"flowsql.timestamp_unit", "ns"},
              {"flowsql.revision_semantics", "event"},
@@ -151,8 +151,8 @@ void TestSchemaAndRows() {
         {"is_final", arrow::Type::BOOL, false},
         {"session_id", arrow::Type::UINT64, false},
         {"observation_domain_id", arrow::Type::UINT64, false},
-        {"a_ip", arrow::Type::STRING, false},
-        {"b_ip", arrow::Type::STRING, false},
+        {"a_ip", arrow::Type::UINT32, false},
+        {"b_ip", arrow::Type::UINT32, false},
         {"a_port", arrow::Type::UINT16, false},
         {"b_port", arrow::Type::UINT16, false},
         {"outcome", arrow::Type::STRING, false},
@@ -186,6 +186,8 @@ void TestSchemaAndRows() {
             columns.push_back(Values<arrow::BooleanBuilder, bool>({true}));
         } else if (type == arrow::Type::UINT16) {
             columns.push_back(Values<arrow::UInt16Builder, uint16_t>({80}));
+        } else if (type == arrow::Type::UINT32) {
+            columns.push_back(Values<arrow::UInt32Builder, uint32_t>({0}));
         } else if (type == arrow::Type::UINT8) {
             columns.push_back(Values<arrow::UInt8Builder, uint8_t>({0}));
         } else {

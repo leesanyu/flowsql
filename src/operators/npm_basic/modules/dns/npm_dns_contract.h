@@ -80,7 +80,7 @@ struct NpmDnsConfigStatusV1 {
 
 /** Parses one borrowed parameters.dns object. Replaces output only on success. */
 NpmDnsConfigStatusV1 ParseNpmDnsConfigV1(std::string_view json, NpmDnsConfigV1* output);
-NpmEntityDescriptorV1 NpmDnsTransactionEntityDescriptorV1();
+NpmEntityDescriptorV1 NpmDnsTransactionEntityDescriptorV1(packet::AddressFamily family);
 NpmModulePlanV1 NpmDnsModulePlanV1(const NpmDnsConfigV1& config);
 
 }  // namespace flowsql::npm

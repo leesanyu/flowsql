@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "npm_tls_result_encoder.h"
+#include <operators/npm_basic/output/npm_family_address_builder.h>
 
 #include "npm_tls_hello.h"
 
@@ -28,11 +29,9 @@ bool Append(Builder& builder, const std::optional<Value>& value) {
     return value ? builder.Append(*value).ok() : builder.AppendNull().ok();
 }
 
-bool ValidRow(const NpmTlsHandshakeResultV1& row, const NpmTlsSessionIdentityV1& session) {
+bool ValidRow(const NpmTlsHandshakeResultV1& row) {
     const auto& handshake = row.handshake;
-    if (!handshake.entity_instance_id || !session.session_id || handshake.session_id != session.session_id ||
-        session.a_ip.empty() || session.b_ip.empty() || session.a_ip.size() > 45 || session.b_ip.size() > 45 ||
-        !arrow::util::ValidateUTF8(session.a_ip) || !arrow::util::ValidateUTF8(session.b_ip) ||
+    if (!handshake.entity_instance_id || !handshake.session_id ||
         (handshake.client_direction != NpmPacketDirection::kAToB &&
          handshake.client_direction != NpmPacketDirection::kBToA) ||
         handshake.hello_retry_count > 1 || handshake.phase != NpmTlsHandshakePhaseV1::kClosed)
@@ -62,10 +61,13 @@ class BuildCharge final {
 
 }  // namespace
 
-int EmitNpmTlsHandshakeV1(const NpmTlsHandshakeResultV1& result, const NpmTlsSessionIdentityV1& session,
+template <typename Address>
+int EmitNpmTlsHandshakeV1(const NpmTlsFamilyResult<Address>& family_result,
                           const std::shared_ptr<INpmTaskBudget>& budget, INpmResultEmitterV1& emitter,
                           arrow::MemoryPool* pool) {
-    if (!budget || !ValidRow(result, session)) return EINVAL;
+    const auto& result = family_result.transaction;
+    const auto& session = family_result;
+    if (!budget || !ValidRow(result)) return EINVAL;
     const auto& handshake = result.handshake;
     const auto& client = handshake.first_client_hello;
     const auto& server = handshake.final_server_hello;
@@ -106,13 +108,13 @@ int EmitNpmTlsHandshakeV1(const NpmTlsHandshakeResultV1& result, const NpmTlsSes
         arrow::UInt64Builder entity_id(pool), revision(pool), session_id(pool), domain_id(pool);
         arrow::Int64Builder observed_at(pool), client_time(pool), server_time(pool), latency(pool);
         arrow::BooleanBuilder is_final(pool), offered13(pool);
-        arrow::StringBuilder a_ip(pool), b_ip(pool), outcome(pool), incomplete_reason(pool), sni(pool), alpn(pool),
-            selected_protocol(pool);
+        NpmAddressArrowBuilder<Address> a_ip(pool), b_ip(pool);
+        arrow::StringBuilder outcome(pool), incomplete_reason(pool), sni(pool), alpn(pool), selected_protocol(pool);
         arrow::UInt16Builder a_port(pool), b_port(pool), version(pool), cipher_suite(pool);
         arrow::UInt8Builder retry_count(pool), direction(pool), alert_level(pool), alert_description(pool);
         if (!Append(entity_id, handshake.entity_instance_id) || !Append(revision, uint64_t{1}) ||
             !Append(observed_at, result.observed_at_ns) || !Append(is_final, true) ||
-            !Append(session_id, session.session_id) || !Append(domain_id, session.observation_domain_id) ||
+            !Append(session_id, result.handshake.session_id) || !Append(domain_id, session.observation_domain_id) ||
             !Append(a_ip, session.a_ip) || !Append(b_ip, session.b_ip) || !Append(a_port, session.a_port) ||
             !Append(b_port, session.b_port) ||
             !Append(outcome, std::string_view(NpmTlsOutcomeNameV1(result.outcome))) ||
@@ -157,11 +159,18 @@ int EmitNpmTlsHandshakeV1(const NpmTlsHandshakeResultV1& result, const NpmTlsSes
             if (!status.ok()) return status.IsOutOfMemory() ? ENOMEM : EIO;
             columns.push_back(std::move(column));
         }
-        auto batch = arrow::RecordBatch::Make(NpmTlsHandshakeEntityDescriptorV1().schema, 1, std::move(columns));
-        return emitter.Emit("tls_handshake", *batch);
+        auto batch = arrow::RecordBatch::Make(
+            NpmTlsHandshakeEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).schema, 1, std::move(columns));
+        return emitter.Emit(NpmTlsHandshakeEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).entity_id,
+                            *batch);
     } catch (const std::bad_alloc&) {
         return ENOMEM;
     }
 }
+
+template int EmitNpmTlsHandshakeV1(const NpmTlsResult4&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitterV1&,
+                                   arrow::MemoryPool*);
+template int EmitNpmTlsHandshakeV1(const NpmTlsResult6&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitterV1&,
+                                   arrow::MemoryPool*);
 
 }  // namespace flowsql::npm

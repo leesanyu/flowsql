@@ -1,6 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <tests/common/packet_family_test_support.h>
+
 #include <plugins/npi/packet_decoder.h>
 #include <algorithm>
 #include <array>
@@ -159,14 +161,16 @@ packet::PacketView View(const uint8_t* data, size_t size) {
     v.meta.link_type = 1;
     return v;
 }
-bool Same(const packet::PacketLayerInfo& a, const packet::PacketLayerInfo& b) {
-    if (a.status != b.status || a.layer_count != b.layer_count || a.src_mac.valid != b.src_mac.valid ||
-        a.dst_mac.valid != b.dst_mac.valid || !(a.src_mac.value == b.src_mac.value) ||
-        !(a.dst_mac.value == b.dst_mac.value) || !(a.src_ip == b.src_ip) || !(a.dst_ip == b.dst_ip) ||
+bool Same(const packet::PacketFamilyLayerView& a, const packet::PacketFamilyLayerView& b) {
+    if (a.status != b.status || a.layer_count != b.layer_count || a.src_mac_valid != b.src_mac_valid ||
+        a.dst_mac_valid != b.dst_mac_valid || !(a.src_mac == b.src_mac) || !(a.dst_mac == b.dst_mac) ||
+        a.address_state != b.address_state || bool(a.Get4()) != bool(b.Get4()) || bool(a.Get6()) != bool(b.Get6()) ||
         a.src_port != b.src_port || a.dst_port != b.dst_port || a.ports_valid != b.ports_valid ||
         a.transport_protocol != b.transport_protocol || a.payload_offset != b.payload_offset ||
         a.network_layer_index != b.network_layer_index || a.transport_layer_index != b.transport_layer_index)
         return false;
+    if (a.Get4() && (!(a.Get4()->src == b.Get4()->src) || !(a.Get4()->dst == b.Get4()->dst))) return false;
+    if (a.Get6() && (!(a.Get6()->src == b.Get6()->src) || !(a.Get6()->dst == b.Get6()->dst))) return false;
     for (uint8_t i = 0; i < a.layer_count; ++i)
         if (a.layers[i].kind != b.layers[i].kind || a.layers[i].offset != b.layers[i].offset) return false;
     return true;
@@ -177,21 +181,21 @@ void Regression(IProtocol* p, const std::vector<Bytes>& inputs) {
     for (const auto& input : inputs) {
         alignas(16) std::array<uint8_t, 512> storage{};
         std::copy(input.begin(), input.end(), storage.begin());
-        auto reference = decoder.Decode(View(storage.data(), input.size()), kOptions);
+        auto reference = flowsql::testing::DecodeLayer(decoder, View(storage.data(), input.size()), kOptions);
         assert(reference.status == packet::LayerStatus::kDecoded && reference.ports_valid);
         assert(reference.src_port == 1234 && reference.dst_port == 80);
         const auto identity = identifier.Identify(View(storage.data(), input.size()), reference);
         for (size_t shift = 0; shift < 16; ++shift) {
             std::copy(input.begin(), input.end(), storage.begin() + shift);
             auto v = View(storage.data() + shift, input.size());
-            auto decoded = decoder.Decode(v, kOptions);
+            auto decoded = flowsql::testing::DecodeLayer(decoder, v, kOptions);
             assert(Same(reference, decoded));
             const auto result = identifier.Identify(v, decoded);
             assert(result.status == identity.status && result.id == identity.id && result.sub_id == identity.sub_id);
             for (size_t length = 0; length < input.size(); ++length) {
                 auto truncated = View(storage.data() + shift, length);
-                const auto result = decoder.Decode(truncated, kOptions);
-                const auto expected = decoder.Decode(View(input.data(), length), kOptions);
+                const auto result = flowsql::testing::DecodeLayer(decoder, truncated, kOptions);
+                const auto expected = flowsql::testing::DecodeLayer(decoder, View(input.data(), length), kOptions);
                 assert(Same(expected, result));
                 if (length < 14) assert(result.status != packet::LayerStatus::kDecoded);
             }
@@ -206,7 +210,8 @@ void ExactPath(IProtocol* p, const Bytes& input, std::initializer_list<std::pair
     for (size_t shift = 0; shift < 16; ++shift) {
         Bytes storage(input.size() + shift);
         std::copy(input.begin(), input.end(), storage.begin() + shift);
-        const auto result = decoder.Decode(View(storage.data() + shift, input.size()), kOptions);
+        const auto result =
+            flowsql::testing::DecodeLayer(decoder, View(storage.data() + shift, input.size()), kOptions);
         assert(result.status == packet::LayerStatus::kDecoded);
         assert(result.layer_count == path.size() && result.payload_offset == payload);
         size_t index = 0;
@@ -217,8 +222,8 @@ void ExactPath(IProtocol* p, const Bytes& input, std::initializer_list<std::pair
         assert(result.ports_valid && result.src_port == 1234 && result.dst_port == 80);
         const int network = result.network_layer_index;
         if (result.layers[network].kind == eLayer::IPv4) {
-            assert(std::get<IPv4Address>(result.src_ip).addr == inet_addr("192.0.0.1"));
-            assert(std::get<IPv4Address>(result.dst_ip).addr == inet_addr("198.0.0.2"));
+            assert(result.Get4()->src.ToUInt32() == ntohl(inet_addr("192.0.0.1")));
+            assert(result.Get4()->dst.ToUInt32() == ntohl(inet_addr("198.0.0.2")));
         }
     }
     Regression(p, {input});
@@ -365,7 +370,7 @@ void RuleHit(IProtocol* p) {
     for (size_t shift = 0; shift < 16; ++shift) {
         std::copy(input.begin(), input.end(), storage.begin() + shift);
         const auto view = View(storage.data() + shift, input.size());
-        const auto layers = decoder.Decode(view, kOptions);
+        const auto layers = flowsql::testing::DecodeLayer(decoder, view, kOptions);
         const auto result = identifier.Identify(view, layers);
         assert(result.id == 2000);
     }
@@ -386,7 +391,7 @@ void Cost(IProtocol* p, const std::vector<Bytes>& inputs) {
                 protocol::Layers l{};
                 checksum += p->Layer(0, b.data(), b.size(), &l) + l.payload;
             } else if (phase == 1) {
-                const auto result = decoder.Decode(View(b.data(), b.size()), kOptions);
+                const auto result = flowsql::testing::DecodeLayer(decoder, View(b.data(), b.size()), kOptions);
                 checksum += result.src_port + result.dst_port + result.payload_offset;
             } else {
                 const auto result = p->Identify(0, b.data(), b.size(), &layers[j]);

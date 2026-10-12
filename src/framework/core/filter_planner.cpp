@@ -3,6 +3,8 @@
 
 #include "filter_planner.h"
 
+#include <framework/interfaces/ipacket_family.h>
+
 #include <arrow/type.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -102,12 +104,10 @@ const char* CompareOpName(FilterCompareOp compare_op) {
 
 class CanonicalFilterPlanWriter {
  public:
-    CanonicalFilterPlanWriter(std::shared_ptr<arrow::Schema> schema,
-                              std::string* error)
+    CanonicalFilterPlanWriter(std::shared_ptr<arrow::Schema> schema, std::string* error)
         : schema_(std::move(schema)), writer_(buffer_), error_(error) {}
 
-    bool Write(const std::shared_ptr<const BoundFilterExpr>& expression,
-               std::string* output) {
+    bool Write(const std::shared_ptr<const BoundFilterExpr>& expression, std::string* output) {
         writer_.StartObject();
         writer_.Key("version");
         writer_.Uint(kFilterPushdownContractVersionV1);
@@ -164,8 +164,7 @@ class CanonicalFilterPlanWriter {
                 if (!WriteComparisonType(*expression)) return false;
                 break;
             case FilterExprKind::kCall:
-                return Fail("bound call nodes are not supported by canonical plan version 1",
-                            expression->node_id);
+                return Fail("bound call nodes are not supported by canonical plan version 1", expression->node_id);
             case FilterExprKind::kAnd:
             case FilterExprKind::kOr:
             case FilterExprKind::kNot:
@@ -190,8 +189,7 @@ class CanonicalFilterPlanWriter {
             return Fail("bound field index is outside the output Schema", expression.node_id);
         }
         const auto& field = schema_->field(expression.field_index);
-        if (!field || !field->type() ||
-            !field->type()->Equals(*expression.value_type) ||
+        if (!field || !field->type() || !field->type()->Equals(*expression.value_type) ||
             field->nullable() != expression.nullable) {
             return Fail("bound field does not match the output Schema", expression.node_id);
         }
@@ -204,8 +202,7 @@ class CanonicalFilterPlanWriter {
 
     bool WriteLiteral(const BoundFilterExpr& expression) {
         if (!expression.literal || !expression.literal->type ||
-            !expression.literal->type->Equals(*expression.value_type) ||
-            !expression.literal->is_valid) {
+            !expression.literal->type->Equals(*expression.value_type) || !expression.literal->is_valid) {
             return Fail("bound literal is incomplete or has the wrong type", expression.node_id);
         }
         writer_.Key("value");
@@ -240,14 +237,11 @@ class FilterSplitter {
  public:
     explicit FilterSplitter(std::string* error) : error_(error) {}
 
-    FilterPlanError Split(
-        const std::shared_ptr<const BoundFilterExpr>& expression,
-        const std::vector<uint32_t>& requested_accepted,
-        FilterPushdownSplit* output) {
-        if (!expression->value_type ||
-            expression->value_type->id() != arrow::Type::BOOL) {
-            return Fail(FilterPlanError::kInvalidBoundExpression,
-                        "filter root must produce boolean", expression->node_id);
+    FilterPlanError Split(const std::shared_ptr<const BoundFilterExpr>& expression,
+                          const std::vector<uint32_t>& requested_accepted, FilterPushdownSplit* output) {
+        if (!expression->value_type || expression->value_type->id() != arrow::Type::BOOL) {
+            return Fail(FilterPlanError::kInvalidBoundExpression, "filter root must produce boolean",
+                        expression->node_id);
         }
         if (!ValidateTree(expression)) return FilterPlanError::kInvalidBoundExpression;
 
@@ -263,18 +257,16 @@ class FilterSplitter {
         accepted_set.reserve(requested_accepted.size());
         for (uint32_t node_id : requested_accepted) {
             if (!accepted_set.insert(node_id).second) {
-                return Fail(FilterPlanError::kDuplicateAcceptedNode,
-                            "accepted node id is duplicated", node_id);
+                return Fail(FilterPlanError::kDuplicateAcceptedNode, "accepted node id is duplicated", node_id);
             }
         }
         for (uint32_t node_id : requested_accepted) {
             if (all_node_ids_.find(node_id) == all_node_ids_.end()) {
-                return Fail(FilterPlanError::kUnknownAcceptedNode,
-                            "accepted node id is unknown", node_id);
+                return Fail(FilterPlanError::kUnknownAcceptedNode, "accepted node id is unknown", node_id);
             }
             if (candidate_ids.find(node_id) == candidate_ids.end()) {
-                return Fail(FilterPlanError::kNonCandidateAcceptedNode,
-                            "accepted node id is not a pushdown candidate", node_id);
+                return Fail(FilterPlanError::kNonCandidateAcceptedNode, "accepted node id is not a pushdown candidate",
+                            node_id);
             }
         }
 
@@ -294,9 +286,7 @@ class FilterSplitter {
     }
 
  private:
-    FilterPlanError Fail(FilterPlanError code,
-                         const std::string& message,
-                         uint32_t node_id) {
+    FilterPlanError Fail(FilterPlanError code, const std::string& message, uint32_t node_id) {
         if (error_) {
             *error_ = message;
             if (node_id != 0) *error_ += " at node " + std::to_string(node_id);
@@ -306,25 +296,22 @@ class FilterSplitter {
 
     bool ValidateTree(const std::shared_ptr<const BoundFilterExpr>& expression) {
         if (!expression || expression->node_id == 0 || !expression->value_type) {
-            Fail(FilterPlanError::kInvalidBoundExpression,
-                 "bound expression node is incomplete",
+            Fail(FilterPlanError::kInvalidBoundExpression, "bound expression node is incomplete",
                  expression ? expression->node_id : 0);
             return false;
         }
         if (!all_node_ids_.insert(expression->node_id).second) {
-            Fail(FilterPlanError::kInvalidBoundExpression,
-                 "bound expression node id is duplicated", expression->node_id);
+            Fail(FilterPlanError::kInvalidBoundExpression, "bound expression node id is duplicated",
+                 expression->node_id);
             return false;
         }
         if (!HasValidArity(*expression)) {
-            Fail(FilterPlanError::kInvalidBoundExpression,
-                 "bound expression node has invalid arity", expression->node_id);
+            Fail(FilterPlanError::kInvalidBoundExpression, "bound expression node has invalid arity",
+                 expression->node_id);
             return false;
         }
-        if (ProducesBoolean(expression->kind) &&
-            expression->value_type->id() != arrow::Type::BOOL) {
-            Fail(FilterPlanError::kInvalidBoundExpression,
-                 "predicate node must produce boolean", expression->node_id);
+        if (ProducesBoolean(expression->kind) && expression->value_type->id() != arrow::Type::BOOL) {
+            Fail(FilterPlanError::kInvalidBoundExpression, "predicate node must produce boolean", expression->node_id);
             return false;
         }
         for (const auto& operand : expression->operands) {
@@ -333,9 +320,8 @@ class FilterSplitter {
         return true;
     }
 
-    void CollectCandidates(
-        const std::shared_ptr<const BoundFilterExpr>& expression,
-        std::vector<std::shared_ptr<const BoundFilterExpr>>* candidates) const {
+    void CollectCandidates(const std::shared_ptr<const BoundFilterExpr>& expression,
+                           std::vector<std::shared_ptr<const BoundFilterExpr>>* candidates) const {
         if (expression->kind != FilterExprKind::kAnd) {
             candidates->push_back(expression);
             return;
@@ -344,10 +330,9 @@ class FilterSplitter {
         CollectCandidates(expression->operands[1], candidates);
     }
 
-    std::shared_ptr<const BoundFilterExpr> Project(
-        const std::shared_ptr<const BoundFilterExpr>& expression,
-        const std::unordered_set<uint32_t>& accepted,
-        bool select_accepted) const {
+    std::shared_ptr<const BoundFilterExpr> Project(const std::shared_ptr<const BoundFilterExpr>& expression,
+                                                   const std::unordered_set<uint32_t>& accepted,
+                                                   bool select_accepted) const {
         if (expression->kind != FilterExprKind::kAnd) {
             const bool is_accepted = accepted.find(expression->node_id) != accepted.end();
             return is_accepted == select_accepted ? expression : nullptr;
@@ -372,11 +357,9 @@ class FilterSplitter {
 
 }  // namespace
 
-FilterPlanError SplitFilterForPushdown(
-    const std::shared_ptr<const BoundFilterExpr>& expression,
-    const std::vector<uint32_t>& accepted_node_ids,
-    FilterPushdownSplit* output,
-    std::string* error) {
+FilterPlanError SplitFilterForPushdown(const std::shared_ptr<const BoundFilterExpr>& expression,
+                                       const std::vector<uint32_t>& accepted_node_ids, FilterPushdownSplit* output,
+                                       std::string* error) {
     if (output) *output = FilterPushdownSplit{};
     if (error) error->clear();
     if (!expression || !output) {
@@ -388,11 +371,9 @@ FilterPlanError SplitFilterForPushdown(
     return splitter.Split(expression, accepted_node_ids, output);
 }
 
-FilterPlanError BuildCanonicalFilterPlan(
-    const std::shared_ptr<arrow::Schema>& output_schema,
-    const std::shared_ptr<const BoundFilterExpr>& expression,
-    std::string* output,
-    std::string* error) {
+FilterPlanError BuildCanonicalFilterPlan(const std::shared_ptr<arrow::Schema>& output_schema,
+                                         const std::shared_ptr<const BoundFilterExpr>& expression, std::string* output,
+                                         std::string* error) {
     if (output) output->clear();
     if (error) error->clear();
     if (!output_schema || !expression || !output) {
@@ -404,7 +385,9 @@ FilterPlanError BuildCanonicalFilterPlan(
     const auto validation = SplitFilterForPushdown(expression, {}, &validated, error);
     if (validation != FilterPlanError::kNone) return validation;
 
-    CanonicalFilterPlanWriter writer(output_schema, error);
+    CanonicalFilterPlanWriter writer(
+        output_schema->Equals(*packet::PacketFamilySchema(), true) ? packet::PacketFamilyFilterSchema() : output_schema,
+        error);
     if (!writer.Write(expression, output)) {
         output->clear();
         return FilterPlanError::kCanonicalPlanError;
@@ -412,16 +395,12 @@ FilterPlanError BuildCanonicalFilterPlan(
     return FilterPlanError::kNone;
 }
 
-FilterPlanError NegotiateFilterPushdown(
-    IQuerier* querier,
-    const FilterPushdownTarget& target,
-    const std::shared_ptr<const BoundFilterExpr>& expression,
-    FilterPushdownNegotiation* output,
-    std::string* error) {
+FilterPlanError NegotiateFilterPushdown(IQuerier* querier, const FilterPushdownTarget& target,
+                                        const std::shared_ptr<const BoundFilterExpr>& expression,
+                                        FilterPushdownNegotiation* output, std::string* error) {
     if (output) *output = FilterPushdownNegotiation{};
     if (error) error->clear();
-    if (!querier || !target.output_schema || target.category.empty() ||
-        target.name.empty() || !expression || !output) {
+    if (!querier || !target.output_schema || target.category.empty() || target.name.empty() || !expression || !output) {
         if (error) {
             *error = "querier, target identity, output Schema, expression, and output are required";
         }
@@ -431,8 +410,7 @@ FilterPlanError NegotiateFilterPushdown(
     FilterPushdownNegotiation result;
     auto plan_error = SplitFilterForPushdown(expression, {}, &result.split, error);
     if (plan_error != FilterPlanError::kNone) return plan_error;
-    plan_error = BuildCanonicalFilterPlan(
-        target.output_schema, expression, &result.canonical_plan_json, error);
+    plan_error = BuildCanonicalFilterPlan(target.output_schema, expression, &result.canonical_plan_json, error);
     if (plan_error != FilterPlanError::kNone) return plan_error;
 
     FilterPushdownRequestV1 request;
@@ -446,28 +424,24 @@ FilterPlanError NegotiateFilterPushdown(
     bool stopped = false;
     int provider_return_code = ENOTSUP;
     FilterPushdownResultV1 provider_result;
-    const int traverse_return_code = querier->Traverse(
-        IID_FILTER_PUSHDOWN_V1,
-        [&](void* iface) {
-            if (!iface) {
-                stopped = true;
-                provider_return_code = EINVAL;
-                provider_result.diagnostic = "IID traversal returned a null provider";
-                return -1;
-            }
-            FilterPushdownResultV1 current;
-            const int current_return_code =
-                static_cast<IFilterPushdownV1*>(iface)->EvaluatePushdown(request, &current);
-            if (current_return_code == ENOTSUP) return 0;
+    const int traverse_return_code = querier->Traverse(IID_FILTER_PUSHDOWN_V1, [&](void* iface) {
+        if (!iface) {
             stopped = true;
-            provider_return_code = current_return_code;
-            provider_result = std::move(current);
+            provider_return_code = EINVAL;
+            provider_result.diagnostic = "IID traversal returned a null provider";
             return -1;
-        });
+        }
+        FilterPushdownResultV1 current;
+        const int current_return_code = static_cast<IFilterPushdownV1*>(iface)->EvaluatePushdown(request, &current);
+        if (current_return_code == ENOTSUP) return 0;
+        stopped = true;
+        provider_return_code = current_return_code;
+        provider_result = std::move(current);
+        return -1;
+    });
     if (traverse_return_code != 0) {
         if (error) {
-            *error = "IFilterPushdownV1 traversal failed with code " +
-                     std::to_string(traverse_return_code);
+            *error = "IFilterPushdownV1 traversal failed with code " + std::to_string(traverse_return_code);
         }
         return FilterPlanError::kQuerierError;
     }
@@ -477,8 +451,7 @@ FilterPlanError NegotiateFilterPushdown(
     }
     if (provider_return_code != 0) {
         if (error) {
-            *error = "IFilterPushdownV1 provider failed with code " +
-                     std::to_string(provider_return_code);
+            *error = "IFilterPushdownV1 provider failed with code " + std::to_string(provider_return_code);
             if (!provider_result.diagnostic.empty()) {
                 *error += ": " + provider_result.diagnostic;
             }
@@ -487,8 +460,7 @@ FilterPlanError NegotiateFilterPushdown(
     }
 
     FilterPushdownSplit accepted_split;
-    plan_error = SplitFilterForPushdown(
-        expression, provider_result.accepted_node_ids, &accepted_split, error);
+    plan_error = SplitFilterForPushdown(expression, provider_result.accepted_node_ids, &accepted_split, error);
     if (plan_error != FilterPlanError::kNone) return plan_error;
     result.provider_matched = true;
     result.provider_diagnostic = std::move(provider_result.diagnostic);
@@ -497,13 +469,11 @@ FilterPlanError NegotiateFilterPushdown(
     return FilterPlanError::kNone;
 }
 
-FilterPlanError MaterializeFilterTaskSessionPlan(
-    const std::shared_ptr<arrow::Schema>& output_schema,
-    const std::shared_ptr<const BoundFilterExpr>& original_expression,
-    const FilterPushdownNegotiation& negotiation,
-    FilterTaskIsolation isolation,
-    FilterTaskSessionPlan* output,
-    std::string* error) {
+FilterPlanError MaterializeFilterTaskSessionPlan(const std::shared_ptr<arrow::Schema>& output_schema,
+                                                 const std::shared_ptr<const BoundFilterExpr>& original_expression,
+                                                 const FilterPushdownNegotiation& negotiation,
+                                                 FilterTaskIsolation isolation, FilterTaskSessionPlan* output,
+                                                 std::string* error) {
     if (output) *output = FilterTaskSessionPlan{};
     if (error) error->clear();
     if (!output_schema || !original_expression || !output) {
@@ -512,8 +482,7 @@ FilterPlanError MaterializeFilterTaskSessionPlan(
     }
 
     std::string expected_canonical_plan;
-    auto plan_error = BuildCanonicalFilterPlan(
-        output_schema, original_expression, &expected_canonical_plan, error);
+    auto plan_error = BuildCanonicalFilterPlan(output_schema, original_expression, &expected_canonical_plan, error);
     if (plan_error != FilterPlanError::kNone) return plan_error;
     if (negotiation.canonical_plan_json != expected_canonical_plan) {
         if (error) *error = "pushdown negotiation does not match the current Schema/expression";
@@ -525,11 +494,8 @@ FilterPlanError MaterializeFilterTaskSessionPlan(
     }
 
     FilterPushdownSplit validated_split;
-    plan_error = SplitFilterForPushdown(
-        original_expression,
-        negotiation.split.accepted_node_ids,
-        &validated_split,
-        error);
+    plan_error =
+        SplitFilterForPushdown(original_expression, negotiation.split.accepted_node_ids, &validated_split, error);
     if (plan_error != FilterPlanError::kNone) return plan_error;
     if (validated_split.candidate_node_ids != negotiation.split.candidate_node_ids ||
         validated_split.accepted_node_ids != negotiation.split.accepted_node_ids) {
@@ -551,11 +517,8 @@ FilterPlanError MaterializeFilterTaskSessionPlan(
     result.residual_expression = validated_split.residual_expression;
     result.pushdown_enabled = result.pushed_expression != nullptr;
     if (result.pushdown_enabled) {
-        plan_error = BuildCanonicalFilterPlan(
-            output_schema,
-            result.pushed_expression,
-            &result.pushed_filter_plan_json,
-            error);
+        plan_error =
+            BuildCanonicalFilterPlan(output_schema, result.pushed_expression, &result.pushed_filter_plan_json, error);
         if (plan_error != FilterPlanError::kNone) return plan_error;
     } else {
         result.pushed_filter_plan_json = kEmptyCanonicalFilterPlanV1;
@@ -565,17 +528,14 @@ FilterPlanError MaterializeFilterTaskSessionPlan(
     return FilterPlanError::kNone;
 }
 
-FilterPlanError CreateBlockTransformTaskSession(
-    IBlockTransformOperatorV1* provider,
-    const std::string& task_id,
-    const std::string& with_params_json,
-    const FilterTaskSessionPlan& filter_plan,
-    IBlockTransformTaskV1** task,
-    std::string* error) {
+FilterPlanError CreateBlockTransformTaskSession(IBlockTransformOperatorV1* provider, const std::string& task_id,
+                                                const std::string& with_params_json,
+                                                const FilterTaskSessionPlan& filter_plan, IBlockTransformTaskV1** task,
+                                                std::string* error) {
     if (task) *task = nullptr;
     if (error) error->clear();
-    if (!provider || task_id.empty() || with_params_json.empty() ||
-        filter_plan.pushed_filter_plan_json.empty() || !task) {
+    if (!provider || task_id.empty() || with_params_json.empty() || filter_plan.pushed_filter_plan_json.empty() ||
+        !task) {
         if (error) {
             *error = "provider, task id, WITH JSON, filter plan, and task output are required";
         }

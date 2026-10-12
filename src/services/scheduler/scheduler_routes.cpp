@@ -1074,9 +1074,17 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                     rsp = BuildErrorJson("managed block transform requires a two-part database destination");
                     return error::BAD_REQUEST;
                 }
-                if (transform_providers.size() != 1 || !stmt.columns.empty() ||
-                    std::any_of(stmt.stage_filters.begin(), stmt.stage_filters.end(),
-                                [](const StageFilterClause& filter) { return filter.after_stage > 0; })) {
+                const auto& parameters =
+                    stmt.operator_with_params.empty() ? stmt.with_params : stmt.operator_with_params[0];
+                const auto observing = parameters.find("observing");
+                const bool family_foreground = stmt.operators.size() == 1 && stmt.operators[0].category == "npm" &&
+                                               stmt.operators[0].name == "basic" && observing != parameters.end() &&
+                                               !observing->second.empty();
+                if (transform_providers.size() != 1 ||
+                    (!family_foreground &&
+                     (!stmt.columns.empty() ||
+                      std::any_of(stmt.stage_filters.begin(), stmt.stage_filters.end(),
+                                  [](const StageFilterClause& filter) { return filter.after_stage > 0; })))) {
                     rsp = BuildErrorJson(
                         "managed block transform requires one operator, SELECT *, and no operator-stage WHERE");
                     return error::BAD_REQUEST;

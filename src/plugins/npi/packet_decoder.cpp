@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -112,14 +113,14 @@ int FindEthernetLayer(const protocol::Layers& layers, int network_index, packet:
     return candidate;
 }
 
-void MarkTruncated(packet::PacketLayerInfo* result) {
+void MarkTruncated(packet::PacketLayerFacts* result) {
     if (result->status != packet::LayerStatus::kMalformed &&
         result->status != packet::LayerStatus::kUnsupportedLinkType) {
         result->status = packet::LayerStatus::kTruncated;
     }
 }
 
-void MarkMalformed(packet::PacketLayerInfo* result) {
+void MarkMalformed(packet::PacketLayerFacts* result) {
     if (result->status != packet::LayerStatus::kUnsupportedLinkType) result->status = packet::LayerStatus::kMalformed;
 }
 
@@ -177,7 +178,7 @@ size_t MinimumHeaderSize(eLayer layer) {
     }
 }
 
-bool BuildProtocolLayers(const packet::PacketView& packet_view, const packet::PacketLayerInfo& source,
+bool BuildProtocolLayers(const packet::PacketView& packet_view, const packet::PacketLayerFacts& source,
                          protocol::Layers* output) {
     if (output == nullptr || source.layer_count == 0 || source.layer_count > protocol::MAX_LAYERS) return false;
     if (source.endpoint_scope != packet::EndpointScope::kInnermost &&
@@ -234,7 +235,7 @@ bool BuildProtocolLayers(const packet::PacketView& packet_view, const packet::Pa
     }
 
     *output = protocol::Layers{};
-    // The complete path remains in PacketLayerInfo. NPI receives the prefix ending at
+    // The complete path remains in PacketLayerFacts. NPI receives the prefix ending at
     // the selected transport so its legacy Top() API observes the selected context.
     output->layercount = static_cast<uint16_t>(top_index + 1);
     output->payload = static_cast<uint16_t>(source.payload_offset);
@@ -257,37 +258,46 @@ bool BuildProtocolLayers(const packet::PacketView& packet_view, const packet::Pa
 NpiPacketLayerDecoder::NpiPacketLayerDecoder(IProtocol* protocol, int32_t pipeno)
     : protocol_(protocol), pipeno_(pipeno) {}
 
-packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& packet_view,
-                                                      const packet::LayerDecodeOptions& options) {
-    packet::PacketLayerInfo result;
+int NpiPacketLayerDecoder::Decode(const packet::PacketView& packet_view, const packet::LayerDecodeOptions& options,
+                                  packet::PacketLayerFacts* output, packet::IPacketAddressSink& addresses) {
+    if (!output) return EINVAL;
+    packet::PacketLayerFacts result;
     result.endpoint_scope = options.endpoint_scope;
+    result.address_state = (options.field_mask & packet::kExtractIp) ? packet::PacketAddressState::kIncomplete
+                                                                     : packet::PacketAddressState::kNotRequested;
 
     if (options.endpoint_scope != packet::EndpointScope::kInnermost &&
         options.endpoint_scope != packet::EndpointScope::kOutermost) {
         result.status = packet::LayerStatus::kMalformed;
-        return result;
+        *output = result;
+        return 0;
     }
 
     if (packet_view.bytes.size != packet_view.meta.captured_len ||
         (packet_view.bytes.size != 0 && packet_view.bytes.data == nullptr)) {
         result.status = packet::LayerStatus::kMalformed;
-        return result;
+        *output = result;
+        return 0;
     }
     if (packet_view.meta.wire_len != 0 && packet_view.meta.wire_len < packet_view.meta.captured_len) {
         result.status = packet::LayerStatus::kMalformed;
-        return result;
+        *output = result;
+        return 0;
     }
     if (packet_view.bytes.size > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
         result.status = packet::LayerStatus::kMalformed;
-        return result;
+        *output = result;
+        return 0;
     }
     if (packet_view.meta.link_type != kDltEthernet) {
         result.status = packet::LayerStatus::kUnsupportedLinkType;
-        return result;
+        *output = result;
+        return 0;
     }
     if (protocol_ == nullptr || packet_view.bytes.size == 0) {
         result.status = packet::LayerStatus::kTruncated;
-        return result;
+        *output = result;
+        return 0;
     }
 
     protocol::Layers parsed{};
@@ -295,7 +305,8 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
         protocol_->Layer(pipeno_, packet_view.bytes.data, static_cast<int32_t>(packet_view.bytes.size), &parsed);
     if (decoded < 0 || decoded > MAX_LAYERS || parsed.layercount > MAX_LAYERS) {
         result.status = packet::LayerStatus::kMalformed;
-        return result;
+        *output = result;
+        return 0;
     }
 
     result.layer_count = static_cast<uint8_t>(std::min<uint16_t>(parsed.layercount, packet::kMaxLayerDepth));
@@ -324,10 +335,10 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
             const auto* ethernet = HeaderAt<EthernetHeader>(parsed, static_cast<uint16_t>(ethernet_index),
                                                             packet_view.bytes.data, packet_view.bytes.size);
             if (ethernet) {
-                result.src_mac.value = wire::ToAnalysis(ethernet->s_addr);
-                result.dst_mac.value = wire::ToAnalysis(ethernet->d_addr);
-                result.src_mac.valid = 1;
-                result.dst_mac.valid = 1;
+                result.src_mac = network::FromWire(ethernet->s_addr);
+                result.dst_mac = network::FromWire(ethernet->d_addr);
+                result.src_mac_valid = true;
+                result.dst_mac_valid = true;
             } else {
                 MarkTruncated(&result);
             }
@@ -335,6 +346,9 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
     }
 
     const eLayer network_layer = network_index < 0 ? eLayer::NONE : parsed.layers[network_index].layer;
+    if ((options.field_mask & packet::kExtractIp) && network_index < 0 &&
+        result.status == packet::LayerStatus::kDecoded)
+        result.address_state = packet::PacketAddressState::kNotPresent;
     if (network_layer == eLayer::IPv4) {
         const auto* header = HeaderAt<Ipv4Header>(parsed, static_cast<uint16_t>(network_index), packet_view.bytes.data,
                                                   packet_view.bytes.size);
@@ -348,8 +362,11 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
         } else {
             result.transport_protocol = header->protocol;
             if (options.field_mask & packet::kExtractIp) {
-                result.src_ip = wire::ToAnalysis(header->src_addr);
-                result.dst_ip = wire::ToAnalysis(header->dst_addr);
+                const packet::PacketIpEndpoints4 endpoints{network::FromWire(header->src_addr),
+                                                           network::FromWire(header->dst_addr)};
+                const int rc = addresses.Set(endpoints);
+                if (rc != 0) return rc;
+                result.address_state = packet::PacketAddressState::kAvailable;
             }
         }
     } else if (network_layer == eLayer::IPv6) {
@@ -366,8 +383,11 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
                 if (mapped != 0) result.transport_protocol = mapped;
             }
             if (options.field_mask & packet::kExtractIp) {
-                result.src_ip = wire::ToAnalysis(header->src_addr);
-                result.dst_ip = wire::ToAnalysis(header->dst_addr);
+                const packet::PacketIpEndpoints6 endpoints{network::FromWire(header->src_addr),
+                                                           network::FromWire(header->dst_addr)};
+                const int rc = addresses.Set(endpoints);
+                if (rc != 0) return rc;
+                result.address_state = packet::PacketAddressState::kAvailable;
             }
         }
     }
@@ -433,14 +453,15 @@ packet::PacketLayerInfo NpiPacketLayerDecoder::Decode(const packet::PacketView& 
     if (result.payload_offset > packet_view.meta.captured_len) {
         result.payload_offset = packet_view.meta.captured_len;
     }
-    return result;
+    *output = result;
+    return 0;
 }
 
 NpiPacketProtocolIdentifier::NpiPacketProtocolIdentifier(IProtocol* protocol, int32_t pipeno)
     : protocol_(protocol), pipeno_(pipeno) {}
 
 packet::PacketProtocolInfo NpiPacketProtocolIdentifier::Identify(const packet::PacketView& packet_view,
-                                                                 const packet::PacketLayerInfo& layer) {
+                                                                 const packet::PacketLayerFacts& layer) {
     if (protocol_ == nullptr) return UnknownProtocol();
 
     protocol::Layers npi_layers{};

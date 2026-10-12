@@ -83,7 +83,8 @@ struct NpmBasicTaskConfigStatus {
 NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, NpmBasicTaskConfig* output,
                                                  bool labeling_available = false,
                                                  const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1(),
-                                                 std::string_view default_input_namespace = "default");
+                                                 std::string_view default_input_namespace = "default",
+                                                 bool managed_output = false);
 
 /** Side-effect-free probe used to gate optional provider lookup before consumed-field validation. */
 bool NpmBasicTaskRequestsLabeling(const char* with_params_json) noexcept;

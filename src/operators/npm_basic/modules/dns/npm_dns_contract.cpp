@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "npm_dns_contract.h"
+#include <operators/npm_basic/npm_family_result_contract.h>
 
 #include <arrow/api.h>
 #include <rapidjson/document.h>
@@ -86,42 +87,10 @@ NpmDnsConfigStatusV1 ParseNpmDnsConfigV1(std::string_view json, NpmDnsConfigV1* 
     }
 }
 
-NpmEntityDescriptorV1 NpmDnsTransactionEntityDescriptorV1() {
-    static const std::shared_ptr<arrow::Schema> schema = arrow::schema(
-        {arrow::field("entity_instance_id", arrow::uint64(), false),
-         arrow::field("revision", arrow::uint64(), false),
-         arrow::field("observed_at", arrow::int64(), false),
-         arrow::field("is_final", arrow::boolean(), false),
-         arrow::field("session_id", arrow::uint64(), false),
-         arrow::field("observation_domain_id", arrow::uint64(), false),
-         arrow::field("transport_protocol", arrow::uint8(), false),
-         arrow::field("a_ip", arrow::utf8(), false),
-         arrow::field("b_ip", arrow::utf8(), false),
-         arrow::field("a_port", arrow::uint16(), false),
-         arrow::field("b_port", arrow::uint16(), false),
-         arrow::field("dns_id", arrow::uint16(), false),
-         arrow::field("outcome", arrow::utf8(), false),
-         arrow::field("query_retries", arrow::uint32(), false),
-         arrow::field("query_direction", arrow::uint8(), true),
-         arrow::field("response_direction", arrow::uint8(), true),
-         arrow::field("qname", arrow::utf8(), true),
-         arrow::field("qtype", arrow::uint16(), true),
-         arrow::field("qclass", arrow::uint16(), true),
-         arrow::field("query_at_ns", arrow::int64(), true),
-         arrow::field("response_at_ns", arrow::int64(), true),
-         arrow::field("latency_ns", arrow::int64(), true),
-         arrow::field("response_rcode", arrow::uint16(), true),
-         arrow::field("response_tc", arrow::boolean(), true),
-         arrow::field("incomplete_reason", arrow::utf8(), true)},
-        arrow::key_value_metadata({"flowsql.entity", "flowsql.schema_version", "flowsql.timestamp_unit",
-                                   "flowsql.revision_semantics", "flowsql.measurement_scope"},
-                                  {"dns_transaction", "1", "ns", "event", "single_capture_observed_packets"}));
-    NpmEntityDescriptorV1 entity;
-    entity.entity_id = "dns_transaction";
-    entity.module_id = "dns";
-    entity.schema = schema;
-    entity.revision_semantics = NpmRevisionSemanticsV1::kEvent;
-    return entity;
+NpmEntityDescriptorV1 NpmDnsTransactionEntityDescriptorV1(packet::AddressFamily family) {
+    static const auto v4 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kDns, packet::AddressFamily::kIPv4);
+    static const auto v6 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kDns, packet::AddressFamily::kIPv6);
+    return family == packet::AddressFamily::kIPv4 ? v4 : v6;
 }
 
 NpmModulePlanV1 NpmDnsModulePlanV1(const NpmDnsConfigV1& config) {
@@ -132,7 +101,8 @@ NpmModulePlanV1 NpmDnsModulePlanV1(const NpmDnsConfigV1& config) {
     plan.requires_labeling = true;
     plan.requires_tcp_stream = true;
     plan.primary_label_ids = config.primary_label_ids;
-    plan.entities.push_back(NpmDnsTransactionEntityDescriptorV1());
+    plan.entities = {NpmDnsTransactionEntityDescriptorV1(packet::AddressFamily::kIPv4),
+                     NpmDnsTransactionEntityDescriptorV1(packet::AddressFamily::kIPv6)};
     return plan;
 }
 

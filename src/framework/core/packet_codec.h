@@ -42,14 +42,6 @@ PacketEnvelopeError CopyPacketBytes(const PacketView& packet, PacketBytes* outpu
 
 std::shared_ptr<arrow::Schema> PacketSchema();
 
-PacketBatchError EncodePacketBatch(const std::vector<PacketRecord>& records,
-                                   std::shared_ptr<arrow::RecordBatch>* output, std::string* error = nullptr);
-
-/** next returns 0 for a borrowed record or ENOENT at end; bytes are copied before the next call. */
-PacketBatchError EncodePacketStream(const std::function<int(PacketRecord*)>& next, uint32_t max_records,
-                                    arrow::MemoryPool* pool, std::shared_ptr<arrow::RecordBatch>* output,
-                                    std::string* error = nullptr);
-
 }  // namespace flowsql::packet
 
 #endif  // _FLOWSQL_FRAMEWORK_CORE_PACKET_CODEC_H_

@@ -1,6 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <tests/common/packet_family_test_support.h>
+
 #include <framework/interfaces/iblock_transform_operator.h>
 #include <operators/npm_basic/modules/dns/npm_dns_contract.h>
 #include <operators/npm_basic/npm_protocol_contract.h>
@@ -74,24 +76,27 @@ std::shared_ptr<arrow::RecordBatch> Rows(const npm::NpmEntityDescriptorV1& entit
 }
 
 void TestEntitiesAndRows() {
-    for (bool labeling : {false, true}) {
-        const auto basic = npm::NpmBasicEntityDescriptorV1();
-        const auto session = npm::NpmSessionEntityDescriptorV1(labeling);
+    for (auto family : {flowsql::packet::AddressFamily::kIPv4, flowsql::packet::AddressFamily::kIPv6}) {
+        const auto basic = npm::NpmBasicEntityDescriptorV1(family);
+        const auto session = npm::NpmSessionEntityDescriptorV1(family);
         Expect(npm::ValidateNpmEntityDescriptorV1(basic), Error::kNone);
         Expect(npm::ValidateNpmEntityDescriptorV1(session), Error::kNone);
-        assert(basic.entity_id == "basic" && basic.module_id == "basic");
-        assert(session.entity_id == "session" && session.module_id == "session");
+        assert(basic.entity_id == (family == flowsql::packet::AddressFamily::kIPv4 ? "basic_ipv4" : "basic_ipv6") &&
+               basic.module_id == "basic");
+        assert(session.entity_id ==
+                   (family == flowsql::packet::AddressFamily::kIPv4 ? "session_ipv4" : "session_ipv6") &&
+               session.module_id == "session");
         assert(basic.identity_column == "session_id" && session.identity_column == "session_id");
-        const uint32_t expected_version = labeling ? 2 : 1;
+        const uint32_t expected_version = 1;
         const std::string expected_version_text = std::to_string(expected_version);
         assert(basic.schema_version == 1 && session.schema_version == expected_version);
-        assert(basic.schema == npm::NpmBasicResultSchema());
-        assert(session.schema == npm::NpmSessionResultSchema(labeling));
+        assert(basic.schema == npm::NpmBasicResultSchema(family));
+        assert(session.schema == npm::NpmSessionResultSchema(family));
         assert(basic.schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == "1");
         assert(session.schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == expected_version_text);
         assert(basic.schema->GetFieldIndex("primary_label_id") >= 0 &&
                basic.schema->GetFieldByName("primary_label_id")->nullable());
-        assert((session.schema->GetFieldIndex("primary_label_id") >= 0) == labeling);
+        assert(session.schema->GetFieldByName("primary_label_id")->nullable());
     }
 
     const auto entity = Entity();
@@ -293,9 +298,9 @@ void TestDnsConfigAndPlan() {
 }
 
 void TestDnsEntitySchemaAndRows() {
-    const auto entity = npm::NpmDnsTransactionEntityDescriptorV1();
+    const auto entity = npm::NpmDnsTransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
     Expect(npm::ValidateNpmEntityDescriptorV1(entity), Error::kNone);
-    assert(entity.entity_id == "dns_transaction" && entity.module_id == "dns");
+    assert(entity.entity_id == "dns_transaction_ipv4" && entity.module_id == "dns");
     assert(entity.schema_version == 1 && entity.revision_semantics == npm::NpmRevisionSemanticsV1::kEvent);
     assert(entity.schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == "1");
     assert(entity.schema->metadata()->Get("flowsql.revision_semantics").ValueOrDie() == "event");
@@ -307,8 +312,8 @@ void TestDnsEntitySchemaAndRows() {
         {"session_id", arrow::Type::UINT64, false},
         {"observation_domain_id", arrow::Type::UINT64, false},
         {"transport_protocol", arrow::Type::UINT8, false},
-        {"a_ip", arrow::Type::STRING, false},
-        {"b_ip", arrow::Type::STRING, false},
+        {"a_ip", arrow::Type::UINT32, false},
+        {"b_ip", arrow::Type::UINT32, false},
         {"a_port", arrow::Type::UINT16, false},
         {"b_port", arrow::Type::UINT16, false},
         {"dns_id", arrow::Type::UINT16, false},
@@ -362,14 +367,14 @@ void TestDnsEntitySchemaAndRows() {
 
 void TestInputRelationships() {
     std::array<uint8_t, 32> bytes{};
-    flowsql::packet::PacketLayerInfo layer;
+    flowsql::testing::OwnedPacketLayer layer;
     layer.transport_protocol = 6;
-    npm::NpmSessionKey key;
+    npm::NpmSessionKey4 key;
     key.transport_protocol = 6;
     key.observation_domain_id = 42;
     npm::NpmSessionView session;
     session.session_id = 1;
-    session.key = &key;
+    session.key = npm::NpmSessionKeyView(key);
     npm::NpmPacketView transport;
     transport.packet.bytes = {bytes.data(), bytes.size()};
     transport.packet.meta.captured_len = bytes.size();

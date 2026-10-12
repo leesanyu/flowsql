@@ -4,7 +4,7 @@
 #ifndef _FLOWSQL_OPERATORS_NPM_BASIC_NPM_PACKET_BATCH_VIEW_H_
 #define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_PACKET_BATCH_VIEW_H_
 
-#include <framework/interfaces/ipacket.h>
+#include <framework/interfaces/ipacket_family.h>
 
 #include <cstdint>
 #include <memory>
@@ -44,9 +44,11 @@ class NpmPacketBatchView final {
                                       std::unique_ptr<NpmPacketBatchView>* output, std::string* error = nullptr);
 
     int64_t num_rows() const;
+    uint64_t owned_address_bytes() const;
 
     /** Reconstructs one row without copying raw_data. Both outputs are unchanged on error. */
-    NpmPacketBatchError Get(int64_t row, packet::PacketView* packet_view, packet::PacketLayerInfo* layer_info) const;
+    NpmPacketBatchError Get(int64_t row, packet::PacketView* packet_view,
+                            packet::PacketFamilyLayerView* layer_info) const;
 
  private:
     struct Columns;

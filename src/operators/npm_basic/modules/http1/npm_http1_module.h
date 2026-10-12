@@ -6,6 +6,7 @@
 
 #include "npm_http1_result_encoder.h"
 
+#include <operators/npm_basic/modules/npm_transaction_identity.h>
 #include <map>
 #include <memory>
 
@@ -35,7 +36,7 @@ class NpmHttp1ProtocolModuleV1 final : public INpmProtocolModuleV1, public INpmT
 
     std::shared_ptr<INpmTaskBudget> budget_;
     NpmHttp1TransactionTrackerV1 transactions_;
-    std::map<uint64_t, NpmHttp1SessionIdentityV1> identities_;
+    std::map<uint64_t, NpmTransactionIdentity> identities_;
     bool finished_ = false;
     bool aborted_ = false;
 };

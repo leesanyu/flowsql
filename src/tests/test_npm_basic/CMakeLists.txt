@@ -2,6 +2,51 @@ project(test_npm_basic)
 
 find_package(Threads REQUIRED)
 
+add_executable(test_npm_family_runtime test_npm_family_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_table.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_key.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_task_budget.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp)
+target_include_directories(test_npm_family_runtime PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_family_runtime PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move -Wno-unused-parameter)
+target_link_libraries(test_npm_family_runtime flowsql_common)
+add_thirddepen(test_npm_family_runtime arrow)
+set_target_properties(test_npm_family_runtime PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_family_runtime COMMAND $<TARGET_FILE:test_npm_family_runtime>)
+
+add_executable(test_npm_ip_family_contract test_npm_ip_family_contract.cpp)
+target_include_directories(test_npm_ip_family_contract PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_ip_family_contract PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-pessimizing-move)
+set_target_properties(test_npm_ip_family_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_ip_family_contract COMMAND $<TARGET_FILE:test_npm_ip_family_contract>)
+
+add_executable(test_npm_family_result_contract test_npm_family_result_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp)
+target_include_directories(test_npm_family_result_contract PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_family_result_contract PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-pessimizing-move -Wno-unused-parameter)
+add_thirddepen(test_npm_family_result_contract arrow)
+set_target_properties(test_npm_family_result_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_family_result_contract COMMAND $<TARGET_FILE:test_npm_family_result_contract>)
+
+add_executable(test_npm_family_output_contract test_npm_family_output_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_output_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp)
+target_include_directories(test_npm_family_output_contract PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_family_output_contract PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-pessimizing-move -Wno-unused-parameter)
+add_thirddepen(test_npm_family_output_contract arrow)
+set_target_properties(test_npm_family_output_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_family_output_contract COMMAND $<TARGET_FILE:test_npm_family_output_contract>)
+
+if(FLOWSQL_IP_FAMILY_CONTRACT_SANITIZERS)
+    foreach(family_contract_target IN ITEMS test_npm_family_runtime test_npm_ip_family_contract test_npm_family_result_contract
+            test_npm_family_output_contract)
+        target_compile_options(${family_contract_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${family_contract_target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
+
 add_executable(${PROJECT_NAME} test_npm_basic.cpp)
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR})
@@ -404,6 +449,8 @@ add_executable(test_npm_result_sqlite test_npm_result_sqlite.cpp)
 target_include_directories(test_npm_result_sqlite PRIVATE ${CMAKE_SOURCE_DIR})
 target_compile_options(test_npm_result_sqlite PRIVATE -UNDEBUG)
 target_sources(test_npm_result_sqlite PRIVATE
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_result_router.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_output_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_basic_result_encoder.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
@@ -433,6 +480,29 @@ set_target_properties(test_npm_result_backends PROPERTIES
 add_test(NAME test_npm_result_backends COMMAND ${CMAKE_BINARY_DIR}/output/test_npm_result_backends)
 
 # Machine-dependent throughput is an observation, not a CTest pass/fail threshold.
+add_executable(benchmark_npm_family_storage benchmark_npm_family_storage.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_task_budget.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp)
+target_include_directories(benchmark_npm_family_storage PRIVATE ${CMAKE_SOURCE_DIR})
+add_thirddepen(benchmark_npm_family_storage arrow)
+target_link_libraries(benchmark_npm_family_storage flowsql_common flowsql_npm_basic flowsql_database)
+set_target_properties(benchmark_npm_family_storage PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+
+add_executable(benchmark_npm_family_cost benchmark_npm_family_cost.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_table.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_key.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_task_budget.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp)
+target_include_directories(benchmark_npm_family_cost PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(benchmark_npm_family_cost PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter -Wno-pessimizing-move)
+add_thirddepen(benchmark_npm_family_cost arrow)
+target_link_libraries(benchmark_npm_family_cost flowsql_common)
+set_target_properties(benchmark_npm_family_cost PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+
 add_executable(benchmark_npm_basic
     benchmark_npm_basic.cpp
     ${CMAKE_SOURCE_DIR}/plugins/npi/packet_decoder.cpp
@@ -485,5 +555,29 @@ if(FLOWSQL_NPM_PERIODIC_SANITIZERS)
     foreach(periodic_target IN ITEMS test_npm_periodic_contract test_npm_periodic_stats test_npm_basic)
         target_compile_options(${periodic_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${periodic_target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
+
+# The same family descriptors serve production and isolated module/encoder targets.
+get_property(npm_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(npm_test_target IN LISTS npm_test_targets)
+    get_target_property(npm_test_sources ${npm_test_target} SOURCES)
+    if("${npm_test_sources}" MATCHES "npm_(analysis|protocol)_contract.cpp" AND
+       NOT "${npm_test_sources}" MATCHES "npm_family_result_contract.cpp")
+        target_sources(${npm_test_target} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp)
+        target_sources(${npm_test_target} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp)
+    endif()
+endforeach()
+
+foreach(family_output_target IN ITEMS test_npm_basic test_npm_family_runtime)
+    target_sources(${family_output_target} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_output_contract.cpp)
+endforeach()
+
+option(FLOWSQL_NPM_RESULT_SANITIZERS "Sanitize typed NPM persistence and database readback" OFF)
+if(FLOWSQL_NPM_RESULT_SANITIZERS)
+    foreach(result_target IN ITEMS flowsql_common flowsql_npm_basic
+                                   test_npm_result_sqlite test_npm_result_backends test_npm_basic test_npm_family_runtime)
+        target_compile_options(${result_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${result_target} PRIVATE -fsanitize=address,undefined)
     endforeach()
 endif()

@@ -7,7 +7,9 @@
 
 #include <cassert>
 #include <cerrno>
+#include <cstring>
 #include <memory>
+#include <type_traits>
 
 namespace npm = flowsql::npm;
 
@@ -46,19 +48,31 @@ class FailingPool final : public arrow::MemoryPool {
     std::string backend_name() const override { return "http1_test_failure"; }
 };
 
+template <typename Address>
 class Emitter final : public npm::INpmResultEmitterV1 {
  public:
     explicit Emitter(std::shared_ptr<Budget> budget) : budget_(std::move(budget)) {}
     int Emit(std::string_view entity, const arrow::RecordBatch& rows) override {
         ++calls;
-        assert(entity == "http1_transaction" && budget_->used > 0);
-        auto descriptor = npm::NpmHttp1TransactionEntityDescriptorV1();
+        assert(entity == (sizeof(Address) == 4 ? "http1_transaction_ipv4" : "http1_transaction_ipv6") &&
+               budget_->used > 0);
+        auto descriptor = npm::NpmHttp1TransactionEntityDescriptorV1(
+            sizeof(Address) == 4 ? flowsql::packet::AddressFamily::kIPv4 : flowsql::packet::AddressFamily::kIPv6);
         assert(npm::ValidateNpmEntityRowsV1("http1", descriptor, rows).error == npm::NpmProtocolContractErrorV1::kNone);
         assert(rows.schema()->Equals(*descriptor.schema, true) && rows.num_rows() == 1);
         auto domain = std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("observation_domain_id"));
         auto outcome = std::static_pointer_cast<arrow::StringArray>(rows.GetColumnByName("outcome"));
         auto latency = std::static_pointer_cast<arrow::Int64Array>(rows.GetColumnByName("latency_ns"));
         assert(domain->Value(0) == 44 && outcome->GetString(0) == "matched" && latency->Value(0) == 10);
+        const auto a_ip = rows.GetColumnByName("a_ip");
+        if constexpr (sizeof(Address) == 4) {
+            assert(std::static_pointer_cast<arrow::UInt32Array>(a_ip)->Value(0) == 0xc0000201U);
+        } else {
+            const uint8_t bytes[16] = {0x20, 1, 0x0d, 0xb8, 0, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+            assert(std::memcmp(std::static_pointer_cast<arrow::FixedSizeBinaryArray>(a_ip)->GetValue(0), bytes, 16) ==
+                   0);
+        }
+        assert(!rows.GetColumnByName("ip_family"));
         return error;
     }
     int error = 0;
@@ -68,17 +82,22 @@ class Emitter final : public npm::INpmResultEmitterV1 {
     std::shared_ptr<Budget> budget_;
 };
 
+template <typename Address>
 void TestEncoder() {
     auto budget = std::make_shared<Budget>();
-    Emitter emitter(budget);
-    npm::NpmHttp1SessionIdentityV1 session;
-    session.session_id = 7;
+    Emitter<Address> emitter(budget);
+    npm::NpmHttp1FamilyResult<Address> session;
     session.observation_domain_id = 44;
-    session.a_ip = "192.0.2.1";
-    session.b_ip = "198.51.100.2";
-    session.a_port = 12345;
+    if constexpr (sizeof(Address) == 4) {
+        session.a_ip = Address{{192, 0, 2, 1}};
+        session.b_ip = Address{{198, 51, 100, 2}};
+    } else {
+        session.a_ip = Address{{0x20, 1, 0x0d, 0xb8, 0, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}};
+        session.b_ip = Address{{0x20, 1, 0x0d, 0xb8, 0, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}};
+    }
+    session.a_port = 53000;
     session.b_port = 80;
-    npm::NpmHttp1TransactionResultV1 row;
+    auto& row = session.transaction;
     row.entity_instance_id = 9;
     row.session_id = 7;
     row.outcome = npm::NpmHttp1OutcomeV1::kMatched;
@@ -94,23 +113,26 @@ void TestEncoder() {
     row.response->complete_at_ns = 20;
     row.latency_ns = 10;
     row.observed_at_ns = 20;
-    assert(npm::EmitNpmHttp1TransactionV1(row, session, budget, emitter) == 0);
+    assert(npm::EmitNpmHttp1TransactionV1(session, budget, emitter) == 0);
     assert(budget->used == 0 && emitter.calls == 1);
     emitter.error = EIO;
-    assert(npm::EmitNpmHttp1TransactionV1(row, session, budget, emitter) == EIO);
+    assert(npm::EmitNpmHttp1TransactionV1(session, budget, emitter) == EIO);
     assert(budget->used == 0 && emitter.calls == 2);
     budget->limit = 1;
-    assert(npm::EmitNpmHttp1TransactionV1(row, session, budget, emitter) == ENOSPC);
+    assert(npm::EmitNpmHttp1TransactionV1(session, budget, emitter) == ENOSPC);
     assert(budget->used == 0 && emitter.calls == 2);
     budget->limit = 1024 * 1024;
     FailingPool pool;
-    assert(npm::EmitNpmHttp1TransactionV1(row, session, budget, emitter, &pool) == ENOMEM);
+    assert(npm::EmitNpmHttp1TransactionV1(session, budget, emitter, &pool) == ENOMEM);
     assert(budget->used == 0 && emitter.calls == 2);
     row.request->target = std::string("\xff", 1);
-    assert(npm::EmitNpmHttp1TransactionV1(row, session, budget, emitter) == EINVAL);
+    assert(npm::EmitNpmHttp1TransactionV1(session, budget, emitter) == EINVAL);
     assert(budget->used == 0 && emitter.calls == 2);
 }
 
 }  // namespace
 
-int main() { TestEncoder(); }
+int main() {
+    TestEncoder<flowsql::network::IPv4Address>();
+    TestEncoder<flowsql::network::IPv6Address>();
+}

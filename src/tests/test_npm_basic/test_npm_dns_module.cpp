@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -39,13 +40,26 @@ class Budget final : public npm::INpmTaskBudget {
 class Emitter final : public npm::INpmResultEmitterV1 {
  public:
     int Emit(std::string_view entity, const arrow::RecordBatch& batch) override {
-        assert(entity == "dns_transaction" && batch.num_rows() == 1);
+        assert(entity == (family == flowsql::packet::AddressFamily::kIPv4 ? "dns_transaction_ipv4"
+                                                                          : "dns_transaction_ipv6") &&
+               batch.num_rows() == 1);
         auto outcome = std::static_pointer_cast<arrow::StringArray>(batch.GetColumnByName("outcome"));
         auto reason = std::static_pointer_cast<arrow::StringArray>(batch.GetColumnByName("incomplete_reason"));
         outcomes.push_back(outcome->GetString(0));
         reasons.push_back(reason->IsNull(0) ? "" : reason->GetString(0));
+        const auto address = batch.GetColumnByName("a_ip");
+        if (family == flowsql::packet::AddressFamily::kIPv4) {
+            assert(std::static_pointer_cast<arrow::UInt32Array>(address)->Value(0) == 0xc0000201U);
+        } else {
+            const uint8_t expected[16] = {192, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff};
+            assert(std::memcmp(std::static_pointer_cast<arrow::FixedSizeBinaryArray>(address)->GetValue(0), expected,
+                               16) == 0);
+        }
+        auto qtype = std::static_pointer_cast<arrow::UInt16Array>(batch.GetColumnByName("qtype"));
+        if (!qtype->IsNull(0)) assert(qtype->Value(0) == (family == flowsql::packet::AddressFamily::kIPv4 ? 28 : 1));
         return error;
     }
+    flowsql::packet::AddressFamily family = flowsql::packet::AddressFamily::kIPv4;
     int error = 0;
     std::vector<std::string> outcomes;
     std::vector<std::string> reasons;
@@ -73,40 +87,45 @@ class Cursor final : public npm::INpmTcpStreamCursorV1 {
     bool consumed_ = false;
 };
 
+template <typename KeyType>
 Bytes Message(uint16_t id, bool response = false) {
-    return {static_cast<uint8_t>(id >> 8),
-            static_cast<uint8_t>(id),
-            static_cast<uint8_t>(response ? 0x80 : 0),
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            'a',
-            0,
-            0,
-            1,
-            0,
-            1};
+    Bytes bytes = {static_cast<uint8_t>(id >> 8),
+                   static_cast<uint8_t>(id),
+                   static_cast<uint8_t>(response ? 0x80 : 0),
+                   0,
+                   0,
+                   1,
+                   0,
+                   0,
+                   0,
+                   0,
+                   0,
+                   0,
+                   1,
+                   'a',
+                   0,
+                   0,
+                   1,
+                   0,
+                   1};
+    bytes[16] = sizeof(decltype(KeyType{}.a_ip)) == 4 ? 28 : 1;
+    return bytes;
 }
 
-npm::NpmSessionView Session(npm::NpmSessionKey* key, uint64_t id) {
+template <typename KeyType>
+npm::NpmSessionView Session(KeyType* key, uint64_t id) {
     npm::NpmSessionView session;
     session.session_id = id;
-    session.key = key;
+    session.key = npm::NpmSessionKeyView(*key);
     return session;
 }
 
-npm::NpmSessionKey Key(uint8_t transport) {
-    npm::NpmSessionKey key;
-    key.ip_family = flowsql::packet::AddressFamily::kIPv4;
+template <typename KeyType>
+KeyType Key(uint8_t transport) {
+    KeyType key;
+
     key.transport_protocol = transport;
-    flowsql::packet::IPv4Address a{}, b{};
+    decltype(key.a_ip) a{}, b{};
     a.bytes[0] = 192;
     a.bytes[1] = 0;
     a.bytes[2] = 2;
@@ -115,10 +134,14 @@ npm::NpmSessionKey Key(uint8_t transport) {
     b.bytes[1] = 51;
     b.bytes[2] = 100;
     b.bytes[3] = 2;
-    key.a.ip = a;
-    key.b.ip = b;
-    key.a.port = 53000;
-    key.b.port = 53;
+    if constexpr (sizeof(a) == 16) {
+        a.bytes[15] = 0xff;
+        b.bytes[15] = 0x80;
+    }
+    key.a_ip = a;
+    key.b_ip = b;
+    key.a_port = 53000;
+    key.b_port = 53;
     key.observation_domain_id = 44;
     return key;
 }
@@ -138,53 +161,59 @@ int Send(npm::NpmDnsProtocolModuleV1* module, const npm::NpmSessionView& session
     return module->OnInput(input, *emitter);
 }
 
+template <typename KeyType>
 void TestUdpTimeEndAndFailure() {
     auto budget = std::make_shared<Budget>();
     npm::NpmDnsProtocolModuleV1 module({{1001}, 1'000'000, 2}, budget);
-    auto key = Key(17);
+    auto key = Key<KeyType>(17);
     auto session = Session(&key, 7);
     Emitter emitter;
-    assert(Send(&module, session, Message(1), npm::NpmPacketDirection::kAToB, 100, &emitter) == 0);
+    emitter.family =
+        sizeof(key.a_ip) == 4 ? flowsql::packet::AddressFamily::kIPv4 : flowsql::packet::AddressFamily::kIPv6;
+    assert(Send(&module, session, Message<KeyType>(1), npm::NpmPacketDirection::kAToB, 100, &emitter) == 0);
     assert(module.NextEventDeadlineNs() == 1'000'100);
     assert(module.OnTime({1'000'099, 1'000'099}, emitter) == 0 && emitter.outcomes.empty());
     assert(module.OnTime({1'000'100, 1'000'100}, emitter) == 0);
     assert(emitter.outcomes == std::vector<std::string>{"query_only"});
     assert(emitter.reasons.back() == "response_not_observed_by_deadline");
     assert(!module.NextEventDeadlineNs());
-    assert(Send(&module, session, Message(2), npm::NpmPacketDirection::kAToB, 200, &emitter) == 0);
-    assert(Send(&module, session, Message(2, true), npm::NpmPacketDirection::kBToA, 300, &emitter) == 0);
+    assert(Send(&module, session, Message<KeyType>(2), npm::NpmPacketDirection::kAToB, 200, &emitter) == 0);
+    assert(Send(&module, session, Message<KeyType>(2, true), npm::NpmPacketDirection::kBToA, 300, &emitter) == 0);
     assert(emitter.outcomes.back() == "matched");
-    assert(Send(&module, session, Message(3), npm::NpmPacketDirection::kAToB, 400, &emitter) == 0);
+    assert(Send(&module, session, Message<KeyType>(3), npm::NpmPacketDirection::kAToB, 400, &emitter) == 0);
     assert(module.OnSessionEnd(session, npm::NpmSessionEndReason::kEof, 500, emitter) == 0);
     assert(emitter.reasons.back() == "session_end");
     assert(module.Finish(500, emitter) == 0 && budget->used == 0);
 
     npm::NpmDnsProtocolModuleV1 failing({{1001}, 1'000'000, 2}, budget);
-    assert(Send(&failing, session, Message(4), npm::NpmPacketDirection::kAToB, 600, &emitter) == 0);
+    assert(Send(&failing, session, Message<KeyType>(4), npm::NpmPacketDirection::kAToB, 600, &emitter) == 0);
     emitter.error = EIO;
-    assert(Send(&failing, session, Message(4, true), npm::NpmPacketDirection::kBToA, 700, &emitter) == EIO);
+    assert(Send(&failing, session, Message<KeyType>(4, true), npm::NpmPacketDirection::kBToA, 700, &emitter) == EIO);
     failing.Abort();
     assert(budget->used == 0);
 }
 
+template <typename KeyType>
 void TestTcpStreamAndBudget() {
     auto budget = std::make_shared<Budget>();
     npm::NpmDnsProtocolModuleV1 module({{1001}, 1'000'000, 2}, budget);
-    auto key = Key(6);
+    auto key = Key<KeyType>(6);
     auto session = Session(&key, 8);
     Emitter emitter;
+    emitter.family =
+        sizeof(key.a_ip) == 4 ? flowsql::packet::AddressFamily::kIPv4 : flowsql::packet::AddressFamily::kIPv6;
     npm::NpmTcpStreamContextV1 context;
     context.session = &session;
     context.origin = npm::NpmTcpStreamOriginV1::kSyn;
     context.direction = npm::NpmPacketDirection::kAToB;
     context.observed_at_ns = 100;
-    const auto query = Message(5);
+    const auto query = Message<KeyType>(5);
     Bytes frame = {0, static_cast<uint8_t>(query.size())};
     frame.insert(frame.end(), query.begin(), query.end());
     Cursor request(frame, 100);
     assert(module.OnTcpStreamReadable(context, request, emitter) == 0 && emitter.outcomes.empty());
     assert(module.NextEventDeadlineNs() == 1'000'100);
-    const auto answer = Message(5, true);
+    const auto answer = Message<KeyType>(5, true);
     frame = {0, static_cast<uint8_t>(answer.size())};
     frame.insert(frame.end(), answer.begin(), answer.end());
     context.direction = npm::NpmPacketDirection::kBToA;
@@ -197,17 +226,18 @@ void TestTcpStreamAndBudget() {
 
     budget->limit = 1;
     npm::NpmDnsProtocolModuleV1 rejected({{1001}, 1'000'000, 2}, budget);
-    assert(Send(&rejected, session, Message(6), npm::NpmPacketDirection::kAToB, 300, &emitter) == ENOSPC);
+    assert(Send(&rejected, session, Message<KeyType>(6), npm::NpmPacketDirection::kAToB, 300, &emitter) == ENOSPC);
     rejected.Abort();
     assert(budget->used == 0);
 
     budget->limit = 4608;
     npm::NpmDnsProtocolModuleV1 output_rejected({{1001}, 1'000'000, 2}, budget);
-    auto udp_key = Key(17);
+    auto udp_key = Key<KeyType>(17);
     auto udp_session = Session(&udp_key, 9);
-    assert(Send(&output_rejected, udp_session, Message(7), npm::NpmPacketDirection::kAToB, 400, &emitter) == 0);
-    assert(Send(&output_rejected, udp_session, Message(7, true), npm::NpmPacketDirection::kBToA, 500, &emitter) ==
-           ENOSPC);
+    assert(Send(&output_rejected, udp_session, Message<KeyType>(7), npm::NpmPacketDirection::kAToB, 400, &emitter) ==
+           0);
+    assert(Send(&output_rejected, udp_session, Message<KeyType>(7, true), npm::NpmPacketDirection::kBToA, 500,
+                &emitter) == ENOSPC);
     output_rejected.Abort();
     assert(budget->used == 0);
 }
@@ -215,8 +245,10 @@ void TestTcpStreamAndBudget() {
 }  // namespace
 
 int main() {
-    TestUdpTimeEndAndFailure();
-    TestTcpStreamAndBudget();
+    TestUdpTimeEndAndFailure<npm::NpmSessionKey4>();
+    TestUdpTimeEndAndFailure<npm::NpmSessionKey6>();
+    TestTcpStreamAndBudget<npm::NpmSessionKey4>();
+    TestTcpStreamAndBudget<npm::NpmSessionKey6>();
     std::puts("NPM DNS module tests passed");
     return 0;
 }

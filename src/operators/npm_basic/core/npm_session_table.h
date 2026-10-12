@@ -18,11 +18,12 @@
 namespace flowsql::npm {
 
 struct NpmSessionKeyHash {
-    size_t operator()(const NpmSessionKey& key) const noexcept;
+    size_t operator()(const NpmSessionKey4& key) const noexcept;
+    size_t operator()(const NpmSessionKey6& key) const noexcept;
 };
-
 struct NpmSessionKeyEqual {
-    bool operator()(const NpmSessionKey& left, const NpmSessionKey& right) const noexcept;
+    bool operator()(const NpmSessionKey4& left, const NpmSessionKey4& right) const noexcept;
+    bool operator()(const NpmSessionKey6& left, const NpmSessionKey6& right) const noexcept;
 };
 
 enum class NpmSessionTableError : uint8_t {
@@ -55,8 +56,7 @@ struct NpmCaptureProgressUpdate {
     bool source_has_backlog = false;
 };
 
-struct NpmSessionSnapshot {
-    NpmSessionKey key;
+struct NpmSessionSnapshotFacts {
     uint64_t session_id = 0;
     int64_t first_ns = 0;
     int64_t last_ns = 0;
@@ -69,8 +69,23 @@ struct NpmSessionSnapshot {
     std::optional<uint16_t> protocol_id;
     std::optional<uint16_t> protocol_sub_id;
     NpmSessionEndReason end_reason = NpmSessionEndReason::kIdleTimeout;
+};
 
-    NpmSessionView View() const;
+struct NpmSessionSnapshot : NpmSessionSnapshotFacts {
+ private:
+    struct Lease;
+    std::shared_ptr<Lease> lease_;
+
+ public:
+    NpmOwnedSessionKey key;
+    NpmSessionSnapshot() = default;
+    NpmSessionSnapshot(const NpmSessionSnapshot& other);
+    NpmSessionSnapshot& operator=(const NpmSessionSnapshot& other);
+    NpmSessionSnapshot(NpmSessionSnapshot&&) noexcept = default;
+    NpmSessionSnapshot& operator=(NpmSessionSnapshot&&) noexcept = default;
+    void ReserveBudget(std::shared_ptr<INpmTaskBudget> budget, uint64_t bytes);
+    NpmSessionView View() const&;
+    NpmSessionView View() const&& = delete;
 };
 
 /** One packet may retire an old instance and either expose a replacement or leave no active session. */
@@ -95,17 +110,21 @@ class NpmSessionTable {
     explicit NpmSessionTable(const NpmAnalysisConfig& config);
     NpmSessionTable(const NpmAnalysisConfig& config, std::shared_ptr<INpmTaskBudget> budget);
     ~NpmSessionTable();
+    NpmSessionTable(const NpmSessionTable&) = delete;
+    NpmSessionTable& operator=(const NpmSessionTable&) = delete;
+    NpmSessionTable(NpmSessionTable&&) = delete;
+    NpmSessionTable& operator=(NpmSessionTable&&) = delete;
 
     /** Observes one normalized packet. Active keys borrow from this table; ended snapshots own their keys. */
     NpmSessionTableError Observe(const NpmSessionPacketBinding& binding, const packet::PacketMeta& meta,
                                  NpmSessionObserveResult* output, uint32_t new_session_primary_label_id = 0);
 
     /** Samples one active session payload. Output keys borrow from this table. */
-    NpmSessionTableError SampleProtocol(const NpmSessionKey& key, uint64_t session_id, const NpmPacketView& packet,
-                                        packet::IPacketProtocolIdentifier& identifier, NpmSessionView* output);
+    NpmSessionTableError SampleProtocol(NpmSessionKeyView key, uint64_t session_id, const NpmPacketView& packet,
+                                        packet::IPacketFamilyProtocolIdentifier& identifier, NpmSessionView* output);
 
     /** Returns a borrowed snapshot view without updating the session. */
-    NpmSessionTableError Find(const NpmSessionKey& key, NpmSessionView* output) const;
+    NpmSessionTableError Find(NpmSessionKeyView key, NpmSessionView* output) const;
 
     /** Returns active borrowed views ordered by session ID; valid until the next table mutation. */
     NpmSessionTableError SnapshotActive(std::vector<NpmSessionView>* output) const;
@@ -126,8 +145,9 @@ class NpmSessionTable {
 
     int64_t WatermarkNs() const noexcept { return watermark_ns_; }
 
-    size_t size() const noexcept { return sessions_.size(); }
+    size_t size() const noexcept { return sessions4_.size() + sessions6_.size(); }
     uint64_t tracked_bytes() const noexcept { return tracked_session_bytes_; }
+    INpmTaskBudget& Budget() const noexcept { return *budget_; }
 
  private:
     friend class NpmSessionAdmissionPlanner;
@@ -154,13 +174,25 @@ class NpmSessionTable {
         uint64_t tracked_bytes = 0;
     };
 
-    using SessionMap = std::unordered_map<NpmSessionKey, State, NpmSessionKeyHash, NpmSessionKeyEqual>;
+    template <typename Key>
+    using FamilyMap = std::unordered_map<Key, State, NpmSessionKeyHash, NpmSessionKeyEqual>;
     using DeadlineKey = std::pair<int64_t, uint64_t>;
-    using DeadlineMap = std::map<DeadlineKey, NpmSessionKey>;
+    using DeadlineMap = std::map<DeadlineKey, uint64_t>;
+    using IdMap = std::unordered_map<uint64_t, NpmSessionKeyView>;
 
-    static NpmSessionView MakeView(const SessionMap::value_type& entry);
-    static NpmSessionSnapshot MakeSnapshot(const SessionMap::value_type& entry, NpmSessionEndReason reason);
-    static uint64_t EstimateTrackedBytes(const NpmSessionKey& key) noexcept;
+    template <typename Entry>
+    static NpmSessionView MakeView(const Entry& entry);
+    template <typename Entry>
+    NpmSessionSnapshot MakeSnapshot(const Entry& entry, NpmSessionEndReason reason);
+    template <typename Key>
+    static uint64_t EstimateTrackedBytes(const Key& key) noexcept;
+    template <typename Key>
+    NpmSessionTableError ObserveFamily(const NpmSessionPacketBinding& binding, const Key& key, FamilyMap<Key>& sessions,
+                                       const packet::PacketMeta& meta, NpmSessionObserveResult* output, uint32_t label);
+    template <typename Key>
+    NpmSessionTableError SampleFamily(const Key& key, FamilyMap<Key>& sessions, uint64_t id,
+                                      const NpmPacketView& packet, packet::IPacketFamilyProtocolIdentifier& identifier,
+                                      NpmSessionView* output);
 
     NpmBudgetError ReserveSession(uint64_t bytes);
     void ReleaseSession(uint64_t bytes) noexcept;
@@ -170,7 +202,9 @@ class NpmSessionTable {
     uint64_t next_session_id_ = 1;
     bool watermark_initialized_ = false;
     int64_t watermark_ns_ = 0;
-    SessionMap sessions_;
+    FamilyMap<NpmSessionKey4> sessions4_;
+    FamilyMap<NpmSessionKey6> sessions6_;
+    IdMap ids_;
     DeadlineMap deadlines_;
     std::shared_ptr<INpmTaskBudget> budget_;
     uint64_t tracked_session_bytes_ = 0;
@@ -180,6 +214,9 @@ class NpmSessionTable {
 class NpmSessionAdmissionPlanner {
  public:
     explicit NpmSessionAdmissionPlanner(const NpmSessionTable& sessions) noexcept;
+    ~NpmSessionAdmissionPlanner();
+    NpmSessionAdmissionPlanner(const NpmSessionAdmissionPlanner&) = delete;
+    NpmSessionAdmissionPlanner& operator=(const NpmSessionAdmissionPlanner&) = delete;
 
     NpmSessionTableError AdvanceControl(int64_t timestamp_ns);
 
@@ -202,7 +239,14 @@ class NpmSessionAdmissionPlanner {
     const NpmSessionTable* sessions_ = nullptr;
     bool watermark_initialized_ = false;
     int64_t watermark_ns_ = 0;
-    std::unordered_map<NpmSessionKey, State, NpmSessionKeyHash, NpmSessionKeyEqual> states_;
+    template <typename Key>
+    NpmSessionTableError ObserveFamily(const NpmSessionPacketBinding& binding, const Key& key,
+                                       const packet::PacketMeta& meta, bool* requires_admission);
+    template <typename Key>
+    using FamilyStates = std::unordered_map<Key, State, NpmSessionKeyHash, NpmSessionKeyEqual>;
+    uint64_t charged_bytes_ = 0;
+    FamilyStates<NpmSessionKey4> states4_;
+    FamilyStates<NpmSessionKey6> states6_;
 };
 
 /** Synchronously notifies every module in registration order for each owned ended-session snapshot. */

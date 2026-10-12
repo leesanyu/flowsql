@@ -96,49 +96,10 @@ struct PacketBytes {
     uint32_t size = 0;
 };
 
-struct PacketLayerInfo {
-    LayerStatus status = LayerStatus::kNotDecoded;
-    uint8_t layer_count = 0;
-    std::array<LayerRef, kMaxLayerDepth> layers{};
-    EndpointScope endpoint_scope = EndpointScope::kInnermost;
-    uint8_t network_layer_index = kNoLayerIndex;
-    uint8_t transport_layer_index = kNoLayerIndex;
-    uint32_t payload_offset = 0;
-    MacAddress src_mac;
-    MacAddress dst_mac;
-    IpAddress src_ip;
-    IpAddress dst_ip;
-    uint8_t transport_protocol = 0;
-    uint16_t src_port = 0;
-    uint16_t dst_port = 0;
-    uint8_t ports_valid = 0;
-};
-
 struct PacketProtocolInfo {
     ProtocolStatus status = ProtocolStatus::kNotAttempted;
     uint16_t id = 0;
     uint16_t sub_id = 0;
-};
-
-struct PacketRecord {
-    PacketMeta meta;
-    PacketBytes raw_data;
-    PacketLayerInfo layer;
-    PacketProtocolInfo protocol;
-};
-
-interface IPacketLayerDecoder {
-    virtual ~IPacketLayerDecoder() = default;
-
-    // Build the complete layer path once, then extract fields requested by options.
-    virtual PacketLayerInfo Decode(const PacketView& packet, const LayerDecodeOptions& options) = 0;
-};
-
-interface IPacketProtocolIdentifier {
-    virtual ~IPacketProtocolIdentifier() = default;
-
-    // Identify only sampled session payloads; do not invoke a layer decoder here.
-    virtual PacketProtocolInfo Identify(const PacketView& packet, const PacketLayerInfo& layer) = 0;
 };
 
 }  // namespace flowsql::packet

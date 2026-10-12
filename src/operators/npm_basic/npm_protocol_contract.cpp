@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "npm_protocol_contract.h"
+#include "npm_family_result_contract.h"
 
 #include <arrow/api.h>
 
@@ -50,18 +51,18 @@ NpmProtocolContractStatusV1 ValidateNpmInputEventV1(const NpmInputEventV1& event
     }
     const bool tcp = event.kind == NpmInputKindV1::kTcpPacket;
     if (!tcp && event.kind != NpmInputKindV1::kUdpDatagram) return Fail(Error::kInvalidInput, "kind");
-    if (event.transport == nullptr || event.session == nullptr || event.session->key == nullptr ||
+    if (event.transport == nullptr || event.session == nullptr || !event.session->key ||
         event.session->session_id == 0) {
         return Fail(Error::kInvalidInput, "session");
     }
     const auto& transport = *event.transport;
     const auto& facts = transport.transport;
     const uint8_t protocol = tcp ? 6 : 17;
-    if (event.session->key->transport_protocol != protocol || event.layer->transport_protocol != protocol ||
+    if (event.session->key->Protocol() != protocol || event.layer->transport_protocol != protocol ||
         facts.tcp.valid != tcp) {
         return Fail(Error::kInvalidInput, "kind");
     }
-    if (event.session->key->observation_domain_id != event.observation_domain_id) {
+    if (event.session->key->Domain() != event.observation_domain_id) {
         return Fail(Error::kInvalidInput, "observation_domain_id");
     }
     if (transport.direction != NpmPacketDirection::kAToB && transport.direction != NpmPacketDirection::kBToA) {
@@ -190,24 +191,20 @@ NpmProtocolContractStatusV1 ValidateNpmEntityRowsV1(std::string_view emitting_mo
     return {};
 }
 
-NpmEntityDescriptorV1 NpmBasicEntityDescriptorV1() {
-    NpmEntityDescriptorV1 entity;
-    entity.entity_id = "basic";
-    entity.module_id = "basic";
-    entity.schema_version = 1;
-    entity.schema = NpmBasicResultSchema();
-    entity.identity_column = "session_id";
-    return entity;
+std::shared_ptr<arrow::Schema> NpmBasicResultSchema(packet::AddressFamily family) {
+    return NpmBasicEntityDescriptorV1(family).schema;
 }
-
-NpmEntityDescriptorV1 NpmSessionEntityDescriptorV1(bool labeling_enabled) {
-    NpmEntityDescriptorV1 entity;
-    entity.entity_id = "session";
-    entity.module_id = "session";
-    entity.schema_version = labeling_enabled ? 2 : 1;
-    entity.schema = NpmSessionResultSchema(labeling_enabled);
-    entity.identity_column = "session_id";
-    return entity;
+std::shared_ptr<arrow::Schema> NpmSessionResultSchema(packet::AddressFamily family) {
+    return NpmSessionEntityDescriptorV1(family).schema;
 }
-
+NpmEntityDescriptorV1 NpmBasicEntityDescriptorV1(packet::AddressFamily family) {
+    static const auto v4 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kBasic, packet::AddressFamily::kIPv4);
+    static const auto v6 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kBasic, packet::AddressFamily::kIPv6);
+    return family == packet::AddressFamily::kIPv4 ? v4 : v6;
+}
+NpmEntityDescriptorV1 NpmSessionEntityDescriptorV1(packet::AddressFamily family) {
+    static const auto v4 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kSession, packet::AddressFamily::kIPv4);
+    static const auto v6 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kSession, packet::AddressFamily::kIPv6);
+    return family == packet::AddressFamily::kIPv4 ? v4 : v6;
+}
 }  // namespace flowsql::npm

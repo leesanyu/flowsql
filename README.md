@@ -558,6 +558,7 @@ NPI 的 JSON option 必须包含指向可读协议词典的 `ldfile`，例如原
 SELECT *
 FROM pcapfile.capture
 USING npm.basic
+WITH observing='basic_ipv4'
 INTO dataframe.basic_metrics
 ```
 
@@ -566,7 +567,7 @@ INTO dataframe.basic_metrics
 | 参数 | 默认值 | 含义 |
 | --- | --- | --- |
 | `features` | `'basic'` | 启用的结果模块，当前支持 `basic`、`session`、`dns`、`http1`、`tls`、`icmp`；DNS/HTTP/1/TLS 需同时启用能力项 `labeling`。 |
-| `observing` | `'basic'` | 普通 DataFrame 目标接收的结果实体，必须已在 `features` 中启用。 |
+| `observing` | 无 | 普通输出必须显式指定已启用模块的具体族实体；托管省略时仅入库，前台零列零行。 |
 | `input_namespace` | `FROM` 通道名 | 本次输入的逻辑来源名称，可用非空值覆盖。 |
 | `source_domains` | `'all'` | 采集来源到观测域的映射，语法见下文。 |
 | `parameters` | 各配置项默认值 | JSON 字符串；`schema_version=1`，`core` 放共享配置，模块名放私有配置。 |
@@ -578,11 +579,11 @@ SELECT *
 FROM pcapfile.http
 USING npm.basic
 WITH features='basic,session',
-     observing='session'
+     observing='session_ipv4'
 INTO dataframe.session_metrics
 ```
 
-`features='session'` 时也必须指定 `observing='session'`；`observing` 不会隐式启用模块。
+`features='session'` 时也必须指定 `observing='session_ipv4'`；`observing` 不会隐式启用模块。
 普通 DataFrame 只接收所选实体；需要留存所有已启用实体时，使用下文的数据库托管目标。
 共享参数使用 `parameters.core`，例如 `parameters='{"schema_version":1,"core":{"max_active_sessions":100000}}'`。
 使用 `parameters` 时，不能同时提供旧的顶层调优参数（如 `run_mode`、`max_active_sessions`），
@@ -605,7 +606,7 @@ INTO dataframe.session_metrics
 SELECT *
 FROM pcapfile.capture
 USING npm.basic
-WITH result_mode='periodic_snapshot',
+WITH observing='basic_ipv4', result_mode='periodic_snapshot',
      output_interval_ns=15000000000
 INTO dataframe.flow_timeline
 ```
@@ -616,7 +617,7 @@ INTO dataframe.flow_timeline
 SELECT *
 FROM pcapfile.capture
 USING npm.basic
-WITH parameters='{"schema_version":1,"core":{"result_mode":"periodic_snapshot","output_interval_ns":15000000000}}'
+WITH observing='basic_ipv4', parameters='{"schema_version":1,"core":{"result_mode":"periodic_snapshot","output_interval_ns":15000000000}}'
 INTO dataframe.flow_timeline
 ```
 
@@ -651,7 +652,7 @@ INTO dataframe.flow_timeline
 SELECT *
 FROM pcapfile.capture
 USING npm.basic
-WITH result_mode='final'
+WITH observing='basic_ipv4', result_mode='final'
 INTO dataframe.flow_final
 ```
 
@@ -670,12 +671,12 @@ SELECT *
 FROM pcapfile.capture
 USING npm.basic
 WITH features='dns,labeling',
-     observing='dns_transaction',
+     observing='dns_transaction_ipv4',
      parameters='{"schema_version":1,"core":{"labeling":"config.dns-labels@7"},"dns":{"primary_label_ids":[1001],"response_timeout_ns":5000000000}}'
 INTO dataframe.dns_transactions
 ```
 
-`observing='dns_transaction'` 只选择普通 DataFrame 的前台结果；同时启用 `basic`、`session` 时，
+`observing='dns_transaction_ipv4'` 只选择普通 DataFrame 的前台结果；同时启用 `basic`、`session` 时，
 它们仍被计算并送往已配置的托管消费者。`response_timeout_ns` 只按捕获水位判断“截至水位未见响应”，
 不代表网络超时；默认 5 秒。`max_pending_per_session` 默认 256，达到上限会使任务失败。
 结果的 `outcome` 可为 `matched`、`truncated_response`、`query_only`、`response_only` 或
@@ -687,12 +688,12 @@ DNS Schema 固定为 v1，与 Basic/Session 的标签 Schema 版本独立。未�
 
 ```sql
 SELECT *
-FROM sqlite.local.npm_dns_transaction_final_v1
+FROM sqlite.local.npm_dns_transaction_ipv4_final_v1
 WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.dns_final
 ```
 
-同一实体还有 `npm_dns_transaction_history_v1` 和 `npm_dns_transaction_latest_v1`。每次运行的
+同一实体还有 `npm_dns_transaction_ipv4_history_v1` 和 `npm_dns_transaction_ipv4_latest_v1`。每次运行的
 `__npm_run_id` 相互隔离；查询时按本次响应的关系名和运行 ID 过滤。
 
 #### HTTP/1 事务分析
@@ -706,7 +707,7 @@ SELECT *
 FROM pcapfile.capture
 USING npm.basic
 WITH features='http1,labeling',
-     observing='http1_transaction',
+     observing='http1_transaction_ipv4',
      parameters='{"schema_version":1,"core":{"labeling":"config.http-labels@7"},"http1":{"primary_label_ids":[1001],"response_timeout_ns":5000000000}}'
 INTO dataframe.http1_transactions
 ```
@@ -716,13 +717,13 @@ INTO dataframe.http1_transactions
 
 ```sql
 SELECT *
-FROM sqlite.local.npm_http1_transaction_final_v1
+FROM sqlite.local.npm_http1_transaction_ipv4_final_v1
 WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.http1_final
 ```
 
-Schema v1 共 22 列；同一实体还有 `npm_http1_transaction_history_v1` 和
-`npm_http1_transaction_latest_v1`，三个关系均按 `__npm_run_id` 隔离。
+Schema 固定为 v1；同一实体还有 `npm_http1_transaction_ipv4_history_v1` 和
+`npm_http1_transaction_ipv4_latest_v1`，三个关系均按 `__npm_run_id` 隔离。
 `matched` 仅表示请求头和最终响应头均被完整观察，不表示响应正文完整；`latency_ns` 是两个头部完成捕获时间之差，
 时间缺失或倒序时为 null。`request_only` 与 `response_only` 的 `incomplete_reason` 描述捕获视图中的缺口、
 定界、期限或未配对事实，不能据此推断服务端故障。默认响应期限为 5 秒，仅随合法捕获水位推进；
@@ -740,18 +741,18 @@ SELECT *
 FROM pcapfile.capture
 USING npm.basic
 WITH features='icmp',
-     observing='icmp_event',
+     observing='icmp_event_ipv4',
      parameters='{"schema_version":1,"icmp":{"echo_timeout_ns":5000000000,"max_pending_echo":4096}}'
 INTO dataframe.icmp_events
 ```
 
-`icmp_event` 是 28 列 Schema v1 的终态事件；`outcome` 区分
+`icmp_event_ipv4/icmp_event_ipv6` 是固定 Schema v1 的终态事件；`outcome` 区分
 `echo_matched`、`echo_request_only`、`echo_reply_only` 和 `icmp_error`。
 `latency_ns` 只计算可见请求与应答的非负时间差；未见应答只表示观测期限或 EOF
 之前未捕获到匹配包，不说明网络确实超时。引用不足时 `quote_status` 标记可见范围，
 `active_quoted_session_id` 为空。托管结果沿用一个数据库目标，提供
-`npm_icmp_event_history_v1`、`npm_icmp_event_latest_v1` 和
-`npm_icmp_event_final_v1`，按 `__npm_run_id` 查询。
+`npm_icmp_event_ipv4_history_v1`、`npm_icmp_event_ipv4_latest_v1` 和
+`npm_icmp_event_ipv4_final_v1`，按 `__npm_run_id` 查询。
 
 #### TLS 握手分析
 
@@ -765,7 +766,7 @@ SELECT *
 FROM pcapfile.capture
 USING npm.basic
 WITH features='tls,labeling',
-     observing='tls_handshake',
+     observing='tls_handshake_ipv4',
      parameters='{"schema_version":1,"core":{"labeling":"config.tls-labels@7"},"tls":{"primary_label_ids":[1001],"handshake_timeout_ns":5000000000}}'
 INTO dataframe.tls_handshakes
 ```
@@ -775,13 +776,13 @@ INTO dataframe.tls_handshakes
 
 ```sql
 SELECT *
-FROM sqlite.local.npm_tls_handshake_final_v1
+FROM sqlite.local.npm_tls_handshake_ipv4_final_v1
 WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.tls_final
 ```
 
-`tls_handshake` 固定为 25 列 Schema v1；另有 `npm_tls_handshake_history_v1` 和
-`npm_tls_handshake_latest_v1`，三个关系都按 `__npm_run_id` 隔离。每个候选最多一条终态事件；
+`tls_handshake_ipv4` 固定为 Schema v1；另有 `npm_tls_handshake_ipv4_history_v1` 和
+`npm_tls_handshake_ipv4_latest_v1`，三个关系都按 `__npm_run_id` 隔离。每个候选最多一条终态事件；
 `server_hello_observed` 仅表示最终 ServerHello 可见，不表示 Finished、证书验证或连接成功。
 `fatal_alert_observed` 只在明文窗口实际看到 fatal alert 时产生；其余 `incomplete` 和
 `incomplete_reason` 描述缺口、期限、终结或定界等捕获视图事实。TLS 1.3 的 ALPN 选择位于加密部分，
@@ -830,7 +831,7 @@ FROM pcapfile.http
 USING npm.basic
 WITH source_domains='0:7;1:7;2:8',
      features='basic,session',
-     observing='session'
+     observing='session_ipv4'
 INTO mysql.flowsql-mysql
 ```
 
@@ -842,16 +843,16 @@ PCAP 默认使用 `run_mode='offline'`；两类来源均默认使用 `result_mod
 
 | 结果实体 | Schema | 标签对数据形状的影响 |
 | --- | --- | --- |
-| `basic` / `npm_basic_result` | 固定 Schema v1，32 列，含会话身份、周期增量、累计总量、协议识别与终结信息 | 固定包含 nullable `primary_label_id`；标签开关不改变 Schema |
-| `session` / `npm_session_result` | 无标签为 Schema v1、49 列，含会话身份、速率与 TCP/UDP 性能指标 | 启用 labeling 后增加 `primary_label_id`，使用 Schema v2、50 列 |
-| `dns_transaction` | 固定 Schema v1，含查询、响应、时长与不完整原因 | 准入标签不新增结果列 |
-| `http1_transaction` | 固定 Schema v1，22 列，含请求/响应头与配对结果 | 准入标签不新增结果列 |
-| `tls_handshake` | 固定 Schema v1，25 列，含初始握手可见事实 | 准入标签不新增结果列 |
-| `icmp_event` | 固定 Schema v1，28 列，含回显关联与差错消息 | 无须启用 labeling |
+| `basic_ipv4` / `basic_ipv6` | 固定 Schema v1，含会话身份、周期增量、累计总量、协议识别与终结信息 | 固定包含 nullable `primary_label_id`；标签开关不改变 Schema |
+| `session_ipv4` / `session_ipv6` | 固定 Schema v1，含会话身份、速率与 TCP/UDP 性能指标 | 固定包含 nullable `primary_label_id`；标签开关不改变 Schema |
+| `dns_transaction_ipv4` / `dns_transaction_ipv6` | 固定 Schema v1，含查询、响应、时长与不完整原因 | 准入标签不新增结果列 |
+| `http1_transaction_ipv4` / `http1_transaction_ipv6` | 固定 Schema v1，含请求/响应头与配对结果 | 准入标签不新增结果列 |
+| `tls_handshake_ipv4` / `tls_handshake_ipv6` | 固定 Schema v1，含初始握手可见事实 | 准入标签不新增结果列 |
+| `icmp_event_ipv4` / `icmp_event_ipv6` | 固定 Schema v1，含回显关联与差错消息 | 无须启用 labeling |
 
 Basic/Session 包含 `session_id`、`observation_domain_id`、`revision`、`observed_at`、`is_final` 等字段。
-Basic 的 `flowsql.schema_version` 恒为 1；`primary_label_id` 未启用 labeling 时为 NULL，启用但未命中时为 0，
-命中时为对应非零标签 ID。Session 继续按标签开关使用版本 1 或 2。
+Basic/Session 的 `flowsql.schema_version` 恒为 1；`primary_label_id` 未启用 labeling 时为 NULL，启用但未命中时为 0，
+命中时为对应非零标签 ID。所有实体的地址族由实体名及 Schema 元数据表达，IPv4 地址为 UInt32，IPv6 地址为 16 字节固定二进制。
 时间戳使用 Unix epoch 纳秒，持续时间与 RTT 等时长使用纳秒。最终行不再是 `pending`；
 `unknown` 的协议 ID/名称为空。
 `session_id` 在任务内唯一，托管结果使用 `__npm_run_id` 区分运行。Basic 的 interval 列可按周期相加，
@@ -874,13 +875,22 @@ SELECT *
 FROM pcapfile.http
 USING npm.basic
 WITH features='basic,session',
-     observing='session'
+     observing='session_ipv4'
 INTO mysql.flowsql-mysql
 ```
 
 这条 SQL 会持久化 **Basic 和 Session 全部结果**，`observing` 不缩小持久化范围。每次执行创建独立 `run_id`；
 完成响应的 `result` 包含 `run_id`、`run_status`、`metadata_status`、`rows_written` 和 `entities[]`，
 各实体给出 Schema 版本以及 `history_relation`、`latest_relation`、`final_relation`。
+
+每个分析模块同时启用 IPv4/IPv6 两个实体：`basic_ipv4/basic_ipv6`、`session_ipv4/session_ipv6`、
+`dns_transaction_ipv4/dns_transaction_ipv6`、`http1_transaction_ipv4/http1_transaction_ipv6`、
+`tls_handshake_ipv4/tls_handshake_ipv6` 和 `icmp_event_ipv4/icmp_event_ipv6`。
+普通输出必须显式设置具体族 `observing`；托管入库可省略，此时前台为零列零行且不接受结果级 WHERE/投影。
+选择 `observing`、结果级 WHERE 或投影仅影响前台，全部启用实体的两族结果均入库。
+IPv4 地址以 UInt32 保存（`1.2.3.4 = 0x01020304`），IPv6 保存原始网络序 FixedSizeBinary(16)；
+Web 查询与目录预览在展示时转为标准地址文本。每个族独立物理分表，标签开关不改变 Schema。
+不提供旧混合实体表名或兼容视图；数据库初始化请使用新的命名空间。
 
 每个实体/Schema 版本提供三种只读关系：
 
@@ -890,12 +900,13 @@ INTO mysql.flowsql-mysql
 | `npm_<entity>_latest_v<version>` | 每个运行、每个实体实例的最大 revision |
 | `npm_<entity>_final_v<version>` | `is_final=true` 的终态结果 |
 
-Basic 的关系名固定为 `npm_basic_history_v1`、`npm_basic_latest_v1` 和 `npm_basic_final_v1`，
+IPv4 Basic 的关系名固定为 `npm_basic_ipv4_history_v1`、`npm_basic_ipv4_latest_v1` 和 `npm_basic_ipv4_final_v1`，
+IPv6 对应 `npm_basic_ipv6_history_v1`、`npm_basic_ipv6_latest_v1` 和 `npm_basic_ipv6_final_v1`。
 不随标签开关变化。查看每个周期的时序应读取 history，例如：
 
 ```sql
 SELECT *
-FROM mysql.flowsql-mysql.npm_basic_history_v1
+FROM mysql.flowsql-mysql.npm_basic_ipv4_history_v1
 WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.basic_timeline
 ```
@@ -908,7 +919,7 @@ latest 只保留每个会话最大 revision 的累计状态；final 只保留会
 
 ```sql
 SELECT *
-FROM mysql.flowsql-mysql.npm_session_latest_v1
+FROM mysql.flowsql-mysql.npm_session_ipv4_latest_v1
 WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.session_latest
 ```
@@ -917,8 +928,8 @@ INTO dataframe.session_latest
   因此需要用 `__npm_run_id` 选择本次运行。
 - 三种关系都包含 `__npm_run_id`、`__npm_task_id`、`__npm_run_status`。失败前已提交的数据可能保留为
   `incomplete`，可据此排查；`metadata_status='unknown'` 表示运行状态落库结果无法确认。
-- 托管写入要求 `SELECT *` 和单个 `npm.basic`；可以使用 source-stage `WHERE`，但拒绝结果投影和
-  operator-stage `WHERE`。结果筛选应放在后续数据库查询中。
+- 托管写入使用单个 `npm.basic`。可以使用 source-stage `WHERE`；显式指定具体族 `observing` 时，
+  结果投影与 operator-stage `WHERE` 只处理前台，全部启用实体仍持久化。省略 observing 时要求 `SELECT *` 且无结果级 WHERE。
 - 每条分析 SQL 只有一个目标；需要 DataFrame 时使用上述查询另行物化。三段式目标
   `INTO mysql.flowsql-mysql.some_table` 是普通单表目标，当前 NPM 托管路径不接受它。
 
@@ -932,7 +943,7 @@ SELECT *
 FROM pcapfile.http
 USING npm.basic
 WITH features='basic,session',
-     observing='session',
+     observing='session_ipv4',
      parameters='{"schema_version":1,"core":{"result":{"retention_days":30}}}'
 INTO mysql.flowsql-mysql
 ```

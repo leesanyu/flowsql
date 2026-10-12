@@ -91,7 +91,7 @@ struct NpmHttp1ConfigStatusV1 {
 
 /** Parses one borrowed parameters.http1 object. Replaces output only on success. */
 NpmHttp1ConfigStatusV1 ParseNpmHttp1ConfigV1(std::string_view json, NpmHttp1ConfigV1* output);
-NpmEntityDescriptorV1 NpmHttp1TransactionEntityDescriptorV1();
+NpmEntityDescriptorV1 NpmHttp1TransactionEntityDescriptorV1(packet::AddressFamily family);
 NpmModulePlanV1 NpmHttp1ModulePlanV1(const NpmHttp1ConfigV1& config);
 
 }  // namespace flowsql::npm

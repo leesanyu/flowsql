@@ -7,7 +7,9 @@
 
 #include <cassert>
 #include <cerrno>
+#include <cstring>
 #include <memory>
+#include <type_traits>
 
 namespace npm = flowsql::npm;
 
@@ -45,13 +47,15 @@ class FailingPool final : public arrow::MemoryPool {
     std::string backend_name() const override { return "tls_test_failure"; }
 };
 
+template <typename Address>
 class Emitter final : public npm::INpmResultEmitterV1 {
  public:
     explicit Emitter(std::shared_ptr<Budget> budget) : budget_(std::move(budget)) {}
     int Emit(std::string_view entity, const arrow::RecordBatch& rows) override {
         ++calls;
-        assert(entity == "tls_handshake" && budget_->used > 0);
-        const auto descriptor = npm::NpmTlsHandshakeEntityDescriptorV1();
+        assert(entity == (sizeof(Address) == 4 ? "tls_handshake_ipv4" : "tls_handshake_ipv6") && budget_->used > 0);
+        const auto descriptor = npm::NpmTlsHandshakeEntityDescriptorV1(
+            sizeof(Address) == 4 ? flowsql::packet::AddressFamily::kIPv4 : flowsql::packet::AddressFamily::kIPv6);
         assert(npm::ValidateNpmEntityRowsV1("tls", descriptor, rows).error == npm::NpmProtocolContractErrorV1::kNone);
         assert(rows.schema()->Equals(*descriptor.schema, true) && rows.num_rows() == 1);
         auto domain = std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("observation_domain_id"));
@@ -69,6 +73,15 @@ class Emitter final : public npm::INpmResultEmitterV1 {
         } else {
             assert(selected_alpn->IsNull(0));
         }
+        const auto a_ip = rows.GetColumnByName("a_ip");
+        if constexpr (sizeof(Address) == 4) {
+            assert(std::static_pointer_cast<arrow::UInt32Array>(a_ip)->Value(0) == 0xc0000201U);
+        } else {
+            const uint8_t bytes[16] = {0x20, 1, 0x0d, 0xb8, 0, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+            assert(std::memcmp(std::static_pointer_cast<arrow::FixedSizeBinaryArray>(a_ip)->GetValue(0), bytes, 16) ==
+                   0);
+        }
+        assert(!rows.GetColumnByName("ip_family"));
         return error;
     }
     int calls = 0;
@@ -81,11 +94,22 @@ class Emitter final : public npm::INpmResultEmitterV1 {
     std::shared_ptr<Budget> budget_;
 };
 
+template <typename Address>
 void TestEncoder() {
     auto budget = std::make_shared<Budget>();
-    Emitter emitter(budget);
-    npm::NpmTlsSessionIdentityV1 session{7, 44, "192.0.2.1", "198.51.100.2", 12345, 443};
-    npm::NpmTlsHandshakeResultV1 row;
+    Emitter<Address> emitter(budget);
+    npm::NpmTlsFamilyResult<Address> session;
+    session.observation_domain_id = 44;
+    if constexpr (sizeof(Address) == 4) {
+        session.a_ip = Address{{192, 0, 2, 1}};
+        session.b_ip = Address{{198, 51, 100, 2}};
+    } else {
+        session.a_ip = Address{{0x20, 1, 0x0d, 0xb8, 0, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}};
+        session.b_ip = Address{{0x20, 1, 0x0d, 0xb8, 0, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}};
+    }
+    session.a_port = 53000;
+    session.b_port = 443;
+    auto& row = session.transaction;
     row.handshake.entity_instance_id = 9;
     row.handshake.session_id = 7;
     row.handshake.phase = npm::NpmTlsHandshakePhaseV1::kClosed;
@@ -102,17 +126,17 @@ void TestEncoder() {
     row.incomplete_reason = npm::NpmTlsIncompleteReasonV1::kEncryptedAfterServerHello;
     row.observed_at_ns = 20;
     row.server_hello_latency_ns = 10;
-    assert(npm::EmitNpmTlsHandshakeV1(row, session, budget, emitter) == 0);
+    assert(npm::EmitNpmTlsHandshakeV1(session, budget, emitter) == 0);
     assert(budget->used == 0 && emitter.calls == 1);
     emitter.error = EIO;
-    assert(npm::EmitNpmTlsHandshakeV1(row, session, budget, emitter) == EIO);
+    assert(npm::EmitNpmTlsHandshakeV1(session, budget, emitter) == EIO);
     assert(budget->used == 0 && emitter.calls == 2);
     budget->limit = 1;
-    assert(npm::EmitNpmTlsHandshakeV1(row, session, budget, emitter) == ENOSPC);
+    assert(npm::EmitNpmTlsHandshakeV1(session, budget, emitter) == ENOSPC);
     assert(budget->used == 0 && emitter.calls == 2);
     budget->limit = 1024 * 1024;
     FailingPool pool;
-    assert(npm::EmitNpmTlsHandshakeV1(row, session, budget, emitter, &pool) == ENOMEM);
+    assert(npm::EmitNpmTlsHandshakeV1(session, budget, emitter, &pool) == ENOMEM);
     assert(budget->used == 0 && emitter.calls == 2);
     row.handshake.final_server_hello->selected_version = 0x0303;
     row.handshake.final_server_hello->selected_alpn = std::string("h\0\xff\"", 4);
@@ -121,12 +145,15 @@ void TestEncoder() {
     emitter.expected_version = 0x0303;
     emitter.expected_reason = "session_end_after_server_hello";
     emitter.expected_selected_alpn = "\"h\\u0000\\u00ff\\\"\"";
-    assert(npm::EmitNpmTlsHandshakeV1(row, session, budget, emitter) == 0);
+    assert(npm::EmitNpmTlsHandshakeV1(session, budget, emitter) == 0);
     assert(budget->used == 0 && emitter.calls == 3);
     row.handshake.entity_instance_id = 0;
-    assert(npm::EmitNpmTlsHandshakeV1(row, session, budget, emitter) == EINVAL);
+    assert(npm::EmitNpmTlsHandshakeV1(session, budget, emitter) == EINVAL);
 }
 
 }  // namespace
 
-int main() { TestEncoder(); }
+int main() {
+    TestEncoder<flowsql::network::IPv4Address>();
+    TestEncoder<flowsql::network::IPv6Address>();
+}

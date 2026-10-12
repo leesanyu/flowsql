@@ -116,13 +116,15 @@ class Querier final : public IQuerier {
 };
 class Writer final : public INpmResultWriter {
  public:
-    std::vector<NpmBasicResult> rows;
-    int WriteBasic(const NpmBasicResult& row) override {
+    std::vector<NpmBasicResult4> rows;
+    int WriteBasic(const NpmBasicResult4& row) override {
         assert(ValidateNpmBasicResult(row) == NpmBasicResultError::kNone);
         rows.push_back(row);
         return 0;
     }
-    int WriteSession(const NpmSessionResult&) override { return EIO; }
+    int WriteSession(const NpmSessionResult4&) override { return EIO; }
+    int WriteSession(const NpmSessionResult6&) override { return EIO; }
+    int WriteBasic(const NpmBasicResult6&) override { return EIO; }
 };
 int main() {
     ContextDictionary dictionary;
@@ -136,14 +138,14 @@ int main() {
     config.output_interval_ns = 10000000000LL;
     config.out_of_order_tolerance_ns = 0;
     auto budget = std::make_shared<NpmTaskBudget>(config);
-    NpmSessionKey key;
+    NpmSessionKey4 key;
     key.input_namespace = "pcapfile.test";
-    key.ip_family = packet::AddressFamily::kIPv4;
+
     key.transport_protocol = 17;
-    key.a.ip = packet::IPv4Address(htonl(0xc0000201));
-    key.b.ip = packet::IPv4Address(htonl(0xc0000202));
+    key.a_ip = network::IPv4Address::FromUInt32(0xc0000201);
+    key.b_ip = network::IPv4Address::FromUInt32(0xc0000202);
     NpmSessionView view;
-    view.key = &key;
+    view.key = NpmSessionKeyView(key);
     view.session_id = 1;
     view.protocol_status = NpmProtocolStatus::kUnknown;
     Writer writer;

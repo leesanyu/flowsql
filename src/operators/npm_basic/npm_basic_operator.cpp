@@ -375,7 +375,7 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
     NpmBasicTaskConfig parsed;
     const auto parse_status =
         ParseNpmBasicTaskConfig(with_params_json_.c_str(), &parsed, labeling_requested, ProductionNpmModuleCatalogV1(),
-                                input_source_.empty() ? task_id_ : input_source_);
+                                input_source_.empty() ? task_id_ : input_source_, managed_channel_ != nullptr);
     if (parse_status.error != NpmBasicTaskConfigError::kNone) {
         const char* error = kConfigError;
         try {

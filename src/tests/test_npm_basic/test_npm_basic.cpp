@@ -1,6 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <tests/common/packet_family_test_support.h>
+
 #include <common/iplugin.h>
 #include <common/network/netbase.h>
 #include <framework/core/packet_codec.h>
@@ -52,6 +54,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <memory>
 #include <string>
@@ -216,6 +219,8 @@ struct LabelingMatcherStats {
     int fail_call = -1;
     std::vector<uint32_t> batch_counts;
     std::vector<flowsql::FlowLabelFactsV1> facts;
+    std::deque<flowsql::network::IPv4Address> address4_owners;
+    std::deque<flowsql::network::IPv6Address> address6_owners;
     std::vector<std::vector<uint32_t>> labels_by_call;
 };
 
@@ -228,7 +233,22 @@ class RecordingLabelMatcher final : public flowsql::IFlowLabelMatcherV1 {
         assert(stats_ != nullptr && facts != nullptr && count != 0 && primary_label_ids != nullptr);
         const size_t call_index = stats_->classify_calls++;
         stats_->batch_counts.push_back(count);
-        stats_->facts.insert(stats_->facts.end(), facts, facts + count);
+        for (uint32_t index = 0; index < count; ++index) {
+            auto copy = facts[index];
+            for (auto* endpoint : {&copy.source, &copy.destination}) {
+                if (!endpoint->ip_valid || !endpoint->ip) continue;
+                if (copy.ip_family == 4) {
+                    stats_->address4_owners.emplace_back();
+                    std::memcpy(stats_->address4_owners.back().bytes, endpoint->ip, 4);
+                    endpoint->ip = stats_->address4_owners.back().bytes;
+                } else {
+                    stats_->address6_owners.emplace_back();
+                    std::memcpy(stats_->address6_owners.back().bytes, endpoint->ip, 16);
+                    endpoint->ip = stats_->address6_owners.back().bytes;
+                }
+            }
+            stats_->facts.push_back(copy);
+        }
         if (stats_->classify_error != 0 &&
             (stats_->fail_call < 0 || static_cast<size_t>(stats_->fail_call) == call_index)) {
             return stats_->classify_error;
@@ -478,7 +498,7 @@ class DelegatingPipelinePool final : public flowsql::IProtocolPipelinePoolV1 {
 
 struct PacketFixture {
     std::vector<uint8_t> bytes;
-    flowsql::packet::PacketLayerInfo layer;
+    flowsql::testing::OwnedPacketLayer layer;
 
     flowsql::packet::PacketView View(uint32_t source_id, uint32_t wire_len = 0) const {
         flowsql::packet::PacketView view;
@@ -490,14 +510,14 @@ struct PacketFixture {
     }
 };
 
-flowsql::packet::IPv4Address ParseIpv4(const char* text) {
-    flowsql::packet::IPv4Address address;
+flowsql::network::IPv4Address ParseIpv4(const char* text) {
+    flowsql::network::IPv4Address address;
     assert(inet_pton(AF_INET, text, address.bytes) == 1);
     return address;
 }
 
-flowsql::packet::IPv6Address ParseIpv6(const char* text) {
-    flowsql::packet::IPv6Address address;
+flowsql::network::IPv6Address ParseIpv6(const char* text) {
+    flowsql::network::IPv6Address address;
     assert(inet_pton(AF_INET6, text, address.bytes) == 1);
     return address;
 }
@@ -534,8 +554,7 @@ PacketFixture MakeIpv4TcpPacket(const char* src, uint16_t src_port, const char* 
     fixture.layer.network_layer_index = 0;
     fixture.layer.transport_layer_index = 1;
     fixture.layer.payload_offset = sizeof(flowsql::Ipv4Header) + sizeof(flowsql::TcpHeader);
-    fixture.layer.src_ip = flowsql::wire::ToAnalysis(ip->src_addr);
-    fixture.layer.dst_ip = flowsql::wire::ToAnalysis(ip->dst_addr);
+    fixture.layer.SetEndpoints(flowsql::wire::ToAnalysis(ip->src_addr), flowsql::wire::ToAnalysis(ip->dst_addr));
     fixture.layer.transport_protocol = flowsql::ipv4::eNext::TCP;
     fixture.layer.src_port = src_port;
     fixture.layer.dst_port = dst_port;
@@ -585,12 +604,55 @@ PacketFixture MakeIpv6UdpPacket(const char* src, uint16_t src_port, const char* 
     fixture.layer.network_layer_index = 0;
     fixture.layer.transport_layer_index = transport_index;
     fixture.layer.payload_offset = static_cast<uint32_t>(udp_offset + sizeof(flowsql::UdpHeader));
-    fixture.layer.src_ip = flowsql::wire::ToAnalysis(ip->src_addr);
-    fixture.layer.dst_ip = flowsql::wire::ToAnalysis(ip->dst_addr);
+    fixture.layer.SetEndpoints(flowsql::wire::ToAnalysis(ip->src_addr), flowsql::wire::ToAnalysis(ip->dst_addr));
     fixture.layer.transport_protocol = flowsql::ipv6::eNext::UDP;
     fixture.layer.src_port = src_port;
     fixture.layer.dst_port = dst_port;
     fixture.layer.ports_valid = 1;
+    return fixture;
+}
+
+PacketFixture MakeIpv4UdpPacket(const char* src, uint16_t src_port, const char* dst, uint16_t dst_port,
+                                const std::vector<uint8_t>& payload) {
+    auto fixture = MakeIpv6UdpPacket("::1", src_port, "::2", dst_port, payload);
+    std::vector<uint8_t> bytes(20 + fixture.bytes.size() - 40);
+    auto* ip = reinterpret_cast<flowsql::Ipv4Header*>(bytes.data());
+    ip->version = 4;
+    ip->ihl = 5;
+    ip->protocol = 17;
+    ip->total_length = htons(bytes.size());
+    const auto source = ParseIpv4(src), destination = ParseIpv4(dst);
+    std::memcpy(ip->src_addr.bytes, source.bytes, 4);
+    std::memcpy(ip->dst_addr.bytes, destination.bytes, 4);
+    std::copy(fixture.bytes.begin() + 40, fixture.bytes.end(), bytes.begin() + 20);
+    fixture.bytes = std::move(bytes);
+    fixture.layer.layers[0] = {static_cast<uint16_t>(flowsql::eLayer::IPv4), 0};
+    fixture.layer.layers[1].offset = 20;
+    fixture.layer.payload_offset = 28;
+    fixture.layer.SetEndpoints(source, destination);
+    return fixture;
+}
+
+PacketFixture MakeIpv6TcpPacket(const char* src, uint16_t src_port, const char* dst, uint16_t dst_port,
+                                const std::vector<uint8_t>& payload, uint8_t flags = 0, uint32_t sequence = 0,
+                                uint32_t acknowledgment = 0) {
+    auto fixture =
+        MakeIpv4TcpPacket("0.0.0.0", src_port, "0.0.0.0", dst_port, payload, flags, sequence, acknowledgment);
+    std::vector<uint8_t> bytes(40 + fixture.bytes.size() - 20);
+    bytes[0] = 0x60;
+    const auto length = static_cast<uint16_t>(bytes.size() - 40);
+    bytes[4] = static_cast<uint8_t>(length >> 8);
+    bytes[5] = static_cast<uint8_t>(length);
+    bytes[6] = 6;
+    const auto source = ParseIpv6(src), destination = ParseIpv6(dst);
+    std::memcpy(bytes.data() + 8, source.bytes, 16);
+    std::memcpy(bytes.data() + 24, destination.bytes, 16);
+    std::copy(fixture.bytes.begin() + 20, fixture.bytes.end(), bytes.begin() + 40);
+    fixture.bytes = std::move(bytes);
+    fixture.layer.layers[0] = {static_cast<uint16_t>(flowsql::eLayer::IPv6), 0};
+    fixture.layer.layers[1].offset = 40;
+    fixture.layer.payload_offset += 20;
+    fixture.layer.SetEndpoints(source, destination);
     return fixture;
 }
 
@@ -605,11 +667,13 @@ bool SameIp(const flowsql::packet::IpAddress& left, const flowsql::packet::IpAdd
     return true;
 }
 
-bool SameKey(const npm::NpmSessionKey& left, const npm::NpmSessionKey& right) {
-    return left.input_namespace == right.input_namespace && left.observation_domain_id == right.observation_domain_id &&
-           left.ip_family == right.ip_family && left.transport_protocol == right.transport_protocol &&
-           SameIp(left.a.ip, right.a.ip) && left.a.port == right.a.port && SameIp(left.b.ip, right.b.ip) &&
-           left.b.port == right.b.port;
+bool SameKey(npm::NpmSessionKeyView left, npm::NpmSessionKeyView right) {
+    return left.Family() == right.Family() && (left.Get4() ? npm::NpmSessionKeyEqual{}(*left.Get4(), *right.Get4())
+                                                           : npm::NpmSessionKeyEqual{}(*left.Get6(), *right.Get6()));
+}
+
+bool BorrowedKeyIs(const std::optional<npm::NpmSessionKeyView>& left, npm::NpmSessionKeyView right) {
+    return left && left->Get4() == right.Get4() && left->Get6() == right.Get6();
 }
 
 void TestConfigDefaultsAndEnumContract() {
@@ -794,7 +858,7 @@ void TestBasicResultNullableContract() {
     static_assert(std::is_same_v<std::underlying_type_t<npm::NpmProtocolStatus>, uint8_t>);
     static_assert(std::is_same_v<std::underlying_type_t<npm::NpmSessionEndReason>, uint8_t>);
 
-    npm::NpmBasicResult result;
+    npm::NpmBasicResult4 result;
     assert(npm::ValidateNpmBasicResult(result) == npm::NpmBasicResultError::kNone);
 
     result.protocol_status = npm::NpmProtocolStatus::kIdentified;
@@ -861,10 +925,9 @@ void TestBasicResultSchema() {
         {"revision", arrow::Type::UINT64, false},
         {"observed_at", arrow::Type::INT64, false},
         {"is_final", arrow::Type::BOOL, false},
-        {"ip_family", arrow::Type::UINT8, false},
         {"transport_protocol", arrow::Type::UINT8, false},
-        {"a_ip", arrow::Type::STRING, false},
-        {"b_ip", arrow::Type::STRING, false},
+        {"a_ip", arrow::Type::UINT32, false},
+        {"b_ip", arrow::Type::UINT32, false},
         {"a_port", arrow::Type::UINT16, false},
         {"b_port", arrow::Type::UINT16, false},
         {"first_ns", arrow::Type::INT64, false},
@@ -890,9 +953,9 @@ void TestBasicResultSchema() {
         {"interval_wire_bytes_total", arrow::Type::UINT64, true},
     };
 
-    const auto schema = npm::NpmBasicResultSchema();
+    const auto schema = npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4);
     assert(schema != nullptr);
-    assert(schema.get() == npm::NpmBasicResultSchema().get());
+    assert(schema.get() == npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4).get());
     assert(schema->num_fields() == static_cast<int>(expected.size()));
     for (std::size_t i = 0; i < expected.size(); ++i) {
         assert(schema->field(static_cast<int>(i))->name() == expected[i].name);
@@ -901,22 +964,21 @@ void TestBasicResultSchema() {
     }
     assert(schema->GetFieldIndex("raw_data") == -1);
     assert(schema->metadata() != nullptr);
-    assert(schema->metadata()->size() == 5);
-    assert(schema->metadata()->Get("flowsql.entity").ValueOrDie() == "npm_basic_result");
+    assert(schema->metadata()->size() == 9);
+    assert(schema->metadata()->Get("flowsql.entity").ValueOrDie() == "basic_ipv4");
     assert(schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == "1");
     assert(schema->metadata()->Get("flowsql.timestamp_unit").ValueOrDie() == "ns");
 }
 
-npm::NpmSessionResult MakeValidUdpSessionResult() {
-    npm::NpmSessionResult result;
+npm::NpmSessionResult4 MakeValidUdpSessionResult() {
+    npm::NpmSessionResult4 result;
     result.session_id = 1;
     result.observation_domain_id = 7;
     result.revision = 1;
     result.observed_at = 100;
-    result.ip_family = 4;
     result.transport_protocol = 17;
-    result.a_ip = "192.0.2.1";
-    result.b_ip = "192.0.2.2";
+    result.a_ip = ParseIpv4("192.0.2.1");
+    result.b_ip = ParseIpv4("192.0.2.2");
     result.a_port = 1000;
     result.b_port = 2000;
     result.first_ns = 10;
@@ -928,7 +990,7 @@ npm::NpmSessionResult MakeValidUdpSessionResult() {
     return result;
 }
 
-npm::NpmSessionResult MakeValidTcpSessionResult() {
+npm::NpmSessionResult4 MakeValidTcpSessionResult() {
     auto result = MakeValidUdpSessionResult();
     result.transport_protocol = 6;
     result.last_ns = 20;
@@ -1085,15 +1147,15 @@ void TestSessionResultSchema() {
         {"revision", arrow::Type::UINT64, false},
         {"observed_at", arrow::Type::INT64, false},
         {"is_final", arrow::Type::BOOL, false},
-        {"ip_family", arrow::Type::UINT8, false},
         {"transport_protocol", arrow::Type::UINT8, false},
-        {"a_ip", arrow::Type::STRING, false},
-        {"b_ip", arrow::Type::STRING, false},
+        {"a_ip", arrow::Type::UINT32, false},
+        {"b_ip", arrow::Type::UINT32, false},
         {"a_port", arrow::Type::UINT16, false},
         {"b_port", arrow::Type::UINT16, false},
         {"first_ns", arrow::Type::INT64, false},
         {"last_ns", arrow::Type::INT64, false},
         {"duration_ns", arrow::Type::INT64, false},
+        {"primary_label_id", arrow::Type::UINT32, true},
         {"protocol_status", arrow::Type::STRING, false},
         {"protocol_id", arrow::Type::UINT16, true},
         {"protocol_sub_id", arrow::Type::UINT16, true},
@@ -1131,8 +1193,9 @@ void TestSessionResultSchema() {
         {"measurement_flags", arrow::Type::UINT32, false},
     };
 
-    const auto schema = npm::NpmSessionResultSchema();
-    assert(schema != nullptr && schema.get() == npm::NpmSessionResultSchema().get());
+    const auto schema = npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4);
+    assert(schema != nullptr &&
+           schema.get() == npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4).get());
     assert(schema->num_fields() == 49);
     assert(schema->num_fields() == static_cast<int>(expected.size()));
     for (std::size_t i = 0; i < expected.size(); ++i) {
@@ -1142,8 +1205,8 @@ void TestSessionResultSchema() {
         assert(field->nullable() == expected[i].nullable);
     }
     assert(schema->GetFieldIndex("raw_data") == -1);
-    assert(schema->metadata() != nullptr && schema->metadata()->size() == 5);
-    assert(schema->metadata()->Get("flowsql.entity").ValueOrDie() == "npm_session_result");
+    assert(schema->metadata() != nullptr && schema->metadata()->size() == 7);
+    assert(schema->metadata()->Get("flowsql.entity").ValueOrDie() == "session_ipv4");
     assert(schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == "1");
     assert(schema->metadata()->Get("flowsql.timestamp_unit").ValueOrDie() == "ns");
     assert(schema->metadata()->Get("flowsql.revision_semantics").ValueOrDie() == "cumulative");
@@ -1223,7 +1286,7 @@ class FixtureBudget final : public npm::INpmTaskBudget {
 
 class FixtureWriter final : public npm::INpmResultWriter {
  public:
-    int WriteBasic(const npm::NpmBasicResult& result) override {
+    int WriteBasic(const npm::NpmBasicResult4& result) override {
         if (next_error != 0) return next_error;
         if (npm::ValidateNpmBasicResult(result) != npm::NpmBasicResultError::kNone) return EINVAL;
         last_result = result;
@@ -1231,7 +1294,7 @@ class FixtureWriter final : public npm::INpmResultWriter {
         return 0;
     }
 
-    int WriteSession(const npm::NpmSessionResult& result) override {
+    int WriteSession(const npm::NpmSessionResult4& result) override {
         if (next_error != 0) return next_error;
         if (npm::ValidateNpmSessionResult(result) != npm::NpmSessionResultError::kNone) return EINVAL;
         last_session_result = result;
@@ -1239,18 +1302,34 @@ class FixtureWriter final : public npm::INpmResultWriter {
         return 0;
     }
 
+    int WriteBasic(const npm::NpmBasicResult6& result) override {
+        if (next_error) return next_error;
+        assert(npm::ValidateNpmBasicResult(result) == npm::NpmBasicResultError::kNone);
+        last_result6 = result;
+        ++accepted;
+        return 0;
+    }
+    int WriteSession(const npm::NpmSessionResult6& result) override {
+        if (next_error) return next_error;
+        assert(npm::ValidateNpmSessionResult(result) == npm::NpmSessionResultError::kNone);
+        last_session_result6 = result;
+        ++session_accepted;
+        return 0;
+    }
+    npm::NpmBasicResult6 last_result6;
+    npm::NpmSessionResult6 last_session_result6;
     int next_error = 0;
     uint32_t accepted = 0;
     uint32_t session_accepted = 0;
-    npm::NpmBasicResult last_result;
-    npm::NpmSessionResult last_session_result;
+    npm::NpmBasicResult4 last_result;
+    npm::NpmSessionResult4 last_session_result;
 };
 
 class CapturingForwardingWriter final : public npm::INpmResultWriter {
  public:
     explicit CapturingForwardingWriter(npm::INpmResultWriter& downstream) : downstream_(downstream) {}
 
-    int WriteBasic(const npm::NpmBasicResult& result) override {
+    int WriteBasic(const npm::NpmBasicResult4& result) override {
         const int error = downstream_.WriteBasic(result);
         if (error != 0) return error;
         last_basic_result = result;
@@ -1258,7 +1337,7 @@ class CapturingForwardingWriter final : public npm::INpmResultWriter {
         return 0;
     }
 
-    int WriteSession(const npm::NpmSessionResult& result) override {
+    int WriteSession(const npm::NpmSessionResult4& result) override {
         const int error = downstream_.WriteSession(result);
         if (error != 0) return error;
         last_session_result = result;
@@ -1266,10 +1345,20 @@ class CapturingForwardingWriter final : public npm::INpmResultWriter {
         return 0;
     }
 
+    int WriteBasic(const npm::NpmBasicResult6& result) override {
+        const int error = downstream_.WriteBasic(result);
+        if (!error) ++basic_writes;
+        return error;
+    }
+    int WriteSession(const npm::NpmSessionResult6& result) override {
+        const int error = downstream_.WriteSession(result);
+        if (!error) ++session_writes;
+        return error;
+    }
     uint32_t basic_writes = 0;
     uint32_t session_writes = 0;
-    npm::NpmBasicResult last_basic_result;
-    npm::NpmSessionResult last_session_result;
+    npm::NpmBasicResult4 last_basic_result;
+    npm::NpmSessionResult4 last_session_result;
 
  private:
     npm::INpmResultWriter& downstream_;
@@ -1286,17 +1375,17 @@ class FixtureModule final : public npm::INpmAnalysisModule {
         assert(packet.packet.meta.timestamp_ns == 123);
         assert(packet.packet.bytes.size == 4);
         assert(packet.direction == npm::NpmPacketDirection::kBToA);
-        assert(session.key != nullptr);
-        assert(session.key->input_namespace == "pcapfile.capture");
-        assert(session.key->observation_domain_id == 7);
-        assert(session.key->a.port == 443);
-        assert(session.key->b.port == 50000);
+        assert(session.key.has_value());
+        assert(session.key->Namespace() == "pcapfile.capture");
+        assert(session.key->Domain() == 7);
+        assert(session.key->APort() == 443);
+        assert(session.key->BPort() == 50000);
         assert(session.packets_ab == 3);
         assert(session.packets_ba == 5);
 
-        npm::NpmBasicResult result;
+        npm::NpmBasicResult4 result;
         result.session_id = session.session_id;
-        result.observation_domain_id = session.key->observation_domain_id;
+        result.observation_domain_id = session.key->Domain();
         result.protocol_status = session.protocol_status;
         return writer.WriteBasic(result);
     }
@@ -1305,7 +1394,7 @@ class FixtureModule final : public npm::INpmAnalysisModule {
                           npm::INpmResultWriter& writer) override {
         auto result = MakeValidUdpSessionResult();
         result.session_id = session.session_id;
-        result.observation_domain_id = session.key->observation_domain_id;
+        result.observation_domain_id = session.key->Domain();
         result.observed_at = observed_at_ns;
         return writer.WriteSession(result);
     }
@@ -1314,7 +1403,7 @@ class FixtureModule final : public npm::INpmAnalysisModule {
                      npm::INpmResultWriter& writer) override {
         auto result = MakeValidUdpSessionResult();
         result.session_id = session.session_id;
-        result.observation_domain_id = session.key->observation_domain_id;
+        result.observation_domain_id = session.key->Domain();
         result.observed_at = observed_at_ns;
         result.protocol_status = npm::NpmProtocolStatus::kUnknown;
         result.is_final = true;
@@ -1324,7 +1413,7 @@ class FixtureModule final : public npm::INpmAnalysisModule {
 };
 
 void TestBorrowedViewsAndModuleInterfaces() {
-    using WriteSessionMethod = int (npm::INpmResultWriter::*)(const npm::NpmSessionResult&);
+    using WriteSessionMethod = int (npm::INpmResultWriter::*)(const npm::NpmSessionResult4&);
     using SessionSnapshotMethod =
         int (npm::INpmAnalysisModule::*)(const npm::NpmSessionView&, int64_t, npm::INpmResultWriter&);
     using SessionEndMethod = int (npm::INpmAnalysisModule::*)(const npm::NpmSessionView&, npm::NpmSessionEndReason,
@@ -1332,7 +1421,8 @@ void TestBorrowedViewsAndModuleInterfaces() {
     static_assert(std::is_abstract_v<npm::INpmTaskBudget>);
     static_assert(std::is_abstract_v<npm::INpmResultWriter>);
     static_assert(std::is_abstract_v<npm::INpmAnalysisModule>);
-    static_assert(std::is_same_v<decltype(&npm::INpmResultWriter::WriteSession), WriteSessionMethod>);
+    static_assert(std::is_same_v<decltype(static_cast<WriteSessionMethod>(&npm::INpmResultWriter::WriteSession)),
+                                 WriteSessionMethod>);
     static_assert(std::is_same_v<decltype(&npm::INpmAnalysisModule::OnSessionSnapshot), SessionSnapshotMethod>);
     static_assert(std::is_same_v<decltype(&npm::INpmAnalysisModule::OnSessionEnd), SessionEndMethod>);
     static_assert(std::is_same_v<std::underlying_type_t<npm::NpmPacketDirection>, uint8_t>);
@@ -1346,19 +1436,19 @@ void TestBorrowedViewsAndModuleInterfaces() {
     packet_view.packet.bytes = flowsql::Span<const uint8_t>(bytes_owner->data(), bytes_owner->size());
     packet_view.payload = flowsql::Span<const uint8_t>(bytes_owner->data() + 1, 2);
     packet_view.direction = npm::NpmPacketDirection::kBToA;
-    flowsql::packet::PacketLayerInfo layer;
+    flowsql::testing::OwnedPacketLayer layer;
     packet_view.layer = &layer;
 
-    npm::NpmSessionKey key;
+    npm::NpmSessionKey4 key;
     key.input_namespace = "pcapfile.capture";
     key.observation_domain_id = 7;
-    key.ip_family = flowsql::packet::AddressFamily::kIPv4;
+
     key.transport_protocol = 6;
-    key.a.port = 443;
-    key.b.port = 50000;
+    key.a_port = 443;
+    key.b_port = 50000;
     npm::NpmSessionView session_view;
     session_view.session_id = 42;
-    session_view.key = &key;
+    session_view.key = npm::NpmSessionKeyView(key);
     session_view.packets_ab = 3;
     session_view.packets_ba = 5;
     session_view.protocol_status = npm::NpmProtocolStatus::kPending;
@@ -1439,8 +1529,8 @@ void TestSessionPacketCanonicalizationAndObservationDomains() {
     assert(SameKey(forward_binding.key, reverse_binding.key));
     assert(forward_binding.direction == npm::NpmPacketDirection::kBToA);
     assert(reverse_binding.direction == npm::NpmPacketDirection::kAToB);
-    assert(std::get<flowsql::packet::IPv4Address>(forward_binding.key.a.ip).bytes[3] == 10);
-    assert(forward_binding.key.a.port == 443);
+    assert(forward_binding.key.Get4()->a_ip.bytes[3] == 10);
+    assert(forward_binding.key.View().APort() == 443);
     assert(forward_binding.payload.size == 2 && forward_binding.payload[0] == 0x10);
     assert(forward_binding.transport.tcp.valid && forward_binding.transport.tcp.syn &&
            !forward_binding.transport.tcp.ack);
@@ -1461,7 +1551,7 @@ void TestSessionPacketCanonicalizationAndObservationDomains() {
     npm::NpmSessionPacketBinding same_ip_binding;
     assert(npm::BuildNpmSessionPacketBinding(domain_map, same_ip.View(1), same_ip.layer, &same_ip_binding) ==
            npm::NpmSessionPacketError::kNone);
-    assert(same_ip_binding.key.a.port == 53 && same_ip_binding.key.b.port == 60000);
+    assert(same_ip_binding.key.View().APort() == 53 && same_ip_binding.key.View().BPort() == 60000);
     assert(same_ip_binding.direction == npm::NpmPacketDirection::kBToA);
 
     auto ipv6_forward = MakeIpv6UdpPacket("2001:db8::ff", 53000, "2001:db8::1", 53, {0xaa});
@@ -1473,7 +1563,7 @@ void TestSessionPacketCanonicalizationAndObservationDomains() {
     assert(npm::BuildNpmSessionPacketBinding(domain_map, ipv6_reverse.View(2), ipv6_reverse.layer,
                                              &ipv6_reverse_binding) == npm::NpmSessionPacketError::kNone);
     assert(SameKey(ipv6_forward_binding.key, ipv6_reverse_binding.key));
-    assert(ipv6_forward_binding.key.ip_family == flowsql::packet::AddressFamily::kIPv6);
+    assert(ipv6_forward_binding.key.View().Family() == flowsql::packet::AddressFamily::kIPv6);
     assert(ipv6_forward_binding.direction == npm::NpmPacketDirection::kBToA);
     assert(ipv6_reverse_binding.direction == npm::NpmPacketDirection::kAToB);
     assert(!ipv6_forward_binding.transport.tcp.valid && !ipv6_reverse_binding.transport.tcp.valid);
@@ -1484,21 +1574,22 @@ void TestSessionPacketCanonicalizationAndObservationDomains() {
     npm::NpmSessionPacketBinding other_domain;
     assert(npm::BuildNpmSessionPacketBinding(domain_map, forward.View(3), forward.layer, &other_domain) ==
            npm::NpmSessionPacketError::kNone);
-    assert(other_domain.key.observation_domain_id == 88);
+    assert(other_domain.key.View().Domain() == 88);
     assert(!SameKey(forward_binding.key, other_domain.key));
     const npm::NpmObservationDomainMap other_namespace{"capture-b", {{1, 77}}};
     npm::NpmSessionPacketBinding namespace_binding;
     assert(npm::BuildNpmSessionPacketBinding(other_namespace, forward.View(1), forward.layer, &namespace_binding) ==
            npm::NpmSessionPacketError::kNone);
-    assert(namespace_binding.key.input_namespace == "capture-b");
+    assert(namespace_binding.key.View().Namespace() == "capture-b");
     assert(!SameKey(forward_binding.key, namespace_binding.key));
 
     npm::NpmSessionPacketBinding unchanged;
-    unchanged.key.input_namespace = "unchanged";
+    unchanged.key = npm::NpmSessionKey4{};
+    unchanged.key.Get4()->input_namespace = "unchanged";
     unchanged.transport.tcp.sequence = 123;
     assert(npm::BuildNpmSessionPacketBinding(domain_map, forward.View(99), forward.layer, &unchanged) ==
            npm::NpmSessionPacketError::kUnknownSourceId);
-    assert(unchanged.key.input_namespace == "unchanged");
+    assert(unchanged.key.View().Namespace() == "unchanged");
     assert(unchanged.transport.tcp.sequence == 123);
     const npm::NpmObservationDomainMap invalid_map{"", {{1, 77}}};
     assert(npm::BuildNpmSessionPacketBinding(invalid_map, forward.View(1), forward.layer, &unchanged) ==
@@ -1593,7 +1684,7 @@ void TestSessionPacketPayloadAndInvalidInputs() {
     assert(npm::BuildNpmSessionPacketBinding(domain_map, invalid.View(1), invalid.layer, &binding) ==
            npm::NpmSessionPacketError::kLayerUnavailable);
     invalid = packet;
-    invalid.layer.src_ip = std::monostate{};
+    invalid.layer.ClearAddresses();
     assert(npm::BuildNpmSessionPacketBinding(domain_map, invalid.View(1), invalid.layer, &binding) ==
            npm::NpmSessionPacketError::kIncompleteEndpoint);
     invalid = packet;
@@ -1646,8 +1737,8 @@ PacketFixture MakeTunnelPacket() {
     fixture.layer.network_layer_index = 3;
     fixture.layer.transport_layer_index = 4;
     fixture.layer.payload_offset = 76;
-    fixture.layer.src_ip = flowsql::wire::ToAnalysis(inner_ip->src_addr);
-    fixture.layer.dst_ip = flowsql::wire::ToAnalysis(inner_ip->dst_addr);
+    fixture.layer.SetEndpoints(flowsql::wire::ToAnalysis(inner_ip->src_addr),
+                               flowsql::wire::ToAnalysis(inner_ip->dst_addr));
     fixture.layer.transport_protocol = flowsql::ipv4::eNext::TCP;
     fixture.layer.src_port = 12000;
     fixture.layer.dst_port = 443;
@@ -1683,14 +1774,13 @@ void TestSessionPacketFragmentsAndTunnelContext() {
     tunnel.layer.network_layer_index = 0;
     tunnel.layer.transport_layer_index = 1;
     tunnel.layer.payload_offset = 28;
-    tunnel.layer.src_ip = ParseIpv4("198.51.100.1");
-    tunnel.layer.dst_ip = ParseIpv4("198.51.100.2");
+    tunnel.layer.SetEndpoints(ParseIpv4("198.51.100.1"), ParseIpv4("198.51.100.2"));
     tunnel.layer.transport_protocol = flowsql::ipv4::eNext::UDP;
     tunnel.layer.src_port = 40000;
     tunnel.layer.dst_port = 4789;
     assert(npm::BuildNpmSessionPacketBinding(domain_map, tunnel.View(1), tunnel.layer, &binding) ==
            npm::NpmSessionPacketError::kNone);
-    assert(binding.key.transport_protocol == flowsql::ipv4::eNext::UDP);
+    assert(binding.key.View().Protocol() == flowsql::ipv4::eNext::UDP);
     assert(binding.payload.size == tunnel.bytes.size() - 28);
 }
 
@@ -2199,12 +2289,12 @@ npm::NpmPacketView MakeUdpPerformancePacket(int64_t timestamp_ns, npm::NpmPacket
     return packet;
 }
 
-npm::NpmSessionView MakeTransportSnapshotView(npm::NpmSessionKey* key, uint64_t session_id, int64_t first_ns,
+npm::NpmSessionView MakeTransportSnapshotView(npm::NpmSessionKey4* key, uint64_t session_id, int64_t first_ns,
                                               int64_t last_ns, uint64_t packets_ab, uint64_t packets_ba,
                                               uint64_t wire_bytes_ab, uint64_t wire_bytes_ba) {
     npm::NpmSessionView session;
     session.session_id = session_id;
-    session.key = key;
+    if (key) session.key = npm::NpmSessionKeyView(*key);
     session.first_ns = first_ns;
     session.last_ns = last_ns;
     session.packets_ab = packets_ab;
@@ -2215,7 +2305,7 @@ npm::NpmSessionView MakeTransportSnapshotView(npm::NpmSessionKey* key, uint64_t 
 }
 
 void TestSessionPerformanceUdpProjectionAndRates() {
-    npm::NpmSessionKey udp_key;
+    npm::NpmSessionKey4 udp_key;
     udp_key.transport_protocol = flowsql::ipv4::eNext::UDP;
     auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmTcpPerformanceTracker tracker(budget);
@@ -2256,7 +2346,7 @@ void TestSessionPerformanceUdpProjectionAndRates() {
 }
 
 void TestSessionPerformanceTcpRatesAndSequenceAmbiguity() {
-    npm::NpmSessionKey tcp_key;
+    npm::NpmSessionKey4 tcp_key;
     tcp_key.transport_protocol = flowsql::ipv4::eNext::TCP;
     auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmTcpPerformanceTracker tracker(budget);
@@ -2291,9 +2381,9 @@ void TestSessionPerformanceTcpRatesAndSequenceAmbiguity() {
 }
 
 void TestSessionPerformanceProtocolAndViewErrorsAreAtomic() {
-    npm::NpmSessionKey udp_key;
+    npm::NpmSessionKey4 udp_key;
     udp_key.transport_protocol = flowsql::ipv4::eNext::UDP;
-    npm::NpmSessionKey tcp_key;
+    npm::NpmSessionKey4 tcp_key;
     tcp_key.transport_protocol = flowsql::ipv4::eNext::TCP;
     auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmTcpPerformanceTracker tracker(budget);
@@ -2323,16 +2413,16 @@ void TestSessionPerformanceProtocolAndViewErrorsAreAtomic() {
     tracker.Clear();
 }
 
-npm::NpmSessionKey MakeSessionModuleKey(uint8_t transport_protocol) {
-    npm::NpmSessionKey key;
+npm::NpmSessionKey4 MakeSessionModuleKey(uint8_t transport_protocol) {
+    npm::NpmSessionKey4 key;
     key.input_namespace = "pcapfile.capture";
     key.observation_domain_id = 77;
-    key.ip_family = flowsql::packet::AddressFamily::kIPv4;
+
     key.transport_protocol = transport_protocol;
-    key.a.ip = ParseIpv4("192.0.2.1");
-    key.a.port = 50000;
-    key.b.ip = ParseIpv4("198.51.100.2");
-    key.b.port = 443;
+    key.a_ip = ParseIpv4("192.0.2.1");
+    key.a_port = 50000;
+    key.b_ip = ParseIpv4("198.51.100.2");
+    key.b_port = 443;
     return key;
 }
 
@@ -2403,7 +2493,7 @@ void TestSessionAnalysisModuleUdpFinalOnlyAndInvalidFinal() {
     auto budget = std::make_shared<FixtureBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
     npm::NpmSessionAnalysisModule module(*context, budget, 8);
     auto key = MakeSessionModuleKey(flowsql::ipv4::eNext::UDP);
-    key.b.port = 53;
+    key.b_port = 53;
     auto session = MakeTransportSnapshotView(&key, 2, 10, 10, 0, 1, 0, 80);
     session.protocol_status = npm::NpmProtocolStatus::kUnknown;
     const auto packet = MakeUdpPerformancePacket(10, npm::NpmPacketDirection::kBToA, 12, 80, false);
@@ -2503,8 +2593,8 @@ void TestSessionTableBidirectionalCountersAndLookup() {
     assert(ObserveActive(table, first, first_meta, &view) == npm::NpmSessionTableError::kNone);
     assert(table.size() == 1);
     assert(view.session_id == 1);
-    assert(view.key != nullptr && SameKey(*view.key, first.key));
-    assert(view.key != &first.key);
+    assert(view.key.has_value() && SameKey(*view.key, first.key));
+    assert(!BorrowedKeyIs(view.key, first.key.View()));
     assert(view.first_ns == 300 && view.last_ns == 300);
     assert(view.packets_ab == 0 && view.packets_ba == 1);
     assert(view.wire_bytes_ab == 0 && view.wire_bytes_ba == 100);
@@ -2527,7 +2617,7 @@ void TestSessionTableBidirectionalCountersAndLookup() {
 
     npm::NpmSessionView found;
     assert(table.Find(first.key, &found) == npm::NpmSessionTableError::kNone);
-    assert(found.session_id == view.session_id && found.key == view.key);
+    assert(found.session_id == view.session_id && BorrowedKeyIs(found.key, *view.key));
     assert(found.first_ns == view.first_ns && found.last_ns == view.last_ns);
     assert(found.packets_ab == view.packets_ab && found.packets_ba == view.packets_ba);
     assert(found.wire_bytes_ab == view.wire_bytes_ab && found.wire_bytes_ba == view.wire_bytes_ba);
@@ -2565,8 +2655,8 @@ void TestSessionTableActiveSnapshotIsOrderedAndNonMutating() {
     assert(table.SnapshotActive(&views) == npm::NpmSessionTableError::kNone);
     assert(views.size() == 2);
     assert(views[0].session_id == 1 && views[1].session_id == 2);
-    assert(views[0].key != nullptr && SameKey(*views[0].key, first.key));
-    assert(views[1].key != nullptr && SameKey(*views[1].key, second.key));
+    assert(views[0].key.has_value() && SameKey(*views[0].key, first.key));
+    assert(views[1].key.has_value() && SameKey(*views[1].key, second.key));
     assert(views[0].protocol_status == npm::NpmProtocolStatus::kPending);
     assert(views[1].protocol_status == npm::NpmProtocolStatus::kPending);
     assert(table.size() == 2 && table.tracked_bytes() == tracked_before);
@@ -2579,8 +2669,8 @@ void TestSessionTableActiveSnapshotIsOrderedAndNonMutating() {
     std::vector<npm::NpmSessionView> repeated;
     assert(table.SnapshotActive(&repeated) == npm::NpmSessionTableError::kNone);
     assert(repeated.size() == 2);
-    assert(repeated[0].session_id == views[0].session_id && repeated[0].key == views[0].key);
-    assert(repeated[1].session_id == views[1].session_id && repeated[1].key == views[1].key);
+    assert(repeated[0].session_id == views[0].session_id && BorrowedKeyIs(repeated[0].key, *views[0].key));
+    assert(repeated[1].session_id == views[1].session_id && BorrowedKeyIs(repeated[1].key, *views[1].key));
     assert(table.size() == 2 && table.tracked_bytes() == tracked_before);
     usage_after = budget->Usage();
     assert(usage_after.session_state_bytes == usage_before.session_state_bytes);
@@ -2730,8 +2820,10 @@ void TestSessionTableBudgetReleasesAllTerminalPaths() {
     npm::NpmSessionView observed;
     assert(ObserveActive(idle_table, udp, udp_meta, &observed) == npm::NpmSessionTableError::kNone);
     assert(idle_table.tracked_bytes() != 0);
-    const auto idle = idle_table.AdvanceCaptureProgress(OfflineProgress(npm::kNpmNanosecondsPerSecond));
+    auto idle = idle_table.AdvanceCaptureProgress(OfflineProgress(npm::kNpmNanosecondsPerSecond));
     assert(idle.ended_sessions.size() == 1 && idle_table.tracked_bytes() == 0);
+    assert(idle_budget->Usage().input_batch_bytes > 0);
+    idle.ended_sessions.clear();
     AssertTaskBudgetUsage(idle_budget->Usage(), 0, 0, 0, 0);
 
     auto eof_budget = std::make_shared<npm::NpmTaskBudget>(config);
@@ -2740,6 +2832,8 @@ void TestSessionTableBudgetReleasesAllTerminalPaths() {
     std::vector<npm::NpmSessionSnapshot> eof_sessions;
     assert(eof_table.FinishAllAtEof(&eof_sessions) == npm::NpmSessionTableError::kNone);
     assert(eof_sessions.size() == 1 && eof_table.tracked_bytes() == 0);
+    assert(eof_budget->Usage().input_batch_bytes > 0);
+    eof_sessions.clear();
     AssertTaskBudgetUsage(eof_budget->Usage(), 0, 0, 0, 0);
 
     const auto rst_packet = MakeIpv4TcpPacket("198.51.100.1", 51000, "198.51.100.2", 8443, {}, kTcpRst, 200);
@@ -2750,6 +2844,8 @@ void TestSessionTableBudgetReleasesAllTerminalPaths() {
     npm::NpmSessionObserveResult closed;
     assert(closed_table.Observe(rst, rst_meta, &closed) == npm::NpmSessionTableError::kNone);
     assert(closed.ended_sessions.size() == 1 && closed_table.tracked_bytes() == 0);
+    assert(closed_budget->Usage().input_batch_bytes > 0);
+    closed.ended_sessions.clear();
     AssertTaskBudgetUsage(closed_budget->Usage(), 0, 0, 0, 0);
 
     auto destructor_budget = std::make_shared<npm::NpmTaskBudget>(config);
@@ -2800,7 +2896,7 @@ void TestOfflineEventWatermarkAndIdleRetirement() {
     assert(progress.ended_sessions[0].session_id == tcp_session_id);
     assert(progress.ended_sessions[0].end_reason == npm::NpmSessionEndReason::kIdleTimeout);
     const auto retired_view = progress.ended_sessions[0].View();
-    assert(retired_view.key == &progress.ended_sessions[0].key);
+    assert(BorrowedKeyIs(retired_view.key, progress.ended_sessions[0].key.View()));
     assert(retired_view.session_id == tcp_session_id && retired_view.first_ns == 50 * second);
     assert(retired_view.packets_ab + retired_view.packets_ba == 1);
     assert(table.size() == 0);
@@ -3061,16 +3157,16 @@ class RecordingEndModule final : public npm::INpmAnalysisModule {
 
     int OnSessionEnd(const npm::NpmSessionView& session, npm::NpmSessionEndReason reason, int64_t observed_at_ns,
                      npm::INpmResultWriter& writer) override {
-        assert(session.key != nullptr);
+        assert(session.key.has_value());
         calls_->push_back(session.session_id * 10 + marker_);
         reasons_->push_back(reason);
         observed_ats_->push_back(observed_at_ns);
         if (error_ != 0) return error_;
         if (!write_result_) return 0;
 
-        npm::NpmBasicResult result;
+        npm::NpmBasicResult4 result;
         result.session_id = session.session_id;
-        result.observation_domain_id = session.key->observation_domain_id;
+        result.observation_domain_id = session.key->Domain();
         result.protocol_status = npm::NpmProtocolStatus::kUnknown;
         result.is_final = true;
         result.end_reason = reason;
@@ -3088,12 +3184,14 @@ class RecordingEndModule final : public npm::INpmAnalysisModule {
 
 void TestSessionEndModuleNotificationOrderAndErrors() {
     std::vector<npm::NpmSessionSnapshot> ended_sessions(2);
-    ended_sessions[0].key.input_namespace = "capture-a";
-    ended_sessions[0].key.observation_domain_id = 77;
+    ended_sessions[0].key = npm::NpmSessionKey4{};
+    ended_sessions[0].key.Get4()->input_namespace = "capture-a";
+    ended_sessions[0].key.Get4()->observation_domain_id = 77;
     ended_sessions[0].session_id = 1;
     ended_sessions[0].end_reason = npm::NpmSessionEndReason::kClosed;
-    ended_sessions[1].key.input_namespace = "capture-a";
-    ended_sessions[1].key.observation_domain_id = 77;
+    ended_sessions[1].key = npm::NpmSessionKey4{};
+    ended_sessions[1].key.Get4()->input_namespace = "capture-a";
+    ended_sessions[1].key.Get4()->observation_domain_id = 77;
     ended_sessions[1].session_id = 2;
     ended_sessions[1].end_reason = npm::NpmSessionEndReason::kTupleReuse;
 
@@ -3135,13 +3233,13 @@ void TestSessionEndModuleNotificationOrderAndErrors() {
     assert((observed_ats == std::vector<int64_t>{7000}));
 }
 
-class SequenceProtocolIdentifier final : public flowsql::packet::IPacketProtocolIdentifier {
+class SequenceProtocolIdentifier final : public flowsql::packet::IPacketFamilyProtocolIdentifier {
  public:
     explicit SequenceProtocolIdentifier(std::vector<flowsql::packet::PacketProtocolInfo> results)
         : results_(std::move(results)) {}
 
     flowsql::packet::PacketProtocolInfo Identify(const flowsql::packet::PacketView& packet,
-                                                 const flowsql::packet::PacketLayerInfo& layer) override {
+                                                 const flowsql::packet::PacketLayerFacts& layer) override {
         ++calls;
         last_packet_data = packet.bytes.data;
         last_layer = &layer;
@@ -3151,7 +3249,7 @@ class SequenceProtocolIdentifier final : public flowsql::packet::IPacketProtocol
 
     uint32_t calls = 0;
     const uint8_t* last_packet_data = nullptr;
-    const flowsql::packet::PacketLayerInfo* last_layer = nullptr;
+    const flowsql::packet::PacketLayerFacts* last_layer = nullptr;
 
  private:
     std::vector<flowsql::packet::PacketProtocolInfo> results_;
@@ -3379,10 +3477,10 @@ void TestSessionTableFinishAllAtEof() {
     assert(snapshots[0].first_ns == 30 && snapshots[0].last_ns == 30);
     assert(snapshots[0].packets_ab + snapshots[0].packets_ba == 1);
     assert(snapshots[0].wire_bytes_ab + snapshots[0].wire_bytes_ba == 100);
-    assert(snapshots[0].key.input_namespace == "capture-a");
-    assert(snapshots[0].key.observation_domain_id == 77);
+    assert(snapshots[0].key.View().Namespace() == "capture-a");
+    assert(snapshots[0].key.View().Domain() == 77);
     const auto snapshot_view = snapshots[1].View();
-    assert(snapshot_view.key == &snapshots[1].key);
+    assert(BorrowedKeyIs(snapshot_view.key, snapshots[1].key.View()));
     assert(snapshot_view.protocol_id == 7 && snapshot_view.protocol_sub_id == 8);
 
     const auto advanced = table.AdvanceCaptureProgress(OfflineProgress(100 * npm::kNpmNanosecondsPerSecond));
@@ -3427,7 +3525,7 @@ class PacketProcessorRecordingModule final : public npm::INpmAnalysisModule {
     int packet_error = 0;
     int end_error = 0;
     const uint8_t* expected_packet_data = nullptr;
-    const flowsql::packet::PacketLayerInfo* expected_layer = nullptr;
+    const flowsql::testing::OwnedPacketLayer* expected_layer = nullptr;
     size_t expected_payload_size = 0;
     uint8_t expected_payload_first = 0;
     npm::NpmPacketDirection expected_direction = npm::NpmPacketDirection::kAToB;
@@ -3849,10 +3947,10 @@ void TestProcessNpmPacketErrorsAreStructuredAndAtomic() {
     assert(ended_sessions.size() == 1 && ended_sessions[0].session_id == 999);
 }
 
-flowsql::packet::PacketRecord MakeBatchPacketRecord(const PacketFixture& fixture, uint32_t source_id,
-                                                    int64_t timestamp_ns, uint64_t sequence) {
+flowsql::testing::PacketRecord MakeBatchPacketRecord(const PacketFixture& fixture, uint32_t source_id,
+                                                     int64_t timestamp_ns, uint64_t sequence) {
     auto owner = std::make_shared<std::vector<uint8_t>>(fixture.bytes);
-    flowsql::packet::PacketRecord record;
+    flowsql::testing::PacketRecord record;
     record.meta.timestamp_ns = timestamp_ns;
     record.meta.captured_len = static_cast<uint32_t>(owner->size());
     record.meta.wire_len = record.meta.captured_len;
@@ -3866,16 +3964,16 @@ flowsql::packet::PacketRecord MakeBatchPacketRecord(const PacketFixture& fixture
     return record;
 }
 
-std::shared_ptr<arrow::RecordBatch> MakeEncodedPacketBatch(const std::vector<flowsql::packet::PacketRecord>& records) {
+std::shared_ptr<arrow::RecordBatch> MakeEncodedPacketBatch(const std::vector<flowsql::testing::PacketRecord>& records) {
     std::shared_ptr<arrow::RecordBatch> batch;
     std::string error;
-    assert(flowsql::packet::EncodePacketBatch(records, &batch, &error) == flowsql::packet::PacketBatchError::kNone);
+    assert(flowsql::testing::EncodePacketBatch(records, &batch, &error) == flowsql::packet::PacketBatchError::kNone);
     assert(error.empty() && batch != nullptr);
     return batch;
 }
 
 std::unique_ptr<npm::NpmPacketBatchView> MakeValidatedPacketBatchView(
-    const std::vector<flowsql::packet::PacketRecord>& records) {
+    const std::vector<flowsql::testing::PacketRecord>& records) {
     auto batch = MakeEncodedPacketBatch(records);
 
     std::unique_ptr<npm::NpmPacketBatchView> view;
@@ -3941,8 +4039,8 @@ void TestProcessNpmOfflinePacketBatchOrderAndWatermark() {
     assert(ended_events[2].observed_at == 3 * second);
 
     batch.reset();
-    assert(ended_events[0].snapshot.key.input_namespace == "capture-a");
-    assert(ended_events[2].snapshot.key.observation_domain_id == 77);
+    assert(ended_events[0].snapshot.key.View().Namespace() == "capture-a");
+    assert(ended_events[2].snapshot.key.View().Domain() == 77);
 }
 
 void TestProcessNpmOfflinePacketBatchErrorsAndAtomicOutput() {
@@ -4142,7 +4240,7 @@ void TestFlowLabelingAdmissionBatchSessionReuseAndFailureAtomicity() {
     failed_matcher->Release();
     assert(failed_stats.release_calls == 1);
 
-    std::vector<flowsql::packet::PacketRecord> bounded_records;
+    std::vector<flowsql::testing::PacketRecord> bounded_records;
     bounded_records.reserve(257);
     for (uint32_t index = 0; index < 257; ++index) {
         const auto candidate =
@@ -4169,7 +4267,7 @@ void TestFlowLabelingAdmissionBatchSessionReuseAndFailureAtomicity() {
     bounded_matcher->Release();
     assert(bounded_stats.release_calls == 1);
 
-    std::vector<flowsql::packet::PacketRecord> boundary_hit_records;
+    std::vector<flowsql::testing::PacketRecord> boundary_hit_records;
     boundary_hit_records.reserve(257);
     for (uint32_t index = 0; index < 256; ++index) {
         const auto candidate =
@@ -4618,7 +4716,7 @@ std::shared_ptr<arrow::RecordBatch> MakeNpmPacketViewBatch() {
         MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, std::vector<uint8_t>{0x44, 0x55});
     auto ipv6_bytes = std::make_shared<std::vector<uint8_t>>(ipv6_fixture.bytes);
 
-    flowsql::packet::PacketRecord first;
+    flowsql::testing::PacketRecord first;
     first.meta.timestamp_ns = 123456789;
     first.meta.captured_len = static_cast<uint32_t>(bytes->size());
     first.meta.wire_len = first.meta.captured_len + 8;
@@ -4630,14 +4728,14 @@ std::shared_ptr<arrow::RecordBatch> MakeNpmPacketViewBatch() {
     first.raw_data.size = static_cast<uint32_t>(bytes->size());
     first.layer = fixture.layer;
     first.layer.endpoint_scope = flowsql::packet::EndpointScope::kInnermost;
-    first.layer.src_mac.valid = 1;
-    first.layer.src_mac.value.bytes[0] = 0x10;
-    first.layer.src_mac.value.bytes[5] = 0x15;
+    first.layer.src_mac_valid = 1;
+    first.layer.src_mac.bytes[0] = 0x10;
+    first.layer.src_mac.bytes[5] = 0x15;
     first.protocol.status = flowsql::packet::ProtocolStatus::kIdentified;
     first.protocol.id = 2000;
     first.protocol.sub_id = 2001;
 
-    flowsql::packet::PacketRecord second;
+    flowsql::testing::PacketRecord second;
     second.meta.timestamp_ns = 123456790;
     second.meta.captured_len = static_cast<uint32_t>(ipv6_bytes->size());
     second.meta.wire_len = second.meta.captured_len;
@@ -4649,7 +4747,7 @@ std::shared_ptr<arrow::RecordBatch> MakeNpmPacketViewBatch() {
     second.raw_data.size = static_cast<uint32_t>(ipv6_bytes->size());
     second.layer = ipv6_fixture.layer;
 
-    flowsql::packet::PacketRecord third;
+    flowsql::testing::PacketRecord third;
     third.meta.timestamp_ns = 123456791;
     third.meta.link_type = 1;
     third.meta.source_id = 9;
@@ -4657,7 +4755,7 @@ std::shared_ptr<arrow::RecordBatch> MakeNpmPacketViewBatch() {
 
     std::shared_ptr<arrow::RecordBatch> batch;
     std::string error;
-    assert(flowsql::packet::EncodePacketBatch({first, second, third}, &batch, &error) ==
+    assert(flowsql::testing::EncodePacketBatch({first, second, third}, &batch, &error) ==
            flowsql::packet::PacketBatchError::kNone);
     assert(error.empty() && batch != nullptr);
     return batch;
@@ -4667,7 +4765,11 @@ void AssertPacketBatchCreateError(const std::shared_ptr<arrow::RecordBatch>& bat
                                   const char* error_fragment, std::unique_ptr<npm::NpmPacketBatchView>* output) {
     auto* original = output->get();
     std::string error = "unchanged";
-    assert(npm::NpmPacketBatchView::Create(batch, output, &error) == expected);
+    const auto actual = npm::NpmPacketBatchView::Create(batch, output, &error);
+    if (actual != expected)
+        std::fprintf(stderr, "batch create expected=%u actual=%u fragment=%s error=%s\n",
+                     static_cast<unsigned>(expected), static_cast<unsigned>(actual), error_fragment, error.c_str());
+    assert(actual == expected);
     assert(output->get() == original);
     assert(error.find(error_fragment) != std::string::npos);
 }
@@ -4694,7 +4796,7 @@ void TestNpmPacketBatchViewBorrowedDecodeAndOwnership() {
     assert(!batch_owner.expired());
 
     flowsql::packet::PacketView packet_view;
-    flowsql::packet::PacketLayerInfo layer_info;
+    flowsql::testing::OwnedPacketLayer layer_info;
     assert(view->Get(0, &packet_view, &layer_info) == npm::NpmPacketBatchError::kNone);
     assert(packet_view.meta.timestamp_ns == 123456789);
     assert(packet_view.meta.captured_len == static_cast<uint32_t>(expected_size));
@@ -4710,10 +4812,10 @@ void TestNpmPacketBatchViewBorrowedDecodeAndOwnership() {
     assert(layer_info.network_layer_index == 0 && layer_info.transport_layer_index == 1);
     assert(layer_info.endpoint_scope == flowsql::packet::EndpointScope::kInnermost);
     assert(layer_info.payload_offset == sizeof(flowsql::Ipv4Header) + sizeof(flowsql::TcpHeader));
-    assert(layer_info.src_mac.valid == 1 && layer_info.src_mac.value.bytes[0] == 0x10);
-    assert(layer_info.dst_mac.valid == 0);
-    assert(std::holds_alternative<flowsql::packet::IPv4Address>(layer_info.src_ip));
-    assert(std::holds_alternative<flowsql::packet::IPv4Address>(layer_info.dst_ip));
+    assert(layer_info.src_mac_valid == 1 && layer_info.src_mac.bytes[0] == 0x10);
+    assert(layer_info.dst_mac_valid == 0);
+    assert(layer_info.Get4() != nullptr);
+    assert(layer_info.Get4() != nullptr);
     assert(layer_info.transport_protocol == flowsql::ipv4::eNext::TCP);
     assert(layer_info.ports_valid == 1 && layer_info.src_port == 41000 && layer_info.dst_port == 443);
 
@@ -4721,17 +4823,17 @@ void TestNpmPacketBatchViewBorrowedDecodeAndOwnership() {
     auto* mutable_raw = const_cast<uint8_t*>(expected_raw);
     mutable_raw[0] ^= 0xff;
     flowsql::packet::PacketView borrowed_again;
-    flowsql::packet::PacketLayerInfo layer_again;
+    flowsql::testing::OwnedPacketLayer layer_again;
     assert(view->Get(0, &borrowed_again, &layer_again) == npm::NpmPacketBatchError::kNone);
     assert(borrowed_again.bytes.data == expected_raw && borrowed_again.bytes.data[0] == mutable_raw[0]);
     mutable_raw[0] = original_byte;
 
     assert(view->Get(1, &borrowed_again, &layer_again) == npm::NpmPacketBatchError::kNone);
     assert(borrowed_again.meta.source_id == 8 && borrowed_again.meta.sequence == 20);
-    assert(std::holds_alternative<flowsql::packet::IPv6Address>(layer_again.src_ip));
-    assert(std::holds_alternative<flowsql::packet::IPv6Address>(layer_again.dst_ip));
-    assert(SameIp(layer_again.src_ip, flowsql::packet::IpAddress{ParseIpv6("2001:db8::1")}));
-    assert(SameIp(layer_again.dst_ip, flowsql::packet::IpAddress{ParseIpv6("2001:db8::2")}));
+    assert(layer_again.Get6() != nullptr);
+    assert(layer_again.Get6() != nullptr);
+    assert(layer_again.Get6()->src == ParseIpv6("2001:db8::1"));
+    assert(layer_again.Get6()->dst == ParseIpv6("2001:db8::2"));
     assert(layer_again.transport_protocol == flowsql::ipv6::eNext::UDP);
     assert(layer_again.ports_valid == 1 && layer_again.src_port == 53000 && layer_again.dst_port == 53);
 
@@ -4740,13 +4842,13 @@ void TestNpmPacketBatchViewBorrowedDecodeAndOwnership() {
     assert(layer_again.status == flowsql::packet::LayerStatus::kNotDecoded);
     assert(layer_again.layer_count == 0 && layer_again.network_layer_index == flowsql::packet::kNoLayerIndex);
     assert(layer_again.transport_layer_index == flowsql::packet::kNoLayerIndex);
-    assert(std::holds_alternative<std::monostate>(layer_again.src_ip));
-    assert(std::holds_alternative<std::monostate>(layer_again.dst_ip));
+    assert(!layer_again.Get4() && !layer_again.Get6());
+    assert(!layer_again.Get4() && !layer_again.Get6());
     assert(layer_again.transport_protocol == 0 && layer_again.ports_valid == 0);
 
     flowsql::packet::PacketView unchanged_packet;
     unchanged_packet.meta.source_id = 99;
-    flowsql::packet::PacketLayerInfo unchanged_layer;
+    flowsql::testing::OwnedPacketLayer unchanged_layer;
     unchanged_layer.payload_offset = 99;
     assert(view->Get(-1, &unchanged_packet, &unchanged_layer) == npm::NpmPacketBatchError::kInvalidRow);
     assert(unchanged_packet.meta.source_id == 99 && unchanged_layer.payload_offset == 99);
@@ -4847,32 +4949,28 @@ void TestNpmPacketBatchViewRejectsInvalidRows() {
         ReplacePacketBatchColumns(batch, {{14, MakeOneValueArray<arrow::UInt32Builder>(captured_len + 1)}});
     AssertPacketBatchCreateError(invalid_payload, npm::NpmPacketBatchError::kInvalidRow, "payload_offset", &output);
 
-    auto invalid_ip_family = ReplacePacketBatchColumns(
-        batch,
-        {{21, MakeOneValueArray<arrow::UInt8Builder>(static_cast<uint8_t>(flowsql::packet::AddressFamily::kNone))}});
-    AssertPacketBatchCreateError(invalid_ip_family, npm::NpmPacketBatchError::kInvalidRow, "src_ip", &output);
+    auto invalid_address_state =
+        ReplacePacketBatchColumns(batch, {{17, MakeOneValueArray<arrow::UInt8Builder>(uint8_t{0})}});
+    AssertPacketBatchCreateError(invalid_address_state, npm::NpmPacketBatchError::kInvalidRow, "address state",
+                                 &output);
+    auto invalid_address_enum =
+        ReplacePacketBatchColumns(batch, {{17, MakeOneValueArray<arrow::UInt8Builder>(uint8_t{9})}});
+    AssertPacketBatchCreateError(invalid_address_enum, npm::NpmPacketBatchError::kInvalidRow, "address state", &output);
 
-    std::vector<uint8_t> short_ipv6(15, 0x22);
-    auto invalid_ipv6 = ReplacePacketBatchColumns(
-        batch,
-        {{17, MakeOneNullArray<arrow::UInt32Builder>()},
-         {19, MakeOneBinaryArray(short_ipv6)},
-         {21, MakeOneValueArray<arrow::UInt8Builder>(static_cast<uint8_t>(flowsql::packet::AddressFamily::kIPv6))}});
-    AssertPacketBatchCreateError(invalid_ipv6, npm::NpmPacketBatchError::kInvalidRow, "src_ip_v6", &output);
-
-    auto invalid_ports = ReplacePacketBatchColumns(batch, {{26, MakeOneValueArray<arrow::BooleanBuilder>(false)}});
+    auto invalid_ports = ReplacePacketBatchColumns(batch, {{22, MakeOneValueArray<arrow::BooleanBuilder>(false)}});
     AssertPacketBatchCreateError(invalid_ports, npm::NpmPacketBatchError::kInvalidRow, "ports_valid", &output);
 
     auto invalid_protocol =
-        ReplacePacketBatchColumns(batch, {{27, MakeOneValueArray<arrow::UInt8Builder>(
+        ReplacePacketBatchColumns(batch, {{23, MakeOneValueArray<arrow::UInt8Builder>(
                                                    static_cast<uint8_t>(flowsql::packet::ProtocolStatus::kUnknown))}});
     AssertPacketBatchCreateError(invalid_protocol, npm::NpmPacketBatchError::kInvalidRow, "protocol_status", &output);
 }
 
-npm::NpmSessionView MakeProjectionSession(const npm::NpmSessionKey* key, uint64_t session_id) {
+template <typename Key>
+npm::NpmSessionView MakeProjectionSession(const Key* key, uint64_t session_id) {
     npm::NpmSessionView session;
     session.session_id = session_id;
-    session.key = key;
+    if (key) session.key = npm::NpmSessionKeyView(*key);
     session.first_ns = 100;
     session.last_ns = 200;
     session.packets_ab = 3;
@@ -4897,24 +4995,23 @@ void TestNpmBasicResultProjectionRevisionsAndLabels() {
     npm::NpmBasicResultProjector projector(*context);
     assert(projector.tracked_sessions() == 0);
 
-    npm::NpmSessionKey ipv4_key;
+    npm::NpmSessionKey4 ipv4_key;
     ipv4_key.input_namespace = "pcapfile.capture";
     ipv4_key.observation_domain_id = 77;
-    ipv4_key.ip_family = flowsql::packet::AddressFamily::kIPv4;
+
     ipv4_key.transport_protocol = flowsql::ipv4::eNext::TCP;
-    ipv4_key.a.ip = ParseIpv4("192.0.2.1");
-    ipv4_key.a.port = 443;
-    ipv4_key.b.ip = ParseIpv4("198.51.100.2");
-    ipv4_key.b.port = 41000;
+    ipv4_key.a_ip = ParseIpv4("192.0.2.1");
+    ipv4_key.a_port = 443;
+    ipv4_key.b_ip = ParseIpv4("198.51.100.2");
+    ipv4_key.b_port = 41000;
     auto session = MakeProjectionSession(&ipv4_key, 42);
 
-    npm::NpmBasicResult result;
+    npm::NpmBasicResult4 result;
     assert(projector.ProjectActive(session, 1000, &result) == npm::NpmBasicProjectionError::kNone);
     assert(result.session_id == 42 && result.observation_domain_id == 77);
     assert(result.revision == 1 && result.observed_at == 1000 && !result.is_final);
-    assert(result.ip_family == static_cast<uint8_t>(flowsql::packet::AddressFamily::kIPv4));
     assert(result.transport_protocol == flowsql::ipv4::eNext::TCP);
-    assert(result.a_ip == "192.0.2.1" && result.b_ip == "198.51.100.2");
+    assert(result.a_ip == ParseIpv4("192.0.2.1") && result.b_ip == ParseIpv4("198.51.100.2"));
     assert(result.a_port == 443 && result.b_port == 41000);
     assert(result.first_ns == 100 && result.last_ns == 200);
     assert(result.packets_ab == 3 && result.packets_ba == 5);
@@ -4936,21 +5033,23 @@ void TestNpmBasicResultProjectionRevisionsAndLabels() {
     assert(result.revision == 3 && result.protocol_id == 7 && result.protocol_sub_id == 9);
     assert(result.protocol == "MAIN");
 
-    npm::NpmSessionKey ipv6_key;
+    npm::NpmSessionKey6 ipv6_key;
     ipv6_key.input_namespace = "pcapfile.capture";
     ipv6_key.observation_domain_id = 88;
-    ipv6_key.ip_family = flowsql::packet::AddressFamily::kIPv6;
+
     ipv6_key.transport_protocol = flowsql::ipv6::eNext::UDP;
-    ipv6_key.a.ip = ParseIpv6("2001:db8::1");
-    ipv6_key.a.port = 53;
-    ipv6_key.b.ip = ParseIpv6("2001:db8::2");
-    ipv6_key.b.port = 53000;
+    ipv6_key.a_ip = ParseIpv6("2001:db8::1");
+    ipv6_key.a_port = 53;
+    ipv6_key.b_ip = ParseIpv6("2001:db8::2");
+    ipv6_key.b_port = 53000;
     auto ipv6_session = MakeProjectionSession(&ipv6_key, 43);
     ipv6_session.protocol_status = npm::NpmProtocolStatus::kUnknown;
-    assert(projector.ProjectActive(ipv6_session, 1300, &result) == npm::NpmBasicProjectionError::kNone);
-    assert(result.revision == 1 && result.a_ip == "2001:db8::1" && result.b_ip == "2001:db8::2");
-    assert(result.protocol_status == npm::NpmProtocolStatus::kUnknown);
-    assert(!result.protocol_id && !result.protocol_sub_id && !result.protocol);
+    npm::NpmBasicResult6 result6;
+    assert(projector.ProjectActive(ipv6_session, 1300, &result6) == npm::NpmBasicProjectionError::kNone);
+    assert(result6.revision == 1 && result6.a_ip == ParseIpv6("2001:db8::1") &&
+           result6.b_ip == ParseIpv6("2001:db8::2"));
+    assert(result6.protocol_status == npm::NpmProtocolStatus::kUnknown);
+    assert(!result6.protocol_id && !result6.protocol_sub_id && !result6.protocol);
     assert(projector.tracked_sessions() == 2);
 
     assert(projector.ProjectFinal(session, npm::NpmSessionEndReason::kClosed, 1400, &result) ==
@@ -4961,10 +5060,10 @@ void TestNpmBasicResultProjectionRevisionsAndLabels() {
     assert(npm::ValidateNpmBasicResult(result) == npm::NpmBasicResultError::kNone);
     assert(projector.tracked_sessions() == 1);
 
-    assert(projector.ProjectFinal(ipv6_session, npm::NpmSessionEndReason::kIdleTimeout, 1500, &result) ==
+    assert(projector.ProjectFinal(ipv6_session, npm::NpmSessionEndReason::kIdleTimeout, 1500, &result6) ==
            npm::NpmBasicProjectionError::kNone);
-    assert(result.revision == 2 && result.is_final);
-    assert(result.end_reason == npm::NpmSessionEndReason::kIdleTimeout);
+    assert(result6.revision == 2 && result6.is_final);
+    assert(result6.end_reason == npm::NpmSessionEndReason::kIdleTimeout);
     assert(projector.tracked_sessions() == 0);
 
     auto final_only = MakeProjectionSession(&ipv4_key, 44);
@@ -4984,27 +5083,29 @@ void TestNpmBasicResultProjectionErrorsDoNotConsumeRevision() {
     assert(npm::NpmProtocolContext::Create(&querier, &context) == npm::NpmProtocolContextError::kNone);
     npm::NpmBasicResultProjector projector(*context);
 
-    npm::NpmSessionKey key;
+    npm::NpmSessionKey4 key;
     key.input_namespace = "pcapfile.capture";
     key.observation_domain_id = 77;
-    key.ip_family = flowsql::packet::AddressFamily::kIPv4;
+
     key.transport_protocol = flowsql::ipv4::eNext::TCP;
-    key.a.ip = ParseIpv4("192.0.2.1");
-    key.a.port = 443;
-    key.b.ip = ParseIpv4("198.51.100.2");
-    key.b.port = 41000;
+    key.a_ip = ParseIpv4("192.0.2.1");
+    key.a_port = 443;
+    key.b_ip = ParseIpv4("198.51.100.2");
+    key.b_port = 41000;
     auto session = MakeProjectionSession(&key, 50);
 
-    npm::NpmBasicResult output;
+    npm::NpmBasicResult4 output;
     output.session_id = 999;
     output.revision = 88;
-    output.a_ip = "sentinel";
-    assert(projector.ProjectActive(session, 1000, nullptr) == npm::NpmBasicProjectionError::kNullOutput);
+    output.a_ip = flowsql::network::IPv4Address::FromUInt32(0x11223344);
+    assert(projector.ProjectActive<flowsql::network::IPv4Address>(session, 1000, nullptr) ==
+           npm::NpmBasicProjectionError::kNullOutput);
 
     auto invalid = session;
-    invalid.key = nullptr;
+    invalid.key.reset();
     assert(projector.ProjectActive(invalid, 1000, &output) == npm::NpmBasicProjectionError::kInvalidSession);
-    assert(output.session_id == 999 && output.revision == 88 && output.a_ip == "sentinel");
+    assert(output.session_id == 999 && output.revision == 88 &&
+           output.a_ip == flowsql::network::IPv4Address::FromUInt32(0x11223344));
     invalid = session;
     invalid.session_id = 0;
     assert(projector.ProjectActive(invalid, 1000, &output) == npm::NpmBasicProjectionError::kInvalidSession);
@@ -5012,11 +5113,7 @@ void TestNpmBasicResultProjectionErrorsDoNotConsumeRevision() {
     invalid.first_ns = 201;
     assert(projector.ProjectActive(invalid, 1000, &output) == npm::NpmBasicProjectionError::kInvalidSession);
 
-    auto invalid_key = key;
-    invalid_key.ip_family = flowsql::packet::AddressFamily::kIPv6;
-    invalid = session;
-    invalid.key = &invalid_key;
-    assert(projector.ProjectActive(invalid, 1000, &output) == npm::NpmBasicProjectionError::kInvalidAddress);
+    static_assert(!std::is_same_v<npm::NpmSessionKey4, npm::NpmSessionKey6>);
 
     invalid = session;
     invalid.protocol_status = static_cast<npm::NpmProtocolStatus>(3);
@@ -5032,7 +5129,8 @@ void TestNpmBasicResultProjectionErrorsDoNotConsumeRevision() {
 
     invalid.protocol_id = 99;
     assert(projector.ProjectActive(invalid, 1000, &output) == npm::NpmBasicProjectionError::kProtocolNameUnavailable);
-    assert(output.session_id == 999 && output.revision == 88 && output.a_ip == "sentinel");
+    assert(output.session_id == 999 && output.revision == 88 &&
+           output.a_ip == flowsql::network::IPv4Address::FromUInt32(0x11223344));
     assert(projector.tracked_sessions() == 0);
 
     session.protocol_status = npm::NpmProtocolStatus::kUnknown;
@@ -5042,15 +5140,15 @@ void TestNpmBasicResultProjectionErrorsDoNotConsumeRevision() {
 
     invalid = session;
     invalid.protocol_status = npm::NpmProtocolStatus::kPending;
-    output.a_ip = "still-active";
+    output.a_ip = flowsql::network::IPv4Address::FromUInt32(0x55667788);
     assert(projector.ProjectFinal(invalid, npm::NpmSessionEndReason::kEof, 1200, &output) ==
            npm::NpmBasicProjectionError::kInvalidResult);
-    assert(output.revision == 1 && output.a_ip == "still-active");
+    assert(output.revision == 1 && output.a_ip == flowsql::network::IPv4Address::FromUInt32(0x55667788));
     assert(projector.tracked_sessions() == 1);
 
     assert(projector.ProjectFinal(session, static_cast<npm::NpmSessionEndReason>(4), 1200, &output) ==
            npm::NpmBasicProjectionError::kInvalidResult);
-    assert(output.revision == 1 && output.a_ip == "still-active");
+    assert(output.revision == 1 && output.a_ip == flowsql::network::IPv4Address::FromUInt32(0x55667788));
     assert(projector.tracked_sessions() == 1);
 
     assert(projector.ProjectFinal(session, npm::NpmSessionEndReason::kTupleReuse, 1300, &output) ==
@@ -5059,18 +5157,16 @@ void TestNpmBasicResultProjectionErrorsDoNotConsumeRevision() {
     assert(projector.tracked_sessions() == 0);
 }
 
-npm::NpmBasicResult MakeBasicEncodingResult(uint64_t index) {
-    npm::NpmBasicResult result;
+npm::NpmBasicResult4 MakeBasicEncodingResult(uint64_t index) {
+    npm::NpmBasicResult4 result;
     result.session_id = index;
     result.observation_domain_id = 100 + index;
     result.revision = 10 + index;
     result.observed_at = 1000 + static_cast<int64_t>(index);
-    result.ip_family = index % 2 == 0 ? static_cast<uint8_t>(flowsql::packet::AddressFamily::kIPv6)
-                                      : static_cast<uint8_t>(flowsql::packet::AddressFamily::kIPv4);
     result.transport_protocol = index % 2 == 0 ? static_cast<uint8_t>(flowsql::ipv6::eNext::UDP)
                                                : static_cast<uint8_t>(flowsql::ipv4::eNext::TCP);
-    result.a_ip = "a-" + std::to_string(index);
-    result.b_ip = "b-" + std::to_string(index);
+    result.a_ip = flowsql::network::IPv4Address::FromUInt32(0xc0000200 + index);
+    result.b_ip = flowsql::network::IPv4Address::FromUInt32(0xc6336400 + index);
     result.a_port = static_cast<uint16_t>(1000 + index);
     result.b_port = static_cast<uint16_t>(2000 + index);
     result.first_ns = 2000 + static_cast<int64_t>(index);
@@ -5101,11 +5197,11 @@ void TestNpmBasicResultArrowEncoding() {
     std::string error = "stale";
     assert(npm::EncodeNpmBasicResults({}, &output, &error) == npm::NpmBasicEncodeError::kNone);
     assert(error.empty() && output != nullptr && output != original);
-    assert(output->schema().get() == npm::NpmBasicResultSchema().get());
-    assert(output->num_rows() == 0 && output->num_columns() == 32);
+    assert(output->schema().get() == npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4).get());
+    assert(output->num_rows() == 0 && output->num_columns() == 31);
     assert(output->ValidateFull().ok());
 
-    std::vector<npm::NpmBasicResult> results;
+    std::vector<npm::NpmBasicResult4> results;
     results.push_back(MakeBasicEncodingResult(1));
 
     auto active_identified = MakeBasicEncodingResult(2);
@@ -5144,8 +5240,8 @@ void TestNpmBasicResultArrowEncoding() {
     error = "stale";
     assert(npm::EncodeNpmBasicResults(results, &output, &error) == npm::NpmBasicEncodeError::kNone);
     assert(error.empty() && output != nullptr);
-    assert(output->schema().get() == npm::NpmBasicResultSchema().get());
-    assert(output->num_rows() == 6 && output->num_columns() == 32);
+    assert(output->schema().get() == npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4).get());
+    assert(output->num_rows() == 6 && output->num_columns() == 31);
     assert(output->ValidateFull().ok());
 
     const auto session_id = BasicResultColumn<arrow::UInt64Array>(output, 0);
@@ -5153,23 +5249,22 @@ void TestNpmBasicResultArrowEncoding() {
     const auto revision = BasicResultColumn<arrow::UInt64Array>(output, 2);
     const auto observed_at = BasicResultColumn<arrow::Int64Array>(output, 3);
     const auto is_final = BasicResultColumn<arrow::BooleanArray>(output, 4);
-    const auto ip_family = BasicResultColumn<arrow::UInt8Array>(output, 5);
-    const auto transport_protocol = BasicResultColumn<arrow::UInt8Array>(output, 6);
-    const auto a_ip = BasicResultColumn<arrow::StringArray>(output, 7);
-    const auto b_ip = BasicResultColumn<arrow::StringArray>(output, 8);
-    const auto a_port = BasicResultColumn<arrow::UInt16Array>(output, 9);
-    const auto b_port = BasicResultColumn<arrow::UInt16Array>(output, 10);
-    const auto first_ns = BasicResultColumn<arrow::Int64Array>(output, 11);
-    const auto last_ns = BasicResultColumn<arrow::Int64Array>(output, 12);
-    const auto packets_ab = BasicResultColumn<arrow::UInt64Array>(output, 13);
-    const auto packets_ba = BasicResultColumn<arrow::UInt64Array>(output, 14);
-    const auto wire_bytes_ab = BasicResultColumn<arrow::UInt64Array>(output, 15);
-    const auto wire_bytes_ba = BasicResultColumn<arrow::UInt64Array>(output, 16);
-    const auto protocol_status = BasicResultColumn<arrow::StringArray>(output, 18);
-    const auto protocol_id = BasicResultColumn<arrow::UInt16Array>(output, 19);
-    const auto protocol_sub_id = BasicResultColumn<arrow::UInt16Array>(output, 20);
-    const auto protocol = BasicResultColumn<arrow::StringArray>(output, 21);
-    const auto end_reason = BasicResultColumn<arrow::StringArray>(output, 22);
+    const auto transport_protocol = BasicResultColumn<arrow::UInt8Array>(output, 5);
+    const auto a_ip = BasicResultColumn<arrow::UInt32Array>(output, 6);
+    const auto b_ip = BasicResultColumn<arrow::UInt32Array>(output, 7);
+    const auto a_port = BasicResultColumn<arrow::UInt16Array>(output, 8);
+    const auto b_port = BasicResultColumn<arrow::UInt16Array>(output, 9);
+    const auto first_ns = BasicResultColumn<arrow::Int64Array>(output, 10);
+    const auto last_ns = BasicResultColumn<arrow::Int64Array>(output, 11);
+    const auto packets_ab = BasicResultColumn<arrow::UInt64Array>(output, 12);
+    const auto packets_ba = BasicResultColumn<arrow::UInt64Array>(output, 13);
+    const auto wire_bytes_ab = BasicResultColumn<arrow::UInt64Array>(output, 14);
+    const auto wire_bytes_ba = BasicResultColumn<arrow::UInt64Array>(output, 15);
+    const auto protocol_status = BasicResultColumn<arrow::StringArray>(output, 17);
+    const auto protocol_id = BasicResultColumn<arrow::UInt16Array>(output, 18);
+    const auto protocol_sub_id = BasicResultColumn<arrow::UInt16Array>(output, 19);
+    const auto protocol = BasicResultColumn<arrow::StringArray>(output, 20);
+    const auto end_reason = BasicResultColumn<arrow::StringArray>(output, 21);
 
     assert(session_id->Value(0) == 1 && session_id->Value(5) == 6);
     assert(observation_domain_id->Value(1) == 102);
@@ -5177,11 +5272,9 @@ void TestNpmBasicResultArrowEncoding() {
     assert(observed_at->Value(3) == 1004);
     assert(!is_final->Value(0) && !is_final->Value(1));
     assert(is_final->Value(2) && is_final->Value(5));
-    assert(ip_family->Value(0) == static_cast<uint8_t>(flowsql::packet::AddressFamily::kIPv4));
-    assert(ip_family->Value(1) == static_cast<uint8_t>(flowsql::packet::AddressFamily::kIPv6));
     assert(transport_protocol->Value(0) == flowsql::ipv4::eNext::TCP);
     assert(transport_protocol->Value(1) == flowsql::ipv6::eNext::UDP);
-    assert(a_ip->GetString(4) == "a-5" && b_ip->GetString(4) == "b-5");
+    assert(a_ip->Value(4) == 0xc0000205 && b_ip->Value(4) == 0xc6336405);
     assert(a_port->Value(0) == 1001 && b_port->Value(0) == 2001);
     assert(first_ns->Value(1) == 2002 && last_ns->Value(1) == 3002);
     assert(packets_ab->Value(2) == 13 && packets_ba->Value(2) == 23);
@@ -5200,13 +5293,13 @@ void TestNpmBasicResultArrowEncoding() {
     assert(end_reason->GetString(4) == "tuple_reuse");
     assert(end_reason->GetString(5) == "eof");
 
-    results[1].a_ip = "mutated";
+    results[1].a_ip = flowsql::network::IPv4Address::FromUInt32(0xdeadbeef);
     results[1].protocol = "mutated";
-    assert(a_ip->GetString(1) == "a-2" && protocol->GetString(1) == "HTTP");
+    assert(a_ip->Value(1) == 0xc0000202 && protocol->GetString(1) == "HTTP");
 }
 
 void TestNpmBasicResultArrowEncodingRejectsInvalidInput() {
-    std::vector<npm::NpmBasicResult> results = {MakeBasicEncodingResult(1), MakeBasicEncodingResult(2)};
+    std::vector<npm::NpmBasicResult4> results = {MakeBasicEncodingResult(1), MakeBasicEncodingResult(2)};
     std::shared_ptr<arrow::RecordBatch> output;
     std::string error;
     assert(npm::EncodeNpmBasicResults(results, &output, &error) == npm::NpmBasicEncodeError::kNone);
@@ -5219,11 +5312,13 @@ void TestNpmBasicResultArrowEncodingRejectsInvalidInput() {
     assert(error.find("result[1]") != std::string::npos);
 
     results[1].protocol_id.reset();
-    results[1].a_ip = std::string(1, static_cast<char>(0xff));
+    results[1].protocol_status = npm::NpmProtocolStatus::kIdentified;
+    results[1].protocol_id = 7;
+    results[1].protocol = std::string(1, static_cast<char>(0xff));
     error = "stale";
     assert(npm::EncodeNpmBasicResults(results, &output, &error) == npm::NpmBasicEncodeError::kInvalidResult);
     assert(output == original);
-    assert(error.find("result[1].a_ip") != std::string::npos);
+    assert(error.find("result[1].protocol") != std::string::npos);
 
     error = "stale";
     assert(npm::EncodeNpmBasicResults(results, nullptr, &error) == npm::NpmBasicEncodeError::kNullOutput);
@@ -5273,14 +5368,14 @@ uint64_t BasicResultBufferBytes(const std::shared_ptr<arrow::RecordBatch>& batch
     return static_cast<uint64_t>(bytes);
 }
 
-std::vector<npm::NpmSessionResult> MakeSessionEncodingResults() {
+std::vector<npm::NpmSessionResult4> MakeSessionEncodingResults() {
     auto complete = MakeValidTcpSessionResult();
     complete.session_id = 101;
     complete.observation_domain_id = 201;
     complete.revision = 3;
     complete.observed_at = 1000;
-    complete.a_ip = "192.0.2.10";
-    complete.b_ip = "198.51.100.20";
+    complete.a_ip = ParseIpv4("192.0.2.10");
+    complete.b_ip = ParseIpv4("198.51.100.20");
     complete.a_port = 12345;
     complete.b_port = 443;
     complete.protocol_sub_id = 81;
@@ -5374,7 +5469,7 @@ std::vector<npm::NpmSessionResult> MakeSessionEncodingResults() {
     udp.end_reason = npm::NpmSessionEndReason::kIdleTimeout;
     udp.measurement_flags = npm::kNpmMeasurementTruncatedPayload | npm::kNpmMeasurementTimestampRegression;
 
-    std::vector<npm::NpmSessionResult> results{complete, partial, not_observed, ambiguous, udp};
+    std::vector<npm::NpmSessionResult4> results{complete, partial, not_observed, ambiguous, udp};
     for (const auto& result : results) {
         assert(npm::ValidateNpmSessionResult(result) == npm::NpmSessionResultError::kNone);
     }
@@ -5392,13 +5487,14 @@ void TestNpmSessionResultArrowEncoding() {
     std::string error = "stale";
     assert(npm::EncodeNpmSessionResults({}, &output, &error) == npm::NpmSessionEncodeError::kNone);
     assert(error.empty() && output != original);
-    assert(output->schema().get() == npm::NpmSessionResultSchema().get());
+    assert(output->schema().get() == npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4).get());
     assert(output->num_rows() == 0 && output->num_columns() == 49);
     assert(output->ValidateFull().ok());
 
     auto results = MakeSessionEncodingResults();
     assert(npm::EncodeNpmSessionResults(results, &output, &error) == npm::NpmSessionEncodeError::kNone);
-    assert(error.empty() && output->schema().get() == npm::NpmSessionResultSchema().get());
+    assert(error.empty() &&
+           output->schema().get() == npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4).get());
     assert(output->num_rows() == 5 && output->num_columns() == 49);
     assert(output->ValidateFull().ok());
 
@@ -5407,15 +5503,14 @@ void TestNpmSessionResultArrowEncoding() {
     const auto revision = SessionResultColumn<arrow::UInt64Array>(output, 2);
     const auto observed_at = SessionResultColumn<arrow::Int64Array>(output, 3);
     const auto is_final = SessionResultColumn<arrow::BooleanArray>(output, 4);
-    const auto ip_family = SessionResultColumn<arrow::UInt8Array>(output, 5);
-    const auto transport_protocol = SessionResultColumn<arrow::UInt8Array>(output, 6);
-    const auto a_ip = SessionResultColumn<arrow::StringArray>(output, 7);
-    const auto b_ip = SessionResultColumn<arrow::StringArray>(output, 8);
-    const auto a_port = SessionResultColumn<arrow::UInt16Array>(output, 9);
-    const auto b_port = SessionResultColumn<arrow::UInt16Array>(output, 10);
-    const auto first_ns = SessionResultColumn<arrow::Int64Array>(output, 11);
-    const auto last_ns = SessionResultColumn<arrow::Int64Array>(output, 12);
-    const auto duration_ns = SessionResultColumn<arrow::Int64Array>(output, 13);
+    const auto transport_protocol = SessionResultColumn<arrow::UInt8Array>(output, 5);
+    const auto a_ip = SessionResultColumn<arrow::UInt32Array>(output, 6);
+    const auto b_ip = SessionResultColumn<arrow::UInt32Array>(output, 7);
+    const auto a_port = SessionResultColumn<arrow::UInt16Array>(output, 8);
+    const auto b_port = SessionResultColumn<arrow::UInt16Array>(output, 9);
+    const auto first_ns = SessionResultColumn<arrow::Int64Array>(output, 10);
+    const auto last_ns = SessionResultColumn<arrow::Int64Array>(output, 11);
+    const auto duration_ns = SessionResultColumn<arrow::Int64Array>(output, 12);
     const auto protocol_status = SessionResultColumn<arrow::StringArray>(output, 14);
     const auto protocol_id = SessionResultColumn<arrow::UInt16Array>(output, 15);
     const auto protocol_sub_id = SessionResultColumn<arrow::UInt16Array>(output, 16);
@@ -5455,9 +5550,9 @@ void TestNpmSessionResultArrowEncoding() {
     assert(session_id->Value(0) == 101 && session_id->Value(4) == 105);
     assert(observation_domain_id->Value(0) == 201 && revision->Value(0) == 3);
     assert(observed_at->Value(0) == 1000 && !is_final->Value(0) && is_final->Value(4));
-    assert(ip_family->Value(0) == 4 && transport_protocol->Value(0) == 6);
     assert(transport_protocol->Value(4) == 17);
-    assert(a_ip->GetString(0) == "192.0.2.10" && b_ip->GetString(0) == "198.51.100.20");
+    assert(a_ip->Value(0) == ParseIpv4("192.0.2.10").ToUInt32() &&
+           b_ip->Value(0) == ParseIpv4("198.51.100.20").ToUInt32());
     assert(a_port->Value(0) == 12345 && b_port->Value(0) == 443);
     assert(first_ns->Value(0) == 10 && last_ns->Value(0) == 20 && duration_ns->Value(0) == 10);
     assert(protocol_status->GetString(0) == "identified");
@@ -5502,9 +5597,9 @@ void TestNpmSessionResultArrowEncoding() {
     assert(measurement_flags->Value(4) ==
            (npm::kNpmMeasurementTruncatedPayload | npm::kNpmMeasurementTimestampRegression));
 
-    results[0].a_ip = "mutated";
+    results[0].a_ip = flowsql::network::IPv4Address::FromUInt32(0xdeadbeef);
     results[0].protocol = "mutated";
-    assert(a_ip->GetString(0) == "192.0.2.10" && protocol->GetString(0) == "HTTP");
+    assert(a_ip->Value(0) == ParseIpv4("192.0.2.10").ToUInt32() && protocol->GetString(0) == "HTTP");
 }
 
 void TestNpmSessionResultArrowEncodingRejectsInvalidInput() {
@@ -5521,14 +5616,16 @@ void TestNpmSessionResultArrowEncodingRejectsInvalidInput() {
 
     const std::string invalid_utf8(1, static_cast<char>(0xff));
     results = MakeSessionEncodingResults();
-    results[0].a_ip = invalid_utf8;
+    results[0].protocol = invalid_utf8;
     assert(npm::EncodeNpmSessionResults(results, &output, &error) == npm::NpmSessionEncodeError::kInvalidResult);
-    assert(output == original && error.find("result[0].a_ip") != std::string::npos);
+    assert(output == original && error.find("result[0].protocol") != std::string::npos);
 
     results = MakeSessionEncodingResults();
-    results[0].b_ip = invalid_utf8;
-    assert(npm::EncodeNpmSessionResults(results, &output, &error) == npm::NpmSessionEncodeError::kInvalidResult);
-    assert(output == original && error.find("result[0].b_ip") != std::string::npos);
+    results[0].b_ip = flowsql::network::IPv4Address::FromUInt32(0xffffffff);
+    std::shared_ptr<arrow::RecordBatch> address_boundary;
+    assert(npm::EncodeNpmSessionResults(results, &address_boundary, &error) == npm::NpmSessionEncodeError::kNone);
+    assert(std::static_pointer_cast<arrow::UInt32Array>(address_boundary->GetColumnByName("b_ip"))->Value(0) ==
+           0xffffffff);
 
     results = MakeSessionEncodingResults();
     results[0].protocol = invalid_utf8;
@@ -5605,14 +5702,15 @@ void TestNpmSessionResultPendingOutputLeaseAndErrors() {
 npm::NpmSessionEndEvent MakeCollectorEndEvent(uint64_t session_id, npm::NpmSessionEndReason reason,
                                               int64_t observed_at) {
     npm::NpmSessionEndEvent event;
-    event.snapshot.key.input_namespace = "pcapfile.capture";
-    event.snapshot.key.observation_domain_id = 77 + session_id;
-    event.snapshot.key.ip_family = flowsql::packet::AddressFamily::kIPv4;
-    event.snapshot.key.transport_protocol = flowsql::ipv4::eNext::TCP;
-    event.snapshot.key.a.ip = ParseIpv4("192.0.2.1");
-    event.snapshot.key.a.port = 443;
-    event.snapshot.key.b.ip = ParseIpv4("198.51.100.2");
-    event.snapshot.key.b.port = 41000;
+    event.snapshot.key = npm::NpmSessionKey4{};
+    event.snapshot.key.Get4()->input_namespace = "pcapfile.capture";
+    event.snapshot.key.Get4()->observation_domain_id = 77 + session_id;
+
+    event.snapshot.key.Get4()->transport_protocol = flowsql::ipv4::eNext::TCP;
+    event.snapshot.key.Get4()->a_ip = ParseIpv4("192.0.2.1");
+    event.snapshot.key.Get4()->a_port = 443;
+    event.snapshot.key.Get4()->b_ip = ParseIpv4("198.51.100.2");
+    event.snapshot.key.Get4()->b_port = 41000;
     event.snapshot.session_id = session_id;
     event.snapshot.first_ns = 100;
     event.snapshot.last_ns = 200;
@@ -5639,7 +5737,9 @@ void TestNpmBasicResultCollectorCopiesAndDrainsUnifiedBatches() {
     std::unique_ptr<npm::NpmProtocolContext> context;
     assert(npm::NpmProtocolContext::Create(&querier, &context) == npm::NpmProtocolContextError::kNone);
     npm::NpmBasicResultProjector projector(*context);
-    npm::NpmBasicResultCollector collector;
+    npm::NpmBasicFeatureConfig collector_features;
+    collector_features.observing_entity = "basic_ipv4";
+    npm::NpmBasicResultCollector collector(collector_features);
 
     const auto session_result = MakeValidUdpSessionResult();
     assert(collector.WriteSession(session_result) == ENOTSUP);
@@ -5648,7 +5748,7 @@ void TestNpmBasicResultCollectorCopiesAndDrainsUnifiedBatches() {
     auto module_result = MakeBasicEncodingResult(90);
     module_result.observed_at = 9000;
     assert(collector.WriteBasic(module_result) == 0);
-    module_result.a_ip = "mutated";
+    module_result.a_ip = flowsql::network::IPv4Address::FromUInt32(0xdeadbeef);
     module_result.observed_at = -1;
     assert(collector.pending_results() == 1);
 
@@ -5670,14 +5770,15 @@ void TestNpmBasicResultCollectorCopiesAndDrainsUnifiedBatches() {
     const auto generated_end_ns = ResultClockNowNs();
     assert(status.error == npm::NpmBasicDrainError::kNone && status.event_index == -1);
     assert(collector.pending_results() == 0 && normal_output != nullptr);
-    assert(normal_output->num_rows() == 3 && normal_output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(normal_output->num_rows() == 3 &&
+           normal_output->schema()->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
     const auto normal_ids = BasicResultColumn<arrow::UInt64Array>(normal_output, 0);
     const auto normal_observed = BasicResultColumn<arrow::Int64Array>(normal_output, 3);
     const auto normal_final = BasicResultColumn<arrow::BooleanArray>(normal_output, 4);
-    const auto normal_a_ip = BasicResultColumn<arrow::StringArray>(normal_output, 7);
+    const auto normal_a_ip = BasicResultColumn<arrow::UInt32Array>(normal_output, 6);
     const auto normal_reason = BasicResultColumn<arrow::StringArray>(normal_output, "end_reason");
     assert(normal_ids->Value(0) == 90 && normal_ids->Value(1) == 91 && normal_ids->Value(2) == 92);
-    assert(normal_observed->Value(0) == 9000 && normal_a_ip->GetString(0) == "a-90");
+    assert(normal_observed->Value(0) == 9000 && normal_a_ip->Value(0) == 0xc000025a);
     for (int64_t row : {1, 2})
         assert(normal_observed->Value(row) >= generated_start_ns && normal_observed->Value(row) <= generated_end_ns);
     assert(!normal_final->Value(0) && normal_final->Value(1) && normal_final->Value(2));
@@ -5725,7 +5826,9 @@ void TestNpmBasicResultCollectorFailuresKeepPendingAndOutput() {
     std::unique_ptr<npm::NpmProtocolContext> context;
     assert(npm::NpmProtocolContext::Create(&querier, &context) == npm::NpmProtocolContextError::kNone);
     npm::NpmBasicResultProjector projector(*context);
-    npm::NpmBasicResultCollector collector;
+    npm::NpmBasicFeatureConfig collector_features;
+    collector_features.observing_entity = "basic_ipv4";
+    npm::NpmBasicResultCollector collector(collector_features);
     assert(collector.WriteBasic(MakeBasicEncodingResult(100)) == 0);
 
     std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
@@ -5742,7 +5845,7 @@ void TestNpmBasicResultCollectorFailuresKeepPendingAndOutput() {
     assert(collector.pending_results() == 1 && output == original && stats->reserve_calls == 0);
 
     auto invalid_event = MakeCollectorEndEvent(101, npm::NpmSessionEndReason::kEof, 10100);
-    invalid_event.snapshot.key.input_namespace.clear();
+    invalid_event.snapshot.key.Get4()->input_namespace.clear();
     status = collector.Drain({invalid_event}, projector, budget, &output);
     assert(status.error == npm::NpmBasicDrainError::kProjectionError && status.event_index == 0);
     assert(status.projection_error == npm::NpmBasicProjectionError::kInvalidSession);
@@ -5756,6 +5859,16 @@ void TestNpmBasicResultCollectorFailuresKeepPendingAndOutput() {
     assert(status.encode_error == npm::NpmBasicEncodeError::kBudgetError);
     assert(collector.pending_results() == 1 && output == original);
     assert(small_stats->reserve_calls == 1 && small_stats->release_calls == 0);
+    const auto valid_event = MakeCollectorEndEvent(102, npm::NpmSessionEndReason::kEof, 10200);
+    status = collector.Drain({valid_event}, projector, small_budget, &output);
+    assert(status.error == npm::NpmBasicDrainError::kEncodeError);
+    assert(collector.pending_results() == 1 && output == original);
+    status = collector.Drain({valid_event, invalid_event}, projector, budget, &output);
+    assert(status.error == npm::NpmBasicDrainError::kProjectionError && status.event_index == 1);
+    assert(collector.pending_results() == 1 && output == original);
+    status = collector.Drain({valid_event}, projector, budget, &output);
+    assert(status.error == npm::NpmBasicDrainError::kNone && output->num_rows() == 2);
+    assert(collector.pending_results() == 0);
 }
 
 void TestNpmBasicResultCollectorRoutesEnabledEntities() {
@@ -5775,6 +5888,7 @@ void TestNpmBasicResultCollectorRoutesEnabledEntities() {
     session_only.basic_enabled = false;
     session_only.session_enabled = true;
     session_only.observing = npm::NpmResultEntity::kSession;
+    session_only.observing_entity = "session_ipv4";
     npm::NpmBasicResultCollector session_collector(session_only);
 
     const auto basic_result = MakeBasicEncodingResult(110);
@@ -5785,33 +5899,34 @@ void TestNpmBasicResultCollectorRoutesEnabledEntities() {
 
     auto session_result = MakeValidUdpSessionResult();
     session_result.session_id = 111;
-    session_result.a_ip = "session-original";
+    session_result.a_ip = flowsql::network::IPv4Address::FromUInt32(0x1020304);
     assert(session_collector.WriteSession(session_result) == 0);
-    session_result.a_ip = "mutated";
+    session_result.a_ip = flowsql::network::IPv4Address::FromUInt32(0xdeadbeef);
     assert(session_collector.pending_results() == 1);
 
     auto ignored_event = MakeCollectorEndEvent(112, npm::NpmSessionEndReason::kClosed, 11200);
-    ignored_event.snapshot.key.input_namespace.clear();
+    ignored_event.snapshot.key.Get4()->input_namespace.clear();
     std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
     auto status = session_collector.Drain({ignored_event}, projector, budget, &output);
     assert(status.error == npm::NpmBasicDrainError::kNone);
     assert(status.encode_error == npm::NpmBasicEncodeError::kNone);
     assert(status.session_encode_error == npm::NpmSessionEncodeError::kNone);
     assert(session_collector.pending_results() == 0 && output->num_rows() == 1);
-    assert(output->schema()->Equals(*npm::NpmSessionResultSchema(), true));
-    assert(SessionResultColumn<arrow::StringArray>(output, 7)->GetString(0) == "session-original");
+    assert(output->schema()->Equals(*npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
+    assert(SessionResultColumn<arrow::UInt32Array>(output, 6)->Value(0) == 0x01020304);
 
     output.reset();
     status = session_collector.Drain({}, projector, budget, &output);
     assert(status.error == npm::NpmBasicDrainError::kNone && output->num_rows() == 0);
     assert(output->num_columns() == 49);
-    assert(output->schema()->Equals(*npm::NpmSessionResultSchema(), true));
+    assert(output->schema()->Equals(*npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
     output.reset();
 
     npm::NpmBasicFeatureConfig both_basic;
     both_basic.basic_enabled = true;
     both_basic.session_enabled = true;
     both_basic.observing = npm::NpmResultEntity::kBasic;
+    both_basic.observing_entity = "basic_ipv4";
     npm::NpmBasicResultCollector basic_collector(both_basic);
     invalid_session = MakeValidUdpSessionResult();
     invalid_session.revision = 0;
@@ -5823,12 +5938,13 @@ void TestNpmBasicResultCollectorRoutesEnabledEntities() {
     status = basic_collector.Drain({}, projector, budget, &output);
     assert(status.error == npm::NpmBasicDrainError::kNone);
     assert(basic_collector.pending_results() == 0 && output->num_rows() == 1);
-    assert(output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(output->schema()->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
     assert(BasicResultColumn<arrow::UInt64Array>(output, 0)->Value(0) == basic_result.session_id);
     output.reset();
 
     npm::NpmBasicFeatureConfig both_session = both_basic;
     both_session.observing = npm::NpmResultEntity::kSession;
+    both_session.observing_entity = "session_ipv4";
     npm::NpmBasicResultCollector both_session_collector(both_session);
     auto invalid_basic = MakeBasicEncodingResult(113);
     invalid_basic.protocol_id = 7;
@@ -5840,7 +5956,7 @@ void TestNpmBasicResultCollectorRoutesEnabledEntities() {
     observed_session.session_id = 115;
     assert(both_session_collector.WriteSession(observed_session) == 0);
     auto projected_event = MakeCollectorEndEvent(116, npm::NpmSessionEndReason::kIdleTimeout, 11600);
-    npm::NpmBasicResult projected_active;
+    npm::NpmBasicResult4 projected_active;
     assert(projector.ProjectActive(projected_event.snapshot.View(), 11500, &projected_active) ==
            npm::NpmBasicProjectionError::kNone);
     assert(projector.tracked_sessions() == 1);
@@ -5848,7 +5964,7 @@ void TestNpmBasicResultCollectorRoutesEnabledEntities() {
     assert(status.error == npm::NpmBasicDrainError::kNone);
     assert(projector.tracked_sessions() == 0);
     assert(both_session_collector.pending_results() == 0 && output->num_rows() == 1);
-    assert(output->schema()->Equals(*npm::NpmSessionResultSchema(), true));
+    assert(output->schema()->Equals(*npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
     assert(SessionResultColumn<arrow::UInt64Array>(output, 0)->Value(0) == observed_session.session_id);
     output.reset();
 
@@ -5913,7 +6029,9 @@ void TestNpmEofFlusherSuccessEmptyAndRepeated() {
     std::unique_ptr<npm::NpmProtocolContext> context;
     assert(npm::NpmProtocolContext::Create(&querier, &context) == npm::NpmProtocolContextError::kNone);
     npm::NpmBasicResultProjector projector(*context);
-    npm::NpmBasicResultCollector collector;
+    npm::NpmBasicFeatureConfig collector_features;
+    collector_features.observing_entity = "basic_ipv4";
+    npm::NpmBasicResultCollector collector(collector_features);
 
     const npm::NpmObservationDomainMap domain_map{"capture-a", {{1, 77}}};
     const auto first = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {0x10});
@@ -5973,7 +6091,9 @@ void TestNpmEofFlusherSuccessEmptyAndRepeated() {
     assert(stats->release_calls == 1 && budget->Usage().pending_output_bytes == 0);
 
     npm::NpmSessionTable empty_table(config);
-    npm::NpmBasicResultCollector empty_collector;
+    npm::NpmBasicFeatureConfig empty_collector_features;
+    empty_collector_features.observing_entity = "basic_ipv4";
+    npm::NpmBasicResultCollector empty_collector(empty_collector_features);
     npm::NpmBasicResultProjector empty_projector(*context);
     npm::NpmEofFlusher empty_flusher;
     std::shared_ptr<arrow::RecordBatch> empty_output;
@@ -6003,7 +6123,9 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
 
     npm::NpmSessionTable cancelled_table(config);
     AddEofFlushSession(cancelled_table, domain_map, packet, 100);
-    npm::NpmBasicResultCollector cancelled_collector;
+    npm::NpmBasicFeatureConfig cancelled_collector_features;
+    cancelled_collector_features.observing_entity = "basic_ipv4";
+    npm::NpmBasicResultCollector cancelled_collector(cancelled_collector_features);
     assert(cancelled_collector.WriteBasic(MakeBasicEncodingResult(100)) == 0);
     npm::NpmBasicResultProjector cancelled_projector(*context);
     npm::NpmEofFlusher cancelled;
@@ -6021,7 +6143,9 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
 
     npm::NpmSessionTable failed_table(config);
     AddEofFlushSession(failed_table, domain_map, packet, 100);
-    npm::NpmBasicResultCollector failed_collector;
+    npm::NpmBasicFeatureConfig failed_collector_features;
+    failed_collector_features.observing_entity = "basic_ipv4";
+    npm::NpmBasicResultCollector failed_collector(failed_collector_features);
     npm::NpmBasicResultProjector failed_projector(*context);
     npm::NpmEofFlusher failed;
     failed.MarkFailed();
@@ -6031,7 +6155,9 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
 
     npm::NpmSessionTable null_output_table(config);
     AddEofFlushSession(null_output_table, domain_map, packet, 100);
-    npm::NpmBasicResultCollector null_output_collector;
+    npm::NpmBasicFeatureConfig null_output_collector_features;
+    null_output_collector_features.observing_entity = "basic_ipv4";
+    npm::NpmBasicResultCollector null_output_collector(null_output_collector_features);
     npm::NpmBasicResultProjector null_output_projector(*context);
     npm::NpmEofFlusher null_output;
     status = null_output.Flush(1000, null_output_table, modules, null_output_collector, null_output_projector, budget,
@@ -6041,7 +6167,9 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
 
     npm::NpmSessionTable null_budget_table(config);
     AddEofFlushSession(null_budget_table, domain_map, packet, 100);
-    npm::NpmBasicResultCollector null_budget_collector;
+    npm::NpmBasicFeatureConfig null_budget_collector_features;
+    null_budget_collector_features.observing_entity = "basic_ipv4";
+    npm::NpmBasicResultCollector null_budget_collector(null_budget_collector_features);
     npm::NpmBasicResultProjector null_budget_projector(*context);
     npm::NpmEofFlusher null_budget;
     status =
@@ -6051,7 +6179,9 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
 
     npm::NpmSessionTable null_module_table(config);
     AddEofFlushSession(null_module_table, domain_map, packet, 100);
-    npm::NpmBasicResultCollector null_module_collector;
+    npm::NpmBasicFeatureConfig null_module_collector_features;
+    null_module_collector_features.observing_entity = "basic_ipv4";
+    npm::NpmBasicResultCollector null_module_collector(null_module_collector_features);
     npm::NpmBasicResultProjector null_module_projector(*context);
     npm::NpmEofFlusher null_module;
     modules.push_back(nullptr);
@@ -6063,7 +6193,9 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
 
     npm::NpmSessionTable module_error_table(config);
     AddEofFlushSession(module_error_table, domain_map, packet, 100);
-    npm::NpmBasicResultCollector module_error_collector;
+    npm::NpmBasicFeatureConfig module_error_collector_features;
+    module_error_collector_features.observing_entity = "basic_ipv4";
+    npm::NpmBasicResultCollector module_error_collector(module_error_collector_features);
     assert(module_error_collector.WriteBasic(MakeBasicEncodingResult(101)) == 0);
     npm::NpmBasicResultProjector module_error_projector(*context);
     npm::NpmEofFlusher module_error;
@@ -6081,7 +6213,9 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
 
     npm::NpmSessionTable drain_error_table(config);
     AddEofFlushSession(drain_error_table, domain_map, packet, 100);
-    npm::NpmBasicResultCollector drain_error_collector;
+    npm::NpmBasicFeatureConfig drain_error_collector_features;
+    drain_error_collector_features.observing_entity = "basic_ipv4";
+    npm::NpmBasicResultCollector drain_error_collector(drain_error_collector_features);
     assert(drain_error_collector.WriteBasic(MakeBasicEncodingResult(102)) == 0);
     npm::NpmBasicResultProjector drain_error_projector(*context);
     npm::NpmEofFlusher drain_error;
@@ -6101,7 +6235,7 @@ void TestNpmEofFlusherTerminalAndErrorPaths() {
 }
 
 void TestNpmBasicResultPendingOutputLease() {
-    std::vector<npm::NpmBasicResult> results = {MakeBasicEncodingResult(1), MakeBasicEncodingResult(2)};
+    std::vector<npm::NpmBasicResult4> results = {MakeBasicEncodingResult(1), MakeBasicEncodingResult(2)};
     std::shared_ptr<arrow::RecordBatch> reference;
     assert(npm::EncodeNpmBasicResults(results, &reference) == npm::NpmBasicEncodeError::kNone);
     const uint64_t expected_bytes = BasicResultBufferBytes(reference);
@@ -6144,7 +6278,7 @@ void TestNpmBasicResultPendingOutputLease() {
 }
 
 void TestNpmBasicResultPendingOutputBudgetAndLifetime() {
-    const std::vector<npm::NpmBasicResult> results = {MakeBasicEncodingResult(3)};
+    const std::vector<npm::NpmBasicResult4> results = {MakeBasicEncodingResult(3)};
     std::shared_ptr<arrow::RecordBatch> reference;
     assert(npm::EncodeNpmBasicResults(results, &reference) == npm::NpmBasicEncodeError::kNone);
     const uint64_t expected_bytes = BasicResultBufferBytes(reference);
@@ -6201,7 +6335,7 @@ void TestNpmBasicResultPendingOutputBudgetAndLifetime() {
 }
 
 void TestNpmBasicResultPendingOutputFailuresAreAtomic() {
-    std::vector<npm::NpmBasicResult> results = {MakeBasicEncodingResult(4)};
+    std::vector<npm::NpmBasicResult4> results = {MakeBasicEncodingResult(4)};
     std::shared_ptr<arrow::RecordBatch> output;
     assert(npm::EncodeNpmBasicResults(results, &output) == npm::NpmBasicEncodeError::kNone);
     const auto original = output;
@@ -6238,9 +6372,15 @@ npm::NpmBasicTaskConfigStatus ParseTaskConfigFailure(
     output.features.basic_enabled = false;
     output.features.session_enabled = true;
     output.features.observing = npm::NpmResultEntity::kSession;
+    output.features.observing_entity = "session_ipv4";
     output.features.session_max_tcp_ranges_per_direction = 321;
 
     const auto status = npm::ParseNpmBasicTaskConfig(json, &output);
+    if (status.error != expected_error) {
+        std::fprintf(stderr, "task config error: actual=%u expected=%u field=%s json=%s\n",
+                     static_cast<unsigned>(status.error), static_cast<unsigned>(expected_error), status.field.c_str(),
+                     json ? json : "<null>");
+    }
     assert(status.error == expected_error);
     assert(status.field == expected_field);
     assert(status.parameter_status.error == expected_parameter_error);
@@ -6263,8 +6403,8 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
     static_assert(std::is_same_v<decltype(npm::NpmBasicTaskConfigStatus::field), std::string>);
 
     npm::NpmBasicTaskConfig minimal;
-    const auto minimal_status =
-        npm::ParseNpmBasicTaskConfig(R"JSON({"input_namespace":"minimal","source_domains":"0:0"})JSON", &minimal);
+    const auto minimal_status = npm::ParseNpmBasicTaskConfig(
+        R"JSON({"input_namespace":"minimal","source_domains":"0:0","observing":"basic_ipv4"})JSON", &minimal);
     assert(minimal_status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(minimal.analysis.run_mode == npm::NpmRunMode::kOffline);
     assert(minimal.analysis.result_mode == npm::NpmResultMode::kPeriodicSnapshot);
@@ -6277,21 +6417,8 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
     assert(minimal.domains.bindings[0].source_id == 0);
     assert(minimal.domains.bindings[0].observation_domain_id == 0);
 
-    std::string json = R"JSON({
-        "result_mode":"periodic_snapshot",
-        "source_domains":"0:7;1:7;2:8",
-        "max_pending_output_bytes":"1099511627776",
-        "max_tracked_bytes":"1099511627776",
-        "max_active_sessions":"10000000",
-        "out_of_order_tolerance_ns":"60000000000",
-        "udp_idle_timeout_ns":"86400000000000",
-        "tcp_idle_timeout_ns":"1000000000",
-        "payload_sample_packets":"64",
-        "output_interval_ns":"10000000",
-        "overload_policy":"fail",
-        "input_namespace":"pcapfile.capture",
-        "run_mode":"offline"
-    })JSON";
+    std::string json =
+        R"JSON({"result_mode":"periodic_snapshot","source_domains":"0:7;1:7;2:8","max_pending_output_bytes":"1099511627776","max_tracked_bytes":"1099511627776","max_active_sessions":"10000000","out_of_order_tolerance_ns":"60000000000","udp_idle_timeout_ns":"86400000000000","tcp_idle_timeout_ns":"1000000000","payload_sample_packets":"64","output_interval_ns":"10000000","overload_policy":"fail","input_namespace":"pcapfile.capture","run_mode":"offline","observing":"basic_ipv4"})JSON";
     npm::NpmBasicTaskConfig output;
     auto status = npm::ParseNpmBasicTaskConfig(json.c_str(), &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
@@ -6320,7 +6447,8 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
     assert(output.domains.bindings[2].observation_domain_id == 8);
 
     status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"source_domains":"9:10","input_namespace":"live","run_mode":"realtime"})JSON", &output);
+        R"JSON({"source_domains":"9:10","input_namespace":"live","run_mode":"realtime","observing":"basic_ipv4"})JSON",
+        &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.analysis.run_mode == npm::NpmRunMode::kRealtime);
     assert(output.analysis.result_mode == npm::NpmResultMode::kPeriodicSnapshot);
@@ -6331,14 +6459,15 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
     assert(output.domains.bindings[0].observation_domain_id == 10);
 
     status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"result_mode":"final","source_domains":"5:6","run_mode":"realtime","input_namespace":"ordered"})JSON",
+        R"JSON({"result_mode":"final","source_domains":"5:6","run_mode":"realtime","input_namespace":"ordered","observing":"basic_ipv4"})JSON",
         &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.analysis.run_mode == npm::NpmRunMode::kRealtime);
     assert(output.analysis.result_mode == npm::NpmResultMode::kFinal);
 
     status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"input_namespace":"limits","source_domains":"4294967295:18446744073709551615"})JSON", &output);
+        R"JSON({"input_namespace":"limits","source_domains":"4294967295:18446744073709551615","observing":"basic_ipv4"})JSON",
+        &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.domains.bindings[0].source_id == UINT32_MAX);
     assert(output.domains.bindings[0].observation_domain_id == UINT64_MAX);
@@ -6346,7 +6475,8 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
 
 void TestNpmBasicTaskConfigInputDefaults() {
     npm::NpmBasicTaskConfig config;
-    for (const char* json : {"{}", R"({"source_domains":"all"})", R"({"parameters":"{\"schema_version\":1}"})"}) {
+    for (const char* json : {R"({"observing":"basic_ipv4"})", R"({"source_domains":"all","observing":"basic_ipv4"})",
+                             R"({"parameters":"{\"schema_version\":1}","observing":"basic_ipv4"})"}) {
         assert(npm::ParseNpmBasicTaskConfig(json, &config).error == npm::NpmBasicTaskConfigError::kNone);
         assert(config.domains.input_namespace == "default");
         assert(config.domains.bindings.empty() && config.domains.source_id_as_domain);
@@ -6355,23 +6485,25 @@ void TestNpmBasicTaskConfigInputDefaults() {
                npm::NpmObservationDomainError::kNone);
         assert(domain == UINT32_MAX);
     }
-    assert(npm::ParseNpmBasicTaskConfig("{}", &config, false, npm::ProductionNpmModuleCatalogV1(), "pcapfile.http")
+    assert(npm::ParseNpmBasicTaskConfig(R"({"observing":"basic_ipv4"})", &config, false,
+                                        npm::ProductionNpmModuleCatalogV1(), "pcapfile.http")
                .error == npm::NpmBasicTaskConfigError::kNone);
     assert(config.domains.input_namespace == "pcapfile.http");
-    for (const char* json :
-         {R"({"features":"basic,session,dns,http1,tls,icmp"})",
-          R"({"features":"basic,session,dns,http1,tls,icmp","parameters":"{\"schema_version\":1}"})"}) {
+    for (
+        const char* json :
+        {R"({"features":"basic,session,dns,http1,tls,icmp","observing":"basic_ipv4"})",
+         R"({"features":"basic,session,dns,http1,tls,icmp","parameters":"{\"schema_version\":1}","observing":"basic_ipv4"})"}) {
         assert(
             npm::ParseNpmBasicTaskConfig(json, &config, false, npm::ProductionNpmModuleCatalogV1(), "netadapter.eth0")
                 .error == npm::NpmBasicTaskConfigError::kNone);
         assert(config.domains.input_namespace == "netadapter.eth0");
         assert(config.domains.source_id_as_domain && config.domains.bindings.empty());
     }
-    assert(npm::ParseNpmBasicTaskConfig(R"({"input_namespace":"custom"})", &config, false,
+    assert(npm::ParseNpmBasicTaskConfig(R"({"input_namespace":"custom","observing":"basic_ipv4"})", &config, false,
                                         npm::ProductionNpmModuleCatalogV1(), "pcapfile.http")
                .error == npm::NpmBasicTaskConfigError::kNone);
     assert(config.domains.input_namespace == "custom" && config.domains.source_id_as_domain);
-    assert(npm::ParseNpmBasicTaskConfig(R"({"source_domains":"0:7;1:7"})", &config).error ==
+    assert(npm::ParseNpmBasicTaskConfig(R"({"source_domains":"0:7;1:7","observing":"basic_ipv4"})", &config).error ==
            npm::NpmBasicTaskConfigError::kNone);
     assert(config.domains.input_namespace == "default" && !config.domains.source_id_as_domain);
     uint64_t domain = 99;
@@ -6383,8 +6515,10 @@ void TestNpmBasicTaskConfigInputDefaults() {
     // Identical endpoints from separate sources stay separate; an explicit mapping may merge them.
     const auto packet = MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, {});
     for (const bool merge : {false, true}) {
-        assert(npm::ParseNpmBasicTaskConfig(merge ? R"({"source_domains":"0:7;1:7"})" : "{}", &config).error ==
-               npm::NpmBasicTaskConfigError::kNone);
+        assert(npm::ParseNpmBasicTaskConfig(
+                   merge ? R"({"source_domains":"0:7;1:7","observing":"basic_ipv4"})" : R"({"observing":"basic_ipv4"})",
+                   &config)
+                   .error == npm::NpmBasicTaskConfigError::kNone);
         npm::NpmSessionTable table(2);
         flowsql::packet::PacketMeta meta;
         npm::NpmSessionView first;
@@ -6406,28 +6540,34 @@ void TestNpmBasicTaskConfigRejectsMalformedFieldsAtomically() {
     assert(status.error == npm::NpmBasicTaskConfigError::kNullOutput);
     ParseTaskConfigFailure("{", npm::NpmBasicTaskConfigError::kInvalidJson);
     ParseTaskConfigFailure("[]", npm::NpmBasicTaskConfigError::kInvalidJson);
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","input_namespace":"b","source_domains":"0:0"})JSON",
-                           npm::NpmBasicTaskConfigError::kDuplicateField, "input_namespace");
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","mystery":"x"})JSON",
-                           npm::NpmBasicTaskConfigError::kUnknownField, "mystery");
-    ParseTaskConfigFailure(R"JSON({"input_namespace":7,"source_domains":"0:0"})JSON",
-                           npm::NpmBasicTaskConfigError::kNonStringValue, "input_namespace");
-    ParseTaskConfigFailure(R"JSON({"source_domains":7})JSON", npm::NpmBasicTaskConfigError::kNonStringValue,
-                           "source_domains");
-
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","run_mode":"batch"})JSON",
-                           npm::NpmBasicTaskConfigError::kInvalidEnum, "run_mode");
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","result_mode":"latest"})JSON",
-                           npm::NpmBasicTaskConfigError::kInvalidEnum, "result_mode");
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","overload_policy":"drop"})JSON",
-                           npm::NpmBasicTaskConfigError::kInvalidEnum, "overload_policy");
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","output_interval_ns":"-1"})JSON",
-                           npm::NpmBasicTaskConfigError::kInvalidInteger, "output_interval_ns");
     ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","payload_sample_packets":"4294967296"})JSON",
+        R"JSON({"input_namespace":"a","input_namespace":"b","source_domains":"0:0","observing":"basic_ipv4"})JSON",
+        npm::NpmBasicTaskConfigError::kDuplicateField, "input_namespace");
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","mystery":"x","observing":"basic_ipv4"})JSON",
+        npm::NpmBasicTaskConfigError::kUnknownField, "mystery");
+    ParseTaskConfigFailure(R"JSON({"input_namespace":7,"source_domains":"0:0","observing":"basic_ipv4"})JSON",
+                           npm::NpmBasicTaskConfigError::kNonStringValue, "input_namespace");
+    ParseTaskConfigFailure(R"JSON({"source_domains":7,"observing":"basic_ipv4"})JSON",
+                           npm::NpmBasicTaskConfigError::kNonStringValue, "source_domains");
+
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","run_mode":"batch","observing":"basic_ipv4"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidEnum, "run_mode");
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","result_mode":"latest","observing":"basic_ipv4"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidEnum, "result_mode");
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","overload_policy":"drop","observing":"basic_ipv4"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidEnum, "overload_policy");
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","output_interval_ns":"-1","observing":"basic_ipv4"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidInteger, "output_interval_ns");
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","payload_sample_packets":"4294967296","observing":"basic_ipv4"})JSON",
         npm::NpmBasicTaskConfigError::kInvalidInteger, "payload_sample_packets");
     ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","max_tracked_bytes":"18446744073709551616"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","max_tracked_bytes":"18446744073709551616","observing":"basic_ipv4"})JSON",
         npm::NpmBasicTaskConfigError::kInvalidInteger, "max_tracked_bytes");
 }
 
@@ -6436,25 +6576,27 @@ void TestNpmBasicTaskConfigRejectsMappingsAndRanges() {
         "", "0", ":1", "1:", "1:2;", "1::2", " 1:2", "1:2 ", "+1:2", "1:-2", "4294967296:1", "1:18446744073709551616",
     };
     for (const auto& domains : invalid_domains) {
-        const std::string json = R"JSON({"input_namespace":"a","source_domains":")JSON" + domains + R"JSON("})JSON";
+        const std::string json =
+            R"JSON({"observing":"basic_ipv4","input_namespace":"a","source_domains":")JSON" + domains + R"JSON("})JSON";
         ParseTaskConfigFailure(json.c_str(), npm::NpmBasicTaskConfigError::kInvalidSourceDomains, "source_domains");
     }
 
-    auto status = ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"1:2;1:3"})JSON",
-                                         npm::NpmBasicTaskConfigError::kDomainValidationError, "source_domains");
+    auto status =
+        ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"1:2;1:3","observing":"basic_ipv4"})JSON",
+                               npm::NpmBasicTaskConfigError::kDomainValidationError, "source_domains");
     assert(status.domain_error == npm::NpmObservationDomainError::kDuplicateSourceId);
 
-    status = ParseTaskConfigFailure(R"JSON({"input_namespace":"","source_domains":"1:2"})JSON",
+    status = ParseTaskConfigFailure(R"JSON({"input_namespace":"","source_domains":"1:2","observing":"basic_ipv4"})JSON",
                                     npm::NpmBasicTaskConfigError::kDomainValidationError, "input_namespace");
     assert(status.domain_error == npm::NpmObservationDomainError::kEmptyInputNamespace);
 
-    status =
-        ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"1:2","output_interval_ns":"1"})JSON",
-                               npm::NpmBasicTaskConfigError::kAnalysisValidationError, "output_interval_ns");
+    status = ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"1:2","output_interval_ns":"1","observing":"basic_ipv4"})JSON",
+        npm::NpmBasicTaskConfigError::kAnalysisValidationError, "output_interval_ns");
     assert(status.analysis_error == npm::NpmAnalysisConfigError::kOutputIntervalOutOfRange);
-    status =
-        ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"1:2","max_active_sessions":"0"})JSON",
-                               npm::NpmBasicTaskConfigError::kAnalysisValidationError, "max_active_sessions");
+    status = ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"1:2","max_active_sessions":"0","observing":"basic_ipv4"})JSON",
+        npm::NpmBasicTaskConfigError::kAnalysisValidationError, "max_active_sessions");
     assert(status.analysis_error == npm::NpmAnalysisConfigError::kActiveSessionsOutOfRange);
 }
 
@@ -6484,8 +6626,8 @@ void TestNpmBasicTaskConfigNumericBoundaries() {
          npm::NpmAnalysisConfigError::kPendingOutputBytesOutOfRange},
     };
     const auto make_json = [](const char* field, const std::string& value) {
-        return std::string(R"JSON({"input_namespace":"a","source_domains":"0:0",")JSON") + field + R"JSON(":")JSON" +
-               value + R"JSON("})JSON";
+        return std::string(R"JSON({"observing":"basic_ipv4","input_namespace":"a","source_domains":"0:0",")JSON") +
+               field + R"JSON(":")JSON" + value + R"JSON("})JSON";
     };
     for (const auto& boundary : boundaries) {
         for (const uint64_t value : {boundary.minimum, boundary.maximum}) {
@@ -6520,10 +6662,10 @@ void TestNpmBasicTaskConfigFeatureSelection() {
     static_assert(npm::kNpmMaxLabelingMemoryMiB == 256);
 
     npm::NpmBasicTaskConfig output;
-    auto status =
-        npm::ParseNpmBasicTaskConfig(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-                                     R"JSON("observing":"session","session_max_tcp_ranges_per_direction":"8"})JSON",
-                                     &output);
+    auto status = npm::ParseNpmBasicTaskConfig(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
+        R"JSON("observing":"session_ipv4","session_max_tcp_ranges_per_direction":"8"})JSON",
+        &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(!output.features.basic_enabled && output.features.session_enabled);
     assert(output.features.observing == npm::NpmResultEntity::kSession);
@@ -6531,7 +6673,7 @@ void TestNpmBasicTaskConfigFeatureSelection() {
 
     status = npm::ParseNpmBasicTaskConfig(
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,session",)JSON"
-        R"JSON("observing":"basic","session_max_tcp_ranges_per_direction":"65536"})JSON",
+        R"JSON("observing":"basic_ipv4","session_max_tcp_ranges_per_direction":"65536"})JSON",
         &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.features.basic_enabled && output.features.session_enabled);
@@ -6540,16 +6682,17 @@ void TestNpmBasicTaskConfigFeatureSelection() {
 
     status = npm::ParseNpmBasicTaskConfig(
         R"JSON({"input_namespace":"a","source_domains":"0:0","features":" session , basic ",)JSON"
-        R"JSON("observing":" session "})JSON",
+        R"JSON("observing":" session_ipv4 "})JSON",
         &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.features.basic_enabled && output.features.session_enabled);
     assert(output.features.observing == npm::NpmResultEntity::kSession);
     assert(output.features.session_max_tcp_ranges_per_direction == npm::kNpmDefaultSessionTcpRangesPerDirection);
 
-    const char* labeling_json = R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,labeling",)JSON"
-                                R"JSON("parameters":"{\"schema_version\":1,\"core\":{)JSON"
-                                R"JSON(\"labeling\":\"config.corp-labels@7\"}}"})JSON";
+    const char* labeling_json =
+        R"JSON({"observing":"basic_ipv4","input_namespace":"a","source_domains":"0:0","features":"basic,labeling",)JSON"
+        R"JSON("parameters":"{\"schema_version\":1,\"core\":{)JSON"
+        R"JSON(\"labeling\":\"config.corp-labels@7\"}}"})JSON";
     status = npm::ParseNpmBasicTaskConfig(labeling_json, &output, true);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.features.basic_enabled && !output.features.session_enabled && output.features.labeling_enabled);
@@ -6557,7 +6700,7 @@ void TestNpmBasicTaskConfigFeatureSelection() {
     assert(output.labeling_memory_mib == npm::kNpmDefaultLabelingMemoryMiB);
 
     const char* sized_labeling_json =
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,labeling",)JSON"
+        R"JSON({"observing":"basic_ipv4","input_namespace":"a","source_domains":"0:0","features":"basic,labeling",)JSON"
         R"JSON("parameters":"{\"schema_version\":1,\"core\":{)JSON"
         R"JSON(\"labeling\":\"config.corp-labels@7\",\"labeling_memory_mib\":96}}"})JSON";
     status = npm::ParseNpmBasicTaskConfig(sized_labeling_json, &output, true);
@@ -6576,39 +6719,40 @@ void TestNpmBasicTaskConfigFeatureSelection() {
     assert(status.parameter_status.path == "/labeling");
 
     const char* invalid_features[] = {
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":""})JSON",
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,,session"})JSON",
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,basic"})JSON",
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,labeling,labeling"})JSON",
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"labeling"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"","observing":"basic_ipv4"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,,session","observing":"basic_ipv4"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,basic","observing":"basic_ipv4"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,labeling,labeling","observing":"basic_ipv4"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"labeling","observing":"basic_ipv4"})JSON",
     };
     for (const char* json : invalid_features) {
         ParseTaskConfigFailure(json, npm::NpmBasicTaskConfigError::kInvalidFeatures, "features");
     }
 
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"session"})JSON",
-                           npm::NpmBasicTaskConfigError::kObservingFeatureDisabled, "observing");
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session"})JSON",
+    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"session_ipv4"})JSON",
                            npm::NpmBasicTaskConfigError::kObservingFeatureDisabled, "observing");
     ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic","observing":"session"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session","observing":"basic_ipv4"})JSON",
+        npm::NpmBasicTaskConfigError::kObservingFeatureDisabled, "observing");
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic","observing":"session_ipv4"})JSON",
         npm::NpmBasicTaskConfigError::kObservingFeatureDisabled, "observing");
     ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"basic,session"})JSON",
                            npm::NpmBasicTaskConfigError::kInvalidObserving, "observing");
     ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"dns"})JSON",
                            npm::NpmBasicTaskConfigError::kInvalidObserving, "observing");
     ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","session_max_tcp_ranges_per_direction":"1024"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","session_max_tcp_ranges_per_direction":"1024","observing":"basic_ipv4"})JSON",
         npm::NpmBasicTaskConfigError::kSessionConfigWithoutFeature, "session_max_tcp_ranges_per_direction");
     ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-                           R"JSON("observing":"session","session_max_tcp_ranges_per_direction":"x"})JSON",
+                           R"JSON("observing":"session_ipv4","session_max_tcp_ranges_per_direction":"x"})JSON",
                            npm::NpmBasicTaskConfigError::kInvalidInteger, "session_max_tcp_ranges_per_direction");
     ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-                           R"JSON("observing":"session","session_max_tcp_ranges_per_direction":"7"})JSON",
+                           R"JSON("observing":"session_ipv4","session_max_tcp_ranges_per_direction":"7"})JSON",
                            npm::NpmBasicTaskConfigError::kSessionTcpRangesOutOfRange,
                            "session_max_tcp_ranges_per_direction");
     ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-                           R"JSON("observing":"session","session_max_tcp_ranges_per_direction":"65537"})JSON",
+                           R"JSON("observing":"session_ipv4","session_max_tcp_ranges_per_direction":"65537"})JSON",
                            npm::NpmBasicTaskConfigError::kSessionTcpRangesOutOfRange,
                            "session_max_tcp_ranges_per_direction");
 }
@@ -6631,6 +6775,7 @@ void AssertEquivalentTaskConfig(const npm::NpmBasicTaskConfig& left, const npm::
     assert(left.labeling_reference == right.labeling_reference);
     assert(left.labeling_memory_mib == right.labeling_memory_mib);
     assert(left.features.observing == right.features.observing);
+    assert(left.features.observing_entity == right.features.observing_entity);
     assert(left.features.session_max_tcp_ranges_per_direction == right.features.session_max_tcp_ranges_per_direction);
     assert(left.domains.input_namespace == right.domains.input_namespace);
     assert(left.domains.bindings.size() == right.domains.bindings.size());
@@ -6648,8 +6793,15 @@ struct EquivalentRuntimeTaskConfigs {
     npm::NpmBasicTaskConfig parameters_v1;
 };
 
-EquivalentRuntimeTaskConfigs MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode run_mode, bool observing_session) {
-    const char* feature_fields = observing_session ? R"JSON(,"features":"session","observing":"session")JSON" : "";
+EquivalentRuntimeTaskConfigs MakeEquivalentRuntimeTaskConfigs(
+    npm::NpmRunMode run_mode, bool observing_session,
+    flowsql::packet::AddressFamily family = flowsql::packet::AddressFamily::kIPv4) {
+    const char* feature_fields =
+        observing_session ? (family == flowsql::packet::AddressFamily::kIPv4
+                                 ? R"JSON(,"features":"session","observing":"session_ipv4")JSON"
+                                 : R"JSON(,"features":"session","observing":"session_ipv6")JSON")
+                          : (family == flowsql::packet::AddressFamily::kIPv4 ? R"JSON(,"observing":"basic_ipv4")JSON"
+                                                                             : R"JSON(,"observing":"basic_ipv6")JSON");
     const char* legacy_framework = run_mode == npm::NpmRunMode::kRealtime
                                        ? R"JSON(,"run_mode":"realtime",)JSON"
                                          R"JSON("result_mode":"periodic_snapshot",)JSON"
@@ -6715,7 +6867,7 @@ void TestNpmBasicTaskConfigNormalizesParametersV1() {
         "input_namespace":"pcapfile.capture",
         "source_domains":"0:7;1:8",
         "features":"basic,session",
-        "observing":"session",
+        "observing":"session_ipv4",
         "parameters":"{\"schema_version\":1,\"core\":{\"run_mode\":\"realtime\",)JSON"
                           R"JSON(\"result_mode\":\"final\",\"overload_policy\":\"fail\",)JSON"
                           R"JSON(\"output_interval_ns\":10000000,\"payload_sample_packets\":64,)JSON"
@@ -6748,24 +6900,8 @@ void TestNpmBasicTaskConfigNormalizesParametersV1() {
     assert(v1.domains.input_namespace == "pcapfile.capture");
     assert(v1.domains.bindings.size() == 2);
 
-    const char* legacy_json = R"JSON({
-        "input_namespace":"pcapfile.capture",
-        "source_domains":"0:7;1:8",
-        "features":"basic,session",
-        "observing":"session",
-        "run_mode":"realtime",
-        "result_mode":"final",
-        "overload_policy":"fail",
-        "output_interval_ns":"10000000",
-        "payload_sample_packets":"64",
-        "tcp_idle_timeout_ns":"1000000000",
-        "udp_idle_timeout_ns":"86400000000000",
-        "out_of_order_tolerance_ns":"60000000000",
-        "max_active_sessions":"10000000",
-        "max_tracked_bytes":"1099511627776",
-        "max_pending_output_bytes":"1099511627776",
-        "session_max_tcp_ranges_per_direction":"8"
-    })JSON";
+    const char* legacy_json =
+        R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:7;1:8","features":"basic,session","observing":"session_ipv4","run_mode":"realtime","result_mode":"final","overload_policy":"fail","output_interval_ns":"10000000","payload_sample_packets":"64","tcp_idle_timeout_ns":"1000000000","udp_idle_timeout_ns":"86400000000000","out_of_order_tolerance_ns":"60000000000","max_active_sessions":"10000000","max_tracked_bytes":"1099511627776","max_pending_output_bytes":"1099511627776","session_max_tcp_ranges_per_direction":"8"})JSON";
     npm::NpmBasicTaskConfig legacy;
     status = npm::ParseNpmBasicTaskConfig(legacy_json, &legacy);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
@@ -6777,11 +6913,11 @@ void TestNpmBasicTaskConfigNormalizesParametersV1() {
     assert(v1.features.session_max_tcp_ranges_per_direction == npm::kNpmMinSessionTcpRangesPerDirection);
 
     npm::NpmBasicTaskConfig basic_only;
-    status =
-        npm::ParseNpmBasicTaskConfig(R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
-                                     R"JSON("parameters":"{\"schema_version\":1,\"session\":{\"unknown\":null},)JSON"
-                                     R"JSON(\"future\":{\"anything\":[1,2]}}"})JSON",
-                                     &basic_only);
+    status = npm::ParseNpmBasicTaskConfig(
+        R"JSON({"observing":"basic_ipv4","input_namespace":"a","source_domains":"0:0",)JSON"
+        R"JSON("parameters":"{\"schema_version\":1,\"session\":{\"unknown\":null},)JSON"
+        R"JSON(\"future\":{\"anything\":[1,2]}}"})JSON",
+        &basic_only);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(basic_only.features.basic_enabled && !basic_only.features.session_enabled);
     assert(basic_only.features.session_max_tcp_ranges_per_direction == npm::kNpmDefaultSessionTcpRangesPerDirection);
@@ -6789,7 +6925,7 @@ void TestNpmBasicTaskConfigNormalizesParametersV1() {
     npm::NpmBasicTaskConfig session_only;
     status =
         npm::ParseNpmBasicTaskConfig(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-                                     R"JSON("observing":"session",)JSON"
+                                     R"JSON("observing":"session_ipv4",)JSON"
                                      R"JSON("parameters":"{\"schema_version\":1,\"basic\":{\"unknown\":1}}"})JSON",
                                      &session_only);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
@@ -6802,9 +6938,10 @@ void TestNpmPeriodicConfigurationParsing() {
         for (const bool nested : {false, true}) {
             npm::NpmBasicTaskConfig config;
             const std::string json =
-                nested ? "{\"parameters\":\"{\\\"schema_version\\\":1,\\\"core\\\":{\\\"output_interval_ns\\\":" +
+                nested ? "{\"observing\":\"basic_ipv4\",\"parameters\":\"{\\\"schema_version\\\":1,\\\"core\\\":{"
+                         "\\\"output_interval_ns\\\":" +
                              std::to_string(period) + "}}\"}"
-                       : "{\"output_interval_ns\":\"" + std::to_string(period) + "\"}";
+                       : "{\"observing\":\"basic_ipv4\",\"output_interval_ns\":\"" + std::to_string(period) + "\"}";
             assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config).error == npm::NpmBasicTaskConfigError::kNone);
             assert(config.analysis.output_interval_ns == period);
             assert(config.analysis.result_mode == npm::NpmResultMode::kPeriodicSnapshot && !config.run_mode_explicit);
@@ -6813,10 +6950,11 @@ void TestNpmPeriodicConfigurationParsing() {
     for (const auto mode : {"offline", "realtime"}) {
         for (const bool nested : {false, true}) {
             npm::NpmBasicTaskConfig config;
-            const std::string json =
-                nested ? "{\"parameters\":\"{\\\"schema_version\\\":1,\\\"core\\\":{\\\"run_mode\\\":\\\"" +
-                             std::string(mode) + "\\\"}}\"}"
-                       : "{\"run_mode\":\"" + std::string(mode) + "\"}";
+            const std::string json = nested
+                                         ? "{\"observing\":\"basic_ipv4\",\"parameters\":\"{\\\"schema_version\\\":1,"
+                                           "\\\"core\\\":{\\\"run_mode\\\":\\\"" +
+                                               std::string(mode) + "\\\"}}\"}"
+                                         : "{\"observing\":\"basic_ipv4\",\"run_mode\":\"" + std::string(mode) + "\"}";
             assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config).error == npm::NpmBasicTaskConfigError::kNone);
             assert(config.run_mode_explicit && config.analysis.output_interval_ns == 30000000000LL);
             assert(config.analysis.result_mode == npm::NpmResultMode::kPeriodicSnapshot);
@@ -6824,7 +6962,8 @@ void TestNpmPeriodicConfigurationParsing() {
         }
     }
     npm::NpmBasicTaskConfig config;
-    assert(npm::ParseNpmBasicTaskConfig("{}", &config).error == npm::NpmBasicTaskConfigError::kNone);
+    assert(npm::ParseNpmBasicTaskConfig(R"({"observing":"basic_ipv4"})", &config).error ==
+           npm::NpmBasicTaskConfigError::kNone);
     assert(config.analysis.output_interval_ns == 30000000000LL && !config.run_mode_explicit);
 }
 
@@ -6855,35 +6994,37 @@ void TestNpmBasicTaskConfigRejectsParameterSourceConflicts() {
     npm::NpmBasicTaskConfig output;
     const auto status =
         npm::ParseNpmBasicTaskConfig(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-                                     R"JSON("observing":"session","parameters":"{\"schema_version\":1}"})JSON",
+                                     R"JSON("observing":"session_ipv4","parameters":"{\"schema_version\":1}"})JSON",
                                      &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(!output.features.basic_enabled && output.features.session_enabled);
 }
 
 void TestNpmBasicTaskConfigPreservesParameterFailuresAtomically() {
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":""})JSON",
-                           npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
-                           npm::NpmParameterErrorV1::kEmptyInput);
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":"","observing":"basic_ipv4"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterErrorV1::kEmptyInput);
+    ParseTaskConfigFailure(R"JSON({"observing":"basic_ipv4","input_namespace":"a","source_domains":"0:0",)JSON"
                            R"JSON("parameters":"{\"schema_version\":1,\"core\":{)JSON"
                            R"JSON(\"max_active_sessions\":\"1\"}}"})JSON",
                            npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
                            npm::NpmParameterErrorV1::kInvalidType, "/core/max_active_sessions");
     ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-                           R"JSON("observing":"session",)JSON"
+                           R"JSON("observing":"session_ipv4",)JSON"
                            R"JSON("parameters":"{\"schema_version\":1,\"session\":{)JSON"
                            R"JSON(\"max_tcp_ranges_per_direction\":7}}"})JSON",
                            npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
                            npm::NpmParameterErrorV1::kInvalidRange, "/session/max_tcp_ranges_per_direction");
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":{}})JSON",
-                           npm::NpmBasicTaskConfigError::kNonStringValue, "parameters");
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON"
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":{},"observing":"basic_ipv4"})JSON",
+        npm::NpmBasicTaskConfigError::kNonStringValue, "parameters");
+    ParseTaskConfigFailure(R"JSON({"observing":"basic_ipv4","input_namespace":"a","source_domains":"0:0",)JSON"
                            R"JSON("parameters":"{\"schema_version\":1}\u0000trailing"})JSON",
                            npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
                            npm::NpmParameterErrorV1::kInvalidJson);
 
-    std::string oversized = R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":")JSON";
+    std::string oversized =
+        R"JSON({"observing":"basic_ipv4","input_namespace":"a","source_domains":"0:0","parameters":")JSON";
     oversized.append(npm::kNpmParametersMaxJsonBytesV1 + 1, 'x');
     oversized += R"JSON("})JSON";
     ParseTaskConfigFailure(oversized.c_str(), npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
@@ -7009,12 +7150,14 @@ void TestNpmTcpStreamParameters() {
     npm::NpmBasicTaskConfig config;
     config.tcp_stream = {131072, 12345};
     const auto status = npm::ParseNpmBasicTaskConfig(
-        R"({"parameters":"{\"schema_version\":1,\"core\":{\"tcp_stream\":{\"gap_timeout_ns\":-1}}}"})", &config);
+        R"({"parameters":"{\"schema_version\":1,\"core\":{\"tcp_stream\":{\"gap_timeout_ns\":-1}}}","observing":"basic_ipv4"})",
+        &config);
     assert(status.error == npm::NpmBasicTaskConfigError::kInvalidParameters);
     assert(status.parameter_status.error == Error::kInvalidRange);
     assert(status.parameter_status.path == "/core/tcp_stream/gap_timeout_ns");
     assert(config.tcp_stream.max_buffered_bytes_per_direction == 131072 && config.tcp_stream.gap_timeout_ns == 12345);
-    assert(npm::ParseNpmBasicTaskConfig("{}", &config).error == npm::NpmBasicTaskConfigError::kNone);
+    assert(npm::ParseNpmBasicTaskConfig(R"({"observing":"basic_ipv4"})", &config).error ==
+           npm::NpmBasicTaskConfigError::kNone);
     assert(config.tcp_stream.max_buffered_bytes_per_direction == 1048576 &&
            config.tcp_stream.gap_timeout_ns == 1000000000);
 }
@@ -7477,12 +7620,15 @@ void TestNpmTaskBudgetConcurrentAccountingAndSharedLifetime() {
     AssertTaskBudgetUsage(empty.Usage(), 0, 0, 0, 0);
 }
 
-npm::NpmBasicTaskConfig MakeRuntimeTaskConfig(npm::NpmRunMode mode = npm::NpmRunMode::kOffline) {
+npm::NpmBasicTaskConfig MakeRuntimeTaskConfig(
+    npm::NpmRunMode mode = npm::NpmRunMode::kOffline,
+    flowsql::packet::AddressFamily family = flowsql::packet::AddressFamily::kIPv4) {
     npm::NpmBasicTaskConfig config;
     config.analysis = npm::DefaultNpmAnalysisConfig(mode);
     if (mode == npm::NpmRunMode::kOffline) config.analysis.result_mode = npm::NpmResultMode::kFinal;
     config.domains.input_namespace = "pcapfile.capture";
     config.domains.bindings = {{0, 77}, {1, 77}};
+    config.features.observing_entity = family == flowsql::packet::AddressFamily::kIPv4 ? "basic_ipv4" : "basic_ipv6";
     return config;
 }
 
@@ -7493,7 +7639,11 @@ std::unique_ptr<npm::NpmBasicTaskRuntime> CreateRuntimeForTest(const npm::NpmBas
     const auto status =
         npm::NpmBasicTaskRuntime::Create(config, querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
-    assert(output_schema != nullptr && output_schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(output_schema != nullptr &&
+           output_schema->Equals(*npm::NpmBasicResultSchema(config.features.observing_entity.back() == '6'
+                                                                ? flowsql::packet::AddressFamily::kIPv6
+                                                                : flowsql::packet::AddressFamily::kIPv4),
+                                 true));
     assert(runtime != nullptr);
     return runtime;
 }
@@ -7514,9 +7664,11 @@ std::unique_ptr<npm::NpmBasicTaskRuntime> CreateRealtimeRuntimeForTest(const npm
     const auto status = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         config, querier, flowsql::packet::PacketSchema(), AllRealtimeTimeCapabilities(), &output_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
+    const auto family = config.features.observing_entity.back() == '6' ? flowsql::packet::AddressFamily::kIPv6
+                                                                       : flowsql::packet::AddressFamily::kIPv4;
     const auto expected_schema = config.features.observing == npm::NpmResultEntity::kSession
-                                     ? npm::NpmSessionResultSchema()
-                                     : npm::NpmBasicResultSchema();
+                                     ? npm::NpmSessionResultSchema(family)
+                                     : npm::NpmBasicResultSchema(family);
     assert(output_schema != nullptr && output_schema->Equals(*expected_schema, true));
     assert(runtime != nullptr);
     return runtime;
@@ -7601,7 +7753,7 @@ void TestNpmBasicTaskRuntimeCreatesExclusiveInitialState() {
     ContextProtocol protocol(&dictionary);
     ContextPool pool(&protocol);
     SinglePoolQuerier querier(&pool);
-    auto config = MakeRuntimeTaskConfig();
+    auto config = MakeRuntimeTaskConfig(npm::NpmRunMode::kOffline, flowsql::packet::AddressFamily::kIPv6);
     std::shared_ptr<arrow::Schema> output_schema;
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
     auto status =
@@ -7609,7 +7761,8 @@ void TestNpmBasicTaskRuntimeCreatesExclusiveInitialState() {
     assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
     assert(status.time_error == npm::NpmTimeCapabilityError::kNone);
     assert(status.protocol_error == npm::NpmProtocolContextError::kNone);
-    assert(output_schema != nullptr && output_schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(output_schema != nullptr &&
+           output_schema->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv6), true));
     assert(runtime != nullptr && pool.acquire_calls == 1 && pool.release_calls == 0);
     assert(runtime->Config().analysis.run_mode == npm::NpmRunMode::kOffline);
     assert(runtime->Config().analysis.result_mode == npm::NpmResultMode::kFinal);
@@ -7651,8 +7804,9 @@ void TestNpmBasicTaskRuntimeCreatesExclusiveInitialState() {
     std::unique_ptr<npm::NpmBasicTaskRuntime> blocked;
     std::shared_ptr<arrow::Schema> blocked_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
     const auto original_schema = blocked_schema;
-    status = npm::NpmBasicTaskRuntime::Create(MakeRuntimeTaskConfig(), &querier, flowsql::packet::PacketSchema(),
-                                              &blocked_schema, &blocked);
+    status = npm::NpmBasicTaskRuntime::Create(
+        MakeRuntimeTaskConfig(npm::NpmRunMode::kOffline, flowsql::packet::AddressFamily::kIPv6), &querier,
+        flowsql::packet::PacketSchema(), &blocked_schema, &blocked);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kProtocolContextError);
     assert(status.protocol_error == npm::NpmProtocolContextError::kPipelineExhausted);
     assert(blocked == nullptr && blocked_schema == original_schema);
@@ -7666,8 +7820,9 @@ void TestNpmBasicTaskRuntimeCreatesExclusiveInitialState() {
     retained_budget.reset();
     assert(weak_budget.expired());
 
-    status = npm::NpmBasicTaskRuntime::Create(MakeRuntimeTaskConfig(), &querier, flowsql::packet::PacketSchema(),
-                                              &blocked_schema, &blocked);
+    status = npm::NpmBasicTaskRuntime::Create(
+        MakeRuntimeTaskConfig(npm::NpmRunMode::kOffline, flowsql::packet::AddressFamily::kIPv6), &querier,
+        flowsql::packet::PacketSchema(), &blocked_schema, &blocked);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
     assert(blocked != nullptr && pool.acquire_calls == 3 && pool.release_calls == 1);
     blocked.reset();
@@ -7747,20 +7902,22 @@ void TestNpmBasicTaskRuntimeSelectsObservedSchema() {
     };
 
     auto config = MakeRuntimeTaskConfig();
-    assert_schema(config, npm::NpmBasicResultSchema(), false);
+    assert_schema(config, npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), false);
 
     config.features.basic_enabled = true;
     config.features.session_enabled = true;
     config.features.observing = npm::NpmResultEntity::kBasic;
-    assert_schema(config, npm::NpmBasicResultSchema(), true);
+    config.features.observing_entity = "basic_ipv4";
+    assert_schema(config, npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true);
 
     config.features.basic_enabled = false;
     config.features.session_enabled = true;
     config.features.observing = npm::NpmResultEntity::kSession;
-    assert_schema(config, npm::NpmSessionResultSchema(), true);
+    config.features.observing_entity = "session_ipv4";
+    assert_schema(config, npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4), true);
 
     config.features.basic_enabled = true;
-    assert_schema(config, npm::NpmSessionResultSchema(), true);
+    assert_schema(config, npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4), true);
 }
 
 void TestNpmBasicTaskRuntimeRejectsOpenFailuresAtomically() {
@@ -7874,7 +8031,8 @@ void TestNpmBasicTaskRuntimeRealtimeCapabilityInjection() {
         config, &querier, flowsql::packet::PacketSchema(), AllRealtimeTimeCapabilities(), &sentinel_schema, &runtime);
     assert(status.error == npm::NpmBasicTaskRuntimeError::kNone);
     assert(status.time_error == npm::NpmTimeCapabilityError::kNone);
-    assert(sentinel_schema != original_schema && sentinel_schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(sentinel_schema != original_schema &&
+           sentinel_schema->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
     assert(runtime != nullptr && runtime->Config().analysis.run_mode == npm::NpmRunMode::kRealtime);
     assert(pool.acquire_calls == 1 && pool.release_calls == 0);
 }
@@ -7909,7 +8067,7 @@ struct PeriodicRuntimeFixture {
     uint64_t sequence = 0;
 
     explicit PeriodicRuntimeFixture(bool session = false, bool observe_session = false, bool basic = true,
-                                    npm::NpmRunMode mode = npm::NpmRunMode::kRealtime) {
+                                    npm::NpmRunMode mode = npm::NpmRunMode::kRealtime, bool ipv6 = false) {
         config = MakeRuntimeTaskConfig(mode);
         config.analysis.result_mode = npm::NpmResultMode::kPeriodicSnapshot;
         config.analysis.output_interval_ns = kPeriodicTestInterval;
@@ -7919,6 +8077,8 @@ struct PeriodicRuntimeFixture {
         config.features.basic_enabled = basic;
         config.features.session_enabled = session;
         config.features.observing = observe_session ? npm::NpmResultEntity::kSession : npm::NpmResultEntity::kBasic;
+        config.features.observing_entity =
+            observe_session ? (ipv6 ? "session_ipv6" : "session_ipv4") : (ipv6 ? "basic_ipv6" : "basic_ipv4");
         runtime = mode == npm::NpmRunMode::kRealtime ? CreateRealtimeRuntimeForTest(config, &querier)
                                                      : CreateRuntimeForTest(config, &querier);
         budget = runtime->Budget();
@@ -8001,7 +8161,7 @@ void TestNpmBasicTaskRuntimeRoutesRealtimePeriodicSnapshots() {
     const auto packet = MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, {1});
     for (const auto selection :
          {std::array<bool, 3>{false, false, true}, {true, false, true}, {true, true, false}, {true, true, true}}) {
-        PeriodicRuntimeFixture fixture(selection[0], selection[1], selection[2]);
+        PeriodicRuntimeFixture fixture(selection[0], selection[1], selection[2], npm::NpmRunMode::kRealtime, true);
         assert(fixture.Packet(packet, 1).error == npm::NpmBasicOfflineBatchError::kNone);
         assert(fixture.Drive(1).error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         auto status = fixture.Drive(kPeriodicTestInterval);
@@ -8009,7 +8169,8 @@ void TestNpmBasicTaskRuntimeRoutesRealtimePeriodicSnapshots() {
         assert(fixture.output->num_rows() == 1);
         assert(PeriodicUInt(fixture.output, "revision") == 1);
         assert(!PeriodicFlag(fixture.output, "is_final"));
-        const auto expected = selection[1] ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
+        const auto expected = selection[1] ? npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv6)
+                                           : npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv6);
         assert(fixture.output->schema()->Equals(*expected, true));
         if (!selection[1]) {
             assert(PeriodicUInt(fixture.output, "interval_packets_ab") == 1);
@@ -8068,53 +8229,54 @@ void TestNpmBasicTaskRuntimeIsolatesRealtimeTupleReuseAfterPeriodicSnapshots() {
 }
 
 void TestNpmBasicTaskRuntimeFlushesRealtimeSessionsAtEofAfterPeriodicSnapshots() {
-    for (const auto mode : {npm::NpmRunMode::kOffline, npm::NpmRunMode::kRealtime}) {
-        PeriodicRuntimeFixture fixture(true, false, true, mode);
-        const auto tcp = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1});
-        const auto udp = MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, {2});
-        uint64_t totals[2] = {};
-        std::map<uint64_t, uint64_t> interval_sums;
-        const auto collect = [&] {
-            for (int64_t row = 0; fixture.output && row < fixture.output->num_rows(); ++row)
-                interval_sums[PeriodicUInt(fixture.output, "session_id", row)] +=
-                    PeriodicUInt(fixture.output, "interval_wire_bytes_total", row);
-        };
-        for (int period = 0; period < 3; ++period) {
-            for (int transport = 0; transport < 2; ++transport) {
-                const auto& packet = transport ? udp : tcp;
-                assert(fixture.Packet(packet, period * kPeriodicTestInterval + 1, 100 + transport).error ==
-                       npm::NpmBasicOfflineBatchError::kNone);
-                collect();
-                totals[transport] += 100 + transport;
-            }
-            if (mode == npm::NpmRunMode::kRealtime) {
-                assert(fixture.Drive((period + 1) * kPeriodicTestInterval).error ==
-                       npm::NpmBasicRealtimeMaintenanceError::kNone);
-                collect();
-                assert(fixture.output->num_rows() == 2);
-                for (int64_t row = 0; row < 2; ++row) {
-                    assert(PeriodicUInt(fixture.output, "revision", row) == static_cast<uint64_t>(period + 1));
-                    assert(PeriodicUInt(fixture.output, "packets_ab", row) == static_cast<uint64_t>(period + 1));
+    for (bool ipv6 : {false, true})
+        for (const auto mode : {npm::NpmRunMode::kOffline, npm::NpmRunMode::kRealtime}) {
+            PeriodicRuntimeFixture fixture(true, false, true, mode, ipv6);
+            const auto tcp = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1});
+            const auto udp = MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, {2});
+            uint64_t totals[2] = {};
+            std::map<uint64_t, uint64_t> interval_sums;
+            const auto collect = [&] {
+                for (int64_t row = 0; fixture.output && row < fixture.output->num_rows(); ++row)
+                    interval_sums[PeriodicUInt(fixture.output, "session_id", row)] +=
+                        PeriodicUInt(fixture.output, "interval_wire_bytes_total", row);
+            };
+            for (int period = 0; period < 3; ++period) {
+                for (int transport = 0; transport < 2; ++transport) {
+                    const auto& packet = transport ? udp : tcp;
+                    assert(fixture.Packet(packet, period * kPeriodicTestInterval + 1, 100 + transport).error ==
+                           npm::NpmBasicOfflineBatchError::kNone);
+                    collect();
+                    totals[transport] += 100 + transport;
+                }
+                if (mode == npm::NpmRunMode::kRealtime) {
+                    assert(fixture.Drive((period + 1) * kPeriodicTestInterval).error ==
+                           npm::NpmBasicRealtimeMaintenanceError::kNone);
+                    collect();
+                    assert(fixture.output->num_rows() == 1);
+                    for (int64_t row = 0; row < 1; ++row) {
+                        assert(PeriodicUInt(fixture.output, "revision", row) == static_cast<uint64_t>(period + 1));
+                        assert(PeriodicUInt(fixture.output, "packets_ab", row) == static_cast<uint64_t>(period + 1));
+                    }
                 }
             }
+            fixture.Finish(3 * kPeriodicTestInterval + 100);
+            collect();
+            assert(fixture.output->num_rows() == 1);
+            for (int64_t row = 0; row < 1; ++row) {
+                const uint64_t id = PeriodicUInt(fixture.output, "session_id", row);
+                assert(PeriodicFlag(fixture.output, "is_final", row));
+                assert(PeriodicUInt(fixture.output, "wire_bytes_total", row) == totals[id - 1]);
+                assert(interval_sums[id] == totals[id - 1]);
+                assert(PeriodicUInt(fixture.output, "packets_ab", row) == 3);
+            }
+            fixture.output.reset();
+            assert(npm::NpmTrackedBudgetBytes(fixture.budget->Usage()) == 0);
         }
-        fixture.Finish(3 * kPeriodicTestInterval + 100);
-        collect();
-        assert(fixture.output->num_rows() == 2);
-        for (int64_t row = 0; row < 2; ++row) {
-            const uint64_t id = PeriodicUInt(fixture.output, "session_id", row);
-            assert(PeriodicFlag(fixture.output, "is_final", row));
-            assert(PeriodicUInt(fixture.output, "wire_bytes_total", row) == totals[id - 1]);
-            assert(interval_sums[id] == totals[id - 1]);
-            assert(PeriodicUInt(fixture.output, "packets_ab", row) == 3);
-        }
-        fixture.output.reset();
-        assert(npm::NpmTrackedBudgetBytes(fixture.budget->Usage()) == 0);
-    }
 }
 
 void TestNpmBasicTaskRuntimeCleansRealtimeBackpressureFailures() {
-    PeriodicRuntimeFixture fixture(true);
+    PeriodicRuntimeFixture fixture(true, false, true, npm::NpmRunMode::kRealtime, true);
     const auto packet = MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, {1});
     assert(fixture.Packet(packet, 1).error == npm::NpmBasicOfflineBatchError::kNone);
     fixture.output.reset();
@@ -8146,7 +8308,7 @@ void TestNpmBasicTaskRuntimeCancelsSessionStateWithoutTerminalResults() {
 }
 
 void TestNpmBasicTaskRuntimeRetiresRealtimeIdleSessionsOnce() {
-    PeriodicRuntimeFixture fixture(true);
+    PeriodicRuntimeFixture fixture(true, false, true, npm::NpmRunMode::kRealtime, true);
     const auto packet = MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, {});
     assert(fixture.Packet(packet, 1).error == npm::NpmBasicOfflineBatchError::kNone);
     const int64_t end = fixture.config.analysis.udp_idle_timeout_ns + 1;
@@ -8168,7 +8330,8 @@ void TestNpmBasicTaskRuntimeRetiresRealtimeIdleSessionsOnce() {
 }
 
 void TestNpmBasicRealtimeTaskIsolationAndSlowSinkBudget() {
-    PeriodicRuntimeFixture first, second;
+    PeriodicRuntimeFixture first(false, false, true, npm::NpmRunMode::kRealtime, true);
+    PeriodicRuntimeFixture second(false, false, true, npm::NpmRunMode::kRealtime, true);
     const auto packet = MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, {1});
     assert(first.Packet(packet, 1).error == npm::NpmBasicOfflineBatchError::kNone);
     assert(second.Packet(packet, 1).error == npm::NpmBasicOfflineBatchError::kNone);
@@ -8200,7 +8363,7 @@ void TestNpmBasicPeriodicOrderDiagnosticsAndStalledBudget() {
             config.analysis.out_of_order_tolerance_ns = kPeriodicTestInterval;
             auto runtime = CreateRuntimeForTest(config, &querier);
             auto budget = runtime->Budget();
-            std::vector<flowsql::packet::PacketRecord> records;
+            std::vector<flowsql::testing::PacketRecord> records;
             for (const int64_t time :
                  {int64_t{1}, kPeriodicTestInterval, 2 * kPeriodicTestInterval + 1, 3 * kPeriodicTestInterval + 1}) {
                 auto record = MakeBatchPacketRecord(packet, 0, time, records.size() + 1);
@@ -8266,7 +8429,8 @@ void TestNpmBasicPeriodicOrderDiagnosticsAndStalledBudget() {
         const auto used = fixture.budget->Usage();
         const uint64_t retained = fixture.config.analysis.max_tracked_bytes - used.session_state_bytes -
                                   used.module_state_bytes -
-                                  static_cast<uint64_t>(arrow::util::TotalBufferSize(*next_input));
+                                  static_cast<uint64_t>(arrow::util::TotalBufferSize(*next_input)) -
+                                  sizeof(flowsql::packet::PacketIpEndpoints4);
         assert(fixture.budget->Reserve(npm::NpmBudgetCategory::kModuleState, retained) == npm::NpmBudgetError::kNone);
         assert(fixture.runtime->ProcessOfflineBatch(next_input, &fixture.output).error ==
                npm::NpmBasicOfflineBatchError::kBatchProcessError);
@@ -8282,7 +8446,8 @@ void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Realtime() {
     constexpr int64_t interval_ns = 10'000'000;
     constexpr int64_t observed_start_ns = 1'700'000'000'000'000'000LL;
     for (const bool observing_session : {false, true}) {
-        auto configs = MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kRealtime, observing_session);
+        auto configs = MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kRealtime, observing_session,
+                                                        flowsql::packet::AddressFamily::kIPv6);
         configs.legacy_json.assign(configs.legacy_json.size(), 'x');
         configs.parameters_v1_json.assign(configs.parameters_v1_json.size(), 'y');
 
@@ -8394,14 +8559,18 @@ void TestNpmBasicTaskRuntimeCleansSessionModuleFailures() {
     auto session_only = both_basic;
     session_only.features.basic_enabled = false;
     session_only.features.observing = npm::NpmResultEntity::kSession;
+    session_only.features.observing_entity = "session_ipv4";
     auto both_session = both_basic;
     both_session.features.observing = npm::NpmResultEntity::kSession;
+    both_session.features.observing_entity = "session_ipv4";
     const std::array<npm::NpmBasicTaskConfig, 3> configs{both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         const auto& config = configs[index];
         const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
-        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
+        const auto expected_schema = observing_session
+                                         ? npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4)
+                                         : npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4);
         std::shared_ptr<arrow::Schema> output_schema;
         std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
         const auto create_status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(),
@@ -8412,7 +8581,7 @@ void TestNpmBasicTaskRuntimeCleansSessionModuleFailures() {
         assert(pool.acquire_calls == static_cast<int>(index + 1));
         assert(pool.release_calls == static_cast<int>(index));
 
-        std::vector<flowsql::packet::PacketRecord> records;
+        std::vector<flowsql::testing::PacketRecord> records;
         for (uint32_t packet_index = 0; packet_index < 5; ++packet_index) {
             const auto packet =
                 MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, std::vector<uint8_t>(10, 0x11), kTcpAck,
@@ -8462,7 +8631,7 @@ void TestNpmBasicTaskRuntimeProcessesAndDrainsOfflineBatch() {
 
     const auto rst = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 91);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 100, 1)});
-    const uint64_t input_bytes = BasicResultBufferBytes(input);
+    const uint64_t input_bytes = BasicResultBufferBytes(input) + sizeof(flowsql::packet::PacketIpEndpoints4);
     std::weak_ptr<arrow::RecordBatch> input_owner = input;
     std::shared_ptr<arrow::RecordBatch> output = MakeNpmPacketViewBatch();
 
@@ -8474,8 +8643,9 @@ void TestNpmBasicTaskRuntimeProcessesAndDrainsOfflineBatch() {
     assert(status.batch_view_error == npm::NpmPacketBatchError::kNone);
     assert(status.process_status.error == npm::NpmPacketBatchProcessError::kNone);
     assert(status.drain_status.error == npm::NpmBasicDrainError::kNone);
-    assert(output != nullptr && output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
-    assert(output->num_rows() == 1 && output->num_columns() == 32);
+    assert(output != nullptr &&
+           output->schema()->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
+    assert(output->num_rows() == 1 && output->num_columns() == 31);
     assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
     assert(BasicResultColumn<arrow::StringArray>(output, "protocol_status")->GetString(0) == "unknown");
     assert(BasicResultColumn<arrow::StringArray>(output, "end_reason")->GetString(0) == "closed");
@@ -8494,8 +8664,9 @@ void TestNpmBasicTaskRuntimeProcessesAndDrainsOfflineBatch() {
     status = runtime->ProcessOfflineBatch(empty_input, &output);
     assert(status.error == npm::NpmBasicOfflineBatchError::kNone);
     assert(status.runtime_state == npm::NpmEofFlushState::kOpen);
-    assert(output != nullptr && output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
-    assert(output->num_rows() == 0 && output->num_columns() == 32);
+    assert(output != nullptr &&
+           output->schema()->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
+    assert(output->num_rows() == 0 && output->num_columns() == 31);
     output.reset();
     AssertTaskBudgetUsage(runtime->Budget()->Usage(), 0, 0, 0, 0);
 }
@@ -8509,13 +8680,15 @@ void TestNpmBasicTaskRuntimeProcessesImmediateClosedSession() {
     config.features.basic_enabled = false;
     config.features.session_enabled = true;
     config.features.observing = npm::NpmResultEntity::kSession;
+    config.features.observing_entity = "session_ipv4";
 
     std::shared_ptr<arrow::Schema> output_schema;
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
     const auto create_status =
         npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &output_schema, &runtime);
     assert(create_status.error == npm::NpmBasicTaskRuntimeError::kNone);
-    assert(runtime != nullptr && output_schema.get() == npm::NpmSessionResultSchema().get());
+    assert(runtime != nullptr &&
+           output_schema.get() == npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4).get());
     assert(runtime->Modules().size() == 1);
 
     const auto rst = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 91);
@@ -8526,10 +8699,11 @@ void TestNpmBasicTaskRuntimeProcessesImmediateClosedSession() {
     assert(status.runtime_state == npm::NpmEofFlushState::kOpen);
     assert(status.process_status.error == npm::NpmPacketBatchProcessError::kNone);
     assert(status.drain_status.error == npm::NpmBasicDrainError::kNone);
-    assert(output != nullptr && output->schema().get() == npm::NpmSessionResultSchema().get());
+    assert(output != nullptr &&
+           output->schema().get() == npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4).get());
     assert(output->num_rows() == 1 && output->num_columns() == 49);
     assert(SessionResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
-    assert(SessionResultColumn<arrow::UInt8Array>(output, 6)->Value(0) == 6);
+    assert(SessionResultColumn<arrow::UInt8Array>(output, 5)->Value(0) == 6);
     assert(SessionResultColumn<arrow::StringArray>(output, 18)->GetString(0) == "closed");
     const auto packets_ab = SessionResultColumn<arrow::UInt64Array>(output, 19)->Value(0);
     const auto packets_ba = SessionResultColumn<arrow::UInt64Array>(output, 20)->Value(0);
@@ -8562,16 +8736,20 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
     session_only.features.basic_enabled = false;
     session_only.features.session_enabled = true;
     session_only.features.observing = npm::NpmResultEntity::kSession;
+    session_only.features.observing_entity = "session_ipv4";
     auto both_session = MakeRuntimeTaskConfig();
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
+    both_session.features.observing_entity = "session_ipv4";
     const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         const auto& config = configs[index];
         const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
-        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
-        const int expected_columns = observing_session ? 49 : 32;
+        const auto expected_schema = observing_session
+                                         ? npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4)
+                                         : npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4);
+        const int expected_columns = observing_session ? 49 : 31;
         const int64_t active_timestamp_ns = 100 + static_cast<int64_t>(index);
         const int64_t closed_timestamp_ns = 200 + static_cast<int64_t>(index);
 
@@ -8643,8 +8821,8 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
             assert(SessionResultColumn<arrow::UInt64Array>(output, 2)->Value(0) == 1);
             assert(SessionResultColumn<arrow::Int64Array>(output, 3)->Value(0) == closed_timestamp_ns);
             assert(SessionResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
-            assert(SessionResultColumn<arrow::Int64Array>(output, 11)->Value(0) == active_timestamp_ns);
-            assert(SessionResultColumn<arrow::Int64Array>(output, 12)->Value(0) == closed_timestamp_ns);
+            assert(SessionResultColumn<arrow::Int64Array>(output, 10)->Value(0) == active_timestamp_ns);
+            assert(SessionResultColumn<arrow::Int64Array>(output, 11)->Value(0) == closed_timestamp_ns);
             assert(SessionResultColumn<arrow::StringArray>(output, 18)->GetString(0) == "closed");
             assert(SessionResultColumn<arrow::UInt64Array>(output, 19)->Value(0) == 1);
             assert(SessionResultColumn<arrow::UInt64Array>(output, 20)->Value(0) == 1);
@@ -8657,12 +8835,12 @@ void TestNpmBasicTaskRuntimeClosesActiveSessionsAcrossFeatureSelections() {
             const auto generated_at = BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0);
             assert(generated_at >= closed_start_ns && generated_at <= closed_end_ns);
             assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
-            assert(BasicResultColumn<arrow::Int64Array>(output, 11)->Value(0) == active_timestamp_ns);
-            assert(BasicResultColumn<arrow::Int64Array>(output, 12)->Value(0) == closed_timestamp_ns);
+            assert(BasicResultColumn<arrow::Int64Array>(output, 10)->Value(0) == active_timestamp_ns);
+            assert(BasicResultColumn<arrow::Int64Array>(output, 11)->Value(0) == closed_timestamp_ns);
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 12)->Value(0) == 1);
             assert(BasicResultColumn<arrow::UInt64Array>(output, 13)->Value(0) == 1);
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 14)->Value(0) == 1);
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) == active_packet.bytes.size());
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 16)->Value(0) == closed_packet.bytes.size());
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 14)->Value(0) == active_packet.bytes.size());
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) == closed_packet.bytes.size());
             assert(BasicResultColumn<arrow::StringArray>(output, "end_reason")->GetString(0) == "closed");
         }
 
@@ -8714,16 +8892,20 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
     session_only.features.basic_enabled = false;
     session_only.features.session_enabled = true;
     session_only.features.observing = npm::NpmResultEntity::kSession;
+    session_only.features.observing_entity = "session_ipv4";
     auto both_session = MakeRuntimeTaskConfig();
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
+    both_session.features.observing_entity = "session_ipv4";
     const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         const auto& config = configs[index];
         const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
-        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
-        const int expected_columns = observing_session ? 49 : 32;
+        const auto expected_schema = observing_session
+                                         ? npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4)
+                                         : npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4);
+        const int expected_columns = observing_session ? 49 : 31;
         const int64_t old_timestamp_ns = 100 + static_cast<int64_t>(index);
         const int64_t reuse_timestamp_ns = 200 + static_cast<int64_t>(index);
         const int64_t closed_timestamp_ns = 300 + static_cast<int64_t>(index);
@@ -8797,8 +8979,8 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
             assert(SessionResultColumn<arrow::UInt64Array>(output, 2)->Value(0) == 1);
             assert(SessionResultColumn<arrow::Int64Array>(output, 3)->Value(0) == reuse_timestamp_ns);
             assert(SessionResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
+            assert(SessionResultColumn<arrow::Int64Array>(output, 10)->Value(0) == old_timestamp_ns);
             assert(SessionResultColumn<arrow::Int64Array>(output, 11)->Value(0) == old_timestamp_ns);
-            assert(SessionResultColumn<arrow::Int64Array>(output, 12)->Value(0) == old_timestamp_ns);
             assert(SessionResultColumn<arrow::StringArray>(output, 14)->GetString(0) == "identified");
             assert(SessionResultColumn<arrow::UInt16Array>(output, 15)->Value(0) == 7);
             assert(SessionResultColumn<arrow::UInt16Array>(output, 16)->Value(0) == 8);
@@ -8816,12 +8998,12 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
             const auto generated_at = BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0);
             assert(generated_at >= reuse_start_ns && generated_at <= reuse_end_ns);
             assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
+            assert(BasicResultColumn<arrow::Int64Array>(output, 10)->Value(0) == old_timestamp_ns);
             assert(BasicResultColumn<arrow::Int64Array>(output, 11)->Value(0) == old_timestamp_ns);
-            assert(BasicResultColumn<arrow::Int64Array>(output, 12)->Value(0) == old_timestamp_ns);
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 13)->Value(0) == 1);
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 14)->Value(0) == 0);
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) == old_packet.bytes.size());
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 16)->Value(0) == 0);
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 12)->Value(0) == 1);
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 13)->Value(0) == 0);
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 14)->Value(0) == old_packet.bytes.size());
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) == 0);
             assert(BasicResultColumn<arrow::StringArray>(output, "protocol_status")->GetString(0) == "identified");
             assert(BasicResultColumn<arrow::UInt16Array>(output, "protocol_id")->Value(0) == 7);
             assert(BasicResultColumn<arrow::UInt16Array>(output, "protocol_sub_id")->Value(0) == 8);
@@ -8871,8 +9053,8 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
             assert(SessionResultColumn<arrow::UInt64Array>(output, 2)->Value(0) == 1);
             assert(SessionResultColumn<arrow::Int64Array>(output, 3)->Value(0) == closed_timestamp_ns);
             assert(SessionResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
-            assert(SessionResultColumn<arrow::Int64Array>(output, 11)->Value(0) == reuse_timestamp_ns);
-            assert(SessionResultColumn<arrow::Int64Array>(output, 12)->Value(0) == closed_timestamp_ns);
+            assert(SessionResultColumn<arrow::Int64Array>(output, 10)->Value(0) == reuse_timestamp_ns);
+            assert(SessionResultColumn<arrow::Int64Array>(output, 11)->Value(0) == closed_timestamp_ns);
             assert(SessionResultColumn<arrow::StringArray>(output, 14)->GetString(0) == "identified");
             assert(SessionResultColumn<arrow::UInt16Array>(output, 15)->Value(0) == 7);
             assert(SessionResultColumn<arrow::UInt16Array>(output, 16)->Value(0) == 8);
@@ -8890,12 +9072,12 @@ void TestNpmBasicTaskRuntimeIsolatesTupleReuseAcrossFeatureSelections() {
             const auto generated_at = BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0);
             assert(generated_at >= closed_start_ns && generated_at <= closed_end_ns);
             assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
-            assert(BasicResultColumn<arrow::Int64Array>(output, 11)->Value(0) == reuse_timestamp_ns);
-            assert(BasicResultColumn<arrow::Int64Array>(output, 12)->Value(0) == closed_timestamp_ns);
+            assert(BasicResultColumn<arrow::Int64Array>(output, 10)->Value(0) == reuse_timestamp_ns);
+            assert(BasicResultColumn<arrow::Int64Array>(output, 11)->Value(0) == closed_timestamp_ns);
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 12)->Value(0) == 1);
             assert(BasicResultColumn<arrow::UInt64Array>(output, 13)->Value(0) == 1);
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 14)->Value(0) == 1);
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) == replacement_packet.bytes.size());
-            assert(BasicResultColumn<arrow::UInt64Array>(output, 16)->Value(0) == closed_packet.bytes.size());
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 14)->Value(0) == replacement_packet.bytes.size());
+            assert(BasicResultColumn<arrow::UInt64Array>(output, 15)->Value(0) == closed_packet.bytes.size());
             assert(BasicResultColumn<arrow::StringArray>(output, "protocol_status")->GetString(0) == "identified");
             assert(BasicResultColumn<arrow::UInt16Array>(output, "protocol_id")->Value(0) == 7);
             assert(BasicResultColumn<arrow::UInt16Array>(output, "protocol_sub_id")->Value(0) == 8);
@@ -8950,16 +9132,20 @@ void TestNpmBasicTaskRuntimeClosesTupleReuseReplacementImmediately() {
     session_only.features.basic_enabled = false;
     session_only.features.session_enabled = true;
     session_only.features.observing = npm::NpmResultEntity::kSession;
+    session_only.features.observing_entity = "session_ipv4";
     auto both_session = MakeRuntimeTaskConfig();
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
+    both_session.features.observing_entity = "session_ipv4";
     const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         const auto& config = configs[index];
         const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
-        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
-        const int expected_columns = observing_session ? 49 : 32;
+        const auto expected_schema = observing_session
+                                         ? npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4)
+                                         : npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4);
+        const int expected_columns = observing_session ? 49 : 31;
         const int64_t old_timestamp_ns = 100 + static_cast<int64_t>(index);
         const int64_t replacement_timestamp_ns = 200 + static_cast<int64_t>(index);
 
@@ -9034,8 +9220,8 @@ void TestNpmBasicTaskRuntimeClosesTupleReuseReplacementImmediately() {
             const auto* revisions = SessionResultColumn<arrow::UInt64Array>(output, 2).get();
             const auto* observed_at = SessionResultColumn<arrow::Int64Array>(output, 3).get();
             const auto* final_flags = SessionResultColumn<arrow::BooleanArray>(output, 4).get();
-            const auto* first_ns = SessionResultColumn<arrow::Int64Array>(output, 11).get();
-            const auto* last_ns = SessionResultColumn<arrow::Int64Array>(output, 12).get();
+            const auto* first_ns = SessionResultColumn<arrow::Int64Array>(output, 10).get();
+            const auto* last_ns = SessionResultColumn<arrow::Int64Array>(output, 11).get();
             const auto* protocol_status = SessionResultColumn<arrow::StringArray>(output, 14).get();
             const auto* protocol_ids = SessionResultColumn<arrow::UInt16Array>(output, 15).get();
             const auto* protocol_sub_ids = SessionResultColumn<arrow::UInt16Array>(output, 16).get();
@@ -9076,12 +9262,12 @@ void TestNpmBasicTaskRuntimeClosesTupleReuseReplacementImmediately() {
             const auto* revisions = BasicResultColumn<arrow::UInt64Array>(output, 2).get();
             const auto* observed_at = BasicResultColumn<arrow::Int64Array>(output, 3).get();
             const auto* final_flags = BasicResultColumn<arrow::BooleanArray>(output, 4).get();
-            const auto* first_ns = BasicResultColumn<arrow::Int64Array>(output, 11).get();
-            const auto* last_ns = BasicResultColumn<arrow::Int64Array>(output, 12).get();
-            const auto* packets_ab = BasicResultColumn<arrow::UInt64Array>(output, 13).get();
-            const auto* packets_ba = BasicResultColumn<arrow::UInt64Array>(output, 14).get();
-            const auto* wire_bytes_ab = BasicResultColumn<arrow::UInt64Array>(output, 15).get();
-            const auto* wire_bytes_ba = BasicResultColumn<arrow::UInt64Array>(output, 16).get();
+            const auto* first_ns = BasicResultColumn<arrow::Int64Array>(output, 10).get();
+            const auto* last_ns = BasicResultColumn<arrow::Int64Array>(output, 11).get();
+            const auto* packets_ab = BasicResultColumn<arrow::UInt64Array>(output, 12).get();
+            const auto* packets_ba = BasicResultColumn<arrow::UInt64Array>(output, 13).get();
+            const auto* wire_bytes_ab = BasicResultColumn<arrow::UInt64Array>(output, 14).get();
+            const auto* wire_bytes_ba = BasicResultColumn<arrow::UInt64Array>(output, 15).get();
             const auto* protocol_status = BasicResultColumn<arrow::StringArray>(output, "protocol_status").get();
             const auto* protocol_ids = BasicResultColumn<arrow::UInt16Array>(output, "protocol_id").get();
             const auto* protocol_sub_ids = BasicResultColumn<arrow::UInt16Array>(output, "protocol_sub_id").get();
@@ -9147,23 +9333,27 @@ void TestNpmBasicTaskRuntimeRoutesObservedEntity() {
     ContextPool pool(&protocol);
     SinglePoolQuerier querier(&pool);
 
-    auto basic_only = MakeRuntimeTaskConfig();
-    auto both_basic = MakeRuntimeTaskConfig();
+    auto basic_only = MakeRuntimeTaskConfig(npm::NpmRunMode::kOffline, flowsql::packet::AddressFamily::kIPv6);
+    auto both_basic = MakeRuntimeTaskConfig(npm::NpmRunMode::kOffline, flowsql::packet::AddressFamily::kIPv6);
     both_basic.features.session_enabled = true;
-    auto session_only = MakeRuntimeTaskConfig();
+    auto session_only = MakeRuntimeTaskConfig(npm::NpmRunMode::kOffline, flowsql::packet::AddressFamily::kIPv6);
     session_only.features.basic_enabled = false;
     session_only.features.session_enabled = true;
     session_only.features.observing = npm::NpmResultEntity::kSession;
-    auto both_session = MakeRuntimeTaskConfig();
+    session_only.features.observing_entity = "session_ipv6";
+    auto both_session = MakeRuntimeTaskConfig(npm::NpmRunMode::kOffline, flowsql::packet::AddressFamily::kIPv6);
     both_session.features.session_enabled = true;
     both_session.features.observing = npm::NpmResultEntity::kSession;
+    both_session.features.observing_entity = "session_ipv6";
     const std::array<npm::NpmBasicTaskConfig, 4> configs{basic_only, both_basic, session_only, both_session};
 
     for (size_t index = 0; index < configs.size(); ++index) {
         const auto& config = configs[index];
         const bool observing_session = config.features.observing == npm::NpmResultEntity::kSession;
-        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
-        const int expected_columns = observing_session ? 49 : 32;
+        const auto expected_schema = observing_session
+                                         ? npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv6)
+                                         : npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv6);
+        const int expected_columns = observing_session ? 49 : 31;
 
         std::shared_ptr<arrow::Schema> output_schema;
         std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
@@ -9213,7 +9403,7 @@ void TestNpmBasicTaskRuntimeRoutesObservedEntity() {
         if (observing_session) {
             assert(SessionResultColumn<arrow::Int64Array>(output, 3)->Value(0) == observed_at);
             assert(SessionResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
-            assert(SessionResultColumn<arrow::UInt8Array>(output, 6)->Value(0) == 17);
+            assert(SessionResultColumn<arrow::UInt8Array>(output, 5)->Value(0) == 17);
             assert(SessionResultColumn<arrow::StringArray>(output, 18)->GetString(0) == "eof");
         } else {
             const auto generated_at = BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0);
@@ -9240,7 +9430,7 @@ void TestNpmBasicTaskRuntimeUsesExactOfflineInputBudget() {
 
     const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 92);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 99, 100, 2)});
-    const uint64_t input_bytes = BasicResultBufferBytes(input);
+    const uint64_t input_bytes = BasicResultBufferBytes(input) + sizeof(flowsql::packet::PacketIpEndpoints4);
     assert(input_bytes > 0 && input_bytes < config.analysis.max_tracked_bytes);
     auto budget = runtime->Budget();
     const uint64_t exact_existing_bytes = config.analysis.max_tracked_bytes - input_bytes;
@@ -9338,6 +9528,15 @@ void TestNpmBasicTaskRuntimeRejectsOfflineBatchFailuresAtomically() {
     assert_failed_terminal();
 
     reset_runtime();
+    auto wrong_endpoints = ReplacePacketBatchColumns(input, {{18, MakeOneValueArray<arrow::UInt8Builder>(uint8_t{4})}});
+    status = runtime->ProcessOfflineBatch(wrong_endpoints, &output);
+    assert(status.error == npm::NpmBasicOfflineBatchError::kBatchViewError);
+    assert(status.batch_view_error == npm::NpmPacketBatchError::kInvalidColumn);
+    assert(output == original_output);
+    AssertTaskBudgetUsage(runtime->Budget()->Usage(), 0, 0, 0, 0);
+    assert_failed_terminal();
+
+    reset_runtime();
     auto budget = runtime->Budget();
     const uint64_t output_limit = runtime->Config().analysis.max_pending_output_bytes;
     assert(budget->Reserve(npm::NpmBudgetCategory::kPendingOutput, output_limit) == npm::NpmBudgetError::kNone);
@@ -9382,8 +9581,9 @@ void TestNpmBasicTaskRuntimeFlushesOfflineExactlyOnce() {
     assert(flush_status.error == npm::NpmEofFlushError::kNone);
     assert(runtime->State() == npm::NpmEofFlushState::kFlushed);
     assert(runtime->LastError().empty() && pool.release_calls == 1);
-    assert(output != nullptr && output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
-    assert(output->num_rows() == 1 && output->num_columns() == 32);
+    assert(output != nullptr &&
+           output->schema()->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
+    assert(output->num_rows() == 1 && output->num_columns() == 31);
     const auto generated_at = BasicResultColumn<arrow::Int64Array>(output, 3)->Value(0);
     assert(generated_at >= generated_start_ns && generated_at <= generated_end_ns);
     assert(BasicResultColumn<arrow::BooleanArray>(output, 4)->Value(0));
@@ -9412,8 +9612,9 @@ void TestNpmBasicTaskRuntimeFlushesOfflineExactlyOnce() {
     assert(flush_status.error == npm::NpmEofFlushError::kNone);
     assert(runtime->State() == npm::NpmEofFlushState::kFlushed);
     assert(runtime->LastError().empty() && pool.release_calls == 2);
-    assert(output != nullptr && output->schema()->Equals(*npm::NpmBasicResultSchema(), true));
-    assert(output->num_rows() == 0 && output->num_columns() == 32);
+    assert(output != nullptr &&
+           output->schema()->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
+    assert(output->num_rows() == 0 && output->num_columns() == 31);
 }
 
 void TestNpmBasicTaskRuntimeEofFailureIsTerminal() {
@@ -9553,7 +9754,7 @@ void TestNpmBasicTaskPreservesLatePacketDiagnostic() {
     npm::NpmBasicOperator provider(&querier);
     const std::string task_id = "public-late-packet";
     const std::string json =
-        R"({"source_domains":"7:77","output_interval_ns":"10000000","out_of_order_tolerance_ns":"0"})";
+        R"({"source_domains":"7:77","output_interval_ns":"10000000","out_of_order_tolerance_ns":"0","observing":"basic_ipv4"})";
     const std::string filter = R"({"version":1,"root":null})";
     flowsql::IBlockTransformTaskV1* task = nullptr;
     assert(provider.CreateTask(MakeOperatorTaskConfig(task_id, json, filter), &task) == 0);
@@ -9599,7 +9800,7 @@ void TestNpmBasicFinalUsesGenerationTime() {
             const std::string json =
                 std::string(R"({"source_domains":"0:77","result_mode":"final","features":"basic,session",)"
                             R"("observing":")") +
-                (observing_session ? "session" : "basic") + "\"}";
+                (observing_session ? "session_ipv4" : "basic_ipv4") + "\"}";
             const std::string filter = R"({"version":1,"root":null})";
             flowsql::IBlockTransformTaskV1* task = nullptr;
             assert(provider.CreateTask(MakeOperatorTaskConfig(task_id, json, filter), &task) == 0);
@@ -9653,7 +9854,8 @@ void TestNpmBasicOperatorCopiesConfigAndOwnsTasks() {
     assert(!provider.Description().empty());
 
     std::string task_id = "task-owned-one";
-    std::string with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    std::string with_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","observing":"basic_ipv4"})";
     std::string filter_plan = R"({"version":1,"root":null})";
     auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
     flowsql::IBlockTransformTaskV1* first = nullptr;
@@ -9673,14 +9875,15 @@ void TestNpmBasicOperatorCopiesConfigAndOwnsTasks() {
     with_json.assign("mutated-with");
     filter_plan.assign("mutated-plan");
     assert(concrete->TaskId() == "task-owned-one");
-    assert(concrete->WithParamsJson() == R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})");
+    assert(concrete->WithParamsJson() ==
+           R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","observing":"basic_ipv4"})");
     assert(concrete->PushedFilterPlanJson() == R"({"version":1,"root":null})");
 
     other_provider.ReleaseTask(first);
     assert(concrete->TaskId() == "task-owned-one");
 
     task_id = "task-owned-two";
-    with_json = R"({"input_namespace":"pcapfile.other","source_domains":"1:88"})";
+    with_json = R"({"input_namespace":"pcapfile.other","source_domains":"1:88","observing":"basic_ipv4"})";
     filter_plan = R"({"version":1,"root":null})";
     config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
     flowsql::IBlockTransformTaskV1* second = nullptr;
@@ -9743,20 +9946,21 @@ void TestNpmBasicTaskObservingSchemaProbe() {
         assert(pool.release_calls == static_cast<int>(completed_probes));
     };
 
-    assert_probe("probe-default", R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})",
-                 npm::NpmBasicResultSchema());
+    assert_probe("probe-default",
+                 R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","observing":"basic_ipv4"})",
+                 npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4));
     assert_probe("probe-both-basic",
                  R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"basic,session",)"
-                 R"("observing":"basic"})",
-                 npm::NpmBasicResultSchema());
+                 R"("observing":"basic_ipv4"})",
+                 npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4));
     assert_probe(
         "probe-session-only",
-        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"session","observing":"session"})",
-        npm::NpmSessionResultSchema());
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"session","observing":"session_ipv4"})",
+        npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4));
     assert_probe("probe-both-session",
                  R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"basic,session",)"
-                 R"("observing":"session"})",
-                 npm::NpmSessionResultSchema());
+                 R"("observing":"session_ipv4"})",
+                 npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4));
 }
 
 void TestNpmBasicTaskProbeMatchesLegacyAndParametersV1() {
@@ -9795,7 +9999,9 @@ void TestNpmBasicTaskProbeMatchesLegacyAndParametersV1() {
         assert(parameters_task->Open(flowsql::packet::PacketSchema(), &parameters_schema) == 0);
         assert(legacy_schema != nullptr && parameters_schema != nullptr);
         assert(legacy_schema->Equals(*parameters_schema, true));
-        const auto expected_schema = observing_session ? npm::NpmSessionResultSchema() : npm::NpmBasicResultSchema();
+        const auto expected_schema = observing_session
+                                         ? npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4)
+                                         : npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4);
         assert(legacy_schema->Equals(*expected_schema, true));
         assert(legacy_task->LastError().empty() && parameters_task->LastError().empty());
         assert(pool.acquire_calls == 2 && pool.release_calls == 0);
@@ -9817,7 +10023,8 @@ void TestNpmBasicTaskOpenProcessAndFlush() {
     SinglePoolQuerier querier(&pool);
     npm::NpmBasicOperator provider(&querier);
     const std::string task_id = "task-happy";
-    const std::string with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string with_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","observing":"basic_ipv4"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
     const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
 
@@ -9827,7 +10034,7 @@ void TestNpmBasicTaskOpenProcessAndFlush() {
     std::shared_ptr<arrow::Schema> output_schema = sentinel_schema;
     assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
     assert(output_schema && output_schema != sentinel_schema);
-    assert(output_schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(output_schema->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
     assert(pool.acquire_calls == 1 && pool.release_calls == 0 && task->LastError().empty());
 
     const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpAck, 101);
@@ -9852,7 +10059,7 @@ void TestNpmBasicTaskOpenProcessAndFlush() {
     assert(outputs.size() == 1 && outputs[0].batch != nullptr && outputs[0].ts_ms == 22);
     assert(outputs[0].batch->num_rows() == 1);
     assert(BasicResultColumn<arrow::Int64Array>(outputs[0].batch, 3)->Value(0) >= before_flush_ns);
-    assert(BasicResultColumn<arrow::Int64Array>(outputs[0].batch, 12)->Value(0) == 100);
+    assert(BasicResultColumn<arrow::Int64Array>(outputs[0].batch, "last_ns")->Value(0) == 100);
     assert(BasicResultColumn<arrow::StringArray>(outputs[0].batch, "end_reason")->GetString(0) == "eof");
     assert(pool.release_calls == 1 && task->LastError().empty());
 
@@ -9891,7 +10098,7 @@ void TestNpmBasicTaskRejectsInvalidCallsAtomically() {
     assert(output_schema == sentinel_schema && task->LastError() == config_error);
     provider.ReleaseTask(task);
 
-    with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","observing":"basic_ipv4"})";
     config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
     task = nullptr;
     assert(provider.CreateTask(config, &task) == 0);
@@ -9951,27 +10158,28 @@ void TestNpmBasicTaskReportsConfigurationFailurePaths() {
     };
 
     assert_failure("task-invalid-core-parameter",
-                   R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
+                   R"JSON({"observing":"basic_ipv4","input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
                    R"JSON("parameters":"{\"schema_version\":1,\"core\":{\"max_active_sessions\":\"1\"}}"})JSON",
                    {"invalid parameters", "/core/max_active_sessions"});
     assert_failure("task-invalid-session-parameter",
                    R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
-                   R"JSON("features":"basic,session","observing":"session",)JSON"
+                   R"JSON("features":"basic,session","observing":"session_ipv4",)JSON"
                    R"JSON("parameters":"{\"schema_version\":1,\"session\":{\"max_tcp_ranges_per_direction\":7}}"})JSON",
                    {"invalid parameters", "/session/max_tcp_ranges_per_direction"});
     assert_failure("task-parameter-source-conflict",
-                   R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
+                   R"JSON({"observing":"basic_ipv4","input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
                    R"JSON("run_mode":"offline","parameters":"{\"schema_version\":1}"})JSON",
                    {"configuration source conflict", "/run_mode"});
-    assert_failure("task-six-modules-missing-dns-config", R"({"features":"basic,session,dns,http1,tls,icmp"})",
+    assert_failure("task-six-modules-missing-dns-config",
+                   R"({"features":"basic,session,dns,http1,tls,icmp","observing":"basic_ipv4"})",
                    {"runtime creation failed", "invalid module configuration", "/dns/primary_label_ids"});
-    assert_failure("task-missing-http1-config", R"({"features":"basic,http1"})",
+    assert_failure("task-missing-http1-config", R"({"features":"basic,http1","observing":"basic_ipv4"})",
                    {"invalid module configuration", "/http1/primary_label_ids"});
-    assert_failure("task-missing-tls-config", R"({"features":"basic,tls"})",
+    assert_failure("task-missing-tls-config", R"({"features":"basic,tls","observing":"basic_ipv4"})",
                    {"invalid module configuration", "/tls/primary_label_ids"});
     assert_failure(
         "task-dns-requires-labeling",
-        R"({"features":"basic,dns","parameters":"{\"schema_version\":1,\"dns\":{\"primary_label_ids\":[1001]}}"})",
+        R"({"features":"basic,dns","parameters":"{\"schema_version\":1,\"dns\":{\"primary_label_ids\":[1001]}}","observing":"basic_ipv4"})",
         {"required module capability is unavailable", "/dns/labeling"});
 }
 
@@ -9995,8 +10203,9 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     const std::string filter_plan = R"({"version":1,"root":null})";
     auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
 
-    const std::string ordinary_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
-                                      R"("features":"basic,session","parameters":"{\"schema_version\":1}"})";
+    const std::string ordinary_json =
+        R"({"observing":"basic_ipv4","input_namespace":"pcapfile.capture","source_domains":"0:77",)"
+        R"("features":"basic,session","parameters":"{\"schema_version\":1}"})";
     const std::string ordinary_task_id = "ordinary-with-labeling-provider";
     auto config = MakeOperatorTaskConfig(ordinary_task_id, ordinary_json, filter_plan);
     flowsql::IBlockTransformTaskV1* task = nullptr;
@@ -10009,8 +10218,9 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     assert(labeling_provider.runtime_status_calls == 0 && labeling_provider.create_matcher_calls == 0);
     provider.ReleaseTask(task);
 
-    const std::string ignored_labeling_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
-                                              R"("parameters":"{\"schema_version\":1,\"core\":{\"labeling\":null}}"})";
+    const std::string ignored_labeling_json =
+        R"({"observing":"basic_ipv4","input_namespace":"pcapfile.capture","source_domains":"0:77",)"
+        R"("parameters":"{\"schema_version\":1,\"core\":{\"labeling\":null}}"})";
     querier.labeling_provider = nullptr;
     const std::string ignored_task_id = "ordinary-ignores-labeling-field";
     config = MakeOperatorTaskConfig(ignored_task_id, ignored_labeling_json, filter_plan);
@@ -10021,11 +10231,12 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     assert(output_schema != sentinel_schema && querier.labeling_queries == 0);
     provider.ReleaseTask(task);
 
-    const std::string labeling_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
-                                      R"("features":"basic,labeling",)"
-                                      R"("parameters":"{\"schema_version\":1,\"core\":{)"
-                                      R"(\"labeling\":\"config.corp-labels@7\",)"
-                                      R"(\"labeling_memory_mib\":127}}"})";
+    const std::string labeling_json =
+        R"({"observing":"basic_ipv4","input_namespace":"pcapfile.capture","source_domains":"0:77",)"
+        R"("features":"basic,labeling",)"
+        R"("parameters":"{\"schema_version\":1,\"core\":{)"
+        R"(\"labeling\":\"config.corp-labels@7\",)"
+        R"(\"labeling_memory_mib\":127}}"})";
 
     querier.labeling_provider = nullptr;
     const std::string missing_task_id = "missing-labeling-provider";
@@ -10078,7 +10289,7 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
     output_schema = sentinel_schema;
     assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
-    assert(output_schema != sentinel_schema && output_schema->GetFieldIndex("primary_label_id") == 17);
+    assert(output_schema != sentinel_schema && output_schema->GetFieldIndex("primary_label_id") == 16);
     assert(querier.labeling_queries == 4 && querier.config_registry_queries == 2);
     assert(config_registry.resolve_calls == 1 && config_registry.last_reference == "config.corp-labels@7");
     assert(labeling_provider.runtime_status_calls == 3 && labeling_provider.create_matcher_calls == 1);
@@ -10101,7 +10312,7 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     assert(labeled_outputs.size() == 1 && labeled_outputs[0].batch->num_rows() == 1);
     const int label_column = labeled_outputs[0].batch->schema()->GetFieldIndex("primary_label_id");
     const int protocol_column = labeled_outputs[0].batch->schema()->GetFieldIndex("protocol");
-    assert(label_column == 17 && protocol_column == 21);
+    assert(label_column == 16 && protocol_column == 20);
     assert(BasicResultColumn<arrow::UInt32Array>(labeled_outputs[0].batch, label_column)->Value(0) == 1001);
     assert(BasicResultColumn<arrow::StringArray>(labeled_outputs[0].batch, protocol_column)->GetString(0) == "SUB");
     assert(labeling_provider.matcher_stats.classify_calls == 1);
@@ -10111,7 +10322,7 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     assert(labeling_provider.matcher_stats.release_calls == 1);
 
     const std::string session_labeling_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
-                                              R"("features":"basic,session,labeling","observing":"session",)"
+                                              R"("features":"basic,session,labeling","observing":"session_ipv4",)"
                                               R"("parameters":"{\"schema_version\":1,\"core\":{)"
                                               R"(\"labeling\":\"config.corp-labels@7\"}}"})";
     const std::string session_task_id = "connected-labeling-session-result";
@@ -10120,7 +10331,7 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
     output_schema = sentinel_schema;
     assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
-    assert(output_schema->GetFieldIndex("primary_label_id") == 14);
+    assert(output_schema->GetFieldIndex("primary_label_id") == 13);
     assert(labeling_provider.captured_reserved_bytes == 64ULL * 1024ULL * 1024ULL);
     labeled_outputs.clear();
     assert(task->ProcessBlock(labeled_input, 18, &labeled_outputs) ==
@@ -10130,7 +10341,7 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     assert(labeled_outputs.size() == 1 && labeled_outputs[0].batch->num_rows() == 1);
     const int session_label_column = labeled_outputs[0].batch->schema()->GetFieldIndex("primary_label_id");
     const int session_protocol_column = labeled_outputs[0].batch->schema()->GetFieldIndex("protocol");
-    assert(session_label_column == 14 && session_protocol_column == 18);
+    assert(session_label_column == 13 && session_protocol_column == 17);
     assert(BasicResultColumn<arrow::UInt32Array>(labeled_outputs[0].batch, session_label_column)->Value(0) == 1001);
     assert(BasicResultColumn<arrow::StringArray>(labeled_outputs[0].batch, session_protocol_column)->GetString(0) ==
            "SUB");
@@ -10140,7 +10351,7 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     assert(labeling_provider.create_matcher_calls == 2 && config_registry.resolve_calls == 2);
 
     const std::string invalid_labeling_json =
-        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)"
+        R"({"observing":"basic_ipv4","input_namespace":"pcapfile.capture","source_domains":"0:77",)"
         R"("features":"basic,labeling",)"
         R"("parameters":"{\"schema_version\":1,\"core\":{\"labeling\":\"@latest\"}}"})";
     const std::string invalid_task_id = "invalid-labeling-reference";
@@ -10191,8 +10402,8 @@ void TestRealFlowLabelingMatcherWithNpmBasicTask() {
         const std::string task_id = session_result ? "real-labeling-session" : "real-labeling-basic";
         const std::string with_json =
             R"({"input_namespace":"pcapfile.capture","source_domains":"0:77",)" +
-            std::string(session_result ? R"("features":"basic,session,labeling","observing":"session",)"
-                                       : R"("features":"basic,labeling",)") +
+            std::string(session_result ? R"("features":"basic,session,labeling","observing":"session_ipv4",)"
+                                       : R"("features":"basic,labeling","observing":"basic_ipv4",)") +
             params + "}";
         const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
         flowsql::IBlockTransformTaskV1* task = nullptr;
@@ -10237,7 +10448,8 @@ void TestNpmBasicTaskMethodPreconditions() {
     SinglePoolQuerier querier(&pool);
     npm::NpmBasicOperator provider(&querier);
     const std::string task_id = "task-preconditions";
-    const std::string with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string with_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","observing":"basic_ipv4"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
     const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
     const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpAck, 103);
@@ -10247,7 +10459,7 @@ void TestNpmBasicTaskMethodPreconditions() {
     flowsql::IBlockTransformTaskV1* task = nullptr;
 
     const std::string retained_with =
-        R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77","parameters":"{\"schema_version\":1,\"core\":{\"result\":{\"retention_days\":1}}}"})JSON";
+        R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77","parameters":"{\"schema_version\":1,\"core\":{\"result\":{\"retention_days\":1}}}","observing":"basic_ipv4"})JSON";
     const auto retained_config = MakeOperatorTaskConfig(task_id, retained_with, filter_plan);
     assert(provider.CreateTask(retained_config, &task) == 0);
     std::shared_ptr<arrow::Schema> retained_schema = sentinel_schema;
@@ -10345,7 +10557,8 @@ void TestNpmBasicTaskCancelBeforeOpenAndDuringProcess() {
     SinglePoolQuerier querier(&pool);
     npm::NpmBasicOperator provider(&querier);
     const std::string task_id = "task-cancel";
-    const std::string with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string with_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","observing":"basic_ipv4"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
     const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
 
@@ -10465,14 +10678,16 @@ void TestNpmBasicV2PluginExports() {
     assert(provider->Category() == "npm" && provider->Name() == "basic");
 
     const std::string task_id = "v2-capability";
-    const std::string with_json = R"({"input_namespace":"pcapfile.capture","source_domains":"0:77"})";
+    const std::string with_json =
+        R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","observing":"basic_ipv4"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
     const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
     flowsql::IBlockTransformTaskV1* task = nullptr;
     assert(provider->CreateTask(config, &task) == 0 && task != nullptr);
     std::shared_ptr<arrow::Schema> output_schema;
     assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
-    assert(output_schema != nullptr && output_schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(output_schema != nullptr &&
+           output_schema->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
 
     const auto rst = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 104);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 100, 6)});
@@ -10497,7 +10712,8 @@ void TestNpmBasicV2PluginExports() {
     v2_config.struct_size = flowsql::kBlockTransformTaskConfigV2Size;
     v2_config.contract_version = flowsql::kBlockTransformContractVersionV2;
     v2_config.task_id = "v2-realtime";
-    v2_config.with_params_json = R"({"input_namespace":"live","source_domains":"7:77","run_mode":"realtime"})";
+    v2_config.with_params_json =
+        R"({"input_namespace":"live","source_domains":"7:77","run_mode":"realtime","observing":"basic_ipv4"})";
     v2_config.pushed_filter_plan_json = filter_plan.c_str();
     flowsql::IBlockTransformTaskV2* v2_task = nullptr;
     assert(v2_provider->CreateTask(v2_config, &v2_task) == 0 && v2_task != nullptr);
@@ -10517,7 +10733,8 @@ void TestNpmBasicV2PluginExports() {
     assert(capture_task->BindCaptureSources(MakeCaptureSourceSet(identity)) == 0);
     assert(capture_task->BindCaptureSources(MakeCaptureSourceSet(identity)) == EALREADY);
     assert(v2_task->Open(flowsql::packet::PacketSchema(), &v2_schema) == 0);
-    assert(v2_schema != nullptr && v2_schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(v2_schema != nullptr &&
+           v2_schema->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
     flowsql::BlockTransformTimeDriveStateV1 time_state{};
     time_state.struct_size = flowsql::kBlockTransformTimeDriveStateV1Size;
     time_state.contract_version = flowsql::kBlockTransformTimeDriveVersionV1;
@@ -10585,7 +10802,8 @@ void TestNpmBasicV2PluginExports() {
     time_event.monotonic_now_ns = first_snapshot_deadline + 1;
     assert(v2_task->OnTime(time_event, &time_outputs) == 0);
     assert(time_outputs.size() == 1 && time_outputs[0].batch->num_rows() == 1);
-    assert(time_outputs[0].batch->schema()->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(time_outputs[0].batch->schema()->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4),
+                                                   true));
     assert(BasicResultColumn<arrow::BooleanArray>(time_outputs[0].batch, "period_complete")->Value(0));
     assert(v2_task->GetTimeDriveState(&time_state) == 0);
     assert(time_state.deadline_ns > first_snapshot_deadline);
@@ -10596,7 +10814,7 @@ void TestNpmBasicV2PluginExports() {
 
     // Omitted input parameters inherit the named source and reader domain, not domain=source_id.
     v2_config.task_id = "v2-input-defaults";
-    v2_config.with_params_json = "{}";
+    v2_config.with_params_json = R"({"observing":"basic_ipv4"})";
     assert(v2_provider->CreateTask(v2_config, &v2_task) == 0 && v2_task != nullptr);
     auto* input_task = dynamic_cast<flowsql::IBlockTransformInputSourceTaskV1*>(v2_task);
     assert(input_task != nullptr && input_task->BindInputSource("netadapter.eth0") == 0);
@@ -10675,7 +10893,7 @@ npm::NpmModuleRegistrationV1 CountingRegistration(std::string id, uint8_t mask, 
         output->plan.requires_tcp_stream = stream;
         output->plan.requires_labeling = labels.has_value();
         output->plan.primary_label_ids = labels;
-        auto entity = npm::NpmBasicEntityDescriptorV1();
+        auto entity = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
         entity.entity_id = id + "_event";
         entity.module_id = id;
         output->plan.entities = {entity};
@@ -10768,8 +10986,9 @@ void TestNpmBasicTaskFlushAppliesPendingCaptureFacts() {
             config.struct_size = flowsql::kBlockTransformTaskConfigV2Size;
             config.contract_version = flowsql::kBlockTransformContractVersionV2;
             config.task_id = "pending-capture-stop";
-            config.with_params_json = R"({"input_namespace":"live","source_domains":"0:77","features":"basic,icmp",)"
-                                      R"("output_interval_ns":"10000000","out_of_order_tolerance_ns":"0"})";
+            config.with_params_json =
+                R"({"observing":"basic_ipv4","input_namespace":"live","source_domains":"0:77","features":"basic,icmp",)"
+                R"("output_interval_ns":"10000000","out_of_order_tolerance_ns":"0"})";
             config.pushed_filter_plan_json = R"({"version":1,"root":null})";
             flowsql::IBlockTransformTaskV2* task = nullptr;
             assert(provider.CreateTask(config, &task) == 0);
@@ -10861,7 +11080,7 @@ void TestProtocolCatalogOpenAndDispatch() {
     catalog.push_back(CountingRegistration("control", 4, &control));
     npm::NpmBasicTaskConfig config;
     const char* json =
-        R"({"input_namespace":"capture","source_domains":"1:77","features":"control,mirror,session,probe,basic","parameters":"{\"schema_version\":1,\"probe\":{\"marker\":7},\"disabled\":{\"bad\":true}}"})";
+        R"({"input_namespace":"capture","source_domains":"1:77","features":"control,mirror,session,probe,basic","parameters":"{\"schema_version\":1,\"probe\":{\"marker\":7},\"disabled\":{\"bad\":true}}","observing":"basic_ipv4"})";
     assert(npm::ParseNpmBasicTaskConfig(json, &config, false, catalog).error == npm::NpmBasicTaskConfigError::kNone);
     ContextDictionary dictionary;
     ContextProtocol protocol(&dictionary);
@@ -10872,7 +11091,7 @@ void TestProtocolCatalogOpenAndDispatch() {
     assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                             nullptr, catalog)
                .error == npm::NpmBasicTaskRuntimeError::kNone);
-    assert(schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(schema->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
     assert(first.json == R"({"marker":7})");
     assert(first.created == 1 && second.created == 1 && control.created == 1);
     // The task owns its plans and factories, independent of the injected directory and configuration lifetimes.
@@ -10902,7 +11121,8 @@ void TestProtocolCatalogOpenAndDispatch() {
     assert(active[0].packets_ab + active[0].packets_ba == 1);
     assert(active[1].packets_ab + active[1].packets_ba == 2);
     assert(runtime->FlushOffline(60, &output).error == npm::NpmEofFlushError::kNone);
-    assert(output->num_rows() == 2);
+    assert(output->num_rows() == 1);
+    assert(output->schema()->metadata()->Get("flowsql.ip_family").ValueOrDie() == "4");
     assert(control.order == std::vector<std::string>({"packet", "packet"}));
     assert(first.order == std::vector<std::string>({"packet", "packet", "packet", "end", "end"}));
     assert(pool.release_calls == 1);
@@ -10913,10 +11133,11 @@ void TestProtocolOpenRejectionsAndControlCompatibility() {
     auto catalog = npm::ProductionNpmModuleCatalogV1();
     catalog.push_back(CountingRegistration("probe", 3, &trace, true, std::vector<uint32_t>{1001}));
     npm::NpmBasicTaskConfig config;
-    assert(npm::ParseNpmBasicTaskConfig(
-               R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,probe"})", &config, false,
-               catalog)
-               .error == npm::NpmBasicTaskConfigError::kNone);
+    assert(
+        npm::ParseNpmBasicTaskConfig(
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,probe","observing":"basic_ipv4"})",
+            &config, false, catalog)
+            .error == npm::NpmBasicTaskConfigError::kNone);
     ContextDictionary dictionary;
     ContextProtocol protocol(&dictionary);
     ContextPool pool(&protocol);
@@ -10931,19 +11152,20 @@ void TestProtocolOpenRejectionsAndControlCompatibility() {
     assert(status.module_status.field.find("probe") != std::string::npos);
     assert(pool.acquire_calls == 0);
     for (const char* features : {"basic,basic", "basic,", "labeling", "basic,probe,probe"}) {
-        const std::string text =
-            std::string(R"({"input_namespace":"capture","source_domains":"1:77","features":")") + features + "\"}";
+        const std::string text = std::string(R"({"input_namespace":"capture","source_domains":"1:77","features":")") +
+                                 features + "\",\"observing\":\"basic_ipv4\"}";
         assert(npm::ParseNpmBasicTaskConfig(text.c_str(), &config, false, catalog).error !=
                npm::NpmBasicTaskConfigError::kNone);
     }
     catalog.back().available = false;
-    assert(npm::ParseNpmBasicTaskConfig(
-               R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,probe"})", &config, false,
-               catalog)
-               .error != npm::NpmBasicTaskConfigError::kNone);
     assert(
         npm::ParseNpmBasicTaskConfig(
-            R"({"input_namespace":"capture","source_domains":"1:77","parameters":"{\"schema_version\":1,\"probe\":{\"bad\":true}}"})",
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,probe","observing":"basic_ipv4"})",
+            &config, false, catalog)
+            .error != npm::NpmBasicTaskConfigError::kNone);
+    assert(
+        npm::ParseNpmBasicTaskConfig(
+            R"({"input_namespace":"capture","source_domains":"1:77","parameters":"{\"schema_version\":1,\"probe\":{\"bad\":true}}","observing":"basic_ipv4"})",
             &config, false, catalog)
             .error == npm::NpmBasicTaskConfigError::kNone);
     const int prepared_before = trace.prepared;
@@ -11097,7 +11319,7 @@ void TestNpmTcpStreamOpenGatesAndFrozenConfig() {
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
     npm::NpmBasicTaskConfig config;
     std::string json =
-        R"({"parameters":"{\"schema_version\":1,\"core\":{\"tcp_stream\":{\"max_buffered_bytes_per_direction\":131072,\"gap_timeout_ns\":12345}}}"})";
+        R"({"parameters":"{\"schema_version\":1,\"core\":{\"tcp_stream\":{\"max_buffered_bytes_per_direction\":131072,\"gap_timeout_ns\":12345}}}","observing":"basic_ipv4"})";
     assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config).error == npm::NpmBasicTaskConfigError::kNone);
     const auto expected_json = config.parameters_json;
     assert(config.features.module_ids == std::vector<std::string>{"basic"});
@@ -11124,8 +11346,9 @@ void TestNpmTcpStreamOpenGatesAndFrozenConfig() {
         const int aborted_before = trace.aborted;
         auto catalog = npm::ProductionNpmModuleCatalogV1();
         catalog.push_back(CountingRegistration("probe", 1, &trace, true, labels));
-        assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic,labeling,probe"})", &config, true, catalog).error ==
-               npm::NpmBasicTaskConfigError::kNone);
+        assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic,labeling,probe","observing":"basic_ipv4"})", &config,
+                                            true, catalog)
+                   .error == npm::NpmBasicTaskConfigError::kNone);
         const auto status =
             npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                              new ProtocolLabelMatcher(&matcher_stats), catalog);
@@ -11159,8 +11382,9 @@ void TestNpmTcpStreamOpenGatesAndFrozenConfig() {
         return status;
     };
     catalog.push_back(std::move(invalid));
-    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic,prior,probe"})", &config, false, catalog).error ==
-           npm::NpmBasicTaskConfigError::kNone);
+    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic,prior,probe","observing":"basic_ipv4"})", &config, false,
+                                        catalog)
+               .error == npm::NpmBasicTaskConfigError::kNone);
     auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
     const int prior_created = trace.created;
     const int prior_aborted = trace.aborted;
@@ -11193,7 +11417,7 @@ void TestDnsT0OpenContract() {
     catalog.erase(catalog.begin() + 2);  // Replace production DNS with the controllable test module.
     npm::NpmModuleRegistrationV1 registration;
     registration.module_id = "dns";
-    registration.entity_ids = {"dns_transaction"};
+    registration.entity_ids = {"dns_transaction_ipv4", "dns_transaction_ipv6"};
     registration.prepare = [&aborts, &consumer_mode, &unrelated](const npm::NpmBasicTaskConfig&, std::string_view json,
                                                                  npm::NpmPreparedModuleV1* output) {
         npm::NpmDnsConfigV1 dns;
@@ -11236,19 +11460,19 @@ void TestDnsT0OpenContract() {
     auto schema = sentinel;
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
     const char* valid =
-        R"({"features":"dns,labeling","observing":"dns_transaction","parameters":"{\"schema_version\":1,\"dns\":{\"primary_label_ids\":[1001]}}"})";
+        R"({"features":"dns,labeling","observing":"dns_transaction_ipv4","parameters":"{\"schema_version\":1,\"dns\":{\"primary_label_ids\":[1001]}}"})";
     auto config = parse(valid);
     auto status = open(config, false, &schema, &runtime);
     assert(status.error == Error::kLabelingMatcherMissing);
     assert(schema == sentinel && !runtime);
     config = parse(
-        R"({"features":"dns","observing":"dns_transaction","parameters":"{\"schema_version\":1,\"dns\":{\"primary_label_ids\":[1001]}}"})");
+        R"({"features":"dns","observing":"dns_transaction_ipv4","parameters":"{\"schema_version\":1,\"dns\":{\"primary_label_ids\":[1001]}}"})");
     status = open(config, false, &schema, &runtime);
     assert(status.error == Error::kModulePlanError &&
            status.module_status.error == ContractError::kUnavailableCapability);
     assert(schema == sentinel && !runtime);
     config = parse(
-        R"({"features":"dns,labeling","observing":"dns_transaction","parameters":"{\"schema_version\":1,\"dns\":{\"primary_label_ids\":[999]}}"})");
+        R"({"features":"dns,labeling","observing":"dns_transaction_ipv4","parameters":"{\"schema_version\":1,\"dns\":{\"primary_label_ids\":[999]}}"})");
     status = open(config, true, &schema, &runtime);
     assert(status.error == Error::kModulePlanError &&
            status.module_status.error == ContractError::kInvalidLabelSelection);
@@ -11260,8 +11484,8 @@ void TestDnsT0OpenContract() {
         assert(status.error == Error::kModulePlanError && status.module_status.error == ContractError::kInvalidPlan);
         assert(schema == sentinel && !runtime);
     }
-    config =
-        parse(R"({"features":"dns,labeling","observing":"dns_transaction","parameters":"{\"schema_version\":1}"})");
+    config = parse(
+        R"({"features":"dns,labeling","observing":"dns_transaction_ipv4","parameters":"{\"schema_version\":1}"})");
     status = open(config, true, &schema, &runtime);
     assert(status.error == Error::kModulePlanError && status.module_status.field == "dns/primary_label_ids");
     assert(schema == sentinel && !runtime);
@@ -11275,22 +11499,24 @@ void TestDnsT0OpenContract() {
     consumer_mode = 0;
     status = open(config, true, &schema, &runtime);
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmDnsTransactionEntityDescriptorV1().schema, true));
+    assert(
+        schema->Equals(*npm::NpmDnsTransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema, true));
     runtime->Cancel();
     runtime.reset();
     config = parse(
-        R"({"features":"basic","observing":"basic","parameters":"{\"schema_version\":1,\"dns\":{\"unknown\":null}}"})");
+        R"({"features":"basic","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"dns\":{\"unknown\":null}}"})");
     status = open(config, false, &schema, &runtime);
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmBasicResultSchema(), true) && runtime->Modules().size() == 1);
+    assert(schema->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true) &&
+           runtime->Modules().size() == 1);
     runtime->Cancel();
     runtime.reset();
     assert(pool.acquire_calls == pool.release_calls);
-    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"dns_transaction"})", &config, true, catalog)
+    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"dns_transaction_ipv4"})", &config, true,
+                                        catalog)
                .error == npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
-    assert(
-        npm::ParseNpmBasicTaskConfig(R"({"features":"dns,labeling","observing":"dns_transaction"})", &config).error ==
-        npm::NpmBasicTaskConfigError::kNone);
+    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"dns,labeling","observing":"dns_transaction_ipv4"})", &config)
+               .error == npm::NpmBasicTaskConfigError::kNone);
     schema = sentinel;
     status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                               new ProtocolLabelMatcher(&matcher_stats));
@@ -11315,7 +11541,7 @@ void TestHttp1T0OpenContract() {
     auto catalog = production;
     npm::NpmModuleRegistrationV1 registration;
     registration.module_id = "http1";
-    registration.entity_ids = {"http1_transaction"};
+    registration.entity_ids = {"http1_transaction_ipv4", "http1_transaction_ipv6"};
     registration.prepare = [&aborts, &consumer_mode, &unrelated](const npm::NpmBasicTaskConfig&, std::string_view json,
                                                                  npm::NpmPreparedModuleV1* output) {
         npm::NpmHttp1ConfigV1 http1;
@@ -11358,17 +11584,17 @@ void TestHttp1T0OpenContract() {
     auto schema = sentinel;
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
     const char* valid =
-        R"({"features":"http1,labeling","observing":"http1_transaction","parameters":"{\"schema_version\":1,\"http1\":{\"primary_label_ids\":[1001]}}"})";
+        R"({"features":"http1,labeling","observing":"http1_transaction_ipv4","parameters":"{\"schema_version\":1,\"http1\":{\"primary_label_ids\":[1001]}}"})";
     auto config = parse(valid);
     auto status = open(config, false, &schema, &runtime);
     assert(status.error == Error::kLabelingMatcherMissing && schema == sentinel && !runtime);
     config = parse(
-        R"({"features":"http1","observing":"http1_transaction","parameters":"{\"schema_version\":1,\"http1\":{\"primary_label_ids\":[1001]}}"})");
+        R"({"features":"http1","observing":"http1_transaction_ipv4","parameters":"{\"schema_version\":1,\"http1\":{\"primary_label_ids\":[1001]}}"})");
     status = open(config, false, &schema, &runtime);
     assert(status.error == Error::kModulePlanError &&
            status.module_status.error == ContractError::kUnavailableCapability && schema == sentinel && !runtime);
     config = parse(
-        R"({"features":"http1,labeling","observing":"http1_transaction","parameters":"{\"schema_version\":1,\"http1\":{\"primary_label_ids\":[999]}}"})");
+        R"({"features":"http1,labeling","observing":"http1_transaction_ipv4","parameters":"{\"schema_version\":1,\"http1\":{\"primary_label_ids\":[999]}}"})");
     status = open(config, true, &schema, &runtime);
     assert(status.error == Error::kModulePlanError &&
            status.module_status.error == ContractError::kInvalidLabelSelection && schema == sentinel && !runtime);
@@ -11382,8 +11608,8 @@ void TestHttp1T0OpenContract() {
         assert(status.error == Error::kModulePlanError && status.module_status.error == ContractError::kInvalidPlan &&
                schema == sentinel && !runtime);
     }
-    config =
-        parse(R"({"features":"http1,labeling","observing":"http1_transaction","parameters":"{\"schema_version\":1}"})");
+    config = parse(
+        R"({"features":"http1,labeling","observing":"http1_transaction_ipv4","parameters":"{\"schema_version\":1}"})");
     status = open(config, true, &schema, &runtime);
     assert(status.error == Error::kModulePlanError && status.module_status.field == "http1/primary_label_ids" &&
            schema == sentinel && !runtime);
@@ -11397,26 +11623,29 @@ void TestHttp1T0OpenContract() {
     consumer_mode = 0;
     status = open(config, true, &schema, &runtime);
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmHttp1TransactionEntityDescriptorV1().schema, true));
+    assert(schema->Equals(*npm::NpmHttp1TransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema,
+                          true));
     runtime->Cancel();
     runtime.reset();
     config = parse(
-        R"({"features":"basic","observing":"basic","parameters":"{\"schema_version\":1,\"http1\":{\"unknown\":null}}"})");
+        R"({"features":"basic","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"http1\":{\"unknown\":null}}"})");
     status = open(config, false, &schema, &runtime);
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmBasicResultSchema(), true) && runtime->Modules().size() == 1);
+    assert(schema->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true) &&
+           runtime->Modules().size() == 1);
     runtime->Cancel();
     runtime.reset();
     assert(pool.acquire_calls == pool.release_calls);
-    assert(
-        npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"http1_transaction"})", &config, true, catalog)
-            .error == npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
+    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"http1_transaction_ipv4"})", &config, true,
+                                        catalog)
+               .error == npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
     config = parse(valid);
     schema = sentinel;
     status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                               new ProtocolLabelMatcher(&matcher_stats));
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmHttp1TransactionEntityDescriptorV1().schema, true));
+    assert(schema->Equals(*npm::NpmHttp1TransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema,
+                          true));
     runtime->Cancel();
     runtime.reset();
 }
@@ -11442,7 +11671,7 @@ void TestIcmpT0OpenContract() {
     catalog.pop_back();  // Replace production ICMP with the controllable Open contract module.
     npm::NpmModuleRegistrationV1 registration;
     registration.module_id = "icmp";
-    registration.entity_ids = {"icmp_event"};
+    registration.entity_ids = {"icmp_event_ipv4", "icmp_event_ipv6"};
     registration.prepare = [](const npm::NpmBasicTaskConfig&, std::string_view json, npm::NpmPreparedModuleV1* out) {
         npm::NpmIcmpConfigV1 config;
         const auto parsed = npm::ParseNpmIcmpConfigV1(json, &config);
@@ -11470,14 +11699,14 @@ void TestIcmpT0OpenContract() {
                npm::NpmBasicTaskConfigError::kNone);
         return config;
     };
-    auto config = parse(R"({"features":"icmp","observing":"icmp_event"})");
+    auto config = parse(R"({"features":"icmp","observing":"icmp_event_ipv4"})");
     auto sentinel = arrow::schema({arrow::field("sentinel", arrow::int8())});
     auto schema = sentinel;
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
     auto status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
                                                    {}, nullptr, npm::ProductionNpmModuleCatalogV1());
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmIcmpEventEntityDescriptorV1().schema, true));
+    assert(schema->Equals(*npm::NpmIcmpEventEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema, true));
     runtime->Cancel();
     runtime.reset();
     schema = sentinel;
@@ -11494,19 +11723,21 @@ void TestIcmpT0OpenContract() {
     status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                               nullptr, catalog);
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmIcmpEventEntityDescriptorV1().schema, true));
+    assert(schema->Equals(*npm::NpmIcmpEventEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema, true));
     runtime->Cancel();
     runtime.reset();
 
     config = parse(
-        R"({"features":"basic","observing":"basic","parameters":"{\"schema_version\":1,\"icmp\":{\"unknown\":null}}"})");
+        R"({"features":"basic","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"icmp\":{\"unknown\":null}}"})");
     status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                               nullptr, catalog);
-    assert(status.error == Error::kNone && runtime && schema->Equals(*npm::NpmBasicResultSchema(), true));
+    assert(status.error == Error::kNone && runtime &&
+           schema->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
     runtime->Cancel();
     runtime.reset();
-    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"icmp_event"})", &config, false, catalog)
-               .error == npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
+    assert(
+        npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"icmp_event_ipv4"})", &config, false, catalog)
+            .error == npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
     assert(pool.acquire_calls == pool.release_calls);
 }
 
@@ -11522,10 +11753,10 @@ void TestIcmpMixedBatchAndSplitEquivalence() {
     reply.bytes[20] = 0;
     auto* reply_ip = reinterpret_cast<flowsql::Ipv4Header*>(reply.bytes.data());
     std::swap(reply_ip->src_addr, reply_ip->dst_addr);
-    std::swap(reply.layer.src_ip, reply.layer.dst_ip);
+    reply.layer.SwapEndpoints();
     const auto tcp = MakeIpv4TcpPacket("192.0.2.10", 40000, "198.51.100.10", 443, {});
     const auto udp = MakeIpv6UdpPacket("2001:db8::1", 53000, "2001:db8::2", 53, {1, 2});
-    const std::vector<flowsql::packet::PacketRecord> records = {
+    const std::vector<flowsql::testing::PacketRecord> records = {
         MakeBatchPacketRecord(tcp, 1, 10, 1), MakeBatchPacketRecord(request, 1, 20, 2),
         MakeBatchPacketRecord(udp, 1, 30, 3), MakeBatchPacketRecord(reply, 1, 50, 4)};
 
@@ -11533,7 +11764,7 @@ void TestIcmpMixedBatchAndSplitEquivalence() {
         npm::NpmBasicTaskConfig config;
         assert(
             npm::ParseNpmBasicTaskConfig(
-                R"({"input_namespace":"capture","source_domains":"1:77","features":"icmp","observing":"icmp_event"})",
+                R"({"input_namespace":"capture","source_domains":"1:77","features":"icmp","observing":"icmp_event_ipv4"})",
                 &config, false, npm::ProductionNpmModuleCatalogV1())
                 .error == npm::NpmBasicTaskConfigError::kNone);
         ContextDictionary dictionary;
@@ -11547,7 +11778,7 @@ void TestIcmpMixedBatchAndSplitEquivalence() {
         std::shared_ptr<arrow::RecordBatch> output;
         if (split) {
             auto first = MakeEncodedPacketBatch(
-                std::vector<flowsql::packet::PacketRecord>(records.begin(), records.begin() + 3));
+                std::vector<flowsql::testing::PacketRecord>(records.begin(), records.begin() + 3));
             assert(runtime->ProcessOfflineBatch(first, &output).error == npm::NpmBasicOfflineBatchError::kNone);
             assert(output && output->num_rows() == 0);
             first.reset();
@@ -11560,9 +11791,9 @@ void TestIcmpMixedBatchAndSplitEquivalence() {
             input.reset();
         }
         assert(output && output->num_rows() == 1 && output->schema()->Equals(*schema, true));
-        assert(BasicResultColumn<arrow::StringArray>(output, 8)->GetString(0) == "echo_matched");
+        assert(BasicResultColumn<arrow::StringArray>(output, "outcome")->GetString(0) == "echo_matched");
         assert(BasicResultColumn<arrow::UInt64Array>(output, 4)->Value(0) == 77);
-        assert(BasicResultColumn<arrow::Int64Array>(output, 18)->Value(0) == 30);
+        assert(BasicResultColumn<arrow::Int64Array>(output, 17)->Value(0) == 30);
         assert(runtime->Sessions().size() == 2);
         std::shared_ptr<arrow::RecordBatch> tail;
         assert(runtime->FlushOffline(60, &tail).error == npm::NpmEofFlushError::kNone);
@@ -11590,7 +11821,7 @@ void TestTlsT0OpenContract() {
     catalog.erase(catalog.begin() + 4);  // Replace production TLS with the controllable Open contract module.
     npm::NpmModuleRegistrationV1 registration;
     registration.module_id = "tls";
-    registration.entity_ids = {"tls_handshake"};
+    registration.entity_ids = {"tls_handshake_ipv4", "tls_handshake_ipv6"};
     registration.prepare = [&aborts, &consumer_mode, &unrelated](const npm::NpmBasicTaskConfig&, std::string_view json,
                                                                  npm::NpmPreparedModuleV1* output) {
         npm::NpmTlsConfigV1 tls;
@@ -11630,7 +11861,7 @@ void TestTlsT0OpenContract() {
             catalog);
     };
     const char* valid =
-        R"({"features":"tls,labeling","observing":"tls_handshake","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[1001]}}"})";
+        R"({"features":"tls,labeling","observing":"tls_handshake_ipv4","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[1001]}}"})";
     npm::NpmBasicTaskConfig production_rejected;
     assert(npm::ParseNpmBasicTaskConfig(valid, &production_rejected, true, production).error ==
            npm::NpmBasicTaskConfigError::kNone);
@@ -11642,12 +11873,12 @@ void TestTlsT0OpenContract() {
     auto status = open(config, false, &schema, &runtime);
     assert(status.error == Error::kLabelingMatcherMissing && schema == sentinel && !runtime);
     config = parse(
-        R"({"features":"tls","observing":"tls_handshake","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[1001]}}"})");
+        R"({"features":"tls","observing":"tls_handshake_ipv4","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[1001]}}"})");
     status = open(config, false, &schema, &runtime);
     assert(status.error == Error::kModulePlanError &&
            status.module_status.error == ContractError::kUnavailableCapability && schema == sentinel && !runtime);
     config = parse(
-        R"({"features":"tls,labeling","observing":"tls_handshake","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[999]}}"})");
+        R"({"features":"tls,labeling","observing":"tls_handshake_ipv4","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[999]}}"})");
     status = open(config, true, &schema, &runtime);
     assert(status.error == Error::kModulePlanError &&
            status.module_status.error == ContractError::kInvalidLabelSelection && schema == sentinel && !runtime);
@@ -11662,7 +11893,8 @@ void TestTlsT0OpenContract() {
         assert(status.error == Error::kModulePlanError && status.module_status.error == ContractError::kInvalidPlan &&
                schema == sentinel && !runtime);
     }
-    config = parse(R"({"features":"tls,labeling","observing":"tls_handshake","parameters":"{\"schema_version\":1}"})");
+    config =
+        parse(R"({"features":"tls,labeling","observing":"tls_handshake_ipv4","parameters":"{\"schema_version\":1}"})");
     status = open(config, true, &schema, &runtime);
     assert(status.error == Error::kModulePlanError && status.module_status.field == "tls/primary_label_ids" &&
            schema == sentinel && !runtime);
@@ -11677,20 +11909,22 @@ void TestTlsT0OpenContract() {
     consumer_mode = 0;
     status = open(config, true, &schema, &runtime);
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmTlsHandshakeEntityDescriptorV1().schema, true));
+    assert(schema->Equals(*npm::NpmTlsHandshakeEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema, true));
     runtime->Cancel();
     runtime.reset();
 
     config = parse(
-        R"({"features":"basic","observing":"basic","parameters":"{\"schema_version\":1,\"tls\":{\"unknown\":null}}"})");
+        R"({"features":"basic","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"tls\":{\"unknown\":null}}"})");
     status = open(config, false, &schema, &runtime);
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmBasicResultSchema(), true) && runtime->Modules().size() == 1);
+    assert(schema->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true) &&
+           runtime->Modules().size() == 1);
     runtime->Cancel();
     runtime.reset();
     assert(pool.acquire_calls == pool.release_calls);
-    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"tls_handshake"})", &config, true, catalog)
-               .error == npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
+    assert(
+        npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"tls_handshake_ipv4"})", &config, true, catalog)
+            .error == npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
 }
 
 struct ProtocolLifecycleTrace {
@@ -11814,7 +12048,7 @@ npm::NpmModuleRegistrationV1 LifecycleRegistration(ProtocolLifecycleTrace* trace
     entry.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view, npm::NpmPreparedModuleV1* output) {
         output->plan.module_id = "lifecycle";
         output->plan.input_mask = npm::kNpmInputMaskV1;
-        auto entity = npm::NpmBasicEntityDescriptorV1();
+        auto entity = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
         entity.module_id = "lifecycle";
         entity.entity_id = "lifecycle_event";
         output->plan.entities = {std::move(entity)};
@@ -11835,7 +12069,7 @@ std::unique_ptr<npm::NpmBasicTaskRuntime> CreateLifecycleRuntime(ProtocolLifecyc
     config.features.module_ids = {"basic", "lifecycle"};
     config.features.basic_enabled = true;
     config.features.observing = npm::NpmResultEntity::kBasic;
-    config.features.observing_entity = "basic";
+    config.features.observing_entity = "basic_ipv4";
     auto catalog = npm::ProductionNpmModuleCatalogV1();
     catalog.push_back(LifecycleRegistration(trace));
     std::shared_ptr<arrow::Schema> schema;
@@ -12055,7 +12289,7 @@ void TestProtocolLabelIsolationAndAtomicFactoryFailure() {
     npm::NpmBasicTaskConfig config;
     assert(
         npm::ParseNpmBasicTaskConfig(
-            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,selected,all,control","out_of_order_tolerance_ns":"0","tcp_idle_timeout_ns":"1000000000"})",
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,selected,all,control","out_of_order_tolerance_ns":"0","tcp_idle_timeout_ns":"1000000000","observing":"basic_ipv4"})",
             &config, true, catalog)
             .error == npm::NpmBasicTaskConfigError::kNone);
     ContextDictionary dictionary;
@@ -12121,7 +12355,7 @@ void TestProtocolLabelIsolationAndAtomicFactoryFailure() {
 }
 
 struct ResultConsumerTrace {
-    std::vector<npm::NpmResultProgressV1> progress;
+    std::vector<npm::NpmFamilyPublicationRequest> progress;
     std::vector<size_t> rows_at_progress;
     int progress_error = 0;
     std::vector<std::string> entities;
@@ -12146,13 +12380,18 @@ struct ResultConsumerTrace {
     std::function<void()> on_finish;
     std::function<void()> on_cancel;
 };
-class RecordingResultConsumer final : public npm::INpmResultConsumerV1, public npm::INpmResultProgressConsumerV1 {
+class RecordingResultConsumer final : public npm::INpmResultConsumerV1, public npm::INpmFamilyProgressConsumer {
  public:
     explicit RecordingResultConsumer(ResultConsumerTrace* trace) : trace_(trace) {}
-    int PublishProgress(const npm::NpmResultContextV1&, const npm::NpmResultProgressV1& progress) override {
+    int PublishProgress(const npm::NpmFamilyPublicationRequest& progress,
+                        npm::NpmFamilyPublishedProgress* confirmed) override {
         if (trace_->progress_error) return trace_->progress_error;
         trace_->progress.push_back(progress);
         trace_->rows_at_progress.push_back(trace_->entities.size());
+        int64_t position = 0;
+        for (const auto& fact : trace_->progress)
+            if (fact.key.entity_id == progress.key.entity_id) ++position;
+        *confirmed = {progress, progress.key.run_id, position};
         return 0;
     }
     int Consume(const npm::NpmResultContextV1& context, const npm::NpmEntityDescriptorV1& entity,
@@ -12168,7 +12407,7 @@ class RecordingResultConsumer final : public npm::INpmResultConsumerV1, public n
                 std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName(entity.revision_column))->Value(i));
             trace_->finals.push_back(
                 std::static_pointer_cast<arrow::BooleanArray>(rows.GetColumnByName(entity.is_final_column))->Value(i));
-            if (entity.entity_id == "dns_transaction") {
+            if (entity.entity_id == "dns_transaction_ipv4" || entity.entity_id == "dns_transaction_ipv6") {
                 trace_->dns_domains.push_back(
                     std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("observation_domain_id"))
                         ->Value(i));
@@ -12177,7 +12416,7 @@ class RecordingResultConsumer final : public npm::INpmResultConsumerV1, public n
                 trace_->dns_outcomes.push_back(
                     std::static_pointer_cast<arrow::StringArray>(rows.GetColumnByName("outcome"))->GetString(i));
             }
-            if (entity.entity_id == "http1_transaction") {
+            if (entity.entity_id == "http1_transaction_ipv4" || entity.entity_id == "http1_transaction_ipv6") {
                 trace_->http_domains.push_back(
                     std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("observation_domain_id"))
                         ->Value(i));
@@ -12186,7 +12425,7 @@ class RecordingResultConsumer final : public npm::INpmResultConsumerV1, public n
                 auto status = std::static_pointer_cast<arrow::UInt16Array>(rows.GetColumnByName("status_code"));
                 trace_->http_statuses.push_back(status->IsNull(i) ? 0 : status->Value(i));
             }
-            if (entity.entity_id == "tls_handshake") {
+            if (entity.entity_id == "tls_handshake_ipv4" || entity.entity_id == "tls_handshake_ipv6") {
                 trace_->tls_domains.push_back(
                     std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("observation_domain_id"))
                         ->Value(i));
@@ -12291,17 +12530,27 @@ void TestUnifiedConsumerBasicSessionSnapshotsFinalsAndRunIdentity() {
         std::vector<std::string> all_entities;
     };
     const std::vector<Scenario> scenarios = {
-        {true, false, npm::NpmResultEntity::kBasic, {"basic"}, {"basic", "basic"}},
-        {true, true, npm::NpmResultEntity::kBasic, {"basic", "session"}, {"basic", "session", "session", "basic"}},
-        {false, true, npm::NpmResultEntity::kSession, {"session"}, {"session", "session"}},
-        {true, true, npm::NpmResultEntity::kSession, {"basic", "session"}, {"basic", "session", "session", "basic"}},
+        {true, false, npm::NpmResultEntity::kBasic, {"basic_ipv6"}, {"basic_ipv6", "basic_ipv6"}},
+        {true,
+         true,
+         npm::NpmResultEntity::kBasic,
+         {"basic_ipv6", "session_ipv6"},
+         {"basic_ipv6", "session_ipv6", "session_ipv6", "basic_ipv6"}},
+        {false, true, npm::NpmResultEntity::kSession, {"session_ipv6"}, {"session_ipv6", "session_ipv6"}},
+        {true,
+         true,
+         npm::NpmResultEntity::kSession,
+         {"basic_ipv6", "session_ipv6"},
+         {"basic_ipv6", "session_ipv6", "session_ipv6", "basic_ipv6"}},
     };
     for (const auto& scenario : scenarios) {
         ResultConsumerTrace trace;
-        auto config = MakeRuntimeTaskConfig(npm::NpmRunMode::kRealtime);
+        auto config = MakeRuntimeTaskConfig(npm::NpmRunMode::kRealtime, flowsql::packet::AddressFamily::kIPv6);
         config.features.basic_enabled = scenario.basic_enabled;
         config.features.session_enabled = scenario.session_enabled;
         config.features.observing = scenario.observing;
+        config.features.observing_entity =
+            scenario.observing == npm::NpmResultEntity::kSession ? "session_ipv6" : "basic_ipv6";
         config.analysis.output_interval_ns = 100;
         config.analysis.out_of_order_tolerance_ns = 0;
         auto runtime = CreateConsumingRuntime(config, &querier, &trace);
@@ -12329,8 +12578,8 @@ void TestUnifiedConsumerBasicSessionSnapshotsFinalsAndRunIdentity() {
         assert(runtime->DriveRealtimeMaintenance(drive, &output).error == npm::NpmBasicRealtimeMaintenanceError::kNone);
         assert(output->num_rows() == 1);
         const auto observed_schema = scenario.observing == npm::NpmResultEntity::kSession
-                                         ? npm::NpmSessionResultSchema()
-                                         : npm::NpmBasicResultSchema();
+                                         ? npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv6)
+                                         : npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv6);
         assert(output->schema()->Equals(*observed_schema, true));
         assert(trace.entities == scenario.snapshot_entities);
         assert(std::all_of(trace.revisions.begin(), trace.revisions.end(), [](uint64_t value) { return value == 1; }));
@@ -12462,37 +12711,38 @@ void TestResultRouterValidationBudgetAndUnobservedRelease() {
     auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     auto budget = std::make_shared<npm::NpmTaskBudget>(config);
     auto invoke = [](const std::function<int()>& fn) { return fn(); };
-    auto basic = npm::NpmBasicEntityDescriptorV1();
+    auto basic = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
     auto another = basic;
     another.entity_id = "other";
     another.module_id = "other";
     std::shared_ptr<arrow::RecordBatch> rows;
     assert(npm::EncodeNpmBasicResults({MakeBasicEncodingResult(1)}, &rows) == npm::NpmBasicEncodeError::kNone);
     {
-        npm::NpmResultRouter router({basic, another}, "basic", npm::MakeNpmResultContext("task"), budget, {}, invoke);
+        npm::NpmResultRouter router({basic, another}, "basic_ipv4", npm::MakeNpmResultContext("task"), budget, {},
+                                    invoke);
         for (int i = 0; i < 1000; ++i) assert(router.Emit("other", "other", *rows) == 0);
         assert(router.pending_results() == 0 && npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
-        assert(router.Emit("other", "basic", *rows) == EINVAL);
+        assert(router.Emit("other", "basic_ipv4", *rows) == EINVAL);
         assert(router.LastError().find("module_id") != std::string::npos);
     }
     for (int invalid : {0, 1, 2}) {
         ResultConsumerTrace trace;
-        npm::NpmResultRouter router({basic}, "basic", npm::MakeNpmResultContext("task"), budget,
+        npm::NpmResultRouter router({basic}, "basic_ipv4", npm::MakeNpmResultContext("task"), budget,
                                     std::make_unique<RecordingResultConsumer>(&trace), invoke);
         if (invalid == 0) assert(router.Emit("basic", "undeclared", *rows) == EINVAL);
-        if (invalid == 1) assert(router.Emit("basic", "basic", *MakeNpmPacketViewBatch()) == EINVAL);
+        if (invalid == 1) assert(router.Emit("basic", "basic_ipv4", *MakeNpmPacketViewBatch()) == EINVAL);
         if (invalid == 2) {
             auto invalid_rows = rows->ReplaceSchemaMetadata(arrow::key_value_metadata({"bad"}, {"metadata"}));
-            assert(router.Emit("basic", "basic", *invalid_rows) == EINVAL);
+            assert(router.Emit("basic", "basic_ipv4", *invalid_rows) == EINVAL);
         }
         assert(trace.attempts == 0 && npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
     }
     config.max_pending_output_bytes = 1;
     budget = std::make_shared<npm::NpmTaskBudget>(config);
     ResultConsumerTrace trace;
-    npm::NpmResultRouter router({basic}, "basic", npm::MakeNpmResultContext("task"), budget,
+    npm::NpmResultRouter router({basic}, "basic_ipv4", npm::MakeNpmResultContext("task"), budget,
                                 std::make_unique<RecordingResultConsumer>(&trace), invoke);
-    assert(router.Emit("basic", "basic", *rows) == ENOMEM);
+    assert(router.Emit("basic", "basic_ipv4", *rows) == ENOMEM);
     assert(trace.attempts == 0 && npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
 }
 
@@ -12556,7 +12806,7 @@ npm::NpmModuleCatalogV1 DualEntityCatalog(DualEntityProtocolTrace* trace, uint64
         out->plan.module_id = "dual";
         out->plan.input_mask = static_cast<uint8_t>(npm::NpmInputKindV1::kControlPacket);
         for (const char* entity_id : {"dual_left", "dual_right"}) {
-            auto entity = npm::NpmBasicEntityDescriptorV1();
+            auto entity = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
             entity.entity_id = entity_id;
             entity.module_id = "dual";
             entity.revision_semantics = npm::NpmRevisionSemanticsV1::kEvent;
@@ -12576,13 +12826,18 @@ npm::NpmModuleCatalogV1 DualEntityCatalog(DualEntityProtocolTrace* trace, uint64
 void TestProtocolProductionCatalogAndConcurrentDualEntityControlRuntime() {
     const auto& production = npm::ProductionNpmModuleCatalogV1();
     assert(production.size() == 6);
-    assert(production[0].module_id == "basic" && production[0].entity_ids == std::vector<std::string>{"basic"});
-    assert(production[1].module_id == "session" && production[1].entity_ids == std::vector<std::string>{"session"});
-    assert(production[2].module_id == "dns" && production[2].entity_ids == std::vector<std::string>{"dns_transaction"});
+    assert(production[0].module_id == "basic" &&
+           production[0].entity_ids == (std::vector<std::string>{"basic_ipv4", "basic_ipv6"}));
+    assert(production[1].module_id == "session" &&
+           production[1].entity_ids == (std::vector<std::string>{"session_ipv4", "session_ipv6"}));
+    assert(production[2].module_id == "dns" &&
+           production[2].entity_ids == (std::vector<std::string>{"dns_transaction_ipv4", "dns_transaction_ipv6"}));
     assert(production[3].module_id == "http1" &&
-           production[3].entity_ids == std::vector<std::string>{"http1_transaction"});
-    assert(production[4].module_id == "tls" && production[4].entity_ids == std::vector<std::string>{"tls_handshake"});
-    assert(production[5].module_id == "icmp" && production[5].entity_ids == std::vector<std::string>{"icmp_event"});
+           production[3].entity_ids == (std::vector<std::string>{"http1_transaction_ipv4", "http1_transaction_ipv6"}));
+    assert(production[4].module_id == "tls" &&
+           production[4].entity_ids == (std::vector<std::string>{"tls_handshake_ipv4", "tls_handshake_ipv6"}));
+    assert(production[5].module_id == "icmp" &&
+           production[5].entity_ids == (std::vector<std::string>{"icmp_event_ipv4", "icmp_event_ipv6"}));
 
     ContextDictionary first_dictionary, second_dictionary;
     ContextProtocol first_protocol(&first_dictionary), second_protocol(&second_dictionary);
@@ -12724,7 +12979,7 @@ class StreamRuntimeModule final : public npm::INpmProtocolModuleV1, public npm::
             if (event.kind == npm::NpmTcpStreamEventKindV1::kData) {
                 trace_->calls.push_back("data");
                 trace_->data.emplace_back(
-                    context.session->key->observation_domain_id, context.session->session_id, context.direction,
+                    context.session->key->Domain(), context.session->session_id, context.direction,
                     std::string(reinterpret_cast<const char*>(event.bytes.data), event.bytes.size));
                 assert(cursor.Consume(event.bytes.size) == 0);
             } else if (event.kind == npm::NpmTcpStreamEventKindV1::kGap) {
@@ -12756,7 +13011,7 @@ npm::NpmModuleRegistrationV1 StreamRuntimeRegistration(const char* name, StreamR
         output->plan.requires_labeling = true;
         output->plan.requires_tcp_stream = true;
         output->plan.primary_label_ids = std::vector<uint32_t>{1001};
-        auto entity = npm::NpmBasicEntityDescriptorV1();
+        auto entity = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
         entity.entity_id = name + "_event";
         entity.module_id = name;
         output->plan.entities = {entity};
@@ -12786,7 +13041,8 @@ void TestTcpStreamRuntimeAdmissionAndLifecycle() {
         catalog.push_back(StreamRuntimeRegistration("beta", &beta));
         npm::NpmBasicTaskConfig config;
         const std::string json =
-            std::string(R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":")") + features + "\"}";
+            std::string(R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":")") + features +
+            "\",\"observing\":\"basic_ipv4\"}";
         assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config, true, catalog).error ==
                npm::NpmBasicTaskConfigError::kNone);
         config.analysis.result_mode = npm::NpmResultMode::kFinal;
@@ -12857,6 +13113,91 @@ void TestTcpStreamRuntimeAdmissionAndLifecycle() {
     }
 }
 
+void TestMixedFamilyRuntimeOrderingAndCleanup() {
+    StreamRuntimeTrace trace{"alpha"};
+    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    catalog.push_back(StreamRuntimeRegistration("alpha", &trace));
+    ResultConsumerTrace family_results;
+    npm::NpmBasicTaskConfig config;
+    assert(
+        npm::ParseNpmBasicTaskConfig(
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,alpha","observing":"basic_ipv4"})",
+            &config, true, catalog)
+            .error == npm::NpmBasicTaskConfigError::kNone);
+    config.analysis.result_mode = npm::NpmResultMode::kFinal;
+    ContextDictionary dictionary;
+    ContextProtocol protocol(&dictionary);
+    ContextPool pool(&protocol);
+    SinglePoolQuerier querier(&pool);
+    LabelingMatcherStats stats;
+    auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+    std::shared_ptr<arrow::Schema> schema;
+    std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+    assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                            budget, new ProtocolLabelMatcher(&stats), catalog,
+                                            std::make_unique<RecordingResultConsumer>(&family_results))
+               .error == npm::NpmBasicTaskRuntimeError::kNone);
+    const auto a4 = MakeIpv4TcpPacket("1.2.3.4", 50000, "2.0.0.0", 443, {'4'}, kTcpAck, 100);
+    const auto a6 = MakeIpv6TcpPacket("102:304::", 50000, "200::", 443, {'6'}, kTcpAck, 100);
+    const auto b4 = MakeIpv4TcpPacket("1.2.3.4", 50000, "2.0.0.0", 443, {'A'}, kTcpAck, 101);
+    const auto b6 = MakeIpv6TcpPacket("102:304::", 50000, "200::", 443, {'B'}, kTcpAck, 101);
+    std::shared_ptr<arrow::RecordBatch> output;
+    assert(runtime
+               ->ProcessOfflineBatch(
+                   MakeEncodedPacketBatch({MakeBatchPacketRecord(a4, 1, 1, 1), MakeBatchPacketRecord(a6, 1, 2, 2),
+                                           MakeBatchPacketRecord(b4, 1, 3, 3), MakeBatchPacketRecord(b6, 1, 4, 4)}),
+                   &output)
+               .error == npm::NpmBasicOfflineBatchError::kNone);
+    assert(trace.data.size() == 4 && std::get<3>(trace.data[0]) == "4" && std::get<3>(trace.data[1]) == "6" &&
+           std::get<3>(trace.data[2]) == "A" && std::get<3>(trace.data[3]) == "B");
+    assert(std::get<1>(trace.data[0]) == std::get<1>(trace.data[2]) &&
+           std::get<1>(trace.data[1]) == std::get<1>(trace.data[3]) &&
+           std::get<1>(trace.data[0]) != std::get<1>(trace.data[1]));
+    assert(runtime->Sessions().size() == 2 && budget->Usage().input_batch_bytes == 0);
+    assert(runtime->FlushOffline(5, &output).error == npm::NpmEofFlushError::kNone);
+    assert(trace.module_ends == 2 && trace.stream_ends == 2 && trace.finishes == 1);
+    const auto ids = std::static_pointer_cast<arrow::UInt64Array>(output->GetColumnByName("session_id"));
+    assert(output->num_rows() == 1 && ids->Value(0) == std::get<1>(trace.data[0]));
+    assert((family_results.entities == std::vector<std::string>{"basic_ipv4", "basic_ipv6"}));
+    output.reset();
+    assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+    assert(runtime->FlushOffline(6, &output).error == npm::NpmEofFlushError::kAlreadyFlushed);
+
+    for (bool fail : {false, true}) {
+        auto plain = MakeRuntimeTaskConfig();
+        auto engine = CreateRuntimeForTest(plain, &querier);
+        auto owned_budget = engine->Budget();
+        assert(engine
+                   ->ProcessOfflineBatch(
+                       MakeEncodedPacketBatch({MakeBatchPacketRecord(a4, 0, 1, 1), MakeBatchPacketRecord(a6, 0, 2, 2)}),
+                       &output)
+                   .error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(engine->Sessions().size() == 2);
+        if (fail) {
+            assert(engine->ProcessOfflineBatch(MakeEncodedPacketBatch({MakeBatchPacketRecord(a6, 99, 3, 3)}), &output)
+                       .error == npm::NpmBasicOfflineBatchError::kBatchProcessError);
+            assert(engine->State() == npm::NpmEofFlushState::kFailed);
+        } else
+            engine->Cancel();
+        output.reset();
+        assert(npm::NpmTrackedBudgetBytes(owned_budget->Usage()) == 0);
+    }
+    for (bool ipv6 : {false, true}) {
+        PeriodicRuntimeFixture periodic(false, false, true, npm::NpmRunMode::kRealtime, ipv6);
+        const auto udp6 = MakeIpv6UdpPacket("2001:db8::1", 50001, "2001:db8::2", 53, {});
+        assert(periodic.Packet(a4, 1).error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(periodic.Packet(udp6, 2).error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(periodic.Drive(kPeriodicTestInterval).error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+        assert(periodic.output->num_rows() == 1);
+        assert(PeriodicUInt(periodic.output, "interval_packets_ab", 0) == 1);
+        assert(periodic.Packet(b4, kPeriodicTestInterval + 1).error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(periodic.Drive(2 * kPeriodicTestInterval).error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+        assert(periodic.output->num_rows() == 1);
+        assert(PeriodicUInt(periodic.output, "interval_packets_ab", 0) == (ipv6 ? 0 : 1));
+        periodic.CancelAndCheck();
+    }
+}
+
 void TestTcpStreamRuntimeDeadlineAndCancel() {
     StreamRuntimeTrace trace{"alpha"};
     auto catalog = npm::ProductionNpmModuleCatalogV1();
@@ -12864,7 +13205,7 @@ void TestTcpStreamRuntimeDeadlineAndCancel() {
     npm::NpmBasicTaskConfig config;
     assert(
         npm::ParseNpmBasicTaskConfig(
-            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,alpha","parameters":"{\"schema_version\":1,\"core\":{\"tcp_stream\":{\"gap_timeout_ns\":5}}}"})",
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,alpha","parameters":"{\"schema_version\":1,\"core\":{\"tcp_stream\":{\"gap_timeout_ns\":5}}}","observing":"basic_ipv4"})",
             &config, true, catalog)
             .error == npm::NpmBasicTaskConfigError::kNone);
     config.analysis.out_of_order_tolerance_ns = 0;
@@ -12903,10 +13244,11 @@ void TestTcpStreamRuntimeFailureDiagnostics() {
     auto catalog = npm::ProductionNpmModuleCatalogV1();
     catalog.push_back(StreamRuntimeRegistration("alpha", &trace));
     npm::NpmBasicTaskConfig config;
-    assert(npm::ParseNpmBasicTaskConfig(
-               R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,alpha"})", &config,
-               true, catalog)
-               .error == npm::NpmBasicTaskConfigError::kNone);
+    assert(
+        npm::ParseNpmBasicTaskConfig(
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,alpha","observing":"basic_ipv4"})",
+            &config, true, catalog)
+            .error == npm::NpmBasicTaskConfigError::kNone);
     config.tcp_stream.max_buffered_bytes_per_direction = 65536;
     ContextDictionary dictionary;
     ContextProtocol protocol(&dictionary);
@@ -12944,10 +13286,11 @@ void TestTcpStreamRuntimeCancelInsideCallback() {
     catalog.push_back(StreamRuntimeRegistration("alpha", &alpha));
     catalog.push_back(StreamRuntimeRegistration("beta", &beta));
     npm::NpmBasicTaskConfig config;
-    assert(npm::ParseNpmBasicTaskConfig(
-               R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,alpha,beta"})",
-               &config, true, catalog)
-               .error == npm::NpmBasicTaskConfigError::kNone);
+    assert(
+        npm::ParseNpmBasicTaskConfig(
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,alpha,beta","observing":"basic_ipv4"})",
+            &config, true, catalog)
+            .error == npm::NpmBasicTaskConfigError::kNone);
     ContextDictionary dictionary;
     ContextProtocol protocol(&dictionary);
     ContextPool pool(&protocol);
@@ -13034,8 +13377,8 @@ class StreamResultConsumer final : public npm::INpmResultConsumerV1 {
         assert(trace_->run_id == context.run_id);
         trace_->entities.push_back(entity.entity_id);
         if (entity.entity_id == "stream_event") AppendStreamEventRows(rows, &trace_->rows);
-        if (entity.entity_id == "basic") trace_->basic_rows += rows.num_rows();
-        if (entity.entity_id == "session") trace_->session_rows += rows.num_rows();
+        if (entity.entity_id.rfind("basic_ipv", 0) == 0) trace_->basic_rows += rows.num_rows();
+        if (entity.entity_id.rfind("session_ipv", 0) == 0) trace_->session_rows += rows.num_rows();
         return 0;
     }
     int Finish() override {
@@ -13140,7 +13483,7 @@ StreamResultOutcome RunStreamResultBatches(bool split_batches, bool observe_stre
     npm::NpmBasicTaskConfig config;
     const std::string json = std::string(R"({"input_namespace":"capture","source_domains":"1:77",)") +
                              R"("features":"basic,session,labeling,stream_probe","observing":")" +
-                             (observe_stream ? "stream_event" : "session") + R"("})";
+                             (observe_stream ? "stream_event" : "session_ipv4") + R"("})";
     assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config, true, catalog).error ==
            npm::NpmBasicTaskConfigError::kNone);
     config.analysis.out_of_order_tolerance_ns = 0;
@@ -13156,7 +13499,9 @@ StreamResultOutcome RunStreamResultBatches(bool split_batches, bool observe_stre
     assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
                                             budget, new ProtocolLabelMatcher(&labels), catalog, std::move(consumer))
                .error == npm::NpmBasicTaskRuntimeError::kNone);
-    assert(schema->Equals(*(observe_stream ? StreamEventSchema() : npm::NpmSessionResultSchema(true)), true));
+    assert(schema->Equals(
+        *(observe_stream ? StreamEventSchema() : npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4)),
+        true));
     auto first = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {'A', 'B', 'C'}, kTcpAck, 100);
     auto late = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {'F', 'G'}, kTcpAck, 105);
     auto reset = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443, {}, kTcpRst, 107);
@@ -13354,7 +13699,7 @@ npm::NpmModuleCatalogV1 TlsTrackerCatalog(TlsTrackerTrace* trace) {
     catalog.erase(catalog.begin() + 4);
     npm::NpmModuleRegistrationV1 registration;
     registration.module_id = "tls";
-    registration.entity_ids = {"tls_handshake"};
+    registration.entity_ids = {"tls_handshake_ipv4", "tls_handshake_ipv6"};
     registration.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view json,
                                    npm::NpmPreparedModuleV1* output) {
         npm::NpmTlsConfigV1 config;
@@ -13379,7 +13724,7 @@ npm::NpmModuleCatalogV1 TlsStreamCatalog(TlsStreamTrace* trace) {
     catalog.erase(catalog.begin() + 4);
     npm::NpmModuleRegistrationV1 registration;
     registration.module_id = "tls";
-    registration.entity_ids = {"tls_handshake"};
+    registration.entity_ids = {"tls_handshake_ipv4", "tls_handshake_ipv6"};
     registration.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view json,
                                    npm::NpmPreparedModuleV1* output) {
         npm::NpmTlsConfigV1 tls;
@@ -13447,7 +13792,7 @@ std::vector<npm::NpmTlsFramedEventV1> RunTlsStreamBatches(bool split_batches) {
     npm::NpmBasicTaskConfig config;
     assert(
         npm::ParseNpmBasicTaskConfig(
-            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,tls","observing":"basic","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[1001]}}"})",
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,tls","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[1001]}}"})",
             &config, true, catalog)
             .error == npm::NpmBasicTaskConfigError::kNone);
     config.analysis.out_of_order_tolerance_ns = 0;
@@ -13472,7 +13817,7 @@ std::vector<npm::NpmTlsFramedEventV1> RunTlsStreamBatches(bool split_batches) {
                        : MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.1", 443,
                                            std::vector<uint8_t>(bytes.begin(), bytes.end()), flags, sequence);
     };
-    std::vector<flowsql::packet::PacketRecord> records = {
+    std::vector<flowsql::testing::PacketRecord> records = {
         MakeBatchPacketRecord(packet(false, "", kTcpSyn, 100), 1, 10, 1),
         MakeBatchPacketRecord(packet(true, "", kTcpSyn | kTcpAck, 500), 1, 11, 2),
         MakeBatchPacketRecord(packet(false, client.substr(0, client_split), kTcpAck, 101), 1, 12, 3),
@@ -13531,7 +13876,7 @@ void TestTlsT2RuntimeFinalDrain() {
     npm::NpmBasicTaskConfig config;
     assert(
         npm::ParseNpmBasicTaskConfig(
-            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,tls","observing":"basic","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[1001]}}"})",
+            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,tls","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"tls\":{\"primary_label_ids\":[1001]}}"})",
             &config, true, catalog)
             .error == npm::NpmBasicTaskConfigError::kNone);
     config.analysis.out_of_order_tolerance_ns = 0;
@@ -13590,8 +13935,8 @@ void TestDnsT3RuntimeRouting() {
         const char* observing;
     };
     for (const auto scenario :
-         {Scenario{"dns,labeling", "dns_transaction"}, Scenario{"labeling,dns,basic", "dns_transaction"},
-          Scenario{"basic,dns,labeling", "basic"}, Scenario{"basic,session,dns,labeling", "session"}}) {
+         {Scenario{"dns,labeling", "dns_transaction_ipv6"}, Scenario{"labeling,dns,basic", "dns_transaction_ipv6"},
+          Scenario{"basic,dns,labeling", "basic_ipv6"}, Scenario{"basic,session,dns,labeling", "session_ipv6"}}) {
         ContextDictionary dictionary;
         ContextProtocol protocol(&dictionary);
         ContextPool pool(&protocol);
@@ -13619,7 +13964,7 @@ void TestDnsT3RuntimeRouting() {
         assert(runtime->ProcessOfflineBatch(remaining, &output).error == npm::NpmBasicOfflineBatchError::kNone);
         assert(output && output->schema()->Equals(*schema, true));
         const int64_t foreground_dns =
-            std::string_view(scenario.observing) == "dns_transaction" ? output->num_rows() : 0;
+            std::string_view(scenario.observing) == "dns_transaction_ipv6" ? output->num_rows() : 0;
         output.reset();
         assert(runtime->FlushOffline(500, &output).error == npm::NpmEofFlushError::kNone);
         assert(output && output->schema()->Equals(*schema, true));
@@ -13627,10 +13972,10 @@ void TestDnsT3RuntimeRouting() {
         assert(trace.dns_ids == (std::vector<uint16_t>{9, 9}));
         assert(trace.dns_outcomes == (std::vector<std::string>{"matched", "matched"}));
         if (std::string_view(scenario.features).find("basic") != std::string_view::npos)
-            assert(std::find(trace.entities.begin(), trace.entities.end(), "basic") != trace.entities.end());
+            assert(std::find(trace.entities.begin(), trace.entities.end(), "basic_ipv6") != trace.entities.end());
         if (std::string_view(scenario.features).find("session") != std::string_view::npos)
-            assert(std::find(trace.entities.begin(), trace.entities.end(), "session") != trace.entities.end());
-        assert(foreground_dns == (std::string_view(scenario.observing) == "dns_transaction" ? 2 : 0));
+            assert(std::find(trace.entities.begin(), trace.entities.end(), "session_ipv6") != trace.entities.end());
+        assert(foreground_dns == (std::string_view(scenario.observing) == "dns_transaction_ipv6" ? 2 : 0));
         assert(trace.finishes == 1);
         output.reset();
         runtime.reset();
@@ -13647,7 +13992,7 @@ void TestDnsT3RuntimeRouting() {
         npm::NpmBasicTaskConfig config;
         assert(
             npm::ParseNpmBasicTaskConfig(
-                R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":"dns,labeling","observing":"dns_transaction"})",
+                R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":"dns,labeling","observing":"dns_transaction_ipv6"})",
                 &config, true, catalog)
                 .error == npm::NpmBasicTaskConfigError::kNone);
         config.parameters_json = R"({"schema_version":1,"dns":{"primary_label_ids":[1001]}})";
@@ -13672,7 +14017,7 @@ void TestHttp1T3RuntimeRouting() {
     const auto& catalog = npm::ProductionNpmModuleCatalogV1();
     const std::string request = "GET /a HTTP/1.1\r\nHost: example.test\r\n\r\n";
     const std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-    std::vector<flowsql::packet::PacketRecord> packets;
+    std::vector<flowsql::testing::PacketRecord> packets;
     uint64_t packet_id = 1;
     for (uint32_t source : {1U, 2U}) {
         const auto syn = MakeIpv4TcpPacket("192.0.2.1", 50000, "198.51.100.2", 443, {}, kTcpSyn, 100);
@@ -13701,9 +14046,9 @@ void TestHttp1T3RuntimeRouting() {
         const char* observing;
     };
     for (const auto scenario :
-         {Scenario{"http1,labeling", "http1_transaction"}, Scenario{"labeling,http1,basic", "basic"},
-          Scenario{"basic,session,http1,labeling", "session"},
-          Scenario{"dns,basic,labeling,http1", "dns_transaction"}}) {
+         {Scenario{"http1,labeling", "http1_transaction_ipv4"}, Scenario{"labeling,http1,basic", "basic_ipv4"},
+          Scenario{"basic,session,http1,labeling", "session_ipv4"},
+          Scenario{"dns,basic,labeling,http1", "dns_transaction_ipv6"}}) {
         ContextDictionary dictionary;
         ContextProtocol protocol(&dictionary);
         ContextPool pool(&protocol);
@@ -13728,22 +14073,23 @@ void TestHttp1T3RuntimeRouting() {
         std::shared_ptr<arrow::RecordBatch> output;
         assert(runtime->ProcessOfflineBatch(batch, &output).error == npm::NpmBasicOfflineBatchError::kNone);
         assert(output && output->schema()->Equals(*schema, true));
-        int64_t foreground_http = std::string_view(scenario.observing) == "http1_transaction" ? output->num_rows() : 0;
+        int64_t foreground_http =
+            std::string_view(scenario.observing) == "http1_transaction_ipv4" ? output->num_rows() : 0;
         output.reset();
         assert(runtime->FlushOffline(800, &output).error == npm::NpmEofFlushError::kNone);
-        if (std::string_view(scenario.observing) == "http1_transaction") foreground_http += output->num_rows();
+        if (std::string_view(scenario.observing) == "http1_transaction_ipv4") foreground_http += output->num_rows();
         assert(trace.http_domains == (std::vector<uint64_t>{77, 78}));
         assert(trace.http_outcomes == (std::vector<std::string>{"matched", "matched"}));
         assert(trace.http_statuses == (std::vector<uint16_t>{200, 200}));
-        assert(foreground_http == (std::string_view(scenario.observing) == "http1_transaction" ? 2 : 0));
+        assert(foreground_http == (std::string_view(scenario.observing) == "http1_transaction_ipv4" ? 2 : 0));
         if (std::string_view(scenario.features).find("dns") != std::string_view::npos) {
             assert(trace.dns_domains == (std::vector<uint64_t>{77}));
             assert(trace.dns_outcomes == (std::vector<std::string>{"matched"}));
         }
         if (std::string_view(scenario.features).find("basic") != std::string_view::npos)
-            assert(std::find(trace.entities.begin(), trace.entities.end(), "basic") != trace.entities.end());
+            assert(std::find(trace.entities.begin(), trace.entities.end(), "basic_ipv4") != trace.entities.end());
         if (std::string_view(scenario.features).find("session") != std::string_view::npos)
-            assert(std::find(trace.entities.begin(), trace.entities.end(), "session") != trace.entities.end());
+            assert(std::find(trace.entities.begin(), trace.entities.end(), "session_ipv4") != trace.entities.end());
         assert(trace.finishes == 1);
         output.reset();
         runtime.reset();
@@ -13760,7 +14106,7 @@ void TestHttp1T3RuntimeRouting() {
         npm::NpmBasicTaskConfig config;
         assert(
             npm::ParseNpmBasicTaskConfig(
-                R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":"http1,labeling","observing":"http1_transaction"})",
+                R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":"http1,labeling","observing":"http1_transaction_ipv4"})",
                 &config, true, catalog)
                 .error == npm::NpmBasicTaskConfigError::kNone);
         config.parameters_json = R"({"schema_version":1,"http1":{"primary_label_ids":[1001]}})";
@@ -13783,7 +14129,7 @@ void TestHttp1T3RuntimeRouting() {
 
 void TestTlsT3RuntimeRouting() {
     const auto catalog = TlsResultCatalog();
-    std::vector<flowsql::packet::PacketRecord> packets;
+    std::vector<flowsql::testing::PacketRecord> packets;
     uint64_t packet_id = 1;
     const auto client = TlsTestHello(false);
     const auto server = TlsTestHello(true);
@@ -13829,10 +14175,11 @@ void TestTlsT3RuntimeRouting() {
         const char* features;
         const char* observing;
     };
-    for (const auto scenario : {Scenario{"tls,labeling", "tls_handshake"}, Scenario{"labeling,tls,basic", "basic"},
-                                Scenario{"basic,session,dns,http1,tls,labeling", "session"},
-                                Scenario{"labeling,http1,tls,dns,basic", "dns_transaction"},
-                                Scenario{"http1,labeling,tls", "http1_transaction"}}) {
+    for (const auto scenario :
+         {Scenario{"tls,labeling", "tls_handshake_ipv4"}, Scenario{"labeling,tls,basic", "basic_ipv4"},
+          Scenario{"basic,session,dns,http1,tls,labeling", "session_ipv4"},
+          Scenario{"labeling,http1,tls,dns,basic", "dns_transaction_ipv6"},
+          Scenario{"http1,labeling,tls", "http1_transaction_ipv4"}}) {
         ContextDictionary dictionary;
         ContextProtocol protocol(&dictionary);
         ContextPool pool(&protocol);
@@ -13857,18 +14204,18 @@ void TestTlsT3RuntimeRouting() {
         std::shared_ptr<arrow::RecordBatch> output;
         assert(runtime->ProcessOfflineBatch(batch, &output).error == npm::NpmBasicOfflineBatchError::kNone);
         assert(output && output->schema()->Equals(*schema, true));
-        int64_t foreground_tls = std::string_view(scenario.observing) == "tls_handshake" ? output->num_rows() : 0;
+        int64_t foreground_tls = std::string_view(scenario.observing) == "tls_handshake_ipv4" ? output->num_rows() : 0;
         output.reset();
         assert(runtime->FlushOffline(800, &output).error == npm::NpmEofFlushError::kNone);
-        if (std::string_view(scenario.observing) == "tls_handshake") foreground_tls += output->num_rows();
+        if (std::string_view(scenario.observing) == "tls_handshake_ipv4") foreground_tls += output->num_rows();
         assert(trace.tls_domains == (std::vector<uint64_t>{77, 78}));
         assert(trace.tls_outcomes == (std::vector<std::string>{"server_hello_observed", "server_hello_observed"}));
         assert(trace.tls_ids.size() == 2 && trace.tls_ids[0] != 0 && trace.tls_ids[0] != trace.tls_ids[1]);
-        assert(foreground_tls == (std::string_view(scenario.observing) == "tls_handshake" ? 2 : 0));
+        assert(foreground_tls == (std::string_view(scenario.observing) == "tls_handshake_ipv4" ? 2 : 0));
         if (std::string_view(scenario.features).find("basic") != std::string_view::npos)
-            assert(std::find(trace.entities.begin(), trace.entities.end(), "basic") != trace.entities.end());
+            assert(std::find(trace.entities.begin(), trace.entities.end(), "basic_ipv4") != trace.entities.end());
         if (std::string_view(scenario.features).find("session") != std::string_view::npos)
-            assert(std::find(trace.entities.begin(), trace.entities.end(), "session") != trace.entities.end());
+            assert(std::find(trace.entities.begin(), trace.entities.end(), "session_ipv4") != trace.entities.end());
         if (std::string_view(scenario.features).find("dns") != std::string_view::npos)
             assert(trace.dns_domains == (std::vector<uint64_t>{77}));
         if (std::string_view(scenario.features).find("http1") != std::string_view::npos)
@@ -13889,7 +14236,7 @@ void TestTlsT3RuntimeRouting() {
         npm::NpmBasicTaskConfig config;
         assert(
             npm::ParseNpmBasicTaskConfig(
-                R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":"tls,labeling","observing":"tls_handshake"})",
+                R"({"input_namespace":"capture","source_domains":"1:77;2:78","features":"tls,labeling","observing":"tls_handshake_ipv4"})",
                 &config, true, catalog)
                 .error == npm::NpmBasicTaskConfigError::kNone);
         config.parameters_json = R"({"schema_version":1,"tls":{"primary_label_ids":[1001]}})";
@@ -13928,6 +14275,7 @@ void TestOfflineDeadlinesBeforePacketAdmission() {
                             config.analysis.udp_idle_timeout_ns = second;
                             config.analysis.out_of_order_tolerance_ns = tolerance;
                             config.features.labeling_enabled = labeling;
+                            config.features.observing_entity = udp ? "basic_ipv6" : "basic_ipv4";
                             LabelingMatcherStats labels;
                             std::shared_ptr<arrow::Schema> schema;
                             std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
@@ -13940,7 +14288,7 @@ void TestOfflineDeadlinesBeforePacketAdmission() {
                                     : MakeIpv4TcpPacket("192.0.2.1", 40000, "192.0.2.2", 443, {}, kTcpAck, 100);
                             auto other = MakeIpv4TcpPacket("192.0.2.3", 40001, "192.0.2.4", 80, {}, kTcpAck, 100);
                             const int64_t next = 2 * second + tolerance + delta;
-                            std::vector<flowsql::packet::PacketRecord> records{
+                            std::vector<flowsql::testing::PacketRecord> records{
                                 MakeBatchPacketRecord(target, 0, second, 1)};
                             if (background) records.push_back(MakeBatchPacketRecord(other, 0, next, 2));
                             records.push_back(MakeBatchPacketRecord(target, 0, next, 3));
@@ -14004,7 +14352,7 @@ void TestOfflineIcmpDeadlinesBeforeReply() {
                         npm::NpmBasicTaskConfig config;
                         assert(
                             npm::ParseNpmBasicTaskConfig(
-                                R"({"input_namespace":"capture","source_domains":"1:77","features":"icmp","observing":"icmp_event","out_of_order_tolerance_ns":"0"})",
+                                R"({"input_namespace":"capture","source_domains":"1:77","features":"icmp","observing":"icmp_event_ipv4","out_of_order_tolerance_ns":"0"})",
                                 &config)
                                 .error == npm::NpmBasicTaskConfigError::kNone);
                         config.analysis.out_of_order_tolerance_ns = tolerance;
@@ -14027,10 +14375,10 @@ void TestOfflineIcmpDeadlinesBeforeReply() {
                         reply.bytes[20] = 0;
                         auto* ip = reinterpret_cast<flowsql::Ipv4Header*>(reply.bytes.data());
                         std::swap(ip->src_addr, ip->dst_addr);
-                        std::swap(reply.layer.src_ip, reply.layer.dst_ip);
+                        reply.layer.SwapEndpoints();
                         auto other = MakeIpv4TcpPacket("192.0.2.3", 40000, "192.0.2.4", 80, {}, kTcpAck, 100);
                         const int64_t next = 6 * second + tolerance + delta;
-                        std::vector<flowsql::packet::PacketRecord> records{
+                        std::vector<flowsql::testing::PacketRecord> records{
                             MakeBatchPacketRecord(request, 1, second, 1)};
                         if (background) records.push_back(MakeBatchPacketRecord(other, 1, next, 2));
                         records.push_back(MakeBatchPacketRecord(reply, 1, next, 3));
@@ -14066,8 +14414,8 @@ void TestResultRouterPreservesSlicedNullableColumns() {
     auto config = MakeRuntimeTaskConfig();
     auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
     auto invoke = [](const std::function<int()>& fn) { return fn(); };
-    npm::NpmResultRouter router({npm::NpmBasicEntityDescriptorV1()}, "basic", npm::MakeNpmResultContext("slice"),
-                                budget, {}, invoke);
+    npm::NpmResultRouter router({npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4)}, "basic_ipv4",
+                                npm::MakeNpmResultContext("slice"), budget, {}, invoke);
     auto first = MakeBasicEncodingResult(1);
     auto second = MakeBasicEncodingResult(2);
     second.protocol_status = npm::NpmProtocolStatus::kUnknown;
@@ -14076,8 +14424,8 @@ void TestResultRouterPreservesSlicedNullableColumns() {
     std::shared_ptr<arrow::RecordBatch> rows, expected, output;
     assert(npm::EncodeNpmBasicResults({first, second}, &rows) == npm::NpmBasicEncodeError::kNone);
     assert(npm::EncodeNpmBasicResults({second, first}, &expected) == npm::NpmBasicEncodeError::kNone);
-    assert(router.Emit("basic", "basic", *rows->Slice(1, 1)) == 0);
-    assert(router.Emit("basic", "basic", *rows->Slice(0, 1)) == 0);
+    assert(router.Emit("basic", "basic_ipv4", *rows->Slice(1, 1)) == 0);
+    assert(router.Emit("basic", "basic_ipv4", *rows->Slice(0, 1)) == 0);
     rows.reset();
     assert(router.Drain(&output) == 0 && output->Equals(*expected));
     output.reset();
@@ -14193,57 +14541,325 @@ void TestLargeResultDeliveryWithinDefaultBudget() {
     ContextProtocol protocol(&dictionary);
     ContextPool pool(&protocol);
     SinglePoolQuerier querier(&pool);
-    // EOF final, EOF periodic, normal realtime terminal Flush, and a common periodic deadline.
-    for (int scenario = 0; scenario < 4; ++scenario) {
-        const bool realtime = scenario == 2;
-        auto config = MakeRuntimeTaskConfig(realtime ? npm::NpmRunMode::kRealtime : npm::NpmRunMode::kOffline);
-        if (scenario != 0) config.analysis.result_mode = npm::NpmResultMode::kPeriodicSnapshot;
-        config.analysis.out_of_order_tolerance_ns = 0;
-        auto runtime =
-            realtime ? CreateRealtimeRuntimeForTest(config, &querier) : CreateRuntimeForTest(config, &querier);
-        auto budget = std::static_pointer_cast<npm::NpmTaskBudget>(runtime->Budget());
-        std::shared_ptr<arrow::RecordBatch> output;
-        for (int begin = 0; begin < count; begin += 512) {
-            std::vector<flowsql::packet::PacketRecord> records;
-            for (int index = begin; index < std::min(begin + 512, count); ++index) {
-                auto packet = MakeIpv4TcpPacket("192.0.2.1", index + 1, "192.0.2.2", 80, {}, kTcpAck, 100);
-                records.push_back(MakeBatchPacketRecord(packet, 0, second, index + 1));
+    // Pure IPv4/IPv6 and both foreground entities of the same 50/50 mixed input.
+    for (int workload = 0; workload < 4; ++workload) {
+        const bool mixed = workload >= 2;
+        const bool observing_ipv6 = workload == 1 || workload == 3;
+        const int expected_count = mixed ? count / 2 : count;
+        const int first_session_id = mixed && observing_ipv6 ? 2 : 1;
+        const int session_stride = mixed ? 2 : 1;
+        const int last_session_id = first_session_id + (expected_count - 1) * session_stride;
+        // EOF final, EOF periodic, normal realtime terminal Flush, and a common periodic deadline.
+        for (int scenario = 0; scenario < 4; ++scenario) {
+            const bool realtime = scenario == 2;
+            auto config = MakeRuntimeTaskConfig(
+                realtime ? npm::NpmRunMode::kRealtime : npm::NpmRunMode::kOffline,
+                observing_ipv6 ? flowsql::packet::AddressFamily::kIPv6 : flowsql::packet::AddressFamily::kIPv4);
+            if (scenario != 0) config.analysis.result_mode = npm::NpmResultMode::kPeriodicSnapshot;
+            config.analysis.out_of_order_tolerance_ns = 0;
+            auto runtime =
+                realtime ? CreateRealtimeRuntimeForTest(config, &querier) : CreateRuntimeForTest(config, &querier);
+            auto budget = std::static_pointer_cast<npm::NpmTaskBudget>(runtime->Budget());
+            std::shared_ptr<arrow::RecordBatch> output;
+            for (int begin = 0; begin < count; begin += 512) {
+                std::vector<flowsql::testing::PacketRecord> records;
+                for (int index = begin; index < std::min(begin + 512, count); ++index) {
+                    const bool ipv6 = mixed ? index % 2 != 0 : observing_ipv6;
+                    auto packet = ipv6
+                                      ? MakeIpv6TcpPacket("2001:db8::1", index + 1, "2001:db8::2", 80, {}, kTcpAck, 100)
+                                      : MakeIpv4TcpPacket("192.0.2.1", index + 1, "192.0.2.2", 80, {}, kTcpAck, 100);
+                    records.push_back(MakeBatchPacketRecord(packet, 0, second, index + 1));
+                }
+                output.reset();
+                assert(runtime->ProcessOfflineBatch(MakeEncodedPacketBatch(records), &output).error ==
+                       npm::NpmBasicOfflineBatchError::kNone);
+                assert(output && output->num_rows() == 0);
             }
             output.reset();
-            assert(runtime->ProcessOfflineBatch(MakeEncodedPacketBatch(records), &output).error ==
+            if (scenario == 3) {
+                auto other = observing_ipv6
+                                 ? MakeIpv6TcpPacket("2001:db8::3", 40000, "2001:db8::4", 80, {}, kTcpAck, 100)
+                                 : MakeIpv4TcpPacket("192.0.2.3", 40000, "192.0.2.4", 80, {}, kTcpAck, 100);
+                assert(runtime
+                           ->ProcessOfflineBatch(MakeEncodedPacketBatch({MakeBatchPacketRecord(
+                                                     other, 0, config.analysis.output_interval_ns, count + 1)}),
+                                                 &output)
+                           .error == npm::NpmBasicOfflineBatchError::kNone);
+            } else {
+                assert(runtime->FlushOffline(second, &output).error == npm::NpmEofFlushError::kNone);
+            }
+            assert(output && output->num_rows() == expected_count && output->ValidateFull().ok());
+            for (int row = 0; row < expected_count; ++row) {
+                assert(PeriodicUInt(output, "session_id", row) ==
+                       static_cast<uint64_t>(first_session_id + row * session_stride));
+                assert(PeriodicUInt(output, "revision", row) == 1);
+                assert(PeriodicUInt(output, "packets_ab", row) == 1);
+                assert(PeriodicUInt(output, "wire_bytes_total", row) == (observing_ipv6 ? 60 : 40));
+                assert(PeriodicFlag(output, "is_final", row) == (scenario != 3));
+            }
+            assert(budget->HighWaterMarks().pending_output_bytes < config.analysis.max_pending_output_bytes);
+            printf("large result workload=%d scenario=%d active=%d rows=%d pending_peak=%lu\n", workload, scenario,
+                   count, expected_count, budget->HighWaterMarks().pending_output_bytes);
+            auto retained = output->GetColumnByName("session_id")->Slice(expected_count - 1, 1);
+            output.reset();
+            if (scenario == 3) runtime->Cancel();
+            runtime.reset();
+            assert(budget->Usage().session_state_bytes == 0 && budget->Usage().module_state_bytes == 0);
+            assert(budget->Usage().pending_output_bytes > 0);
+            assert(std::static_pointer_cast<arrow::UInt64Array>(retained)->Value(0) == last_session_id);
+            retained.reset();
+            assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+        }
+    }
+}
+
+void TestFamilyProtocolRuntime() {
+    for (const std::string module : {"dns", "http1", "tls"}) {
+        const std::string entity = module == "dns"     ? "dns_transaction"
+                                   : module == "http1" ? "http1_transaction"
+                                                       : "tls_handshake";
+        std::vector<flowsql::testing::PacketRecord> packets;
+        uint64_t packet_id = 1;
+        int64_t time = 100;
+        for (bool ipv6 : {false, true}) {
+            const char* a = ipv6 ? "2001:db8::ff00:1" : "1.2.3.4";
+            const char* b = ipv6 ? "ffff::ffff" : "255.255.255.255";
+            if (module == "dns") {
+                std::vector<uint8_t> query = {
+                    0, 9, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 'a', 0, 0, static_cast<uint8_t>(ipv6 ? 1 : 28), 0, 1};
+                auto response = query;
+                response[2] = 0x80;
+                const auto req =
+                    ipv6 ? MakeIpv6UdpPacket(a, 53000, b, 443, query) : MakeIpv4UdpPacket(a, 53000, b, 443, query);
+                const auto resp = ipv6 ? MakeIpv6UdpPacket(b, 443, a, 53000, response)
+                                       : MakeIpv4UdpPacket(b, 443, a, 53000, response);
+                packets.push_back(MakeBatchPacketRecord(req, 1, time++, packet_id++));
+                packets.push_back(MakeBatchPacketRecord(resp, 1, time++, packet_id++));
+            } else {
+                const auto request = module == "http1" ? std::string("GET /a HTTP/1.1\r\nHost: example.test\r\n\r\n")
+                                                       : TlsTestHello(false);
+                const auto response = module == "http1" ? std::string("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                                                        : TlsTestHello(true);
+                const auto tcp = [&](const char* src, uint16_t sport, const char* dst, uint16_t dport,
+                                     const std::vector<uint8_t>& bytes, uint8_t flags, uint32_t sequence,
+                                     uint32_t ack) {
+                    return ipv6 ? MakeIpv6TcpPacket(src, sport, dst, dport, bytes, flags, sequence, ack)
+                                : MakeIpv4TcpPacket(src, sport, dst, dport, bytes, flags, sequence, ack);
+                };
+                packets.push_back(
+                    MakeBatchPacketRecord(tcp(a, 50000, b, 443, {}, kTcpSyn, 100, 0), 1, time++, packet_id++));
+                packets.push_back(MakeBatchPacketRecord(tcp(b, 443, a, 50000, {}, kTcpSyn | kTcpAck, 500, 101), 1,
+                                                        time++, packet_id++));
+                packets.push_back(
+                    MakeBatchPacketRecord(tcp(a, 50000, b, 443, {request.begin(), request.end()}, kTcpAck, 101, 501), 1,
+                                          time++, packet_id++));
+                packets.push_back(MakeBatchPacketRecord(
+                    tcp(b, 443, a, 50000, {response.begin(), response.end()}, kTcpAck, 501, 101 + request.size()), 1,
+                    time++, packet_id++));
+            }
+        }
+        for (const std::string suffix : {"_ipv4", "_ipv6"}) {
+            ContextDictionary dictionary;
+            ContextProtocol protocol(&dictionary);
+            ContextPool pool(&protocol);
+            SinglePoolQuerier querier(&pool);
+            LabelingMatcherStats labels;
+            ResultConsumerTrace trace;
+            npm::NpmBasicTaskConfig config;
+            const std::string json =
+                std::string(
+                    R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,session,labeling,)") +
+                module + R"(","observing":")" + entity + suffix + R"("})";
+            assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config, true).error ==
+                   npm::NpmBasicTaskConfigError::kNone);
+            config.analysis.result_mode = npm::NpmResultMode::kFinal;
+            config.parameters_json =
+                std::string(R"({"schema_version":1,")") + module + R"(":{"primary_label_ids":[1001]}})";
+            auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+            std::shared_ptr<arrow::Schema> schema;
+            std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+            assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema,
+                                                    &runtime, budget, new ProtocolLabelMatcher(&labels),
+                                                    npm::ProductionNpmModuleCatalogV1(),
+                                                    std::make_unique<RecordingResultConsumer>(&trace))
+                       .error == npm::NpmBasicTaskRuntimeError::kNone);
+            std::shared_ptr<arrow::RecordBatch> output;
+            assert(runtime->ProcessOfflineBatch(MakeEncodedPacketBatch(packets), &output).error ==
                    npm::NpmBasicOfflineBatchError::kNone);
-            assert(output && output->num_rows() == 0);
+            std::vector<std::shared_ptr<arrow::RecordBatch>> foreground;
+            if (output->num_rows()) foreground.push_back(output);
+            output.reset();
+            assert(runtime->FlushOffline(time, &output).error == npm::NpmEofFlushError::kNone);
+            if (output->num_rows()) foreground.push_back(output);
+            int64_t rows = 0;
+            for (const auto& batch : foreground) {
+                rows += batch->num_rows();
+                assert(batch->schema()->Equals(*schema, true) && !batch->GetColumnByName("ip_family"));
+                const auto address = batch->GetColumnByName("a_ip");
+                if (suffix == "_ipv4")
+                    assert(std::static_pointer_cast<arrow::UInt32Array>(address)->Value(0) == 0x01020304);
+                else {
+                    const auto expected = ParseIpv6("2001:db8::ff00:1");
+                    assert(std::memcmp(std::static_pointer_cast<arrow::FixedSizeBinaryArray>(address)->GetValue(0),
+                                       expected.bytes, 16) == 0);
+                }
+                if (module == "dns")
+                    assert(std::static_pointer_cast<arrow::UInt16Array>(batch->GetColumnByName("qtype"))->Value(0) ==
+                           (suffix == "_ipv4" ? 28 : 1));
+                const auto outcome =
+                    std::static_pointer_cast<arrow::StringArray>(batch->GetColumnByName("outcome"))->GetString(0);
+                assert(outcome == (module == "tls" ? "server_hello_observed" : "matched"));
+            }
+            assert(rows == 1 && trace.finishes == 1);
+            for (const std::string& name : std::vector<std::string>{"basic_ipv4", "basic_ipv6", "session_ipv4",
+                                                                    "session_ipv6", entity + "_ipv4", entity + "_ipv6"})
+                assert(std::count(trace.entities.begin(), trace.entities.end(), name) == 1);
+            output.reset();
+            foreground.clear();
+            runtime.reset();
+            assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0 && labels.release_calls == 1);
         }
+    }
+}
+
+void TestFamilyBasicSessionResultsAndSelection() {
+    npm::NpmBasicTaskConfig parsed;
+    assert(npm::ParseNpmBasicTaskConfig("{}", &parsed).error == npm::NpmBasicTaskConfigError::kInvalidObserving);
+    assert(npm::ParseNpmBasicTaskConfig(R"({"observing":"basic_ipv4"})", &parsed).error ==
+           npm::NpmBasicTaskConfigError::kNone);
+    assert(parsed.features.module_ids == std::vector<std::string>{"basic"});
+    for (const char* old : {"basic", "session"}) {
+        std::string json = std::string(R"({"features":"basic,session","observing":")") + old + R"("})";
+        assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &parsed).error ==
+               npm::NpmBasicTaskConfigError::kInvalidObserving);
+    }
+    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"session_ipv6"})", &parsed).error ==
+           npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
+    assert(npm::ParseNpmBasicTaskConfig("{}", &parsed, false, npm::ProductionNpmModuleCatalogV1(), "default", true)
+               .error == npm::NpmBasicTaskConfigError::kNone);
+    assert(parsed.features.observing_entity.empty());
+    assert(npm::ParseNpmBasicTaskConfig(R"({"observing":""})", &parsed, false, npm::ProductionNpmModuleCatalogV1(),
+                                        "default", true)
+               .error == npm::NpmBasicTaskConfigError::kInvalidObserving);
+
+    {
+        class Managed final : public npm::INpmManagedResultConsumerV1 {
+         public:
+            explicit Managed(ResultConsumerTrace* trace) : delegate_(trace) {}
+            int Consume(const npm::NpmResultContextV1& context, const npm::NpmEntityDescriptorV1& entity,
+                        const arrow::RecordBatch& rows) override {
+                return delegate_.Consume(context, entity, rows);
+            }
+            int Finish() override { return delegate_.Finish(); }
+            void Cancel() noexcept override { delegate_.Cancel(); }
+            int FailRun(const npm::NpmResultFailureV1&) override { return EIO; }
+            std::string ResultJson() const override { return "{}"; }
+
+         private:
+            RecordingResultConsumer delegate_;
+        };
+        class Factory final : public npm::INpmResultConsumerFactoryV1 {
+         public:
+            explicit Factory(ResultConsumerTrace* trace) : trace_(trace) {}
+            int Create(const npm::NpmResultContextV1&, const std::vector<npm::NpmEntityDescriptorV1>& entities,
+                       std::shared_ptr<npm::INpmTaskBudget>,
+                       std::unique_ptr<npm::INpmManagedResultConsumerV1>* output) override {
+                assert(entities.size() == 4);
+                *output = std::make_unique<Managed>(trace_);
+                return 0;
+            }
+            std::string LastError() const override { return {}; }
+
+         private:
+            ResultConsumerTrace* trace_;
+        };
+        ResultConsumerTrace trace;
+        Factory factory(&trace);
+        ContextDictionary dictionary;
+        ContextProtocol protocol(&dictionary);
+        ContextPool pool(&protocol);
+        SinglePoolQuerier querier(&pool);
+        npm::NpmBasicTaskConfig config;
+        assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic,session"})", &config, false,
+                                            npm::ProductionNpmModuleCatalogV1(), "default", true)
+                   .error == npm::NpmBasicTaskConfigError::kNone);
+        config.analysis.result_mode = npm::NpmResultMode::kFinal;
+        auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+        std::shared_ptr<arrow::Schema> schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+        assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                                budget, nullptr, npm::ProductionNpmModuleCatalogV1(), {},
+                                                "managed-family", &factory)
+                   .error == npm::NpmBasicTaskRuntimeError::kNone);
+        assert(schema->num_fields() == 0);
+        const auto p4 = MakeIpv4TcpPacket("1.2.3.4", 50000, "255.255.255.255", 443, {}, kTcpAck, 100);
+        const auto p6 = MakeIpv6TcpPacket("2001:db8::1", 50000, "ffff::ffff", 443, {}, kTcpAck, 100);
+        std::shared_ptr<arrow::RecordBatch> output;
+        assert(runtime
+                   ->ProcessOfflineBatch(
+                       MakeEncodedPacketBatch({MakeBatchPacketRecord(p4, 0, 1, 1), MakeBatchPacketRecord(p6, 0, 2, 2)}),
+                       &output)
+                   .error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(output->num_rows() == 0 && output->num_columns() == 0);
+        assert(runtime->FlushOffline(3, &output).error == npm::NpmEofFlushError::kNone);
+        assert(output->num_rows() == 0 && output->num_columns() == 0 && trace.finishes == 1);
+        for (const auto* name : {"basic_ipv4", "basic_ipv6", "session_ipv4", "session_ipv6"})
+            assert(std::count(trace.entities.begin(), trace.entities.end(), name) == 1);
         output.reset();
-        if (scenario == 3) {
-            auto other = MakeIpv4TcpPacket("192.0.2.3", 40000, "192.0.2.4", 80, {}, kTcpAck, 100);
-            assert(runtime
-                       ->ProcessOfflineBatch(MakeEncodedPacketBatch({MakeBatchPacketRecord(
-                                                 other, 0, config.analysis.output_interval_ns, count + 1)}),
-                                             &output)
-                       .error == npm::NpmBasicOfflineBatchError::kNone);
+        runtime.reset();
+        assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
+    }
+    for (const std::string entity : {"basic_ipv4", "basic_ipv6", "session_ipv4", "session_ipv6"}) {
+        ContextDictionary dictionary;
+        ContextProtocol protocol(&dictionary);
+        ContextPool pool(&protocol);
+        SinglePoolQuerier querier(&pool);
+        auto config = MakeRuntimeTaskConfig();
+        config.features.module_ids = {"basic", "session"};
+        config.features.session_enabled = true;
+        config.features.observing_entity = entity;
+        config.features.observing =
+            entity.rfind("basic", 0) == 0 ? npm::NpmResultEntity::kBasic : npm::NpmResultEntity::kSession;
+        auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
+        ResultConsumerTrace trace;
+        std::shared_ptr<arrow::Schema> schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
+        assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
+                                                budget, nullptr, npm::ProductionNpmModuleCatalogV1(),
+                                                std::make_unique<RecordingResultConsumer>(&trace))
+                   .error == npm::NpmBasicTaskRuntimeError::kNone);
+        const auto p4 = MakeIpv4TcpPacket("1.2.3.4", 50000, "255.255.255.255", 443, {0xff}, kTcpAck, 100);
+        const auto p6 = MakeIpv6TcpPacket("102:304::ff00:1", 50000, "ffff::ffff", 443, {0}, kTcpAck, 100);
+        std::shared_ptr<arrow::RecordBatch> output;
+        assert(runtime
+                   ->ProcessOfflineBatch(
+                       MakeEncodedPacketBatch({MakeBatchPacketRecord(p4, 0, 1, 1), MakeBatchPacketRecord(p6, 0, 2, 2)}),
+                       &output)
+                   .error == npm::NpmBasicOfflineBatchError::kNone);
+        assert(runtime->FlushOffline(3, &output).error == npm::NpmEofFlushError::kNone);
+        assert(output->num_rows() == 1 && output->schema()->Equals(*schema, true));
+        assert(output->GetColumnByName("ip_family") == nullptr);
+        assert(schema->GetFieldByName("primary_label_id")->nullable() &&
+               output->GetColumnByName("primary_label_id")->IsNull(0));
+        assert(trace.entities.size() == 4 && trace.finishes == 1);
+        for (const auto& expected : {"basic_ipv4", "basic_ipv6", "session_ipv4", "session_ipv6"})
+            assert(std::count(trace.entities.begin(), trace.entities.end(), expected) == 1);
+        const auto address = output->GetColumnByName("a_ip");
+        if (entity.back() == '4') {
+            assert(std::static_pointer_cast<arrow::UInt32Array>(address)->Value(0) == 0x01020304);
+            assert(std::static_pointer_cast<arrow::UInt32Array>(output->GetColumnByName("b_ip"))->Value(0) ==
+                   0xffffffff);
         } else {
-            assert(runtime->FlushOffline(second, &output).error == npm::NpmEofFlushError::kNone);
+            const auto bytes = std::static_pointer_cast<arrow::FixedSizeBinaryArray>(address)->GetView(0);
+            const auto expected = ParseIpv6("102:304::ff00:1");
+            assert(bytes.size() == 16 && std::memcmp(bytes.data(), expected.bytes, 16) == 0);
         }
-        assert(output && output->num_rows() == count && output->ValidateFull().ok());
-        for (int row = 0; row < count; ++row) {
-            assert(PeriodicUInt(output, "session_id", row) == static_cast<uint64_t>(row + 1));
-            assert(PeriodicUInt(output, "revision", row) == 1);
-            assert(PeriodicUInt(output, "packets_ab", row) == 1);
-            assert(PeriodicUInt(output, "wire_bytes_total", row) == 40);
-            assert(PeriodicFlag(output, "is_final", row) == (scenario != 3));
-        }
-        assert(budget->HighWaterMarks().pending_output_bytes < config.analysis.max_pending_output_bytes);
-        printf("large result scenario=%d rows=%d pending_peak=%lu\n", scenario, count,
-               budget->HighWaterMarks().pending_output_bytes);
-        auto retained = output->GetColumnByName("session_id")->Slice(count - 1, 1);
-        output.reset();
-        if (scenario == 3) runtime->Cancel();
         runtime.reset();
         assert(budget->Usage().session_state_bytes == 0 && budget->Usage().module_state_bytes == 0);
+        auto retained_address = output->GetColumnByName("a_ip");
+        output.reset();
         assert(budget->Usage().pending_output_bytes > 0);
-        assert(std::static_pointer_cast<arrow::UInt64Array>(retained)->Value(0) == count);
-        retained.reset();
+        retained_address.reset();
         assert(npm::NpmTrackedBudgetBytes(budget->Usage()) == 0);
     }
 }
@@ -14314,21 +14930,28 @@ void TestSafeResultProgress() {
             assert(runtime->State() == npm::NpmEofFlushState::kFailed);
         } else {
             assert(status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
-            assert(trace.progress.size() == 1 && trace.progress[0].closed_before_ns == 30 * second);
+            assert(trace.progress.size() == 2 && trace.progress[0].closed_before_ns == 30 * second &&
+                   trace.progress[1].closed_before_ns == 30 * second &&
+                   trace.progress[0].key.entity_id == "basic_ipv4" && trace.progress[1].key.entity_id == "basic_ipv6");
             assert(trace.rows_at_progress[0] == (scenario == 1 ? 0 : 1));
             assert(drive(true, false, true).error == npm::NpmBasicRealtimeMaintenanceError::kNone);
-            assert(trace.progress.size() == 1);
+            assert(trace.progress.size() == 2);
             output.reset();
             assert(runtime->FlushOffline(1000, &output).error == npm::NpmEofFlushError::kNone);
-            assert(trace.progress.size() == 1);  // EOF/partial tail does not invent a closed period.
+            assert(trace.progress.size() == 2);  // EOF/partial tail does not invent a closed period.
         }
         output.reset();
         runtime->Cancel();
-        assert(trace.progress.size() == (scenario < 2 ? 1 : 0));
+        assert(trace.progress.size() == (scenario < 2 ? 2 : 0));
     }
 }
 
 int main(int argc, char** argv) {
+    if (argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--family-results-only")) {
+        TestFamilyBasicSessionResultsAndSelection();
+        TestFamilyProtocolRuntime();
+        if (argc == 2) return 0;
+    }
     if (argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--progress-only")) {
         TestSafeResultProgress();
         if (argc == 2) return 0;
@@ -14366,6 +14989,7 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--tcp-stream-only") {
         TestTcpStreamRecordBatchTypedResultRouting();
         TestTcpStreamRuntimeAdmissionAndLifecycle();
+        TestMixedFamilyRuntimeOrderingAndCleanup();
         TestTcpStreamRuntimeDeadlineAndCancel();
         TestTcpStreamRuntimeFailureDiagnostics();
         TestTcpStreamRuntimeCancelInsideCallback();
@@ -14375,6 +14999,7 @@ int main(int argc, char** argv) {
     assert(argc == 1);
     TestTcpStreamRecordBatchTypedResultRouting();
     TestTcpStreamRuntimeAdmissionAndLifecycle();
+    TestMixedFamilyRuntimeOrderingAndCleanup();
     TestTcpStreamRuntimeDeadlineAndCancel();
     TestTcpStreamRuntimeFailureDiagnostics();
     TestTcpStreamRuntimeCancelInsideCallback();

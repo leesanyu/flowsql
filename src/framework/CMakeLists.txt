@@ -23,6 +23,8 @@ add_library(${PROJECT_NAME} SHARED
     core/json_error_builder.cpp
     core/memory_channel.cpp
     core/packet_codec.cpp
+    core/packet_family_contract.cpp
+    core/packet_family_codec.cpp
     core/ring_stream_channel.cpp
     core/scheduler_control_client.cpp
     core/sql_text_splitter.cpp

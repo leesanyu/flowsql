@@ -53,3 +53,8 @@ target_link_libraries(${PROJECT_NAME} flowsql_common)
 set_target_properties(${PROJECT_NAME} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
+
+if(FLOWSQL_NPM_RESULT_SANITIZERS)
+    target_compile_options(${PROJECT_NAME} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(${PROJECT_NAME} PRIVATE -fsanitize=address,undefined)
+endif()

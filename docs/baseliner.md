@@ -27,6 +27,10 @@ INTO mysql.baseline
 有限 PCAP 的 NPM 结果可通过 snapshot 分析。poll 要求来源具备真实的已提交位置、epoch、不可变前缀和桶关闭证据；
 单独运行有限 PCAP 离线落库不会自动提供采集进度能力，缺少进度时 poll 会明确拒绝。
 
+两个族分别读取 `npm_basic_ipv4_history_v1` 或 `npm_basic_ipv6_history_v1`，绑定相同任务返回的明确 run_id。
+实时 poll 的 epoch/position 属于各关系；真实源确认后两族独立发布同一个闭合边界，无包族同样可推进。
+写入/发布失败后运行终结为 incomplete，保留已提交前缀，不能继续读取旧事实作为成功进度。
+
 下面的配置读取已经完成的 run，按采集域聚合完整周期的字节增量；将 `completed-run-id` 替换为 NPM 响应的 `run_id`。
 `observation_domain_id` 是本例的稳定身份，实际部署应按业务对象配置 `series_keys`。
 
@@ -43,7 +47,7 @@ INTO mysql.baseline
   "persistence": {"checkpoint_every_buckets": 7, "retain_generations": 2, "restore": "if_exists"},
   "datasets": [{
     "id": "link",
-    "table": "npm_basic_history_v1",
+    "table": "npm_basic_ipv4_history_v1",
     "fields": {
       "__npm_run_id": "utf8", "session_id": "uint64", "revision": "uint64",
       "observation_domain_id": "uint64", "period_start_ns": "int64", "period_end_ns": "int64",

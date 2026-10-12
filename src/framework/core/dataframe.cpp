@@ -1,6 +1,7 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 #include "dataframe.h"
+#include <common/network/address_display.h>
 
 #include <arrow/builder.h>
 #include <arrow/type.h>
@@ -14,32 +15,55 @@ namespace flowsql {
 
 std::shared_ptr<arrow::DataType> ToArrowType(DataType type) {
     switch (type) {
-        case DataType::INT32:     return arrow::int32();
-        case DataType::INT64:     return arrow::int64();
-        case DataType::UINT32:    return arrow::uint32();
-        case DataType::UINT64:    return arrow::uint64();
-        case DataType::FLOAT:     return arrow::float32();
-        case DataType::DOUBLE:    return arrow::float64();
-        case DataType::STRING:    return arrow::utf8();
-        case DataType::BYTES:     return arrow::binary();
-        case DataType::TIMESTAMP: return arrow::int64();
-        case DataType::BOOLEAN:   return arrow::boolean();
-        default:                  return arrow::utf8();
+        case DataType::INT32:
+            return arrow::int32();
+        case DataType::INT64:
+            return arrow::int64();
+        case DataType::UINT32:
+            return arrow::uint32();
+        case DataType::UINT64:
+            return arrow::uint64();
+        case DataType::FLOAT:
+            return arrow::float32();
+        case DataType::DOUBLE:
+            return arrow::float64();
+        case DataType::STRING:
+            return arrow::utf8();
+        case DataType::BYTES:
+            return arrow::binary();
+        case DataType::TIMESTAMP:
+            return arrow::int64();
+        case DataType::BOOLEAN:
+            return arrow::boolean();
+        default:
+            return arrow::utf8();
     }
 }
 
 DataType FromArrowType(const std::shared_ptr<arrow::DataType>& type) {
     switch (type->id()) {
-        case arrow::Type::INT32:   return DataType::INT32;
-        case arrow::Type::INT64:   return DataType::INT64;
-        case arrow::Type::UINT32:  return DataType::UINT32;
-        case arrow::Type::UINT64:  return DataType::UINT64;
-        case arrow::Type::FLOAT:   return DataType::FLOAT;
-        case arrow::Type::DOUBLE:  return DataType::DOUBLE;
-        case arrow::Type::STRING:  return DataType::STRING;
-        case arrow::Type::BINARY:  return DataType::BYTES;
-        case arrow::Type::BOOL:    return DataType::BOOLEAN;
-        default:                   return DataType::STRING;
+        case arrow::Type::INT32:
+            return DataType::INT32;
+        case arrow::Type::INT64:
+            return DataType::INT64;
+        case arrow::Type::UINT32:
+            return DataType::UINT32;
+        case arrow::Type::UINT64:
+            return DataType::UINT64;
+        case arrow::Type::FLOAT:
+            return DataType::FLOAT;
+        case arrow::Type::DOUBLE:
+            return DataType::DOUBLE;
+        case arrow::Type::STRING:
+            return DataType::STRING;
+        case arrow::Type::BINARY:
+            return DataType::BYTES;
+        case arrow::Type::FIXED_SIZE_BINARY:
+            return DataType::BYTES;
+        case arrow::Type::BOOL:
+            return DataType::BOOLEAN;
+        default:
+            return DataType::STRING;
     }
 }
 
@@ -158,31 +182,42 @@ void DataFrame::FromArrow(std::shared_ptr<arrow::RecordBatch> batch) {
 
 static const char* DataTypeToString(DataType t) {
     switch (t) {
-        case DataType::INT32:     return "INT32";
-        case DataType::INT64:     return "INT64";
-        case DataType::UINT32:    return "UINT32";
-        case DataType::UINT64:    return "UINT64";
-        case DataType::FLOAT:     return "FLOAT";
-        case DataType::DOUBLE:    return "DOUBLE";
-        case DataType::STRING:    return "STRING";
-        case DataType::BYTES:     return "BYTES";
-        case DataType::TIMESTAMP: return "TIMESTAMP";
-        case DataType::BOOLEAN:   return "BOOLEAN";
-        default:                  return "STRING";
+        case DataType::INT32:
+            return "INT32";
+        case DataType::INT64:
+            return "INT64";
+        case DataType::UINT32:
+            return "UINT32";
+        case DataType::UINT64:
+            return "UINT64";
+        case DataType::FLOAT:
+            return "FLOAT";
+        case DataType::DOUBLE:
+            return "DOUBLE";
+        case DataType::STRING:
+            return "STRING";
+        case DataType::BYTES:
+            return "BYTES";
+        case DataType::TIMESTAMP:
+            return "TIMESTAMP";
+        case DataType::BOOLEAN:
+            return "BOOLEAN";
+        default:
+            return "STRING";
     }
 }
 
 static DataType StringToDataType(const std::string& s) {
-    if (s == "INT32")     return DataType::INT32;
-    if (s == "INT64")     return DataType::INT64;
-    if (s == "UINT32")    return DataType::UINT32;
-    if (s == "UINT64")    return DataType::UINT64;
-    if (s == "FLOAT")     return DataType::FLOAT;
-    if (s == "DOUBLE")    return DataType::DOUBLE;
-    if (s == "STRING")    return DataType::STRING;
-    if (s == "BYTES")     return DataType::BYTES;
+    if (s == "INT32") return DataType::INT32;
+    if (s == "INT64") return DataType::INT64;
+    if (s == "UINT32") return DataType::UINT32;
+    if (s == "UINT64") return DataType::UINT64;
+    if (s == "FLOAT") return DataType::FLOAT;
+    if (s == "DOUBLE") return DataType::DOUBLE;
+    if (s == "STRING") return DataType::STRING;
+    if (s == "BYTES") return DataType::BYTES;
     if (s == "TIMESTAMP") return DataType::TIMESTAMP;
-    if (s == "BOOLEAN")   return DataType::BOOLEAN;
+    if (s == "BOOLEAN") return DataType::BOOLEAN;
     return DataType::STRING;
 }
 
@@ -213,19 +248,40 @@ std::string DataFrame::ToJson() const {
     for (int32_t r = 0; r < rows; ++r) {
         w.StartArray();
         for (size_t c = 0; c < schema_.size(); ++c) {
+            const auto& column = batch_->column(static_cast<int>(c));
+            if (column->IsNull(r)) {
+                w.Null();
+                continue;
+            }
+            const auto address = network::DisplayAddress(*batch_->schema()->field(static_cast<int>(c)), *column, r);
+            if (address) {
+                w.String(address->data(), address->size());
+                continue;
+            }
             auto val = ExtractValue(batch_->column(static_cast<int>(c)), r);
-            std::visit([&w](auto&& v) {
-                using T = std::decay_t<decltype(v)>;
-                if constexpr (std::is_same_v<T, int32_t>) w.Int(v);
-                else if constexpr (std::is_same_v<T, int64_t>) w.Int64(v);
-                else if constexpr (std::is_same_v<T, uint32_t>) w.Uint(v);
-                else if constexpr (std::is_same_v<T, uint64_t>) w.Uint64(v);
-                else if constexpr (std::is_same_v<T, float>) w.Double(v);
-                else if constexpr (std::is_same_v<T, double>) w.Double(v);
-                else if constexpr (std::is_same_v<T, std::string>) w.String(v.c_str());
-                else if constexpr (std::is_same_v<T, std::vector<uint8_t>>) w.String(reinterpret_cast<const char*>(v.data()), v.size());
-                else if constexpr (std::is_same_v<T, bool>) w.Bool(v);
-            }, val);
+            std::visit(
+                [&w](auto&& v) {
+                    using T = std::decay_t<decltype(v)>;
+                    if constexpr (std::is_same_v<T, int32_t>)
+                        w.Int(v);
+                    else if constexpr (std::is_same_v<T, int64_t>)
+                        w.Int64(v);
+                    else if constexpr (std::is_same_v<T, uint32_t>)
+                        w.Uint(v);
+                    else if constexpr (std::is_same_v<T, uint64_t>)
+                        w.Uint64(v);
+                    else if constexpr (std::is_same_v<T, float>)
+                        w.Double(v);
+                    else if constexpr (std::is_same_v<T, double>)
+                        w.Double(v);
+                    else if constexpr (std::is_same_v<T, std::string>)
+                        w.String(v.c_str());
+                    else if constexpr (std::is_same_v<T, std::vector<uint8_t>>)
+                        w.String(reinterpret_cast<const char*>(v.data()), v.size());
+                    else if constexpr (std::is_same_v<T, bool>)
+                        w.Bool(v);
+                },
+                val);
         }
         w.EndArray();
     }
@@ -264,22 +320,40 @@ bool DataFrame::FromJson(const std::string& json) {
         for (rapidjson::SizeType c = 0; c < row_arr.Size(); ++c) {
             auto& v = row_arr[c];
             switch (schema_[c].type) {
-                case DataType::INT32:     row.emplace_back(v.GetInt()); break;
+                case DataType::INT32:
+                    row.emplace_back(v.GetInt());
+                    break;
                 case DataType::INT64:
-                case DataType::TIMESTAMP: row.emplace_back(v.GetInt64()); break;
-                case DataType::UINT32:    row.emplace_back(v.GetUint()); break;
-                case DataType::UINT64:    row.emplace_back(v.GetUint64()); break;
-                case DataType::FLOAT:     row.emplace_back(static_cast<float>(v.GetDouble())); break;
-                case DataType::DOUBLE:    row.emplace_back(v.GetDouble()); break;
-                case DataType::STRING:    row.emplace_back(std::string(v.GetString())); break;
+                case DataType::TIMESTAMP:
+                    row.emplace_back(v.GetInt64());
+                    break;
+                case DataType::UINT32:
+                    row.emplace_back(v.GetUint());
+                    break;
+                case DataType::UINT64:
+                    row.emplace_back(v.GetUint64());
+                    break;
+                case DataType::FLOAT:
+                    row.emplace_back(static_cast<float>(v.GetDouble()));
+                    break;
+                case DataType::DOUBLE:
+                    row.emplace_back(v.GetDouble());
+                    break;
+                case DataType::STRING:
+                    row.emplace_back(std::string(v.GetString()));
+                    break;
                 case DataType::BYTES: {
                     auto s = v.GetString();
                     auto len = v.GetStringLength();
                     row.emplace_back(std::vector<uint8_t>(s, s + len));
                     break;
                 }
-                case DataType::BOOLEAN:   row.emplace_back(v.GetBool()); break;
-                default:                  row.emplace_back(std::string(v.GetString())); break;
+                case DataType::BOOLEAN:
+                    row.emplace_back(v.GetBool());
+                    break;
+                default:
+                    row.emplace_back(std::string(v.GetString()));
+                    break;
             }
         }
         AppendRow(row);
@@ -348,7 +422,12 @@ void DataFrame::AppendValueToBuilder(int col, const FieldValue& value) {
             break;
         case DataType::BYTES: {
             auto& bytes = std::get<std::vector<uint8_t>>(value);
-            status = static_cast<arrow::BinaryBuilder*>(builder.get())->Append(bytes.data(), static_cast<int32_t>(bytes.size()));
+            if (builder->type()->id() == arrow::Type::FIXED_SIZE_BINARY)
+                status = static_cast<arrow::FixedSizeBinaryBuilder*>(builder.get())
+                             ->Append(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+            else
+                status = static_cast<arrow::BinaryBuilder*>(builder.get())
+                             ->Append(bytes.data(), static_cast<int32_t>(bytes.size()));
             break;
         }
         case DataType::BOOLEAN:
@@ -366,14 +445,22 @@ FieldValue DataFrame::ExtractValue(const std::shared_ptr<arrow::Array>& array, i
     // null 值返回类型对应的默认值
     if (array->IsNull(row)) {
         switch (array->type_id()) {
-            case arrow::Type::INT32:   return int32_t(0);
-            case arrow::Type::INT64:   return int64_t(0);
-            case arrow::Type::UINT32:  return uint32_t(0);
-            case arrow::Type::UINT64:  return uint64_t(0);
-            case arrow::Type::FLOAT:   return float(0);
-            case arrow::Type::DOUBLE:  return double(0);
-            case arrow::Type::BOOL:    return false;
-            default:                   return std::string{};
+            case arrow::Type::INT32:
+                return int32_t(0);
+            case arrow::Type::INT64:
+                return int64_t(0);
+            case arrow::Type::UINT32:
+                return uint32_t(0);
+            case arrow::Type::UINT64:
+                return uint64_t(0);
+            case arrow::Type::FLOAT:
+                return float(0);
+            case arrow::Type::DOUBLE:
+                return double(0);
+            case arrow::Type::BOOL:
+                return false;
+            default:
+                return std::string{};
         }
     }
     switch (array->type_id()) {
@@ -396,6 +483,10 @@ FieldValue DataFrame::ExtractValue(const std::shared_ptr<arrow::Array>& array, i
         case arrow::Type::BINARY: {
             auto bin_arr = std::static_pointer_cast<arrow::BinaryArray>(array);
             auto view = bin_arr->GetView(row);
+            return std::vector<uint8_t>(view.begin(), view.end());
+        }
+        case arrow::Type::FIXED_SIZE_BINARY: {
+            const auto view = static_cast<const arrow::FixedSizeBinaryArray&>(*array).GetView(row);
             return std::vector<uint8_t>(view.begin(), view.end());
         }
         case arrow::Type::BOOL:
@@ -438,8 +529,7 @@ int DataFrame::Filter(const char* condition) {
     while (!value.empty() && std::isspace(value.front())) value.erase(value.begin());
 
     // 去除值的引号（前后引号必须匹配）
-    if (value.size() >= 2 && (value.front() == '\'' || value.front() == '"') &&
-        value.back() == value.front()) {
+    if (value.size() >= 2 && (value.front() == '\'' || value.front() == '"') && value.back() == value.front()) {
         value = value.substr(1, value.size() - 2);
     }
 
@@ -462,42 +552,72 @@ int DataFrame::Filter(const char* condition) {
         bool match = false;
 
         // 根据类型比较
-        std::visit([&](auto&& v) {
-            using T = std::decay_t<decltype(v)>;
-            if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, int64_t> ||
-                          std::is_same_v<T, uint32_t> || std::is_same_v<T, uint64_t>) {
-                int64_t lhs = static_cast<int64_t>(v);
-                int64_t rhs = 0;
-                try { rhs = std::stoll(value); } catch (...) { return; }
-                if (op == "=") match = (lhs == rhs);
-                else if (op == ">") match = (lhs > rhs);
-                else if (op == "<") match = (lhs < rhs);
-                else if (op == ">=") match = (lhs >= rhs);
-                else if (op == "<=") match = (lhs <= rhs);
-                else if (op == "!=") match = (lhs != rhs);
-            } else if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-                double lhs = static_cast<double>(v);
-                double rhs = 0;
-                try { rhs = std::stod(value); } catch (...) { return; }
-                if (op == "=") match = (lhs == rhs);
-                else if (op == ">") match = (lhs > rhs);
-                else if (op == "<") match = (lhs < rhs);
-                else if (op == ">=") match = (lhs >= rhs);
-                else if (op == "<=") match = (lhs <= rhs);
-                else if (op == "!=") match = (lhs != rhs);
-            } else if constexpr (std::is_same_v<T, std::string>) {
-                if (op == "=") match = (v == value);
-                else if (op == "!=") match = (v != value);
-                else if (op == ">") match = (v > value);
-                else if (op == "<") match = (v < value);
-                else if (op == ">=") match = (v >= value);
-                else if (op == "<=") match = (v <= value);
-            } else if constexpr (std::is_same_v<T, bool>) {
-                bool rhs = (value == "true" || value == "1");
-                if (op == "=") match = (v == rhs);
-                else if (op == "!=") match = (v != rhs);
-            }
-        }, row_val);
+        std::visit(
+            [&](auto&& v) {
+                using T = std::decay_t<decltype(v)>;
+                if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, int64_t> || std::is_same_v<T, uint32_t> ||
+                              std::is_same_v<T, uint64_t>) {
+                    int64_t lhs = static_cast<int64_t>(v);
+                    int64_t rhs = 0;
+                    try {
+                        rhs = std::stoll(value);
+                    } catch (...) {
+                        return;
+                    }
+                    if (op == "=")
+                        match = (lhs == rhs);
+                    else if (op == ">")
+                        match = (lhs > rhs);
+                    else if (op == "<")
+                        match = (lhs < rhs);
+                    else if (op == ">=")
+                        match = (lhs >= rhs);
+                    else if (op == "<=")
+                        match = (lhs <= rhs);
+                    else if (op == "!=")
+                        match = (lhs != rhs);
+                } else if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
+                    double lhs = static_cast<double>(v);
+                    double rhs = 0;
+                    try {
+                        rhs = std::stod(value);
+                    } catch (...) {
+                        return;
+                    }
+                    if (op == "=")
+                        match = (lhs == rhs);
+                    else if (op == ">")
+                        match = (lhs > rhs);
+                    else if (op == "<")
+                        match = (lhs < rhs);
+                    else if (op == ">=")
+                        match = (lhs >= rhs);
+                    else if (op == "<=")
+                        match = (lhs <= rhs);
+                    else if (op == "!=")
+                        match = (lhs != rhs);
+                } else if constexpr (std::is_same_v<T, std::string>) {
+                    if (op == "=")
+                        match = (v == value);
+                    else if (op == "!=")
+                        match = (v != value);
+                    else if (op == ">")
+                        match = (v > value);
+                    else if (op == "<")
+                        match = (v < value);
+                    else if (op == ">=")
+                        match = (v >= value);
+                    else if (op == "<=")
+                        match = (v <= value);
+                } else if constexpr (std::is_same_v<T, bool>) {
+                    bool rhs = (value == "true" || value == "1");
+                    if (op == "=")
+                        match = (v == rhs);
+                    else if (op == "!=")
+                        match = (v != rhs);
+                }
+            },
+            row_val);
 
         if (match) {
             // 收集整行

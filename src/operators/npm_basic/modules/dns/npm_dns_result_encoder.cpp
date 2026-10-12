@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "npm_dns_result_encoder.h"
+#include <operators/npm_basic/output/npm_family_address_builder.h>
 
 #include <arrow/api.h>
 #include <arrow/util/utf8.h>
@@ -47,16 +48,16 @@ std::optional<uint8_t> DirectionValue(std::optional<NpmPacketDirection> directio
 
 }  // namespace
 
-int EmitNpmDnsTransactionV1(const NpmDnsUdpResultV1& result, const NpmDnsSessionIdentityV1& session,
+template <typename Address>
+int EmitNpmDnsTransactionV1(const NpmDnsFamilyResult<Address>& family_result,
                             const std::shared_ptr<INpmTaskBudget>& budget, INpmResultEmitterV1& emitter,
                             arrow::MemoryPool* pool) {
-    if (!budget || result.entity_instance_id == 0 || session.session_id == 0 ||
-        result.session_id != session.session_id ||
-        (session.transport_protocol != 6 && session.transport_protocol != 17) || session.a_ip.empty() ||
-        session.b_ip.empty() || session.a_ip.size() > 45 || session.b_ip.size() > 45 || result.outcome.empty() ||
+    const auto& result = family_result.transaction;
+    const auto& session = family_result;
+    if (!budget || result.entity_instance_id == 0 || result.session_id == 0 ||
+        (session.transport_protocol != 6 && session.transport_protocol != 17) || result.outcome.empty() ||
         result.outcome.size() > 32 || (result.qname && result.qname->size() > 1024) ||
         (result.incomplete_reason && result.incomplete_reason->size() > 64) ||
-        !arrow::util::ValidateUTF8(session.a_ip) || !arrow::util::ValidateUTF8(session.b_ip) ||
         !arrow::util::ValidateUTF8(result.outcome) || (result.qname && !arrow::util::ValidateUTF8(*result.qname)) ||
         (result.incomplete_reason && !arrow::util::ValidateUTF8(*result.incomplete_reason)))
         return EINVAL;
@@ -68,13 +69,14 @@ int EmitNpmDnsTransactionV1(const NpmDnsUdpResultV1& result, const NpmDnsSession
         arrow::Int64Builder observed_at(pool), query_at(pool), response_at(pool), latency(pool);
         arrow::BooleanBuilder is_final(pool), response_tc(pool);
         arrow::UInt8Builder transport_protocol(pool), query_direction(pool), response_direction(pool);
-        arrow::StringBuilder a_ip(pool), b_ip(pool), outcome(pool), qname(pool), incomplete_reason(pool);
+        NpmAddressArrowBuilder<Address> a_ip(pool), b_ip(pool);
+        arrow::StringBuilder outcome(pool), qname(pool), incomplete_reason(pool);
         arrow::UInt16Builder a_port(pool), b_port(pool), dns_id(pool), qtype(pool), qclass(pool), response_rcode(pool);
         arrow::UInt32Builder query_retries(pool);
 
         if (!Append(entity_id, result.entity_instance_id) || !Append(revision, uint64_t{1}) ||
             !Append(observed_at, result.observed_at_ns) || !Append(is_final, true) ||
-            !Append(session_id, session.session_id) || !Append(observation_domain_id, session.observation_domain_id) ||
+            !Append(session_id, result.session_id) || !Append(observation_domain_id, session.observation_domain_id) ||
             !Append(transport_protocol, session.transport_protocol) || !Append(a_ip, session.a_ip) ||
             !Append(b_ip, session.b_ip) || !Append(a_port, session.a_port) || !Append(b_port, session.b_port) ||
             !Append(dns_id, result.dns_id) || !Append(outcome, result.outcome) ||
@@ -120,12 +122,18 @@ int EmitNpmDnsTransactionV1(const NpmDnsUdpResultV1& result, const NpmDnsSession
             if (!status.ok()) return status.IsOutOfMemory() ? ENOMEM : EIO;
             columns.push_back(std::move(column));
         }
-        const auto schema = NpmDnsTransactionEntityDescriptorV1().schema;
+        const auto schema = NpmDnsTransactionEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).schema;
         auto batch = arrow::RecordBatch::Make(schema, 1, std::move(columns));
-        return emitter.Emit("dns_transaction", *batch);
+        return emitter.Emit(NpmDnsTransactionEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).entity_id,
+                            *batch);
     } catch (const std::bad_alloc&) {
         return ENOMEM;
     }
 }
+
+template int EmitNpmDnsTransactionV1(const NpmDnsResult4&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitterV1&,
+                                     arrow::MemoryPool*);
+template int EmitNpmDnsTransactionV1(const NpmDnsResult6&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitterV1&,
+                                     arrow::MemoryPool*);
 
 }  // namespace flowsql::npm

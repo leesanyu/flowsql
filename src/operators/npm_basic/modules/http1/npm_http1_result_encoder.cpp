@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "npm_http1_result_encoder.h"
+#include <operators/npm_basic/output/npm_family_address_builder.h>
 
 #include <arrow/api.h>
 #include <arrow/util/utf8.h>
@@ -36,12 +37,9 @@ bool ValidText(const std::optional<std::string>* value, size_t max_bytes) {
     return !value || !*value || (value->value().size() <= max_bytes && arrow::util::ValidateUTF8(value->value()));
 }
 
-bool ValidRow(const NpmHttp1TransactionResultV1& row, const NpmHttp1SessionIdentityV1& session) {
-    if (row.entity_instance_id == 0 || row.session_id == 0 || row.session_id != session.session_id ||
-        session.a_ip.empty() || session.b_ip.empty() || session.a_ip.size() > 45 || session.b_ip.size() > 45 ||
-        !arrow::util::ValidateUTF8(session.a_ip) || !arrow::util::ValidateUTF8(session.b_ip) ||
-        !ValidDirection(row.request_direction) || !ValidDirection(row.response_direction) ||
-        !ValidText(row.request ? &row.request->method : nullptr, 1024) ||
+bool ValidRow(const NpmHttp1TransactionResultV1& row) {
+    if (row.entity_instance_id == 0 || row.session_id == 0 || !ValidDirection(row.request_direction) ||
+        !ValidDirection(row.response_direction) || !ValidText(row.request ? &row.request->method : nullptr, 1024) ||
         !ValidText(row.request ? &row.request->target : nullptr, 4 * 1048576) ||
         !ValidText(row.request ? &row.request->host : nullptr, 4 * 1048576))
         return false;
@@ -86,10 +84,13 @@ class BuildCharge final {
 
 }  // namespace
 
-int EmitNpmHttp1TransactionV1(const NpmHttp1TransactionResultV1& result, const NpmHttp1SessionIdentityV1& session,
+template <typename Address>
+int EmitNpmHttp1TransactionV1(const NpmHttp1FamilyResult<Address>& family_result,
                               const std::shared_ptr<INpmTaskBudget>& budget, INpmResultEmitterV1& emitter,
                               arrow::MemoryPool* pool) {
-    if (!budget || !ValidRow(result, session)) return EINVAL;
+    const auto& result = family_result.transaction;
+    const auto& session = family_result;
+    if (!budget || !ValidRow(result)) return EINVAL;
     const uint64_t text_bytes = result.request ? result.request->method->size() + result.request->target->size() +
                                                      (result.request->host ? result.request->host->size() : 0)
                                                : 0;
@@ -100,8 +101,8 @@ int EmitNpmHttp1TransactionV1(const NpmHttp1TransactionResultV1& result, const N
         arrow::UInt64Builder entity_id(pool), revision(pool), session_id(pool), domain_id(pool);
         arrow::Int64Builder observed_at(pool), request_at(pool), response_at(pool), latency(pool);
         arrow::BooleanBuilder is_final(pool);
-        arrow::StringBuilder a_ip(pool), b_ip(pool), outcome(pool), method(pool), target(pool), host(pool),
-            reason(pool);
+        NpmAddressArrowBuilder<Address> a_ip(pool), b_ip(pool);
+        arrow::StringBuilder outcome(pool), method(pool), target(pool), host(pool), reason(pool);
         arrow::UInt16Builder a_port(pool), b_port(pool), status_code(pool);
         arrow::UInt32Builder informational_count(pool);
         arrow::UInt8Builder request_direction(pool), response_direction(pool);
@@ -119,7 +120,7 @@ int EmitNpmHttp1TransactionV1(const NpmHttp1TransactionResultV1& result, const N
             reason_name ? std::optional<std::string_view>(reason_name) : std::nullopt;
         if (!Append(entity_id, result.entity_instance_id) || !Append(revision, uint64_t{1}) ||
             !Append(observed_at, result.observed_at_ns) || !Append(is_final, true) ||
-            !Append(session_id, session.session_id) || !Append(domain_id, session.observation_domain_id) ||
+            !Append(session_id, result.session_id) || !Append(domain_id, session.observation_domain_id) ||
             !Append(a_ip, session.a_ip) || !Append(b_ip, session.b_ip) || !Append(a_port, session.a_port) ||
             !Append(b_port, session.b_port) || !Append(outcome, std::string_view(outcome_name)) ||
             !Append(informational_count, result.informational_count) ||
@@ -159,11 +160,19 @@ int EmitNpmHttp1TransactionV1(const NpmHttp1TransactionResultV1& result, const N
             if (!status.ok()) return status.IsOutOfMemory() ? ENOMEM : EIO;
             columns.push_back(std::move(column));
         }
-        auto batch = arrow::RecordBatch::Make(NpmHttp1TransactionEntityDescriptorV1().schema, 1, std::move(columns));
-        return emitter.Emit("http1_transaction", *batch);
+        auto batch = arrow::RecordBatch::Make(
+            NpmHttp1TransactionEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).schema, 1,
+            std::move(columns));
+        return emitter.Emit(NpmHttp1TransactionEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).entity_id,
+                            *batch);
     } catch (const std::bad_alloc&) {
         return ENOMEM;
     }
 }
+
+template int EmitNpmHttp1TransactionV1(const NpmHttp1Result4&, const std::shared_ptr<INpmTaskBudget>&,
+                                       INpmResultEmitterV1&, arrow::MemoryPool*);
+template int EmitNpmHttp1TransactionV1(const NpmHttp1Result6&, const std::shared_ptr<INpmTaskBudget>&,
+                                       INpmResultEmitterV1&, arrow::MemoryPool*);
 
 }  // namespace flowsql::npm

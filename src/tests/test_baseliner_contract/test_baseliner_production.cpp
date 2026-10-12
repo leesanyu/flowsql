@@ -545,7 +545,7 @@ std::string Configuration(const std::string& source, const std::string& run, con
            R"(,"timezone":"UTC"},"calendar":{"calendar_id":"cn-holiday","calendar_version":"2026.1"},
 "forecast":{"horizon_buckets":2},"read_policy":{"page_rows":37,"poll_interval_ms":5},
 "persistence":{"checkpoint_every_buckets":1000,"restore":"if_exists"},
-"datasets":[{"id":"npm","table":"npm_basic_history_v1","fields":{"__npm_run_id":"utf8","session_id":"uint64","revision":"uint64",
+"datasets":[{"id":"npm","table":"npm_basic_ipv4_history_v1","fields":{"__npm_run_id":"utf8","session_id":"uint64","revision":"uint64",
 "observation_domain_id":"uint64","b_port":"uint64","period_start_ns":"int64","period_end_ns":"int64","period_complete":"boolean",
 "interval_wire_bytes_total":"uint64","interval_packets_ab":"uint64"},
 "scope":{"run_ids":[")" +
@@ -707,7 +707,7 @@ void ThreePartCases(const std::string& source, const std::string& run, const std
     const auto target = "sqlite.t73sqlite";
     for (int variant = 0; variant < 3; ++variant) {
         Case c;
-        c.source = source + ".npm_basic_history_v1";
+        c.source = source + ".npm_basic_ipv4_history_v1";
         c.target = target;
         c.poll = variant == 1;
         c.key = "single-" + unique + "-" + source + "-" + std::to_string(variant);
@@ -748,7 +748,7 @@ void ThreePartCases(const std::string& source, const std::string& run, const std
         std::cout << "PASS three-part SQL " << source << " " << (c.poll ? "poll" : "snapshot")
                   << (variant == 2 ? " single WITH" : " exact config") << " matches two-part" << std::endl;
     }
-    auto full = Configuration(source + ".npm_basic_history_v1", run, "missing-progress-" + unique, true);
+    auto full = Configuration(source + ".npm_basic_ipv4_history_v1", run, "missing-progress-" + unique, true);
     ConfigSnapshot finite;
     Check(ParseConfig(full, &finite).ok(), "finite producer poll config");
     const auto dot = source.find('.');
@@ -1118,7 +1118,7 @@ void ResultOutputCases(const std::string& root, const std::string& unique, const
     auto two =
         std::find_if(cases.begin(), cases.end(), [](const auto& c) { return !c.poll && c.source == "mysql.t73mysql"; });
     auto three = std::find_if(cases.begin(), cases.end(), [](const auto& c) {
-        return !c.poll && c.source == "mysql.t73mysql.npm_basic_history_v1";
+        return !c.poll && c.source == "mysql.t73mysql.npm_basic_ipv4_history_v1";
     });
     Check(csv != cases.end() && two != cases.end() && three != cases.end(), "T5 input fixtures");
     auto comparable = [](const std::string& target, const std::string& key) {
@@ -1344,9 +1344,9 @@ int main() {
             environment.capture.pcap_name = name;
             const auto poll_run = CaptureRun(exact, "producer-" + std::string(source) + unique);
             sources[exact + "|" + poll_run] =
-                Fingerprint(*Query("SELECT * FROM " + exact + ".npm_basic_history_v1 WHERE __npm_run_id='" + poll_run +
-                                   "' ORDER BY session_id,revision"));
-            auto before = Query("SELECT * FROM " + exact + ".npm_basic_history_v1 WHERE __npm_run_id='" + run +
+                Fingerprint(*Query("SELECT * FROM " + exact + ".npm_basic_ipv4_history_v1 WHERE __npm_run_id='" +
+                                   poll_run + "' ORDER BY session_id,revision"));
+            auto before = Query("SELECT * FROM " + exact + ".npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + run +
                                 "' ORDER BY session_id,revision");
             Check(before->num_rows() >= 120, "real NPM SQL rows");
             sources[exact + "|" + run] = Fingerprint(*before);
@@ -1415,7 +1415,7 @@ int main() {
         for (const auto& source : sources) {
             auto p = source.first.find('|');
             auto exact = source.first.substr(0, p), run = source.first.substr(p + 1);
-            auto b = Query("SELECT * FROM " + exact + ".npm_basic_history_v1 WHERE __npm_run_id='" + run +
+            auto b = Query("SELECT * FROM " + exact + ".npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + run +
                            "' ORDER BY session_id,revision");
             Check(Fingerprint(*b) == source.second, "source contents/schema changed");
         }

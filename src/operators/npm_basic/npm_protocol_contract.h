@@ -51,7 +51,7 @@ struct NpmInputEventV1 {
     NpmInputKindV1 kind = NpmInputKindV1::kTcpPacket;
     uint64_t observation_domain_id = 0;
     packet::PacketView packet;
-    const packet::PacketLayerInfo* layer = nullptr;
+    const packet::PacketFamilyLayerView* layer = nullptr;
     Span<const uint8_t> body;
     bool body_complete = true;
     const NpmPacketView* transport = nullptr;
@@ -109,8 +109,8 @@ NpmProtocolContractStatusV1 ValidateNpmModulePlanV1(const NpmModulePlanV1& plan,
 NpmProtocolContractStatusV1 ValidateNpmEntityRowsV1(std::string_view emitting_module,
                                                     const NpmEntityDescriptorV1& entity,
                                                     const arrow::RecordBatch& rows);
-NpmEntityDescriptorV1 NpmBasicEntityDescriptorV1();
-NpmEntityDescriptorV1 NpmSessionEntityDescriptorV1(bool labeling_enabled = false);
+NpmEntityDescriptorV1 NpmBasicEntityDescriptorV1(packet::AddressFamily family);
+NpmEntityDescriptorV1 NpmSessionEntityDescriptorV1(packet::AddressFamily family);
 
 interface INpmResultEmitterV1 {
     virtual ~INpmResultEmitterV1() = default;

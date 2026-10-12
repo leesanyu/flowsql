@@ -6,6 +6,7 @@
 
 #include "npm_tls_result_encoder.h"
 
+#include <operators/npm_basic/modules/npm_transaction_identity.h>
 #include <map>
 #include <memory>
 
@@ -30,7 +31,7 @@ class NpmTlsProtocolModuleV1 final : public INpmProtocolModuleV1, public INpmTcp
 
  private:
     struct SessionState {
-        NpmTlsSessionIdentityV1 identity;
+        NpmTransactionIdentity identity;
         std::unique_ptr<NpmTlsHandshakeTrackerV1> tracker;
         uint64_t reserved_bytes = 0;
     };

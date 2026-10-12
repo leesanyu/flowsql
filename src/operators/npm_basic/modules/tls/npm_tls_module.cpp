@@ -3,8 +3,6 @@
 
 #include "npm_tls_module.h"
 
-#include <arpa/inet.h>
-
 #include <algorithm>
 #include <cerrno>
 #include <new>
@@ -13,31 +11,8 @@
 namespace flowsql::npm {
 namespace {
 
-constexpr uint64_t kIdentityCharge = 512;
 constexpr uint64_t kTrackerBaseCharge = 64 * 1024;
 constexpr uint64_t kMaxParseChunk = 256;
-
-bool FormatAddress(packet::AddressFamily family, const packet::IpAddress& address, std::string* output) {
-    char text[INET6_ADDRSTRLEN]{};
-    const void* bytes = nullptr;
-    int system_family = AF_UNSPEC;
-    if (family == packet::AddressFamily::kIPv4) {
-        const auto* value = std::get_if<packet::IPv4Address>(&address);
-        if (!value) return false;
-        bytes = value->bytes;
-        system_family = AF_INET;
-    } else if (family == packet::AddressFamily::kIPv6) {
-        const auto* value = std::get_if<packet::IPv6Address>(&address);
-        if (!value) return false;
-        bytes = value->bytes;
-        system_family = AF_INET6;
-    } else {
-        return false;
-    }
-    if (!inet_ntop(system_family, bytes, text, sizeof(text))) return false;
-    *output = text;
-    return true;
-}
 
 }  // namespace
 
@@ -49,20 +24,18 @@ NpmTlsProtocolModuleV1::~NpmTlsProtocolModuleV1() { Abort(); }
 int NpmTlsProtocolModuleV1::RememberSession(const NpmSessionView& session) {
     if (!budget_ || !session.key || !session.session_id) return EINVAL;
     if (sessions_.find(session.session_id) != sessions_.end()) return 0;
-    const uint64_t bytes = kIdentityCharge + kTrackerBaseCharge + 8ULL * config_.max_hello_bytes;
+    const uint64_t identity_charge = sizeof(SessionState) + 6 * sizeof(void*) + session.key->OwnedKeyBytes();
+    const uint64_t bytes = identity_charge + kTrackerBaseCharge + 8ULL * config_.max_hello_bytes;
     if (budget_->Reserve(NpmBudgetCategory::kModuleState, bytes) != NpmBudgetError::kNone) return ENOSPC;
     try {
         SessionState state;
-        state.identity.session_id = session.session_id;
-        state.identity.observation_domain_id = session.key->observation_domain_id;
-        state.identity.a_port = session.key->a.port;
-        state.identity.b_port = session.key->b.port;
-        if (session.key->transport_protocol != 6 ||
-            !FormatAddress(session.key->ip_family, session.key->a.ip, &state.identity.a_ip) ||
-            !FormatAddress(session.key->ip_family, session.key->b.ip, &state.identity.b_ip)) {
+        if (session.key->Protocol() != 6) {
             budget_->Release(NpmBudgetCategory::kModuleState, bytes);
             return EINVAL;
         }
+        state.identity.session_id = session.session_id;
+        state.identity.key = *session.key;
+        state.identity.charge = identity_charge;
         state.tracker = std::make_unique<NpmTlsHandshakeTrackerV1>(session.session_id, config_);
         state.reserved_bytes = bytes;
         sessions_.emplace(session.session_id, std::move(state));
@@ -77,8 +50,8 @@ void NpmTlsProtocolModuleV1::ReleaseTracker(SessionState& state) noexcept {
     if (!state.tracker) return;
     state.tracker->Abort();
     state.tracker.reset();
-    budget_->Release(NpmBudgetCategory::kModuleState, state.reserved_bytes - kIdentityCharge);
-    state.reserved_bytes = kIdentityCharge;
+    budget_->Release(NpmBudgetCategory::kModuleState, state.reserved_bytes - state.identity.charge);
+    state.reserved_bytes = state.identity.charge;
 }
 
 void NpmTlsProtocolModuleV1::ForgetSession(uint64_t session_id) noexcept {
@@ -93,7 +66,17 @@ int NpmTlsProtocolModuleV1::EmitResult(SessionState& state, std::optional<NpmTls
                                        INpmResultEmitterV1& emitter) {
     if (!*result) return 0;
     result->value().handshake.entity_instance_id = state.identity.session_id;
-    const int error = EmitNpmTlsHandshakeV1(**result, state.identity, budget_, emitter);
+    auto emit = [&](auto family_result, const auto& key) {
+        family_result.a_ip = key.a_ip;
+        family_result.b_ip = key.b_ip;
+        family_result.observation_domain_id = key.observation_domain_id;
+        family_result.a_port = key.a_port;
+        family_result.b_port = key.b_port;
+        family_result.transaction = std::move(**result);
+        return EmitNpmTlsHandshakeV1(family_result, budget_, emitter);
+    };
+    const auto& key = state.identity.key;
+    const int error = key.Get4() ? emit(NpmTlsResult4{}, *key.Get4()) : emit(NpmTlsResult6{}, *key.Get6());
     result->reset();
     ReleaseTracker(state);
     return error;

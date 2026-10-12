@@ -22,13 +22,13 @@ int main() {
             assert(ValidateNpmAnalysisConfig(custom) == NpmAnalysisConfigError::kNone);
         }
     }
-    const auto schema = NpmBasicResultSchema();
-    assert(schema->Equals(*NpmBasicEntityDescriptorV1().schema, true));
-    assert(schema->num_fields() == 32);
+    const auto schema = NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4);
+    assert(schema->Equals(*NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema, true));
+    assert(schema->num_fields() == 31);
     assert(schema->GetFieldByName("primary_label_id")->nullable());
     assert(schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == "1");
-    assert(NpmBasicEntityDescriptorV1().schema_version == 1);
-    NpmBasicResult row;
+    assert(NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema_version == 1);
+    NpmBasicResult4 row;
     row.session_id = 1;
     row.revision = 1;
     row.protocol_status = NpmProtocolStatus::kUnknown;
@@ -39,6 +39,7 @@ int main() {
     assert(EncodeNpmBasicResults({row}, &batch) == NpmBasicEncodeError::kNone);
     assert(batch->GetColumnByName("primary_label_id")->IsNull(0));
     assert(batch->GetColumnByName("period_start_ns")->IsNull(0));
+    row.primary_label_id = 0;
     assert(EncodeNpmBasicResults({row}, &batch, nullptr, true) == NpmBasicEncodeError::kNone);
     const auto label = std::static_pointer_cast<arrow::UInt32Array>(batch->GetColumnByName("primary_label_id"));
     assert(!label->IsNull(0) && label->Value(0) == 0);

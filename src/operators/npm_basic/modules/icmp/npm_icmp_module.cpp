@@ -5,34 +5,11 @@
 
 #include "npm_icmp_result_encoder.h"
 
-#include <arpa/inet.h>
-
 #include <cerrno>
 #include <cstring>
 #include <utility>
 
 namespace flowsql::npm {
-namespace {
-
-std::string FormatIp(const packet::IpAddress& address) {
-    char text[INET6_ADDRSTRLEN] = {};
-    if (const auto* ipv4 = std::get_if<packet::IPv4Address>(&address)) {
-        if (inet_ntop(AF_INET, ipv4->bytes, text, sizeof(text))) return text;
-    } else if (const auto* ipv6 = std::get_if<packet::IPv6Address>(&address)) {
-        if (inet_ntop(AF_INET6, ipv6->bytes, text, sizeof(text))) return text;
-    }
-    return {};
-}
-
-int CompareIp(const packet::IpAddress& left, const packet::IpAddress& right, packet::AddressFamily family) {
-    if (family == packet::AddressFamily::kIPv4) {
-        return std::memcmp(std::get<packet::IPv4Address>(left).bytes, std::get<packet::IPv4Address>(right).bytes, 4);
-    }
-    return std::memcmp(std::get<packet::IPv6Address>(left).bytes, std::get<packet::IPv6Address>(right).bytes, 16);
-}
-
-}  // namespace
-
 NpmIcmpProtocolModuleV1::NpmIcmpProtocolModuleV1(NpmIcmpConfigV1 config, std::shared_ptr<INpmTaskBudget> budget)
     : budget_(std::move(budget)), echoes_(config, budget_) {}
 
@@ -41,48 +18,50 @@ void NpmIcmpProtocolModuleV1::BindSessions(const NpmSessionTable* sessions, std:
     input_namespace_ = std::move(input_namespace);
 }
 
-std::optional<uint64_t> NpmIcmpProtocolModuleV1::FindActive(const NpmIcmpQuotedFlowV1& flow) const {
-    if (!sessions_ || input_namespace_.empty() || (flow.protocol != 6 && flow.protocol != 17) ||
-        (flow.ip_family != packet::AddressFamily::kIPv4 && flow.ip_family != packet::AddressFamily::kIPv6))
-        return {};
-    NpmSessionKey key;
+template <typename Address>
+std::optional<uint64_t> NpmIcmpProtocolModuleV1::Lookup(const NpmIcmpFamilyQuotedFlow<Address>& flow) const {
+    if (!sessions_ || input_namespace_.empty() || (flow.protocol != 6 && flow.protocol != 17)) return {};
+    std::conditional_t<sizeof(Address) == 4, NpmSessionKey4, NpmSessionKey6> key;
+    const int order = std::memcmp(flow.src_ip.bytes, flow.dst_ip.bytes, sizeof(Address));
+    const bool forward = order < 0 || (order == 0 && flow.src_port <= flow.dst_port);
     key.input_namespace = input_namespace_;
     key.observation_domain_id = flow.observation_domain_id;
-    key.ip_family = flow.ip_family;
     key.transport_protocol = flow.protocol;
-    const NpmEndpoint src{flow.src_ip, flow.src_port}, dst{flow.dst_ip, flow.dst_port};
-    const int order = CompareIp(src.ip, dst.ip, flow.ip_family);
-    if (order < 0 || (order == 0 && src.port <= dst.port)) {
-        key.a = src;
-        key.b = dst;
-    } else {
-        key.a = dst;
-        key.b = src;
-    }
+    key.a_ip = forward ? flow.src_ip : flow.dst_ip;
+    key.b_ip = forward ? flow.dst_ip : flow.src_ip;
+    key.a_port = forward ? flow.src_port : flow.dst_port;
+    key.b_port = forward ? flow.dst_port : flow.src_port;
     NpmSessionView session;
-    if (sessions_->Find(key, &session) != NpmSessionTableError::kNone) return {};
+    if (sessions_->Find(NpmSessionKeyView(key), &session) != NpmSessionTableError::kNone) return {};
     return session.session_id;
 }
+std::optional<uint64_t> NpmIcmpProtocolModuleV1::FindActive(const NpmIcmpQuotedFlow4& flow) const {
+    return Lookup(flow);
+}
+std::optional<uint64_t> NpmIcmpProtocolModuleV1::FindActive(const NpmIcmpQuotedFlow6& flow) const {
+    return Lookup(flow);
+}
 
-int NpmIcmpProtocolModuleV1::Emit(const NpmIcmpEventV1& event, INpmResultEmitterV1& emitter) {
+template <typename Address>
+int NpmIcmpProtocolModuleV1::Emit(const NpmIcmpFamilyEvent<Address>& event, INpmResultEmitterV1& emitter) {
     return EmitNpmIcmpEventV1(event, budget_, emitter);
 }
 
-int NpmIcmpProtocolModuleV1::OnInput(const NpmInputEventV1& input, INpmResultEmitterV1& emitter) {
-    NpmIcmpParsedV1 parsed;
+template <typename Address>
+int NpmIcmpProtocolModuleV1::OnFamilyInput(const NpmInputEventV1& input, INpmResultEmitterV1& emitter) {
+    NpmIcmpFamilyParsed<Address> parsed;
     if (ParseNpmIcmpControlV1(input, &parsed) != NpmIcmpParseErrorV1::kNone) return EINVAL;
-    const auto emit = [&](const NpmIcmpEventV1& event) { return Emit(event, emitter); };
+    const auto emit = [&](const auto& event) { return Emit(event, emitter); };
     if (parsed.kind == NpmIcmpMessageKindV1::kEchoRequest || parsed.kind == NpmIcmpMessageKindV1::kEchoReply)
         return echoes_.OnEcho(parsed, input.observation_domain_id, input.packet.meta.timestamp_ns, emit);
     if (parsed.kind != NpmIcmpMessageKindV1::kError) return 0;
-    NpmIcmpEventV1 event;
+    NpmIcmpFamilyEvent<Address> event;
     event.entity_instance_id = echoes_.AllocateEventId();
     if (event.entity_instance_id == 0) return EOVERFLOW;
     event.observed_at = input.packet.meta.timestamp_ns;
     event.observation_domain_id = input.observation_domain_id;
-    event.ip_family = parsed.ip_family;
-    event.src_ip = FormatIp(parsed.src_ip);
-    event.dst_ip = FormatIp(parsed.dst_ip);
+    event.src_ip = parsed.src_ip;
+    event.dst_ip = parsed.dst_ip;
     event.outcome = "icmp_error";
     event.icmp_type = parsed.icmp_type;
     event.icmp_code = parsed.icmp_code;
@@ -90,8 +69,8 @@ int NpmIcmpProtocolModuleV1::OnInput(const NpmInputEventV1& input, INpmResultEmi
     event.quote_status = parsed.quote_status;
     event.quoted_ip_family = parsed.quoted_ip_family;
     event.quoted_protocol = parsed.quoted_protocol;
-    if (parsed.quoted_src_ip) event.quoted_src_ip = FormatIp(*parsed.quoted_src_ip);
-    if (parsed.quoted_dst_ip) event.quoted_dst_ip = FormatIp(*parsed.quoted_dst_ip);
+    if (parsed.quoted_src_ip) event.quoted_src_ip = *parsed.quoted_src_ip;
+    if (parsed.quoted_dst_ip) event.quoted_dst_ip = *parsed.quoted_dst_ip;
     if (parsed.quoted_flow) {
         event.quoted_src_port = parsed.quoted_flow->src_port;
         event.quoted_dst_port = parsed.quoted_flow->dst_port;
@@ -101,14 +80,21 @@ int NpmIcmpProtocolModuleV1::OnInput(const NpmInputEventV1& input, INpmResultEmi
     return Emit(event, emitter);
 }
 
+int NpmIcmpProtocolModuleV1::OnInput(const NpmInputEventV1& input, INpmResultEmitterV1& emitter) {
+    if (!input.layer) return EINVAL;
+    if (input.layer->Get4()) return OnFamilyInput<network::IPv4Address>(input, emitter);
+    if (input.layer->Get6()) return OnFamilyInput<network::IPv6Address>(input, emitter);
+    return EINVAL;
+}
+
 std::optional<int64_t> NpmIcmpProtocolModuleV1::NextEventDeadlineNs() const { return echoes_.NextEventDeadlineNs(); }
 
 int NpmIcmpProtocolModuleV1::OnTime(const NpmModuleTimeV1& time, INpmResultEmitterV1& emitter) {
-    return echoes_.OnTime(time.watermark_ns, [&](const NpmIcmpEventV1& event) { return Emit(event, emitter); });
+    return echoes_.OnTime(time.watermark_ns, [&](const auto& event) { return Emit(event, emitter); });
 }
 
 int NpmIcmpProtocolModuleV1::Finish(int64_t observed_at_ns, INpmResultEmitterV1& emitter) {
-    return echoes_.Finish(observed_at_ns, [&](const NpmIcmpEventV1& event) { return Emit(event, emitter); });
+    return echoes_.Finish(observed_at_ns, [&](const auto& event) { return Emit(event, emitter); });
 }
 
 void NpmIcmpProtocolModuleV1::Abort() noexcept { echoes_.Abort(); }

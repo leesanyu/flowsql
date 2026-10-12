@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 #include "netadapter_reader.h"
 #include <channels/pcapfile/packet_filter_domain.h>
-#include <framework/core/packet_codec.h>
+#include <framework/core/packet_family_codec.h>
 #include <plugins/npi/packet_decoder.h>
 #include <poll.h>
 #include <rapidjson/stringbuffer.h>
@@ -160,7 +160,7 @@ CapturePollEventV2 NetAdapterReader::PollCapture(int timeout_ms) {
     const auto expired = [&] {
         return monotonic_now_() - *started - wait_elapsed >= std::chrono::milliseconds(sources_.max_poll_work_ms);
     };
-    const auto next = [&](packet::PacketRecord* record) {
+    const auto next = [&](packet::PacketFamilyBatch* scratch) {
         release();
         if (!started) started = monotonic_now_();
         while (!terminal_ && inspected < sources_.max_inspected_packets_per_poll &&
@@ -205,10 +205,19 @@ CapturePollEventV2 NetAdapterReader::PollCapture(int timeout_ms) {
                 packet_view.meta = {view.timestamp_ns,        view.captured_len, view.wire_len, 1,
                                     static_cast<uint32_t>(i), sequence_ + 1};
                 packet_view.bytes = {view.bytes, view.captured_len};
-                auto layer =
-                    decoder.Decode(packet_view, {packet::kExtractMac | packet::kExtractIp | packet::kExtractPort,
-                                                 packet::EndpointScope::kInnermost});
+                packet::PacketFamilyRecord row;
+                const int decode_rc = decoder.Decode(packet_view,
+                                                     {packet::kExtractMac | packet::kExtractIp | packet::kExtractPort,
+                                                      packet::EndpointScope::kInnermost},
+                                                     *scratch, &row);
+                if (decode_rc != 0) {
+                    fail();
+                    return decode_rc;
+                }
+                const auto layer = packet::PacketFamilyBorrowLayer(row.layer, row.address, *scratch);
                 if (filter_ && !pcapfile::EvaluatePcapDecodedFilter(*filter_, packet_view.meta, layer)) {
+                    scratch->ipv4.clear();
+                    scratch->ipv6.clear();
                     release();
                     continue;
                 }
@@ -217,9 +226,9 @@ CapturePollEventV2 NetAdapterReader::PollCapture(int timeout_ms) {
                     return EOVERFLOW;
                 }
                 ++sequence_;
-                record->meta = packet_view.meta;
-                record->layer = layer;
-                record->raw_data = {backend_, view.bytes, view.captured_len};
+                row.meta = packet_view.meta;
+                row.raw_data = {backend_, view.bytes, view.captured_len};
+                scratch->rows.push_back(std::move(row));
                 delivered_bytes += view.captured_len;
                 ++counters_[i].delivered_packets;
                 counters_[i].delivered_bytes += view.captured_len;
@@ -248,7 +257,7 @@ CapturePollEventV2 NetAdapterReader::PollCapture(int timeout_ms) {
     std::shared_ptr<arrow::RecordBatch> batch;
     std::string error;
     const auto encoded =
-        packet::EncodePacketStream(next, sources_.limits.max_packets_per_batch, pool_.get(), &batch, &error);
+        packet::EncodePacketFamilyStream(next, sources_.limits.max_packets_per_batch, pool_.get(), &batch, &error);
     release();
     if (terminal_) return terminal();
     if (encoded != packet::PacketBatchError::kNone) {

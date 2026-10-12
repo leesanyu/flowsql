@@ -54,8 +54,8 @@ NpmSessionPacketError ValidateLayerStatus(packet::LayerStatus status) {
     return NpmSessionPacketError::kLayerUnavailable;
 }
 
-NpmSessionPacketError ValidateIpv6Fragments(const packet::PacketView& packet, const packet::PacketLayerInfo& layer,
-                                            uint8_t network_index) {
+NpmSessionPacketError ValidateIpv6Fragments(const packet::PacketView& packet,
+                                            const packet::PacketFamilyLayerView& layer, uint8_t network_index) {
     for (uint8_t index = static_cast<uint8_t>(network_index + 1); index < layer.layer_count; ++index) {
         const uint16_t kind = layer.layers[index].kind;
         if (IsNetworkLayer(kind)) break;
@@ -68,40 +68,19 @@ NpmSessionPacketError ValidateIpv6Fragments(const packet::PacketView& packet, co
     return NpmSessionPacketError::kNone;
 }
 
-int CompareEndpointAddresses(const NpmEndpoint& left, const NpmEndpoint& right, packet::AddressFamily family) {
-    if (family == packet::AddressFamily::kIPv4) {
-        const auto& left_address = std::get<packet::IPv4Address>(left.ip);
-        const auto& right_address = std::get<packet::IPv4Address>(right.ip);
-        return std::memcmp(left_address.bytes, right_address.bytes, sizeof(left_address.bytes));
-    }
-    const auto& left_address = std::get<packet::IPv6Address>(left.ip);
-    const auto& right_address = std::get<packet::IPv6Address>(right.ip);
-    return std::memcmp(left_address.bytes, right_address.bytes, sizeof(left_address.bytes));
-}
-
-bool EndpointComesFirst(const NpmEndpoint& left, const NpmEndpoint& right, packet::AddressFamily family) {
-    const int address_order = CompareEndpointAddresses(left, right, family);
-    return address_order < 0 || (address_order == 0 && left.port <= right.port);
-}
-
-void PopulateLabelEndpoint(const packet::MacAddress& mac, const packet::IpAddress& ip, uint16_t port,
+void PopulateLabelEndpoint(const network::EthernetAddress& mac, bool mac_valid, const uint8_t* ip, uint16_t port,
                            FlowLabelEndpointFactsV1* output) {
-    if (mac.valid) {
-        std::memcpy(output->mac, mac.value.bytes, sizeof(output->mac));
+    if (mac_valid) {
+        std::memcpy(output->mac, mac.bytes, sizeof(output->mac));
         output->mac_valid = 1;
     }
-    if (const auto* ipv4 = std::get_if<packet::IPv4Address>(&ip)) {
-        std::memcpy(output->ip, ipv4->bytes, sizeof(ipv4->bytes));
-        output->ip_valid = 1;
-    } else if (const auto* ipv6 = std::get_if<packet::IPv6Address>(&ip)) {
-        std::memcpy(output->ip, ipv6->bytes, sizeof(ipv6->bytes));
-        output->ip_valid = 1;
-    }
+    output->ip = ip;
+    output->ip_valid = ip ? 1 : 0;
     output->port = port;
     output->port_valid = 1;
 }
 
-uint16_t VlanTpid(const packet::PacketView& packet, const packet::PacketLayerInfo& layer, uint8_t vlan_index) {
+uint16_t VlanTpid(const packet::PacketView& packet, const packet::PacketFamilyLayerView& layer, uint8_t vlan_index) {
     if (vlan_index == 0) return 0;
     const auto& previous = layer.layers[vlan_index - 1];
     if (previous.kind == static_cast<uint16_t>(eLayer::ETHERNET)) {
@@ -115,8 +94,8 @@ uint16_t VlanTpid(const packet::PacketView& packet, const packet::PacketLayerInf
     return 0;
 }
 
-void PopulateLabelVlans(const packet::PacketView& packet, const packet::PacketLayerInfo& layer, uint8_t network_index,
-                        FlowLabelFactsV1* output) {
+void PopulateLabelVlans(const packet::PacketView& packet, const packet::PacketFamilyLayerView& layer,
+                        uint8_t network_index, FlowLabelFactsV1* output) {
     size_t fact_index = 0;
     for (uint8_t index = 0; index < network_index && fact_index < 2; ++index) {
         if (layer.layers[index].kind != static_cast<uint16_t>(eLayer::VLAN)) continue;
@@ -141,7 +120,7 @@ struct NetworkRange {
     packet::AddressFamily family = packet::AddressFamily::kNone;
 };
 NpmSessionPacketError ValidateNetworkRange(const NpmObservationDomainMap& domain_map, const packet::PacketView& packet,
-                                           const packet::PacketLayerInfo& layer, NetworkRange* range) {
+                                           const packet::PacketFamilyLayerView& layer, NetworkRange* range) {
     const auto domain_error = ResolveDomain(domain_map, packet.meta.source_id, &range->domain);
     if (domain_error != NpmSessionPacketError::kNone) return domain_error;
     if (packet.bytes.size != packet.meta.captured_len || packet.bytes.size == 0 || packet.bytes.data == nullptr ||
@@ -211,7 +190,7 @@ NpmSessionPacketError ValidateNetworkRange(const NpmObservationDomainMap& domain
 }  // namespace
 
 NpmSessionPacketError BuildNpmControlInput(const NpmObservationDomainMap& domains, const packet::PacketView& packet,
-                                           packet::PacketLayerInfo& layer, NpmInputEventV1* output) {
+                                           packet::PacketFamilyLayerView& layer, NpmInputEventV1* output) {
     if (!output) return NpmSessionPacketError::kNullOutput;
     NetworkRange range;
     auto error = ValidateNetworkRange(domains, packet, layer, &range);
@@ -272,7 +251,7 @@ NpmSessionPacketError BuildNpmControlInput(const NpmObservationDomainMap& domain
 
 NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap& domain_map,
                                                    const packet::PacketView& packet,
-                                                   const packet::PacketLayerInfo& layer,
+                                                   const packet::PacketFamilyLayerView& layer,
                                                    NpmSessionPacketBinding* output) {
     if (!output) return NpmSessionPacketError::kNullOutput;
 
@@ -300,12 +279,9 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
         return NpmSessionPacketError::kUnsupportedTransportProtocol;
     }
     if (!layer.ports_valid) return NpmSessionPacketError::kIncompleteEndpoint;
-    if ((family == packet::AddressFamily::kIPv4 && (!std::holds_alternative<packet::IPv4Address>(layer.src_ip) ||
-                                                    !std::holds_alternative<packet::IPv4Address>(layer.dst_ip))) ||
-        (family == packet::AddressFamily::kIPv6 && (!std::holds_alternative<packet::IPv6Address>(layer.src_ip) ||
-                                                    !std::holds_alternative<packet::IPv6Address>(layer.dst_ip)))) {
+    if (layer.address_state != packet::PacketAddressState::kAvailable ||
+        (family == packet::AddressFamily::kIPv4 ? !layer.Get4() : !layer.Get6()))
         return NpmSessionPacketError::kIncompleteEndpoint;
-    }
 
     const size_t transport_offset = layer.layers[transport_index].offset;
     if (transport_offset < network_offset || transport_offset >= network_end) {
@@ -357,21 +333,27 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
     }
 
     NpmSessionPacketBinding binding;
-    binding.key.input_namespace = domain_map.input_namespace;
-    binding.key.observation_domain_id = observation_domain_id;
-    binding.key.ip_family = family;
-    binding.key.transport_protocol = expected_protocol;
-    const NpmEndpoint source{layer.src_ip, layer.src_port};
-    const NpmEndpoint destination{layer.dst_ip, layer.dst_port};
-    if (EndpointComesFirst(source, destination, family)) {
-        binding.key.a = source;
-        binding.key.b = destination;
-        binding.direction = NpmPacketDirection::kAToB;
-    } else {
-        binding.key.a = destination;
-        binding.key.b = source;
-        binding.direction = NpmPacketDirection::kBToA;
-    }
+    const auto normalize = [&](const auto& endpoints, auto key) {
+        key.input_namespace = domain_map.input_namespace;
+        key.observation_domain_id = observation_domain_id;
+        key.transport_protocol = expected_protocol;
+        const int order = std::memcmp(endpoints.src.bytes, endpoints.dst.bytes, sizeof(endpoints.src.bytes));
+        const bool forward = order < 0 || (order == 0 && layer.src_port <= layer.dst_port);
+        key.a_ip = forward ? endpoints.src : endpoints.dst;
+        key.b_ip = forward ? endpoints.dst : endpoints.src;
+        key.a_port = forward ? layer.src_port : layer.dst_port;
+        key.b_port = forward ? layer.dst_port : layer.src_port;
+        binding.key = NpmOwnedSessionKey(key);
+        binding.direction = forward ? NpmPacketDirection::kAToB : NpmPacketDirection::kBToA;
+        PopulateLabelEndpoint(layer.src_mac, layer.src_mac_valid, endpoints.src.bytes, layer.src_port,
+                              &binding.label_facts.source);
+        PopulateLabelEndpoint(layer.dst_mac, layer.dst_mac_valid, endpoints.dst.bytes, layer.dst_port,
+                              &binding.label_facts.destination);
+    };
+    if (const auto* endpoints = layer.Get4())
+        normalize(*endpoints, NpmSessionKey4{});
+    else
+        normalize(*layer.Get6(), NpmSessionKey6{});
     binding.payload = Span<const uint8_t>(packet.bytes.data + payload_start, payload_end - payload_start);
     binding.transport.payload_wire_bytes = static_cast<uint32_t>(payload_wire_bytes);
     binding.transport.payload_captured_bytes = static_cast<uint32_t>(binding.payload.size);
@@ -381,8 +363,6 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
     binding.label_facts.ip_family = static_cast<uint8_t>(family);
     binding.label_facts.transport_protocol = expected_protocol;
     binding.label_facts.transport_valid = 1;
-    PopulateLabelEndpoint(layer.src_mac, layer.src_ip, layer.src_port, &binding.label_facts.source);
-    PopulateLabelEndpoint(layer.dst_mac, layer.dst_ip, layer.dst_port, &binding.label_facts.destination);
     PopulateLabelVlans(packet, layer, network_index, &binding.label_facts);
     *output = std::move(binding);
     return NpmSessionPacketError::kNone;
