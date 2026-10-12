@@ -1,6 +1,6 @@
 # 即时工作台
 
-WIP=1；npm-ip-family-pipeline / npm-ip-family-throughput 提交收口，Atomic Slice 1：进行中。
+WIP=0；npm-ip-family-pipeline / npm-ip-family-throughput 提交收口，Atomic Slice 1：已完成。
 
 - 用户授权：提交代码；完成当前分族实现与新增优化规格的本地提交。
 - 关联：npm-ip-family-pipeline T1～T5 已验收并归档；npm-ip-family-throughput 规格已完成，T1～T5 未启动。
@@ -22,3 +22,13 @@ WIP=1；npm-ip-family-pipeline / npm-ip-family-throughput 提交收口，Atomic 
 - 分族 Feature：标准全量构建通过；完整 CTest 90/90 唯一测试；ASan/UBSan/LSan 24 个唯一测试及三远程后端通过。
 - 三万会话 16 场景通过；59 个严格编译单元与 142 个 C++ 格式/版权检查通过；真实四后端与原生驱动验收通过。
 - 优化 Feature：仅分析与规格完成，所有实现任务未勾选；性能指标为后续验收目标。
+
+## 提交收口证据
+
+- 分族实现本地提交：0e339be094ff3963fa8cfd895fae487546a4afe7；158 个路径的提交树与逐项暂存清单及内容哈希一致。
+- 完整 CTest 的最终 JUnit 81/81 和 10/10 去重覆盖当前全部 90 个登记测试，无失败或跳过；Sanitizer 24 项及大容量重验记录核对通过。
+- 本轮重新执行 142 个 C++ 的 clang-format/版权检查和 git diff --check；已有验收对象哈希未变，本轮没有重跑实现测试。
+- 新优化规格与分析按四文档清单独立提交；Backlog 最终内容恢复起点哈希，T1～T5 及全部子任务仍待实施。
+- 提交范围、JUnit 覆盖、格式、暂存内容与最终提交/工作区审计：/tmp/npm-ip-family-submit/。
+- 本轮只修改工作台与 Backlog 的提交拆分内容；源码、测试、成本报告及两份优化文档保持已验收哈希；不推送。
+- 当前切片完成后停止；未启动 npm-ip-family-throughput T1。
