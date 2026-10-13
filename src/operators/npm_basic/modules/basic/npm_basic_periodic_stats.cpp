@@ -31,6 +31,7 @@ int NpmBasicPeriodicStats::Fail(std::string message) {
     return EIO;
 }
 void NpmBasicPeriodicStats::Release(State& state) {
+    state.snapshot.Clear();
     budget_->Release(NpmBudgetCategory::kModuleState, state.charge);
     state.charge = 0;
 }
@@ -40,11 +41,11 @@ void NpmBasicPeriodicStats::Schedule(const State& state) {
     if (!next_due_ns_ || due < *next_due_ns_) next_due_ns_ = due;
 }
 int NpmBasicPeriodicStats::RetainMetadata(State& state, const NpmSessionView& view) {
-    state.snapshot.session_id = view.session_id;
-    state.snapshot.primary_label_id = view.primary_label_id;
-    state.snapshot.protocol_status = view.protocol_status;
-    state.snapshot.protocol_id = view.protocol_id;
-    state.snapshot.protocol_sub_id = view.protocol_sub_id;
+    state.snapshot.MutableFacts(0).session_id = view.session_id;
+    state.snapshot.MutableFacts(0).primary_label_id = view.primary_label_id;
+    state.snapshot.MutableFacts(0).protocol_status = view.protocol_status;
+    state.snapshot.MutableFacts(0).protocol_id = view.protocol_id;
+    state.snapshot.MutableFacts(0).protocol_sub_id = view.protocol_sub_id;
     return 0;
 }
 int NpmBasicPeriodicStats::OnPacket(const NpmPacketView& packet, const NpmSessionView& view, INpmResultWriter&) {
@@ -60,12 +61,14 @@ int NpmBasicPeriodicStats::OnPacket(const NpmPacketView& packet, const NpmSessio
     try {
         auto found = states_.find(view.session_id);
         if (found == states_.end()) {
-            const uint64_t charge = sizeof(State) + 192 + view.key->OwnedKeyBytes();
+            const uint64_t charge = sizeof(State) + 192;
             if (budget_->Reserve(NpmBudgetCategory::kModuleState, charge) != NpmBudgetError::kNone)
                 return Fail("Basic periodic state budget exceeded");
             try {
                 State state;
-                state.snapshot.key = *view.key;
+                if (NpmSessionSnapshotBatch::Capture(view, NpmSessionEndReason::kIdleTimeout, 0, budget_,
+                                                     &state.snapshot) != NpmSessionTableError::kNone)
+                    throw std::bad_alloc();
                 state.next_start_ns = start;
                 state.charge = charge;
                 found = states_.emplace(view.session_id, std::move(state)).first;
@@ -127,8 +130,8 @@ int NpmBasicPeriodicStats::Emit(State& state, bool complete, bool final, int64_t
         period.interval_wire_bytes_ba > std::numeric_limits<uint64_t>::max() - period.interval_wire_bytes_ab)
         return Fail("Basic periodic total overflow");
     period.interval_wire_bytes_total = period.interval_wire_bytes_ab + period.interval_wire_bytes_ba;
-    auto view = state.snapshot.View();
-    view.first_ns = state.first_ns.value_or(state.snapshot.first_ns);
+    auto view = state.snapshot.View(0);
+    view.first_ns = state.first_ns.value_or(state.snapshot.MutableFacts(0).first_ns);
     view.last_ns = state.last_ns.value_or(view.first_ns);
     view.packets_ab = state.packets_ab;
     view.packets_ba = state.packets_ba;
@@ -141,7 +144,8 @@ int NpmBasicPeriodicStats::Emit(State& state, bool complete, bool final, int64_t
     }
     int rc = 0;
     auto error = projector_.ProjectAndWrite(
-        view, observed_at, final ? std::optional<NpmSessionEndReason>(state.snapshot.end_reason) : std::nullopt, writer,
+        view, observed_at,
+        final ? std::optional<NpmSessionEndReason>(state.snapshot.MutableFacts(0).end_reason) : std::nullopt, writer,
         &rc, period);
     if (error != NpmBasicProjectionError::kNone) return Fail("Basic periodic projection failed");
     if (rc != 0) return Fail("Basic periodic consumer failed");
@@ -174,8 +178,8 @@ int NpmBasicPeriodicStats::OnSessionEnd(const NpmSessionView& view, NpmSessionEn
     if (found == states_.end()) return Fail("Basic terminal session has no statistics");
     auto& state = found->second;
     RetainMetadata(state, view);
-    state.snapshot.first_ns = view.first_ns;
-    state.snapshot.end_reason = reason;
+    state.snapshot.MutableFacts(0).first_ns = view.first_ns;
+    state.snapshot.MutableFacts(0).end_reason = reason;
     if (reason == NpmSessionEndReason::kIdleTimeout) {
         state.end_ns =
             End(view.last_ns, view.key->Protocol() == 6 ? config_.tcp_idle_timeout_ns : config_.udp_idle_timeout_ns);

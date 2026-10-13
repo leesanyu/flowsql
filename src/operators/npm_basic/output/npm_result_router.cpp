@@ -60,6 +60,10 @@ void LeaseBuffers(const std::shared_ptr<arrow::ArrayData>& data, const std::shar
 }
 }  // namespace
 
+std::shared_ptr<arrow::MemoryPool> MakeNpmResultMemoryPool(std::shared_ptr<INpmTaskBudget> budget) {
+    return std::make_shared<ResultMemoryPool>(std::move(budget));
+}
+
 NpmResultContextV1 MakeNpmResultContext(std::string task_id) {
     static std::atomic<uint64_t> sequence{0};
     std::random_device random;
@@ -75,7 +79,14 @@ NpmResultRouter::NpmResultRouter(std::vector<NpmEntityDescriptorV1> entities, st
     : entities_(std::move(entities)),
       observing_(std::move(observing)),
       context_(std::move(context)),
-      pool_(std::make_shared<ResultMemoryPool>(std::move(budget))),
+      delivery_plan_([&] {
+          NpmResultDeliveryPlan plan;
+          for (const auto& entity : entities_)
+              plan.entities.push_back({entity, entity.entity_id == observing_, consumer != nullptr});
+          return plan;
+      }()),
+      budget_(std::move(budget)),
+      pool_(MakeNpmResultMemoryPool(budget_)),
       consumer_(std::move(consumer)),
       invoke_(std::move(invoke)) {}
 NpmResultRouter::~NpmResultRouter() { Cancel(); }
@@ -86,9 +97,13 @@ int NpmResultRouter::Fail(int code, std::string message) {
     }
     return error_code_;
 }
-int NpmResultRouter::Emit(std::string_view module, std::string_view entity_id, const arrow::RecordBatch& rows) {
-    if (cancelled_) return ECANCELED;
+int NpmResultRouter::Status() const noexcept {
     if (error_code_) return error_code_;
+    if (cancelled_) return ECANCELED;
+    return finished_ ? EPIPE : 0;
+}
+int NpmResultRouter::Emit(std::string_view module, std::string_view entity_id, const arrow::RecordBatch& rows) {
+    if (const int rc = Status()) return rc;
     const NpmEntityDescriptorV1* entity = nullptr;
     for (const auto& candidate : entities_)
         if (candidate.entity_id == entity_id) entity = &candidate;
@@ -117,32 +132,37 @@ int NpmResultRouter::Emit(std::string_view module, std::string_view entity_id, c
     return cancelled_ ? ECANCELED : 0;
 }
 int NpmResultRouter::Drain(std::shared_ptr<arrow::RecordBatch>* output) {
-    if (cancelled_) return ECANCELED;
     if (error_code_) return error_code_;
-    std::shared_ptr<arrow::Schema> schema = arrow::schema({});
-    for (const auto& entity : entities_)
-        if (entity.entity_id == observing_) schema = entity.schema;
-    std::shared_ptr<arrow::RecordBatch> rows;
-    if (pending_) {
-        // Finish transfers the compact column buffers; there is no second full-result concatenation.
-        auto result = pending_->Flush(false);
-        if (!result.ok()) return Fail(ENOMEM, result.status().ToString());
-        rows = arrow::RecordBatch::Make(schema, (*result)->num_rows(), (*result)->columns());
-    } else {
-        auto result = arrow::RecordBatch::MakeEmpty(schema, pool_.get());
-        if (!result.ok()) return Fail(ENOMEM, result.status().ToString());
-        rows = std::move(*result);
+    if (cancelled_) return ECANCELED;
+    try {
+        std::shared_ptr<arrow::Schema> schema = arrow::schema({});
+        for (const auto& entity : entities_)
+            if (entity.entity_id == observing_) schema = entity.schema;
+        std::shared_ptr<arrow::RecordBatch> rows;
+        if (pending_) {
+            // Finish transfers the compact column buffers; there is no second full-result concatenation.
+            auto result = pending_->Flush(false);
+            if (!result.ok()) return Fail(ENOMEM, result.status().ToString());
+            rows = arrow::RecordBatch::Make(schema, (*result)->num_rows(), (*result)->columns());
+        } else {
+            auto result = arrow::RecordBatch::MakeEmpty(schema, pool_.get());
+            if (!result.ok()) return Fail(ENOMEM, result.status().ToString());
+            rows = std::move(*result);
+        }
+        for (const auto& column : rows->columns()) LeaseBuffers(column->data(), pool_);
+        *output = std::move(rows);
+        Discard();
+        return 0;
+    } catch (const std::bad_alloc&) {
+        Discard();
+        return Fail(ENOMEM, "NPM foreground output ownership allocation failed");
     }
-    for (const auto& column : rows->columns()) LeaseBuffers(column->data(), pool_);
-    *output = std::move(rows);
-    Discard();
-    return 0;
 }
 
 int NpmResultRouter::PublishProgress(int64_t period_ns, int64_t closed_before_ns,
                                      const NpmFamilyPublicationProof& source_proof) {
-    if (cancelled_) return ECANCELED;
     if (error_code_) return error_code_;
+    if (cancelled_) return ECANCELED;
     if (finished_) return EPIPE;
     auto proof = source_proof;
     proof.foreground_drained = proof.foreground_drained && pending_rows_ == 0;
@@ -177,9 +197,10 @@ int NpmResultRouter::PublishProgress(int64_t period_ns, int64_t closed_before_ns
     return 0;
 }
 int NpmResultRouter::Finish() {
-    if (cancelled_) return ECANCELED;
     if (error_code_) return error_code_;
+    if (cancelled_) return ECANCELED;
     if (finished_) return 0;
+    if (pending_rows_) return Fail(EPIPE, "NPM foreground must be drained before Finish");
     const int error = consumer_ ? invoke_([&] { return consumer_->Finish(); }) : 0;
     if (error) return Fail(error, "consumer Finish failed: " + std::to_string(error));
     if (cancelled_) return ECANCELED;

@@ -2,7 +2,9 @@
 // Licensed under the MIT License.
 
 #include "npm_basic_result_consumer.h"
+#include <framework/interfaces/idatabase_arrow_write.h>
 #include "npm_result_progress.h"
+#include "output/npm_result_router.h"
 
 #include <arrow/api.h>
 #include <arrow/io/memory.h>
@@ -900,7 +902,8 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
           backend_(backend),
           context_(std::move(context)),
           entities_(std::move(entities)),
-          budget_(std::move(budget)) {}
+          budget_(std::move(budget)),
+          arrow_pool_(backend_ == DatabaseBackend::kClickHouse ? MakeNpmResultMemoryPool(budget_) : nullptr) {}
 
     ~NpmDatabaseResultConsumer() override {
         Cancel();
@@ -959,6 +962,41 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
                  found->observed_period_ns != found->publication.last_confirmed->publication.period_ns)) {
                 publication_failed_ = true;
                 return EINVAL;
+            }
+        }
+
+        if (backend_ == DatabaseBackend::kClickHouse) {
+            try {
+                auto fields = rows.schema()->fields();
+                fields.insert(fields.begin(), {arrow::field("__npm_run_id", arrow::utf8(), false),
+                                               arrow::field("__npm_task_id", arrow::utf8(), false)});
+                std::vector<std::shared_ptr<arrow::Array>> columns;
+                for (const auto* value : {&context_.run_id, &context_.task_id}) {
+                    arrow::StringBuilder builder(arrow_pool_.get());
+                    auto status = builder.Reserve(rows.num_rows());
+                    if (!status.ok()) return ENOSPC;
+                    for (int64_t row = 0; row < rows.num_rows(); ++row) {
+                        status = builder.Append(*value);
+                        if (!status.ok()) return ENOSPC;
+                    }
+                    auto result = builder.Finish();
+                    if (!result.ok()) return ENOSPC;
+                    columns.push_back(*result);
+                }
+                columns.insert(columns.end(), rows.columns().begin(), rows.columns().end());
+                auto batch =
+                    arrow::RecordBatch::Make(arrow::schema(std::move(fields)), rows.num_rows(), std::move(columns));
+                auto* writer = dynamic_cast<IDatabaseArrowWriteV1*>(channel_);
+                const int rc = writer->WriteArrowBatchesWithPool(found->data_table.c_str(), {batch}, arrow_pool_.get());
+                if (rc != 0) {
+                    publication_failed_ = true;
+                    error_ = channel_->GetLastError();
+                    return rc == ENOSPC ? ENOSPC : EIO;
+                }
+                found->rows_written += rows.num_rows();
+                return 0;
+            } catch (const std::bad_alloc&) {
+                return ENOMEM;
             }
         }
 
@@ -1156,6 +1194,7 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
     NpmResultContextV1 context_;
     std::vector<EntityStorage> entities_;
     std::shared_ptr<INpmTaskBudget> budget_;
+    std::shared_ptr<arrow::MemoryPool> arrow_pool_;
     mutable std::mutex mutex_;
     std::atomic<bool> cancelled_{false};
     bool terminal_ = false;
@@ -1186,6 +1225,9 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
         }
         auto* commands = dynamic_cast<IDatabasePreparedCommandV1*>(channel_);
         if (!commands) return Fail(ENOTSUP, "database channel has no prepared command capability");
+        if (backend_ == DatabaseBackend::kClickHouse && !dynamic_cast<IDatabaseArrowWriteV1*>(channel_)) {
+            return Fail(ENOTSUP, "ClickHouse channel has no budgeted Arrow write capability");
+        }
         try {
             std::vector<EntityStorage> storage;
             storage.reserve(entities.size());

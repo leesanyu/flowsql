@@ -4,6 +4,7 @@
 
 #include <arrow/memory_pool.h>
 #include <arrow/table_builder.h>
+#include <operators/npm_basic/core/npm_throughput_contract.h>
 #include <operators/npm_basic/npm_protocol_contract.h>
 #include <operators/npm_basic/npm_result_progress.h>
 #include <atomic>
@@ -11,6 +12,8 @@
 #include <unordered_map>
 
 namespace flowsql::npm {
+
+std::shared_ptr<arrow::MemoryPool> MakeNpmResultMemoryPool(std::shared_ptr<INpmTaskBudget> budget);
 
 /** Task-private synchronous router. Only observing rows survive Emit. */
 class NpmResultRouter final {
@@ -33,12 +36,17 @@ class NpmResultRouter final {
     arrow::MemoryPool* pool() const { return pool_.get(); }
     const std::string& LastError() const { return error_; }
     const NpmResultContextV1& Context() const { return context_; }
+    const NpmResultDeliveryPlan& DeliveryPlan() const { return delivery_plan_; }
+    const std::shared_ptr<INpmTaskBudget>& Budget() const { return budget_; }
+    int Status() const noexcept;
 
  private:
     int Fail(int code, std::string message);
     std::vector<NpmEntityDescriptorV1> entities_;
     std::string observing_;
     NpmResultContextV1 context_;
+    const NpmResultDeliveryPlan delivery_plan_;
+    std::shared_ptr<INpmTaskBudget> budget_;
     std::shared_ptr<arrow::MemoryPool> pool_;
     std::unique_ptr<INpmResultConsumerV1> consumer_;
     Invoke invoke_;

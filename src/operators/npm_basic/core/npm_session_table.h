@@ -4,7 +4,7 @@
 #ifndef _FLOWSQL_OPERATORS_NPM_BASIC_NPM_SESSION_TABLE_H_
 #define _FLOWSQL_OPERATORS_NPM_BASIC_NPM_SESSION_TABLE_H_
 
-#include "npm_session_key.h"
+#include "npm_session_snapshot.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -26,20 +26,6 @@ struct NpmSessionKeyEqual {
     bool operator()(const NpmSessionKey6& left, const NpmSessionKey6& right) const noexcept;
 };
 
-enum class NpmSessionTableError : uint8_t {
-    kNone = 0,
-    kNullOutput,
-    kNotFound,
-    kInvalidDirection,
-    kSessionLimitExceeded,
-    kSessionIdExhausted,
-    kLatePacket,
-    kSessionInstanceMismatch,
-    kInvalidPacketView,
-    kSessionBudgetExceeded,
-    kAllocationFailed,
-};
-
 enum class NpmCaptureProgressDisposition : uint8_t {
     kAdvanced = 0,
     kUnchanged,
@@ -56,50 +42,44 @@ struct NpmCaptureProgressUpdate {
     bool source_has_backlog = false;
 };
 
-struct NpmSessionSnapshotFacts {
-    uint64_t session_id = 0;
-    int64_t first_ns = 0;
-    int64_t last_ns = 0;
-    uint64_t packets_ab = 0;
-    uint64_t packets_ba = 0;
-    uint64_t wire_bytes_ab = 0;
-    uint64_t wire_bytes_ba = 0;
-    uint32_t primary_label_id = 0;
-    NpmProtocolStatus protocol_status = NpmProtocolStatus::kPending;
-    std::optional<uint16_t> protocol_id;
-    std::optional<uint16_t> protocol_sub_id;
-    NpmSessionEndReason end_reason = NpmSessionEndReason::kIdleTimeout;
-};
+class NpmSessionTable;
 
-struct NpmSessionSnapshot : NpmSessionSnapshotFacts {
- private:
-    struct Lease;
-    std::shared_ptr<Lease> lease_;
-
+// Core-private access: only Observe -> SampleProtocol, before any further table mutation.
+class NpmSessionAccess {
  public:
-    NpmOwnedSessionKey key;
-    NpmSessionSnapshot() = default;
-    NpmSessionSnapshot(const NpmSessionSnapshot& other);
-    NpmSessionSnapshot& operator=(const NpmSessionSnapshot& other);
-    NpmSessionSnapshot(NpmSessionSnapshot&&) noexcept = default;
-    NpmSessionSnapshot& operator=(NpmSessionSnapshot&&) noexcept = default;
-    void ReserveBudget(std::shared_ptr<INpmTaskBudget> budget, uint64_t bytes);
-    NpmSessionView View() const&;
-    NpmSessionView View() const&& = delete;
+    NpmSessionAccess() = default;
+    NpmSessionAccess(const NpmSessionAccess&) = delete;
+    NpmSessionAccess& operator=(const NpmSessionAccess&) = delete;
+    NpmSessionAccess(NpmSessionAccess&&) noexcept;
+    NpmSessionAccess& operator=(NpmSessionAccess&&) noexcept;
+
+ private:
+    friend class NpmSessionTable;
+    friend struct NpmThroughputTestAccess;
+    const NpmSessionTable* owner_ = nullptr;
+    void* entry_ = nullptr;
+    uint64_t session_id_ = 0;
+    uint64_t generation_ = 0;
+    packet::AddressFamily family_ = packet::AddressFamily::kNone;
 };
 
 /** One packet may retire an old instance and either expose a replacement or leave no active session. */
 struct NpmSessionObserveResult {
     bool has_active_session = false;
     NpmSessionView active_session;
-    std::vector<NpmSessionSnapshot> ended_sessions;
+    NpmSessionAccess access;
+    NpmSessionSnapshotBatch ended_sessions;
+    size_t ended_begin = 0;
+    size_t ended_end = 0;
 };
 
 struct NpmCaptureProgressResult {
     NpmCaptureProgressDisposition disposition = NpmCaptureProgressDisposition::kUnchanged;
     bool watermark_initialized = false;
     int64_t watermark_ns = 0;
-    std::vector<NpmSessionSnapshot> ended_sessions;
+    NpmSessionSnapshotBatch ended_sessions;
+    size_t ended_begin = 0;
+    size_t ended_end = 0;
 };
 
 class NpmSessionAdmissionPlanner;
@@ -116,11 +96,12 @@ class NpmSessionTable {
     NpmSessionTable& operator=(NpmSessionTable&&) = delete;
 
     /** Observes one normalized packet. Active keys borrow from this table; ended snapshots own their keys. */
-    NpmSessionTableError Observe(const NpmSessionPacketBinding& binding, const packet::PacketMeta& meta,
-                                 NpmSessionObserveResult* output, uint32_t new_session_primary_label_id = 0);
+    NpmSessionTableError Observe(const NpmPacketBindingView& binding, const packet::PacketMeta& meta,
+                                 NpmSessionObserveResult* output, uint32_t new_session_primary_label_id = 0,
+                                 NpmSessionSnapshotBatch* ended_batch = nullptr);
 
     /** Samples one active session payload. Output keys borrow from this table. */
-    NpmSessionTableError SampleProtocol(NpmSessionKeyView key, uint64_t session_id, const NpmPacketView& packet,
+    NpmSessionTableError SampleProtocol(NpmSessionAccess access, const NpmPacketView& packet,
                                         packet::IPacketFamilyProtocolIdentifier& identifier, NpmSessionView* output);
 
     /** Returns a borrowed snapshot view without updating the session. */
@@ -130,10 +111,11 @@ class NpmSessionTable {
     NpmSessionTableError SnapshotActive(std::vector<NpmSessionView>* output) const;
 
     /** Advances event time explicitly and returns owned snapshots for sessions retired as idle. */
-    NpmCaptureProgressResult AdvanceCaptureProgress(const NpmCaptureProgressUpdate& update);
+    NpmCaptureProgressResult AdvanceCaptureProgress(const NpmCaptureProgressUpdate& update,
+                                                    NpmSessionSnapshotBatch* ended_batch = nullptr);
 
     /** Atomically retires every active session as EOF in ascending session ID order. */
-    NpmSessionTableError FinishAllAtEof(std::vector<NpmSessionSnapshot>* output);
+    NpmSessionTableError FinishAllAtEof(NpmSessionSnapshotBatch* output);
 
     std::optional<int64_t> NextEventDeadlineNs() const noexcept {
         return deadlines_.empty() ? std::nullopt : std::optional<int64_t>(deadlines_.begin()->first.first);
@@ -151,6 +133,7 @@ class NpmSessionTable {
 
  private:
     friend class NpmSessionAdmissionPlanner;
+    friend struct NpmThroughputTestAccess;
 
     struct State {
         uint64_t session_id = 0;
@@ -183,23 +166,26 @@ class NpmSessionTable {
     template <typename Entry>
     static NpmSessionView MakeView(const Entry& entry);
     template <typename Entry>
-    NpmSessionSnapshot MakeSnapshot(const Entry& entry, NpmSessionEndReason reason);
+    void AppendSnapshot(const Entry& entry, NpmSessionEndReason reason, NpmSessionSnapshotBatch* batch);
     template <typename Key>
     static uint64_t EstimateTrackedBytes(const Key& key) noexcept;
     template <typename Key>
-    NpmSessionTableError ObserveFamily(const NpmSessionPacketBinding& binding, const Key& key, FamilyMap<Key>& sessions,
-                                       const packet::PacketMeta& meta, NpmSessionObserveResult* output, uint32_t label);
-    template <typename Key>
-    NpmSessionTableError SampleFamily(const Key& key, FamilyMap<Key>& sessions, uint64_t id,
-                                      const NpmPacketView& packet, packet::IPacketFamilyProtocolIdentifier& identifier,
-                                      NpmSessionView* output);
+    NpmSessionTableError ObserveFamily(const NpmPacketBindingView& binding, const Key& key, FamilyMap<Key>& sessions,
+                                       const packet::PacketMeta& meta, NpmSessionObserveResult* output, uint32_t label,
+                                       NpmSessionSnapshotBatch* ended_batch);
+    template <typename Entry>
+    NpmSessionTableError SampleFamily(Entry& entry, const NpmPacketView& packet,
+                                      packet::IPacketFamilyProtocolIdentifier& identifier, NpmSessionView* output);
 
+    template <typename Entry>
+    NpmSessionAccess MakeAccess(Entry& entry) const;
     NpmBudgetError ReserveSession(uint64_t bytes);
     void ReleaseSession(uint64_t bytes) noexcept;
 
     NpmAnalysisConfig config_;
     uint64_t max_active_sessions_ = 0;
     uint64_t next_session_id_ = 1;
+    uint64_t access_generation_ = 0;
     bool watermark_initialized_ = false;
     int64_t watermark_ns_ = 0;
     FamilyMap<NpmSessionKey4> sessions4_;
@@ -221,7 +207,7 @@ class NpmSessionAdmissionPlanner {
     NpmSessionTableError AdvanceControl(int64_t timestamp_ns);
 
     /** Mirrors offline capture progress followed by Observe for admission decisions only. */
-    NpmSessionTableError ObserveAndAdvance(const NpmSessionPacketBinding& binding, const packet::PacketMeta& meta,
+    NpmSessionTableError ObserveAndAdvance(const NpmPacketBindingView& binding, const packet::PacketMeta& meta,
                                            bool* requires_admission);
 
  private:
@@ -240,7 +226,7 @@ class NpmSessionAdmissionPlanner {
     bool watermark_initialized_ = false;
     int64_t watermark_ns_ = 0;
     template <typename Key>
-    NpmSessionTableError ObserveFamily(const NpmSessionPacketBinding& binding, const Key& key,
+    NpmSessionTableError ObserveFamily(const NpmPacketBindingView& binding, const Key& key,
                                        const packet::PacketMeta& meta, bool* requires_admission);
     template <typename Key>
     using FamilyStates = std::unordered_map<Key, State, NpmSessionKeyHash, NpmSessionKeyEqual>;
@@ -250,9 +236,8 @@ class NpmSessionAdmissionPlanner {
 };
 
 /** Synchronously notifies every module in registration order for each owned ended-session snapshot. */
-int NotifyNpmSessionEnd(const std::vector<NpmSessionSnapshot>& ended_sessions,
-                        const std::vector<INpmAnalysisModule*>& modules, int64_t observed_at_ns,
-                        INpmResultWriter& writer);
+int NotifyNpmSessionEnd(const NpmSessionSnapshotBatch& ended_sessions, const std::vector<INpmAnalysisModule*>& modules,
+                        int64_t observed_at_ns, INpmResultWriter& writer);
 
 }  // namespace flowsql::npm
 

@@ -52,7 +52,7 @@ static_assert(offsetof(npm::NpmSessionKey6, a_port) == 72);
 static_assert(offsetof(npm::NpmSessionKey6, b_port) == 74);
 static_assert(offsetof(npm::NpmSessionKey6, transport_protocol) == 76);
 static_assert(sizeof(npm::NpmSessionKeyView) == 16);
-static_assert(!std::is_default_constructible_v<npm::NpmSessionKeyView>);
+static_assert(std::is_default_constructible_v<npm::NpmSessionKeyView>);
 static_assert(!std::is_constructible_v<npm::NpmSessionKeyView, npm::NpmSessionKey4&&>);
 static_assert(!std::is_constructible_v<npm::NpmSessionKeyView, npm::NpmSessionKey6&&>);
 static_assert(!std::is_constructible_v<npm::NpmSessionKeyView, const npm::NpmSessionKey4&&>);
@@ -126,6 +126,9 @@ void TestNetworkOctetsAndAlignment() {
 }
 
 void TestBorrowedFamilyDispatch() {
+    const npm::NpmSessionKeyView empty;
+    assert(!empty && empty.Family() == packet::AddressFamily::kNone);
+    assert(empty.Get4() == nullptr && empty.Get6() == nullptr);
     npm::NpmSessionKey4 key4;
     npm::NpmSessionKey6 key6;
     key4.a_ip = network::IPv4Address::FromUInt32(0xc0000201u);

@@ -2,6 +2,39 @@ project(test_npm_basic)
 
 find_package(Threads REQUIRED)
 
+add_executable(test_clickhouse_columnar_write test_clickhouse_columnar_write.cpp)
+target_include_directories(test_clickhouse_columnar_write PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_clickhouse_columnar_write PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-unused-parameter -Wno-pessimizing-move)
+add_thirddepen(test_clickhouse_columnar_write arrow httplib)
+target_link_libraries(test_clickhouse_columnar_write flowsql_common flowsql_database Threads::Threads)
+set_target_properties(test_clickhouse_columnar_write PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_clickhouse_columnar_write COMMAND $<TARGET_FILE:test_clickhouse_columnar_write>)
+
+add_executable(benchmark_clickhouse_columnar benchmark_clickhouse_columnar.cpp)
+target_include_directories(benchmark_clickhouse_columnar PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(benchmark_clickhouse_columnar PRIVATE -Wall -Wextra -Werror
+    -Wno-unused-parameter -Wno-pessimizing-move)
+add_thirddepen(benchmark_clickhouse_columnar arrow)
+target_link_libraries(benchmark_clickhouse_columnar flowsql_common flowsql_database)
+set_target_properties(benchmark_clickhouse_columnar PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+
+add_executable(test_npm_throughput_contract test_npm_throughput_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_table.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_key.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_task_budget.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp)
+target_compile_definitions(test_npm_throughput_contract PRIVATE FLOWSQL_NPM_LOOKUP_TEST_HOOK)
+target_link_libraries(test_npm_throughput_contract flowsql_common)
+target_include_directories(test_npm_throughput_contract PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_throughput_contract PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-pessimizing-move -Wno-unused-parameter -Wno-missing-field-initializers)
+add_thirddepen(test_npm_throughput_contract arrow)
+set_target_properties(test_npm_throughput_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_throughput_contract COMMAND $<TARGET_FILE:test_npm_throughput_contract>)
+
 add_executable(test_npm_family_runtime test_npm_family_runtime.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_table.cpp
     ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_key.cpp
@@ -40,7 +73,7 @@ set_target_properties(test_npm_family_output_contract PROPERTIES RUNTIME_OUTPUT_
 add_test(NAME test_npm_family_output_contract COMMAND $<TARGET_FILE:test_npm_family_output_contract>)
 
 if(FLOWSQL_IP_FAMILY_CONTRACT_SANITIZERS)
-    foreach(family_contract_target IN ITEMS test_npm_family_runtime test_npm_ip_family_contract test_npm_family_result_contract
+    foreach(family_contract_target IN ITEMS test_npm_throughput_contract test_npm_family_runtime test_npm_ip_family_contract test_npm_family_result_contract
             test_npm_family_output_contract)
         target_compile_options(${family_contract_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${family_contract_target} PRIVATE -fsanitize=address,undefined)
@@ -573,11 +606,102 @@ foreach(family_output_target IN ITEMS test_npm_basic test_npm_family_runtime)
     target_sources(${family_output_target} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_output_contract.cpp)
 endforeach()
 
+add_executable(test_npm_result_delivery test_npm_result_delivery.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_basic_result_collector.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_result_router.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_basic_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_session_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/basic/npm_basic_result_projector.cpp
+    ${CMAKE_SOURCE_DIR}/plugins/npi/packet_decoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_task_budget.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_protocol_context.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_table.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_key.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_output_contract.cpp)
+target_include_directories(test_npm_result_delivery PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_npm_result_delivery PRIVATE -UNDEBUG -Wall -Wextra -Werror
+    -Wno-pessimizing-move -Wno-unused-parameter)
+add_thirddepen(test_npm_result_delivery arrow)
+target_link_libraries(test_npm_result_delivery flowsql_common)
+set_target_properties(test_npm_result_delivery PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_result_delivery COMMAND $<TARGET_FILE:test_npm_result_delivery>)
+
 option(FLOWSQL_NPM_RESULT_SANITIZERS "Sanitize typed NPM persistence and database readback" OFF)
 if(FLOWSQL_NPM_RESULT_SANITIZERS)
     foreach(result_target IN ITEMS flowsql_common flowsql_npm_basic
-                                   test_npm_result_sqlite test_npm_result_backends test_npm_basic test_npm_family_runtime)
+                                   test_npm_result_sqlite test_npm_result_backends test_npm_basic test_npm_family_runtime test_npm_result_delivery)
         target_compile_options(${result_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${result_target} PRIVATE -fsanitize=address,undefined)
     endforeach()
+endif()
+
+# T1 harness links the same real plugins as the existing RST benchmark.
+add_executable(benchmark_npm_throughput benchmark_npm_throughput.cpp
+    ${CMAKE_SOURCE_DIR}/plugins/npi/packet_decoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp)
+target_include_directories(benchmark_npm_throughput PRIVATE ${CMAKE_SOURCE_DIR})
+add_thirddepen(benchmark_npm_throughput arrow rapidjson)
+target_compile_options(benchmark_npm_throughput PRIVATE -Wall -Wextra -Werror
+    -Wno-pessimizing-move -Wno-unused-parameter -Wno-type-limits)
+target_compile_definitions(benchmark_npm_throughput PRIVATE
+    FLOWSQL_NPI_PLUGIN_PATH="$<TARGET_FILE:flowsql_npi>"
+    FLOWSQL_NPM_BASIC_PLUGIN_PATH="$<TARGET_FILE:flowsql_npm_basic>"
+    FLOWSQL_NPI_PROTOCOLS_PATH="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml")
+add_dependencies(benchmark_npm_throughput flowsql_common flowsql_npi flowsql_npm_basic)
+target_link_libraries(benchmark_npm_throughput flowsql_common)
+set_target_properties(benchmark_npm_throughput PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+
+if(TARGET flowsql_flow_labeling)
+    target_compile_definitions(benchmark_npm_throughput PRIVATE
+        FLOWSQL_FLOW_LABELING_PLUGIN_PATH="$<TARGET_FILE:flowsql_flow_labeling>")
+    add_dependencies(benchmark_npm_throughput flowsql_flow_labeling)
+endif()
+
+foreach(delivery_backend_target IN ITEMS test_npm_result_sqlite test_npm_result_backends)
+    target_sources(${delivery_backend_target} PRIVATE
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_basic_result_collector.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_result_router.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_basic_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/output/npm_session_result_encoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/modules/basic/npm_basic_result_projector.cpp
+    ${CMAKE_SOURCE_DIR}/plugins/npi/packet_decoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_task_budget.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_protocol_context.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_table.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_session_key.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_output_contract.cpp
+    )
+endforeach()
+
+
+# Separate managed target leaves the frozen frontend performance executable unchanged.
+add_executable(benchmark_npm_throughput_managed benchmark_npm_throughput.cpp
+    ${CMAKE_SOURCE_DIR}/plugins/npi/packet_decoder.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp)
+target_include_directories(benchmark_npm_throughput_managed PRIVATE ${CMAKE_SOURCE_DIR})
+add_thirddepen(benchmark_npm_throughput_managed arrow rapidjson)
+target_compile_options(benchmark_npm_throughput_managed PRIVATE -Wall -Wextra -Werror
+    -Wno-pessimizing-move -Wno-unused-parameter -Wno-type-limits)
+target_compile_definitions(benchmark_npm_throughput_managed PRIVATE
+    FLOWSQL_NPI_PLUGIN_PATH="$<TARGET_FILE:flowsql_npi>"
+    FLOWSQL_NPM_BASIC_PLUGIN_PATH="$<TARGET_FILE:flowsql_npm_basic>"
+    FLOWSQL_DATABASE_PLUGIN_PATH="$<TARGET_FILE:flowsql_database>"
+    FLOWSQL_NPI_PROTOCOLS_PATH="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml")
+add_dependencies(benchmark_npm_throughput_managed flowsql_common flowsql_npi flowsql_npm_basic flowsql_database)
+target_link_libraries(benchmark_npm_throughput_managed flowsql_common)
+set_target_properties(benchmark_npm_throughput_managed PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+if(TARGET flowsql_flow_labeling)
+    target_compile_definitions(benchmark_npm_throughput_managed PRIVATE
+        FLOWSQL_FLOW_LABELING_PLUGIN_PATH="$<TARGET_FILE:flowsql_flow_labeling>")
+    add_dependencies(benchmark_npm_throughput_managed flowsql_flow_labeling)
 endif()

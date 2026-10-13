@@ -10,25 +10,6 @@
 #include <new>
 
 namespace flowsql::npm {
-namespace {
-NpmSessionSnapshot CopySnapshot(const NpmSessionView& session) {
-    NpmSessionSnapshot snapshot;
-    snapshot.key = *session.key;
-    snapshot.session_id = session.session_id;
-    snapshot.first_ns = session.first_ns;
-    snapshot.last_ns = session.last_ns;
-    snapshot.packets_ab = session.packets_ab;
-    snapshot.packets_ba = session.packets_ba;
-    snapshot.wire_bytes_ab = session.wire_bytes_ab;
-    snapshot.wire_bytes_ba = session.wire_bytes_ba;
-    snapshot.primary_label_id = session.primary_label_id;
-    snapshot.protocol_status = session.protocol_status;
-    snapshot.protocol_id = session.protocol_id;
-    snapshot.protocol_sub_id = session.protocol_sub_id;
-    return snapshot;
-}
-}  // namespace
-
 int NpmTcpStreamProvider::ConsumerGate::OnTcpStreamReadable(const NpmTcpStreamContextV1& context,
                                                             INpmTcpStreamCursorV1& cursor,
                                                             INpmResultEmitterV1& emitter) {
@@ -110,11 +91,13 @@ void NpmTcpStreamProvider::Initialize(Span<const NpmTcpStreamRegistration> regis
 }
 
 NpmTcpStreamProvider::Entries::iterator NpmTcpStreamProvider::AddSession(const NpmSessionView& session) {
-    const uint64_t charge = sizeof(Entries::value_type) + 4 * sizeof(void*) + session.key->OwnedKeyBytes();
+    const uint64_t charge = sizeof(Entries::value_type) + 4 * sizeof(void*);
     Reserve(charge);
     try {
         Entry entry;
-        entry.snapshot = CopySnapshot(session);
+        if (NpmSessionSnapshotBatch::Capture(session, NpmSessionEndReason::kIdleTimeout, 0, budget_, &entry.snapshot) !=
+            NpmSessionTableError::kNone)
+            throw std::bad_alloc();
         entry.charge = charge;
         return entries_.emplace(session.session_id, std::move(entry)).first;
     } catch (...) {
@@ -124,7 +107,7 @@ NpmTcpStreamProvider::Entries::iterator NpmTcpStreamProvider::AddSession(const N
 }
 
 void NpmTcpStreamProvider::Refresh(Entry& entry, const NpmSessionView& session) noexcept {
-    auto& snapshot = entry.snapshot;
+    auto& snapshot = entry.snapshot.MutableFacts(0);
     snapshot.last_ns = session.last_ns;
     snapshot.packets_ab = session.packets_ab;
     snapshot.packets_ba = session.packets_ba;
@@ -181,7 +164,7 @@ int NpmTcpStreamProvider::OnPacket(const NpmPacketView& packet, const NpmSession
                 return EIO;
             }
         }
-        const auto view = entry.snapshot.View();
+        const auto view = entry.snapshot.View(0);
         const auto error = entry.directions[index]->Push(view, packet);
         if (error != NpmTcpStreamError::kNone) {
             SaveFailure(*entry.directions[index]);
@@ -198,7 +181,8 @@ int NpmTcpStreamProvider::OnPacket(const NpmPacketView& packet, const NpmSession
     }
 }
 
-int NpmTcpStreamProvider::OnSessionEnd(const NpmSessionSnapshot& session, int64_t observed_at_ns) {
+int NpmTcpStreamProvider::OnSessionEnd(const NpmSessionView& session, NpmSessionEndReason reason,
+                                       int64_t observed_at_ns) {
     if (aborted_ || (cancellation_requested_ && cancellation_requested_->load(std::memory_order_acquire)))
         return ECANCELED;
     auto at = entries_.find(session.session_id);
@@ -206,8 +190,7 @@ int NpmTcpStreamProvider::OnSessionEnd(const NpmSessionSnapshot& session, int64_
     for (size_t index = 0; index < 2; ++index) {
         auto& stream = at->second.directions[index];
         if (!stream) continue;
-        const auto error =
-            stream->End(session.View(), NpmTcpStreamEndReasonV1::kSessionEnd, session.end_reason, observed_at_ns);
+        const auto error = stream->End(session, NpmTcpStreamEndReasonV1::kSessionEnd, reason, observed_at_ns);
         if (error != NpmTcpStreamError::kNone) {
             SaveFailure(*stream);
             return EIO;
@@ -223,7 +206,7 @@ int NpmTcpStreamProvider::AdvanceWatermark(int64_t watermark_ns) {
     for (auto& [id, entry] : entries_) {
         for (auto& stream : entry.directions) {
             if (!stream) continue;
-            const auto error = stream->AdvanceWatermark(entry.snapshot.View(), watermark_ns);
+            const auto error = stream->AdvanceWatermark(entry.snapshot.View(0), watermark_ns);
             if (error != NpmTcpStreamError::kNone) {
                 SaveFailure(*stream);
                 return EIO;

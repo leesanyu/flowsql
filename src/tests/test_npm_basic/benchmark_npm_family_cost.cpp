@@ -1,8 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#include <operators/npm_basic/core/npm_session_table.h>
 #include <operators/npm_basic/core/npm_task_budget.h>
+#include "npm_packet_test_support.h"
 
 #include <malloc.h>
 #include <sys/resource.h>
@@ -42,9 +42,9 @@ void Phase(const char* name, uint64_t initial_heap, const flowsql::npm::NpmTaskB
         name, HeapBytes(), static_cast<int64_t>(HeapBytes()) - static_cast<int64_t>(initial_heap), RssBytes(),
         usage.session_state_bytes, usage.input_batch_bytes, usage.pending_output_bytes);
 }
-flowsql::npm::NpmSessionPacketBinding Binding(int index, bool ipv6) {
+flowsql::npm::NpmTestPacketBinding Binding(int index, bool ipv6) {
     using namespace flowsql::npm;
-    NpmSessionPacketBinding binding;
+    NpmTestPacketBinding binding;
     const auto fill = [&](auto& key) {
         key.input_namespace = "cost.packet";
         key.observation_domain_id = 7;
@@ -95,9 +95,10 @@ int main(int argc, char** argv) {
         auto budget = std::make_shared<NpmTaskBudget>(config);
         std::printf(
             "family,%s,sessions,%d,max_tracked_bytes,%lu,max_pending_bytes,%lu,key4_size,%zu,key6_size,%zu,snapshot_"
+            "batch_"
             "size,%zu\n",
             family.c_str(), count, config.max_tracked_bytes, config.max_pending_output_bytes, sizeof(NpmSessionKey4),
-            sizeof(NpmSessionKey6), sizeof(NpmSessionSnapshot));
+            sizeof(NpmSessionKey6), sizeof(NpmSessionSnapshotBatch));
         const auto initial_heap = HeapBytes();
         Phase("empty", initial_heap, *budget);
         uint64_t owned_snapshot_heap = 0, cleared_snapshot_heap = 0;
@@ -139,23 +140,22 @@ int main(int argc, char** argv) {
             Phase("borrowed_views", initial_heap, *budget);
             views.clear();
             views.shrink_to_fit();
-            std::vector<NpmSessionSnapshot> snapshots;
+            NpmSessionSnapshotBatch snapshots;
             Require(table.FinishAllAtEof(&snapshots) == NpmSessionTableError::kNone && snapshots.size() == count &&
                         table.size() == 0 && !table.NextEventDeadlineNs(),
                     "owned EOF failed");
             Phase("owned_snapshots", initial_heap, *budget);
             owned_snapshot_heap = HeapBytes();
-            std::printf("snapshot_vector_usable_bytes,%zu\n", malloc_usable_size(snapshots.data()));
+            std::printf("snapshot_batch_tracked_bytes,%lu\n", NpmThroughputTestAccess::StorageBytes(snapshots));
             for (int index = 0; index < count; ++index) {
-                const auto view = snapshots[index].View();
+                const auto view = snapshots.View(index);
                 Require(view.session_id == static_cast<uint64_t>(index + 1) && view.packets_ab == 1 &&
                             view.wire_bytes_ab == 96,
                         "snapshot values mismatch");
                 Require((view.key->Get6() != nullptr) == (family == "ipv6" || (family == "mixed" && index % 2)),
                         "snapshot family mismatch");
             }
-            snapshots.clear();
-            snapshots.shrink_to_fit();
+            snapshots.Clear();
             cleared_snapshot_heap = HeapBytes();
             Phase("snapshots_released_buckets_retained", initial_heap, *budget);
             Require(NpmTrackedBudgetBytes(budget->Usage()) == 0 && budget->Usage().pending_output_bytes == 0,

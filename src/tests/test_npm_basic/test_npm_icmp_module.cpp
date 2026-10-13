@@ -1,6 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include "npm_packet_test_support.h"
+
 #include <tests/common/packet_family_test_support.h>
 
 #include <operators/npm_basic/core/npm_task_budget.h>
@@ -168,7 +170,7 @@ void TestActiveQuotedSession() {
     auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     auto budget = std::make_shared<npm::NpmTaskBudget>(config);
     npm::NpmSessionTable sessions(config, budget);
-    npm::NpmSessionPacketBinding binding;
+    npm::NpmTestPacketBinding binding;
     KeyType key;
     key.input_namespace = "default";
     key.observation_domain_id = 7;
@@ -207,7 +209,7 @@ void TestActiveQuotedSession() {
         other.a_ip.bytes[15] = 1;
         other.b_ip.bytes[15] = 2;
     }
-    npm::NpmSessionPacketBinding other_binding;
+    npm::NpmTestPacketBinding other_binding;
     other_binding.key = other;
     npm::NpmSessionObserveResult other_observed;
     assert(sessions.Observe(other_binding, meta, &other_observed) == npm::NpmSessionTableError::kNone);
@@ -250,7 +252,7 @@ void TestActiveQuotedSession() {
            observed.active_session.session_id);
     assert(sessions.size() == 3);
 
-    std::vector<npm::NpmSessionSnapshot> ended;
+    npm::NpmSessionSnapshotBatch ended;
     assert(sessions.FinishAllAtEof(&ended) == npm::NpmSessionTableError::kNone && ended.size() == 3);
     assert(module.OnInput(error.event, emitter) == 0);
     assert(Column<arrow::UInt64Array>(emitter.rows.back(), "active_quoted_session_id")->IsNull(0));

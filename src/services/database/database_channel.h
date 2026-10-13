@@ -4,6 +4,7 @@
 #ifndef _FLOWSQL_SERVICES_DATABASE_DATABASE_CHANNEL_H_
 #define _FLOWSQL_SERVICES_DATABASE_DATABASE_CHANNEL_H_
 
+#include <framework/interfaces/idatabase_arrow_write.h>
 #include <framework/interfaces/idatabase_atomic_target.h>
 #include <framework/interfaces/idatabase_channel.h>
 #include <framework/interfaces/idatabase_published_source.h>
@@ -24,6 +25,7 @@ namespace database {
 // 持有 IDbDriver 弱引用和 Session 工厂，支持连接池复用
 class DatabaseChannel : public IDatabaseChannel,
                         public IDatabasePreparedCommandV1,
+                        public IDatabaseArrowWriteV1,
                         public IDatabaseSnapshotSourceV1,
                         public IDatabasePublishedSourceV1,
                         public IDatabaseAtomicTargetV1 {
@@ -57,6 +59,8 @@ class DatabaseChannel : public IDatabaseChannel,
     int CreateArrowWriter(const char* table, IArrowWriter** writer) override;
     int ExecuteQueryArrow(const char* query, std::vector<std::shared_ptr<arrow::RecordBatch>>* batches) override;
     int WriteArrowBatches(const char* table, const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) override;
+    int WriteArrowBatchesWithPool(const char* table, const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+                                  arrow::MemoryPool* pool) override;
 
     // IDatabaseChannel 通用接口
     int ExecuteSql(const char* sql) override;

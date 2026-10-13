@@ -70,6 +70,12 @@ class InputBatchLease final {
         if (reserved_) budget_->Release(NpmBudgetCategory::kInputBatch, bytes_);
     }
 
+    NpmBudgetError ReserveAdditional(uint64_t bytes) {
+        const auto result = budget_->Reserve(NpmBudgetCategory::kInputBatch, bytes);
+        if (result == NpmBudgetError::kNone) bytes_ += bytes;
+        return result;
+    }
+
     NpmBudgetError Reserve() {
         const auto result = budget_->Reserve(NpmBudgetCategory::kInputBatch, bytes_);
         reserved_ = result == NpmBudgetError::kNone;
@@ -190,6 +196,11 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         if (!budget) budget = std::make_shared<NpmTaskBudget>(config.analysis);
         std::unique_ptr<NpmBasicTaskRuntime> runtime(new NpmBasicTaskRuntime(
             std::move(frozen), std::move(protocol_context), std::move(budget), std::move(matcher_lease)));
+        status.domain_error = NpmObservationDomainLookup::Create(config.domains, runtime->budget_, &runtime->domains_);
+        if (status.domain_error != NpmObservationDomainLookupError::kNone) {
+            status.error = NpmBasicTaskRuntimeError::kObservationDomainError;
+            return status;
+        }
         std::vector<NpmEntityDescriptorV1> entities;
         for (const auto& entry : prepared)
             entities.insert(entities.end(), entry.plan.entities.begin(), entry.plan.entities.end());
@@ -243,7 +254,8 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
                     throw;
                 }
             });
-        runtime->collector_->BindRouter(runtime->router_);
+        runtime->collector_ =
+            std::make_unique<NpmBasicResultCollector>(runtime->config_.features, runtime->budget_, runtime->router_);
         runtime->prepared_modules_ = std::move(prepared);
         std::vector<NpmTcpStreamRegistration> stream_registrations;
         for (size_t index = 0; index < runtime->prepared_modules_.size(); ++index) {
@@ -299,7 +311,6 @@ NpmBasicTaskRuntime::NpmBasicTaskRuntime(NpmBasicTaskConfig config,
       budget_(std::move(budget)),
       matcher_(std::move(matcher)),
       sessions_(std::make_unique<NpmSessionTable>(config_.analysis, budget_)),
-      collector_(std::make_unique<NpmBasicResultCollector>(config_.features)),
       projector_(std::make_unique<NpmBasicResultProjector>(*protocol_context_)) {}
 
 NpmBasicTaskRuntime::~NpmBasicTaskRuntime() {
@@ -364,8 +375,10 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::s
                         "npm.basic input batch has a negative Arrow buffer size");
         }
         status.input_bytes = static_cast<uint64_t>(signed_bytes);
+        uint64_t estimated_address_bytes = 0;
         const auto packet_schema = packet::PacketFamilySchema();
-        if (input->schema()->Equals(*packet_schema, true) && input->num_columns() == packet_schema->num_fields()) {
+        if (input->schema() && input->schema()->Equals(*packet_schema, true) &&
+            input->num_columns() == packet_schema->num_fields()) {
             const auto endpoints =
                 std::dynamic_pointer_cast<arrow::DenseUnionArray>(input->GetColumnByName("ip_endpoints"));
             if (endpoints && endpoints->num_fields() == 3) {
@@ -375,6 +388,7 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::s
                 if (address_bytes > std::numeric_limits<uint64_t>::max() - status.input_bytes)
                     return fail(NpmBasicOfflineBatchError::kInvalidBufferSize,
                                 "npm.basic address buffer size overflow");
+                estimated_address_bytes = address_bytes;
                 status.input_bytes += address_bytes;
             }
         }
@@ -391,11 +405,19 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::s
         if (status.batch_view_error != NpmPacketBatchError::kNone) {
             return fail(NpmBasicOfflineBatchError::kBatchViewError, "npm.basic input batch validation failed");
         }
+        if (batch->owned_address_bytes() > estimated_address_bytes) {
+            const uint64_t extra = batch->owned_address_bytes() - estimated_address_bytes;
+            status.budget_error = input_lease.ReserveAdditional(extra);
+            if (status.budget_error != NpmBudgetError::kNone)
+                return fail(NpmBasicOfflineBatchError::kInputBudgetError,
+                            "npm.basic actual address capacity budget reservation failed");
+            status.input_bytes += extra;
+        }
         if (state_.load(std::memory_order_acquire) == NpmEofFlushState::kCancelled) return cancel();
 
-        std::vector<NpmSessionEndEvent> ended_events;
+        NpmSessionSnapshotBatch ended_events;
         status.process_status = ProcessNpmOfflinePacketBatch(
-            config_.domains, *batch, *sessions_, *protocol_context_->Identifier(), modules_, *collector_, &ended_events,
+            *domains_, *batch, *sessions_, *protocol_context_->Identifier(), modules_, *collector_, &ended_events,
             matcher_.get(), protocol_modules_, streams_.get(), config_.analysis.run_mode == NpmRunMode::kOffline);
         if (status.process_status.error != NpmPacketBatchProcessError::kNone) {
             if (status.process_status.packet_status.session_error == NpmSessionTableError::kLatePacket &&
@@ -415,7 +437,7 @@ NpmBasicOfflineBatchStatus NpmBasicTaskRuntime::ProcessOfflineBatch(const std::s
         if (state_.load(std::memory_order_acquire) == NpmEofFlushState::kCancelled) return cancel();
 
         std::shared_ptr<arrow::RecordBatch> next_output;
-        status.drain_status = collector_->Drain(ended_events, *projector_, budget_, &next_output);
+        status.drain_status = collector_->Drain(ended_events, *projector_, &next_output);
         if (status.drain_status.error != NpmBasicDrainError::kNone) {
             return fail(NpmBasicOfflineBatchError::kDrainError, "npm.basic offline batch result drain failed");
         }
@@ -508,8 +530,10 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
         status.progress_disposition = progress.disposition;
         status.ended_sessions = progress.ended_sessions.size();
         if (streams_) {
-            for (const auto& ended : progress.ended_sessions) {
-                status.module_error = streams_->OnSessionEnd(ended, input.observed_at_ns);
+            for (size_t row = 0; row < progress.ended_sessions.size(); ++row) {
+                status.module_error =
+                    streams_->OnSessionEnd(progress.ended_sessions.View(row),
+                                           progress.ended_sessions.Row(row).facts.end_reason, input.observed_at_ns);
                 if (status.module_error != 0) {
                     RememberStreamFailure();
                     return fail(NpmBasicRealtimeMaintenanceError::kModuleError, kRealtimeModuleError);
@@ -578,7 +602,8 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
                 return 0;
             const auto period = config_.analysis.output_interval_ns;
             const auto closed = std::max<int64_t>(0, progress.watermark_ns - progress.watermark_ns % period);
-            const NpmFamilyPublicationProof proof{true, progress.watermark_ns, true, true, false};
+            const NpmFamilyPublicationProof proof{true, progress.watermark_ns, collector_->pending_typed_rows() == 0,
+                                                  collector_->pending_results() == 0, false};
             return router_->PublishProgress(period, closed, proof);
         };
         if (!should_emit) {
@@ -588,13 +613,9 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
             return status;
         }
 
-        std::vector<NpmSessionEndEvent> events;
-        events.reserve(progress.ended_sessions.size());
-        for (auto& ended : progress.ended_sessions) {
-            events.push_back({std::move(ended), input.observed_at_ns});
-        }
+        progress.ended_sessions.SetObservedAt(input.observed_at_ns);
         std::shared_ptr<arrow::RecordBatch> next_output;
-        status.drain_status = collector_->Drain(events, *projector_, budget_, &next_output);
+        status.drain_status = collector_->Drain(progress.ended_sessions, *projector_, &next_output);
         if (status.drain_status.error != NpmBasicDrainError::kNone) {
             return fail(NpmBasicRealtimeMaintenanceError::kDrainError, kRealtimeDrainError);
         }
@@ -763,6 +784,7 @@ void NpmBasicTaskRuntime::RememberStreamFailure() noexcept {
 }
 
 void NpmBasicTaskRuntime::ReleaseResources() noexcept {
+    if (collector_) collector_->DiscardAccepted();
     if (router_) {
         const auto runtime_state = state_.load(std::memory_order_acquire);
         const std::string message = router_->LastError().empty() ? LastError() : router_->LastError();
@@ -788,6 +810,7 @@ void NpmBasicTaskRuntime::ReleaseResources() noexcept {
     projector_.reset();
     protocol_context_.reset();
     matcher_.reset();
+    domains_.reset();
 }
 
 NpmProtocolContext& NpmBasicTaskRuntime::ProtocolContext() noexcept { return *protocol_context_; }

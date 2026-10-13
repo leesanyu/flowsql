@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <type_traits>
 #include <utility>
 
 namespace flowsql::npm {
@@ -32,9 +33,9 @@ const Header* HeaderAt(const packet::PacketView& packet, size_t offset) {
     return wire::View<Header>(packet.bytes.data, packet.bytes.size, offset);
 }
 
-NpmSessionPacketError ResolveDomain(const NpmObservationDomainMap& domain_map, uint32_t source_id,
+NpmSessionPacketError ResolveDomain(const NpmObservationDomainLookup& domain_map, uint32_t source_id,
                                     uint64_t* observation_domain_id) {
-    const auto error = ResolveNpmObservationDomain(domain_map, source_id, observation_domain_id);
+    const auto error = domain_map.Resolve(source_id, observation_domain_id);
     if (error == NpmObservationDomainError::kNone) return NpmSessionPacketError::kNone;
     if (error == NpmObservationDomainError::kUnknownSourceId) return NpmSessionPacketError::kUnknownSourceId;
     return NpmSessionPacketError::kInvalidObservationDomainMap;
@@ -119,8 +120,9 @@ struct NetworkRange {
     uint8_t protocol = 0;
     packet::AddressFamily family = packet::AddressFamily::kNone;
 };
-NpmSessionPacketError ValidateNetworkRange(const NpmObservationDomainMap& domain_map, const packet::PacketView& packet,
-                                           const packet::PacketFamilyLayerView& layer, NetworkRange* range) {
+NpmSessionPacketError ValidateNetworkRange(const NpmObservationDomainLookup& domain_map,
+                                           const packet::PacketView& packet, const packet::PacketFamilyLayerView& layer,
+                                           NetworkRange* range) {
     const auto domain_error = ResolveDomain(domain_map, packet.meta.source_id, &range->domain);
     if (domain_error != NpmSessionPacketError::kNone) return domain_error;
     if (packet.bytes.size != packet.meta.captured_len || packet.bytes.size == 0 || packet.bytes.data == nullptr ||
@@ -189,7 +191,7 @@ NpmSessionPacketError ValidateNetworkRange(const NpmObservationDomainMap& domain
 }
 }  // namespace
 
-NpmSessionPacketError BuildNpmControlInput(const NpmObservationDomainMap& domains, const packet::PacketView& packet,
+NpmSessionPacketError BuildNpmControlInput(const NpmObservationDomainLookup& domains, const packet::PacketView& packet,
                                            packet::PacketFamilyLayerView& layer, NpmInputEventV1* output) {
     if (!output) return NpmSessionPacketError::kNullOutput;
     NetworkRange range;
@@ -249,11 +251,12 @@ NpmSessionPacketError BuildNpmControlInput(const NpmObservationDomainMap& domain
     return NpmSessionPacketError::kNone;
 }
 
-NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap& domain_map,
+template <typename Key>
+NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainLookup& domain_map,
                                                    const packet::PacketView& packet,
-                                                   const packet::PacketFamilyLayerView& layer,
-                                                   NpmSessionPacketBinding* output) {
-    if (!output) return NpmSessionPacketError::kNullOutput;
+                                                   const packet::PacketFamilyLayerView& layer, Key* key_output,
+                                                   NpmPacketBindingView* output) {
+    if (!key_output || !output) return NpmSessionPacketError::kNullOutput;
 
     NetworkRange range;
     const auto error = ValidateNetworkRange(domain_map, packet, layer, &range);
@@ -332,9 +335,10 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
         return NpmSessionPacketError::kInvalidPayloadBounds;
     }
 
-    NpmSessionPacketBinding binding;
-    const auto normalize = [&](const auto& endpoints, auto key) {
-        key.input_namespace = domain_map.input_namespace;
+    NpmPacketBindingView binding;
+    Key key;
+    const auto normalize = [&](const auto& endpoints) {
+        key.input_namespace = domain_map.Namespace();
         key.observation_domain_id = observation_domain_id;
         key.transport_protocol = expected_protocol;
         const int order = std::memcmp(endpoints.src.bytes, endpoints.dst.bytes, sizeof(endpoints.src.bytes));
@@ -343,17 +347,20 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
         key.b_ip = forward ? endpoints.dst : endpoints.src;
         key.a_port = forward ? layer.src_port : layer.dst_port;
         key.b_port = forward ? layer.dst_port : layer.src_port;
-        binding.key = NpmOwnedSessionKey(key);
         binding.direction = forward ? NpmPacketDirection::kAToB : NpmPacketDirection::kBToA;
         PopulateLabelEndpoint(layer.src_mac, layer.src_mac_valid, endpoints.src.bytes, layer.src_port,
                               &binding.label_facts.source);
         PopulateLabelEndpoint(layer.dst_mac, layer.dst_mac_valid, endpoints.dst.bytes, layer.dst_port,
                               &binding.label_facts.destination);
     };
-    if (const auto* endpoints = layer.Get4())
-        normalize(*endpoints, NpmSessionKey4{});
-    else
-        normalize(*layer.Get6(), NpmSessionKey6{});
+    if constexpr (std::is_same_v<Key, NpmSessionKey4>) {
+        if (!layer.Get4()) return NpmSessionPacketError::kIncompleteEndpoint;
+        normalize(*layer.Get4());
+    } else {
+        static_assert(std::is_same_v<Key, NpmSessionKey6>);
+        if (!layer.Get6()) return NpmSessionPacketError::kIncompleteEndpoint;
+        normalize(*layer.Get6());
+    }
     binding.payload = Span<const uint8_t>(packet.bytes.data + payload_start, payload_end - payload_start);
     binding.transport.payload_wire_bytes = static_cast<uint32_t>(payload_wire_bytes);
     binding.transport.payload_captured_bytes = static_cast<uint32_t>(binding.payload.size);
@@ -364,8 +371,19 @@ NpmSessionPacketError BuildNpmSessionPacketBinding(const NpmObservationDomainMap
     binding.label_facts.transport_protocol = expected_protocol;
     binding.label_facts.transport_valid = 1;
     PopulateLabelVlans(packet, layer, network_index, &binding.label_facts);
+    *key_output = std::move(key);
+    binding.key = NpmSessionKeyView(*key_output);
     *output = std::move(binding);
     return NpmSessionPacketError::kNone;
 }
+
+template NpmSessionPacketError BuildNpmSessionPacketBinding<NpmSessionKey4>(const NpmObservationDomainLookup&,
+                                                                            const packet::PacketView&,
+                                                                            const packet::PacketFamilyLayerView&,
+                                                                            NpmSessionKey4*, NpmPacketBindingView*);
+template NpmSessionPacketError BuildNpmSessionPacketBinding<NpmSessionKey6>(const NpmObservationDomainLookup&,
+                                                                            const packet::PacketView&,
+                                                                            const packet::PacketFamilyLayerView&,
+                                                                            NpmSessionKey6*, NpmPacketBindingView*);
 
 }  // namespace flowsql::npm

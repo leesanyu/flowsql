@@ -118,8 +118,36 @@ enum class NpmObservationDomainError : uint8_t {
 };
 
 NpmObservationDomainError ValidateNpmObservationDomainMap(const NpmObservationDomainMap& domain_map);
-NpmObservationDomainError ResolveNpmObservationDomain(const NpmObservationDomainMap& domain_map, uint32_t source_id,
-                                                      uint64_t* observation_domain_id);
+interface INpmTaskBudget;
+
+// Create validates once and owns the sorted index. Resolve does no configuration revalidation.
+enum class NpmObservationDomainLookupError : uint8_t {
+    kNone = 0,
+    kNullOutput,
+    kInvalidConfiguration,
+    kBudgetExceeded,
+    kAllocationFailed,
+};
+
+class NpmObservationDomainLookup {
+ public:
+    static NpmObservationDomainLookupError Create(const NpmObservationDomainMap& map,
+                                                  std::shared_ptr<INpmTaskBudget> budget,
+                                                  std::unique_ptr<NpmObservationDomainLookup>* output);
+    ~NpmObservationDomainLookup();
+    NpmObservationDomainLookup(const NpmObservationDomainLookup&) = delete;
+    NpmObservationDomainLookup& operator=(const NpmObservationDomainLookup&) = delete;
+    NpmObservationDomainError Resolve(uint32_t source_id, uint64_t* domain) const noexcept;
+    const std::string& Namespace() const noexcept { return namespace_; }
+
+ private:
+    NpmObservationDomainLookup() = default;
+    std::string namespace_;
+    std::vector<NpmSourceDomainBinding> bindings_;
+    bool source_id_as_domain_ = false;
+    std::shared_ptr<INpmTaskBudget> budget_;
+    uint64_t charged_bytes_ = 0;
+};
 
 enum class NpmProtocolStatus : uint8_t {
     kPending = 0,

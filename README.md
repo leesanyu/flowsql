@@ -539,7 +539,7 @@ tcpdump 语法，也不代表 TCP stream、重组、会话或客户端/服务端
 Session 提供当前捕获点可观察的速率、TCP RTT/重传等指标，以状态和 nullable 值表达证据不足；结果不保留
 `raw_data`。任务内部已提供按主标签准入的共享有界 TCP 字节流，供 DNS 等协议模块复用；生产目录支持
 Basic、Session、DNS、HTTP/1、TLS、ICMP 结果模块。不能区分隧道上下文的封装流量会明确报错。
-共享流的消费、资源和缺口语义见 [NPM 共享有界 TCP 字节流接入说明](docs/npm-tcp-stream.md)。
+完整配置、统计与协议解析边界见 [NPM 使用说明](docs/npm.md)，固定负载比较见其[性能说明](docs/npm.md#性能说明)。
 
 需要按 observation domain、MAC、VLAN、IP/CIDR、传输协议和端口为双向会话绑定唯一主标签时，参见
 [Flow Labeling 构建、部署、规则配置与容量指引](docs/flow-labeling.md)。该文档说明 DPDK 依赖、CMake 三态、
@@ -1104,8 +1104,7 @@ Baseliner 在 SQLite、MySQL、PostgreSQL 上创建并确保 `(task_key, publish
 首次为已有大量数据的托管表创建索引时，应按实测 DDL 耗时配置 `persistence.operation_timeout_ms`
 （默认 5 秒），并满足 `renew_ms + operation_timeout_ms < lease_ms`；结果表索引存在后，重复初始化会复用它。
 
-完整配置、结果查询与恢复方式见 [Baseliner 使用说明](docs/baseliner.md)；
-验证范围和成本测量见 [Baseliner 验收记录](docs/baseliner-acceptance.md)。
+完整配置、结果查询与恢复方式见 [Baseliner 使用说明](docs/baseliner.md)，固定负载成本见其[性能说明](docs/baseliner.md#性能说明)。
 
 ## SQL 任务能力矩阵（当前）
 
@@ -1297,7 +1296,7 @@ flowSQL/
 │   │   ├── pcapfile/       # PCAP/PCAPNG 离线输入与阶段过滤
 │   │   └── config/         # 不可变 revision 的配置资源通道
 │   ├── operators/
-│   │   └── npm_basic/      # NPM 共享核心、Basic/Session 模块及结果存储
+│   │   └── npm_basic/      # NPM 会话与协议分析及结果存储
 │   ├── plugins/
 │   │   ├── baseline/       # Baseline 插件（在线基线、bootstrap、relation rolling/fusion）
 │   │   ├── flow_labeling/  # 基于 DPDK ACL 的会话主标签能力
@@ -1305,7 +1304,8 @@ flowSQL/
 │   ├── python/             # Python Worker（FastAPI）
 │   ├── frontend/           # Vue.js 前端
 │   └── tests/
-├── docs/                   # 设计文档
+├── docs/                   # 用户功能与使用说明、架构概览
+├── evidence/               # 本地性能与验收证据缓存（Git 忽略）
 ├── samples/                # 开发者样例工程（如 C++ 算子插件）
 └── tasks/                  # Backlog、Feature 规格、即时工作台与归档
 ```
@@ -1314,17 +1314,16 @@ flowSQL/
 
 - [项目愿景](docs/vision.md)
 - [架构设计](docs/framework.md)
+- [NetAdapter 采集与隔离真实联验](docs/netadapter.md)
 - [Flow Labeling 构建与配置](docs/flow-labeling.md)
+- [NPM 网络会话与协议分析：配置、结果与性能](docs/npm.md)
 - [NPM 参数契约](tasks/archive/feat-npm-basic-parameters.md)
 - [NPM Session 性能分析](tasks/archive/feat-npm-session-analysis.md)
 - [NPM 协议模块运行时](tasks/archive/feat-npm-protocol-analysis.md)
 - [NPM 多实体结果存储与查询](tasks/archive/feat-npm-result-query.md)
-- [NPM 共享有界 TCP 字节流接入说明](docs/npm-tcp-stream.md)
-- [NetAdapter 采集与隔离真实联验](docs/netadapter.md)
 - [NPM TLS 握手分析规格](tasks/archive/feat-npm-tls-handshake-analysis.md)
 - [Baseline 插件说明](src/plugins/baseline/README.md)
-- [Baseliner 算子使用说明](docs/baseliner.md)
-- [Baseliner 验收记录](docs/baseliner-acceptance.md)
+- [Baseliner 基线分析：输入输出、恢复与性能](docs/baseliner.md)
 - [C++ 算子插件 Sample](samples/cpp_operator/README.md)
 - [产品需求与当前进度](tasks/product_backlog.md)
 

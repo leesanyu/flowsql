@@ -29,7 +29,7 @@ class NpmBasicPeriodicStats final : public INpmAnalysisModule {
         int64_t first_ns = 0, last_ns = 0;
     };
     struct State {
-        NpmSessionSnapshot snapshot;
+        NpmSessionSnapshotBatch snapshot;
         std::map<int64_t, Bucket> buckets;
         int64_t next_start_ns = 0;
         std::optional<NpmBasicPeriodStats> last_period;

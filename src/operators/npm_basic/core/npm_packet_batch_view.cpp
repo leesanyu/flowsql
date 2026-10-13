@@ -102,6 +102,7 @@ struct NpmPacketBatchView::Columns {
     std::shared_ptr<arrow::UInt8Array> address_state;
     std::shared_ptr<arrow::DenseUnionArray> endpoints;
     packet::PacketFamilyBatch addresses;
+    size_t rows4 = 0, rows6 = 0, transport4 = 0, transport6 = 0;
     std::shared_ptr<arrow::UInt8Array> transport_protocol;
     std::shared_ptr<arrow::UInt16Array> src_port;
     std::shared_ptr<arrow::UInt16Array> dst_port;
@@ -214,12 +215,6 @@ NpmPacketBatchError NpmPacketBatchView::Create(const std::shared_ptr<arrow::Reco
             return Fail(NpmPacketBatchError::kInvalidColumn, field->name() + " contains null", error);
         }
     }
-    const auto validation = batch->ValidateFull();
-    if (!validation.ok()) {
-        return Fail(NpmPacketBatchError::kInvalidColumn,
-                    std::string("packet batch Arrow validation failed: ") + validation.ToString(), error);
-    }
-
     try {
         const auto family_validation = packet::ValidatePacketFamilyBatch(*batch);
         if (!family_validation.ok()) return Fail(NpmPacketBatchError::kInvalidRow, family_validation.ToString(), error);
@@ -248,20 +243,20 @@ NpmPacketBatchError NpmPacketBatchView::Create(const std::shared_ptr<arrow::Reco
         columns->endpoints = PacketColumnAs<arrow::DenseUnionArray>(batch, kEndpoints);
         const auto& pair4 = static_cast<const arrow::StructArray&>(*columns->endpoints->field(1));
         const auto& pair6 = static_cast<const arrow::StructArray&>(*columns->endpoints->field(2));
+        const auto& src4 = static_cast<const arrow::UInt32Array&>(*pair4.field(0));
+        const auto& dst4 = static_cast<const arrow::UInt32Array&>(*pair4.field(1));
+        const auto& src6 = static_cast<const arrow::FixedSizeBinaryArray&>(*pair6.field(0));
+        const auto& dst6 = static_cast<const arrow::FixedSizeBinaryArray&>(*pair6.field(1));
         columns->addresses.ipv4.reserve(pair4.length());
         columns->addresses.ipv6.reserve(pair6.length());
         for (int64_t index = 0; index < pair4.length(); ++index) {
-            columns->addresses.ipv4.push_back(
-                {network::IPv4Address::FromUInt32(static_cast<const arrow::UInt32Array&>(*pair4.field(0)).Value(index)),
-                 network::IPv4Address::FromUInt32(
-                     static_cast<const arrow::UInt32Array&>(*pair4.field(1)).Value(index))});
+            columns->addresses.ipv4.push_back({network::IPv4Address::FromUInt32(src4.Value(index)),
+                                               network::IPv4Address::FromUInt32(dst4.Value(index))});
         }
         for (int64_t index = 0; index < pair6.length(); ++index) {
             packet::PacketIpEndpoints6 pair;
-            std::memcpy(pair.src.bytes,
-                        static_cast<const arrow::FixedSizeBinaryArray&>(*pair6.field(0)).GetValue(index), 16);
-            std::memcpy(pair.dst.bytes,
-                        static_cast<const arrow::FixedSizeBinaryArray&>(*pair6.field(1)).GetValue(index), 16);
+            std::memcpy(pair.src.bytes, src6.GetValue(index), 16);
+            std::memcpy(pair.dst.bytes, dst6.GetValue(index), 16);
             columns->addresses.ipv6.push_back(pair);
         }
         columns->transport_protocol = PacketColumnAs<arrow::UInt8Array>(batch, kTransportProtocol);
@@ -283,6 +278,14 @@ NpmPacketBatchError NpmPacketBatchView::Create(const std::shared_ptr<arrow::Reco
                     return Fail(NpmPacketBatchError::kInvalidColumn, "layer_offsets values contain null", error);
                 }
             }
+            const auto family = columns->endpoints->type_code(row);
+            if (family == 4) {
+                ++columns->rows4;
+                if (columns->ports_valid->Value(row)) ++columns->transport4;
+            } else if (family == 6) {
+                ++columns->rows6;
+                if (columns->ports_valid->Value(row)) ++columns->transport6;
+            }
             const auto row_result = ValidateRow(row, *columns, error);
             if (row_result != NpmPacketBatchError::kNone) return row_result;
         }
@@ -299,6 +302,12 @@ int64_t NpmPacketBatchView::num_rows() const { return batch_->num_rows(); }
 uint64_t NpmPacketBatchView::owned_address_bytes() const {
     return columns_->addresses.ipv4.capacity() * sizeof(packet::PacketIpEndpoints4) +
            columns_->addresses.ipv6.capacity() * sizeof(packet::PacketIpEndpoints6);
+}
+
+size_t NpmPacketBatchView::binding_key_count(packet::AddressFamily family, bool exclude_control) const {
+    if (family == packet::AddressFamily::kIPv4) return exclude_control ? columns_->transport4 : columns_->rows4;
+    if (family == packet::AddressFamily::kIPv6) return exclude_control ? columns_->transport6 : columns_->rows6;
+    return 0;
 }
 
 NpmPacketBatchError NpmPacketBatchView::Get(int64_t row, packet::PacketView* packet_view,

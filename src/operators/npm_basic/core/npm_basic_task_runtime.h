@@ -45,10 +45,12 @@ enum class NpmBasicTaskRuntimeError : uint8_t {
     kModulePlanError,
     kModuleCreateError,
     kConsumerCreateError,
+    kObservationDomainError,
 };
 
 struct NpmBasicTaskRuntimeStatus {
     NpmBasicTaskRuntimeError error = NpmBasicTaskRuntimeError::kNone;
+    NpmObservationDomainLookupError domain_error = NpmObservationDomainLookupError::kNone;
     NpmTimeCapabilityError time_error = NpmTimeCapabilityError::kNone;
     NpmProtocolContextError protocol_error = NpmProtocolContextError::kNone;
     NpmProtocolContractStatusV1 module_status;
@@ -185,6 +187,7 @@ class NpmBasicTaskRuntime final {
     NpmBasicTaskConfig config_;
     std::unique_ptr<NpmProtocolContext> protocol_context_;
     std::shared_ptr<NpmTaskBudget> budget_;
+    std::unique_ptr<NpmObservationDomainLookup> domains_;
     MatcherLease matcher_;
     std::unique_ptr<NpmSessionTable> sessions_;
     std::unique_ptr<NpmBasicResultCollector> collector_;

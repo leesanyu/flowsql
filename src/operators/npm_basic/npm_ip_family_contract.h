@@ -40,12 +40,15 @@ struct NpmSessionKey6 {
 // Ended snapshots and asynchronous work own a Key4 or Key6 copy, never this view or a maximum-size key variant.
 class NpmSessionKeyView {
  public:
+    NpmSessionKeyView() : key_(static_cast<const NpmSessionKey4*>(nullptr)) {}
+    explicit operator bool() const { return Get4() || Get6(); }
     explicit NpmSessionKeyView(const NpmSessionKey4& key) : key_(&key) {}
     explicit NpmSessionKeyView(const NpmSessionKey6& key) : key_(&key) {}
     NpmSessionKeyView(const NpmSessionKey4&&) = delete;
     NpmSessionKeyView(const NpmSessionKey6&&) = delete;
 
     packet::AddressFamily Family() const {
+        if (!*this) return packet::AddressFamily::kNone;
         return key_.index() == 0 ? packet::AddressFamily::kIPv4 : packet::AddressFamily::kIPv6;
     }
 
@@ -81,6 +84,8 @@ class NpmOwnedSessionKey {
     NpmOwnedSessionKey() = default;
     NpmOwnedSessionKey(const NpmSessionKey4& key) : key_(std::make_unique<NpmSessionKey4>(key)) {}
     NpmOwnedSessionKey(const NpmSessionKey6& key) : key_(std::make_unique<NpmSessionKey6>(key)) {}
+    NpmOwnedSessionKey(NpmSessionKey4&& key) : key_(std::make_unique<NpmSessionKey4>(std::move(key))) {}
+    NpmOwnedSessionKey(NpmSessionKey6&& key) : key_(std::make_unique<NpmSessionKey6>(std::move(key))) {}
     NpmOwnedSessionKey(NpmSessionKeyView key) { Assign(key); }
     NpmOwnedSessionKey(const NpmOwnedSessionKey& other) {
         if (other) Assign(other.View());

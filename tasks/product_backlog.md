@@ -12,7 +12,8 @@
 | --- | --- | --- | --- | --- |
 | [x] | NPI 报文头布局与安全解析 (`npi-wire-layout`) | P1 | 为通过 NPI 和 NPM 直接读取网络报文的调用方，消除任意偏移下的未对齐访问及固定字段裸偏移造成的可读性下降；交付符合协议布局的具名报文头、明确地址值转换和经真实报文验证的分层/识别结果。 | [归档](archive/feat-npi-wire-layout.md) |
 | [x] | NPM 按 IPv4/IPv6 分析与存储 (`npm-ip-family-pipeline`) | P1 | 为用 npm.basic 分析并保存混合 IPv4/IPv6 离线或实时流量的用户，消除 IPv4 为 IPv6 最大表示、端口嵌套及字符串中间结果承担的存储成本；交付分族地址、会话、分析实体和物理数据库表，使两族在同一任务内正确处理、分别查询，并以真实容量与成本证据验收。 | [规格](archive/feat-npm-ip-family-pipeline.md) |
-| [ ] | NPM 分族链路吞吐与分配优化 (`npm-ip-family-throughput`) | P1 | 为用 npm.basic 分析混合 IPv4/IPv6 离线或实时流量的用户，降低分族后的逐包分配、重复会话访问、结束快照和单行结果编码成本；交付更高的处理吞吐，保留分族空间、原始处理顺序、三万会话容量、默认预算及全部启用实体的正确输出和持久化。 | [规格](specs/feat-npm-ip-family-throughput.md) |
+| [x] | NPM 分族链路吞吐与分配优化 (`npm-ip-family-throughput`) | P1 | 为用 npm.basic 分析混合 IPv4/IPv6 离线或实时流量的用户，降低分族后的逐包分配、重复会话访问、结束快照和单行结果编码成本；交付更高的处理吞吐，保留分族空间、原始处理顺序、三万会话容量、默认预算及全部启用实体的正确输出和持久化。 | [规格](archive/feat-npm-ip-family-throughput.md) |
+| [x] | NPM ClickHouse 列式批量写入优化 (`npm-clickhouse-columnar-write`) | P1 | 为用 ClickHouse 留存 NPM 分析结果的用户，消除列式结果被展开为逐字段 URL 参数造成的写入开销；交付预算受控、同步可见的 ArrowStream 批量写入与连接复用，以同配置结果行/秒和字节/秒证明收益，保留 MergeTree、Schema、全部实体和失败/排空语义。 | [规格](archive/feat-npm-clickhouse-columnar-write.md) |
 | [x] | NPM 运行时检视修复 (`npm-runtime-review-fixes`) | P1 | 为离线批处理和实时终态分析修复已复现的超时顺序、输出内存放大、周期空扫描与标签预算未归还问题，使目标流超时结果稳定、默认预算可交付三万会话结果且资源账目随生命周期归零。 | [归档](archive/feat-npm-runtime-review-fixes.md) |
 | [x] | NPM 数据包契约与解析基础 (`npm-packet-contract`) | P0 | 定义统一的 packet 数据实体、采集元数据、Arrow Schema 及截断/畸形报文语义，并复用现有 NPI 分层与协议识别能力。 | [归档](archive/feat-npm-packet-contract.md) |
 | [x] | NPM 离线数据包全量导入 (`npm-offline-import`) | P0 | 提供 pcap/pcapng 文件的有限流读取与回放，保留原始时间戳、捕获长度、线速长度和报文顺序，接入现有流批任务运行时。 | [归档](archive/feat-npm-offline-import.md) |

@@ -412,10 +412,16 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
                 for (const auto& input : capture_sources_.inputs)
                     parsed.domains.bindings.push_back({input.source_id, input.observation_domain_id});
             }
+            std::unique_ptr<NpmObservationDomainLookup> capture_domains;
+            if (NpmObservationDomainLookup::Create(parsed.domains, std::make_shared<NpmTaskBudget>(parsed.analysis),
+                                                   &capture_domains) != NpmObservationDomainLookupError::kNone) {
+                expected = State::kOpening;
+                expected = Fail(expected, "npm.basic invalid final capture domain map");
+                return expected == State::kCancelled ? ECANCELED : EINVAL;
+            }
             for (const auto& input : capture_sources_.inputs) {
                 uint64_t domain = 0;
-                if (ResolveNpmObservationDomain(parsed.domains, input.source_id, &domain) !=
-                        NpmObservationDomainError::kNone ||
+                if (capture_domains->Resolve(input.source_id, &domain) != NpmObservationDomainError::kNone ||
                     domain != input.observation_domain_id) {
                     expected = State::kOpening;
                     expected = Fail(expected, "npm.basic realtime source domain conflicts with capture identity");

@@ -1,11 +1,11 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#include <operators/npm_basic/core/npm_session_table.h>
 #include <operators/npm_basic/core/npm_task_budget.h>
 #include <cassert>
 #include <cstdio>
 #include <type_traits>
+#include "npm_packet_test_support.h"
 
 using namespace flowsql::npm;
 namespace p = flowsql::packet;
@@ -29,7 +29,7 @@ Key MakeKey(uint16_t port = 1000, uint8_t protocol = 17) {
     key.transport_protocol = protocol;
     return key;
 }
-NpmSessionObserveResult Observe(NpmSessionTable& table, const NpmSessionPacketBinding& binding, int64_t time) {
+NpmSessionObserveResult Observe(NpmSessionTable& table, const NpmTestPacketBinding& binding, int64_t time) {
     NpmSessionObserveResult result;
     p::PacketMeta meta;
     meta.timestamp_ns = time;
@@ -43,7 +43,7 @@ void TestSharedCapacityAndSnapshots() {
     config.max_active_sessions = 2;
     auto budget = std::make_shared<NpmTaskBudget>(config);
     NpmSessionTable table(config, budget);
-    NpmSessionPacketBinding four, six;
+    NpmTestPacketBinding four, six;
     four.key = MakeKey<NpmSessionKey4>();
     six.key = MakeKey<NpmSessionKey6>();
     auto r4 = Observe(table, four, 10);
@@ -58,7 +58,7 @@ void TestSharedCapacityAndSnapshots() {
     auto reverse = Observe(table, four, 12);
     assert(reverse.active_session.session_id == id4 && reverse.active_session.packets_ab == 1 &&
            reverse.active_session.packets_ba == 1);
-    NpmSessionPacketBinding third;
+    NpmTestPacketBinding third;
     third.key = MakeKey<NpmSessionKey4>(1001);
     NpmSessionObserveResult denied;
     p::PacketMeta meta;
@@ -69,23 +69,23 @@ void TestSharedCapacityAndSnapshots() {
     std::vector<NpmSessionView> active;
     assert(table.SnapshotActive(&active) == NpmSessionTableError::kNone && active.size() == 2);
     assert(active[0].session_id == id4 && active[1].session_id == id6);
-    std::vector<NpmSessionSnapshot> ended;
+    NpmSessionSnapshotBatch ended;
     assert(table.FinishAllAtEof(&ended) == NpmSessionTableError::kNone && ended.size() == 2);
     assert(table.size() == 0 && table.tracked_bytes() == 0 && budget->Usage().session_state_bytes == 0 &&
            !table.NextEventDeadlineNs());
     four.key = {};
     six.key = {};
-    assert(ended[0].View().key->Get4()->a_ip.ToUInt32() == 0x01020304 &&
-           ended[1].View().key->Get6()->a_ip.bytes[3] == 4);
+    assert(ended.View(0).key->Get4()->a_ip.ToUInt32() == 0x01020304 && ended.View(1).key->Get6()->a_ip.bytes[3] == 4);
     const auto retained = budget->Usage().input_batch_bytes;
     assert(retained > 0);
-    auto copy = ended;
+    NpmSessionSnapshotBatch copy;
+    assert(ended.Clone(&copy) == NpmSessionTableError::kNone);
     assert(budget->Usage().input_batch_bytes == 2 * retained);
-    assert(copy[0].key.Get4() != ended[0].key.Get4());
-    ended.clear();
-    assert(copy[0].View().key->Namespace() == "mixed-capture");
+    assert(copy.View(0).key->Get4() != ended.View(0).key->Get4());
+    ended.Clear();
+    assert(copy.View(0).key->Namespace() == "mixed-capture");
     assert(table.FinishAllAtEof(&ended) == NpmSessionTableError::kNone && ended.empty());
-    copy.clear();
+    copy.Clear();
     assert(budget->Usage().input_batch_bytes == 0);
 }
 
@@ -97,7 +97,7 @@ void TestLifecycle() {
     config.out_of_order_tolerance_ns = 0;
     auto budget = std::make_shared<NpmTaskBudget>(config);
     NpmSessionTable table(config, budget);
-    NpmSessionPacketBinding binding;
+    NpmTestPacketBinding binding;
     binding.key = MakeKey<Key>(1000, 6);
     binding.transport.tcp = {true, true, false, false, false, 1, 0, 1};
     auto first = Observe(table, binding, 1);
@@ -105,19 +105,19 @@ void TestLifecycle() {
     assert(Observe(table, binding, 2).active_session.session_id == id);
     binding.transport.tcp.sequence = 2;
     auto reused = Observe(table, binding, 3);
-    assert(reused.ended_sessions.size() == 1 && reused.ended_sessions[0].session_id == id &&
-           reused.ended_sessions[0].end_reason == NpmSessionEndReason::kTupleReuse);
+    assert(reused.ended_sessions.size() == 1 && reused.ended_sessions.Row(0).facts.session_id == id &&
+           reused.ended_sessions.Row(0).facts.end_reason == NpmSessionEndReason::kTupleReuse);
     assert(reused.active_session.session_id > id);
     Identifier identifier;
     NpmSessionView invalid;
     NpmPacketView packet;
-    assert(table.SampleProtocol(binding.key.View(), id, packet, identifier, &invalid) ==
-           NpmSessionTableError::kSessionInstanceMismatch);
+    assert(table.SampleProtocol(NpmThroughputTestAccess::Token(table, binding.key.View(), id), packet, identifier,
+                                &invalid) == NpmSessionTableError::kSessionInstanceMismatch);
     auto quiet = table.AdvanceCaptureProgress({102, true});
     assert(quiet.ended_sessions.empty() && table.size() == 1);  // retired deadline must not retire replacement
     auto timeout = table.AdvanceCaptureProgress({103, true});
     assert(timeout.ended_sessions.size() == 1 &&
-           timeout.ended_sessions[0].session_id == reused.active_session.session_id);
+           timeout.ended_sessions.Row(0).facts.session_id == reused.active_session.session_id);
     assert(table.tracked_bytes() == 0 && !table.NextEventDeadlineNs());
     NpmSessionObserveResult rejected;
     p::PacketMeta late;
@@ -128,13 +128,13 @@ void TestLifecycle() {
     Observe(table, binding, 104);
     binding.direction = NpmPacketDirection::kBToA;
     auto fin = Observe(table, binding, 105);
-    assert(!fin.has_active_session && fin.ended_sessions.size() == 1 && fin.ended_sessions[0].packets_ab == 1 &&
-           fin.ended_sessions[0].packets_ba == 1);
+    assert(!fin.has_active_session && fin.ended_sessions.size() == 1 &&
+           fin.ended_sessions.Row(0).facts.packets_ab == 1 && fin.ended_sessions.Row(0).facts.packets_ba == 1);
     binding.transport.tcp.fin = false;
     binding.transport.tcp.rst = true;
     auto rst = Observe(table, binding, 106);
     assert(!rst.has_active_session && rst.ended_sessions.size() == 1 &&
-           rst.ended_sessions[0].session_id > fin.ended_sessions[0].session_id);
+           rst.ended_sessions.Row(0).facts.session_id > fin.ended_sessions.Row(0).facts.session_id);
     assert(table.size() == 0 && budget->Usage().session_state_bytes == 0);
 }
 
@@ -145,7 +145,7 @@ void TestMixedTimeoutAndNodeStability() {
     auto budget = std::make_shared<NpmTaskBudget>(config);
     {
         NpmSessionTable table(config, budget);
-        NpmSessionPacketBinding four, six;
+        NpmTestPacketBinding four, six;
         four.key = MakeKey<NpmSessionKey4>();
         six.key = MakeKey<NpmSessionKey6>();
         const auto v6 = Observe(table, six, 1).active_session;
@@ -160,9 +160,9 @@ void TestMixedTimeoutAndNodeStability() {
         assert(unknown.disposition == NpmCaptureProgressDisposition::kDeferredBacklogUnknown &&
                unknown.ended_sessions.empty());
         auto progress = table.AdvanceCaptureProgress({102, false, true, true, false});
-        assert(progress.ended_sessions.size() == 2 && progress.ended_sessions[0].session_id == 1 &&
-               progress.ended_sessions[1].session_id == 2);
-        assert(progress.ended_sessions[0].key.Get6() && progress.ended_sessions[1].key.Get4());
+        assert(progress.ended_sessions.size() == 2 && progress.ended_sessions.Row(0).facts.session_id == 1 &&
+               progress.ended_sessions.Row(1).facts.session_id == 2);
+        assert(progress.ended_sessions.View(0).key->Get6() && progress.ended_sessions.View(1).key->Get4());
         assert(table.size() == 1999);
     }
     assert(budget->Usage().session_state_bytes == 0);
@@ -172,7 +172,7 @@ void TestAdmissionBudget() {
     config.out_of_order_tolerance_ns = 0;
     auto budget = std::make_shared<NpmTaskBudget>(config);
     NpmSessionTable table(config, budget);
-    NpmSessionPacketBinding four, six;
+    NpmTestPacketBinding four, six;
     four.key = MakeKey<NpmSessionKey4>();
     six.key = MakeKey<NpmSessionKey6>();
     const auto used = budget->Usage().input_batch_bytes;
@@ -199,7 +199,7 @@ void TestSnapshotBudgetFailureIsAtomic() {
     config.out_of_order_tolerance_ns = 0;
     auto budget = std::make_shared<NpmTaskBudget>(config);
     NpmSessionTable table(config, budget);
-    NpmSessionPacketBinding binding;
+    NpmTestPacketBinding binding;
     binding.key = MakeKey<NpmSessionKey6>();
     const auto id = Observe(table, binding, 1).active_session.session_id;
     const auto charged = table.tracked_bytes();
@@ -214,13 +214,13 @@ void TestSnapshotBudgetFailureIsAtomic() {
     }
     assert(rejected && table.size() == 1 && table.tracked_bytes() == charged && table.WatermarkNs() == 0 &&
            table.NextEventDeadlineNs() == deadline);
-    std::vector<NpmSessionSnapshot> unchanged;
+    NpmSessionSnapshotBatch unchanged;
     assert(table.FinishAllAtEof(&unchanged) == NpmSessionTableError::kAllocationFailed && unchanged.empty());
     assert(table.size() == 1 && budget->Usage().input_batch_bytes == 0);
     budget->Release(NpmBudgetCategory::kModuleState, retained);
     auto ended = table.AdvanceCaptureProgress({101, true});
-    assert(ended.ended_sessions.size() == 1 && ended.ended_sessions[0].session_id == id && table.size() == 0);
-    ended.ended_sessions.clear();
+    assert(ended.ended_sessions.size() == 1 && ended.ended_sessions.Row(0).facts.session_id == id && table.size() == 0);
+    ended.ended_sessions.Clear();
     assert(NpmTrackedBudgetBytes(budget->Usage()) == 0);
 }
 

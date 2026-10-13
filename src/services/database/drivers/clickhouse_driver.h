@@ -4,6 +4,7 @@
 #ifndef _FLOWSQL_SERVICES_DATABASE_DRIVERS_CLICKHOUSE_DRIVER_H_
 #define _FLOWSQL_SERVICES_DATABASE_DRIVERS_CLICKHOUSE_DRIVER_H_
 
+#include <framework/interfaces/idatabase_arrow_write.h>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -21,9 +22,11 @@ class Client;
 namespace flowsql {
 namespace database {
 
+struct ClickHouseWriteTransport;
+
 // ClickHouseDriver — ClickHouse 数据库驱动
 // 基于 HTTP 接口（8123 端口），使用 cpp-httplib，零新依赖
-// HTTP 无状态，不需要连接池，每次 CreateSession() 创建新 Session
+// 每次创建独立 Session；列式写入共享驱动的单个同步 keep-alive 连接。
 class __attribute__((visibility("default"))) ClickHouseDriver : public IDbDriver, public IDbSessionFactoryProvider {
  public:
     ClickHouseDriver() = default;
@@ -33,6 +36,7 @@ class __attribute__((visibility("default"))) ClickHouseDriver : public IDbDriver
     int Connect(const std::unordered_map<std::string, std::string>& params) override;
     int Disconnect() override {
         connected_ = false;
+        write_transport_.reset();
         return 0;
     }
     bool IsConnected() override { return connected_; }
@@ -51,16 +55,21 @@ class __attribute__((visibility("default"))) ClickHouseDriver : public IDbDriver
     std::string database_;
     bool connected_ = false;
     std::string last_error_;
+    std::shared_ptr<ClickHouseWriteTransport> write_transport_;
 };
 
 // ClickHouseSession — ClickHouse 会话实现
 // 直接继承 IDbSession，覆盖 Arrow 方法
 // 同时继承 IArrowReadable + IArrowWritable，供 DatabaseChannel::CreateArrowReader/Writer 的 dynamic_cast 检查
 // 不继承 RelationDbSessionBase（ClickHouse 是列式数据库，不走行式路径）
-class ClickHouseSession : public IDbSession, public IArrowReadable, public IArrowWritable, public IDbSnapshotSession {
+class ClickHouseSession : public IDbSession,
+                          public IArrowReadable,
+                          public IArrowWritable,
+                          public IDbSnapshotSession,
+                          public IDatabaseArrowWriteV1 {
  public:
     ClickHouseSession(const std::string& host, int port, const std::string& user, const std::string& password,
-                      const std::string& database);
+                      const std::string& database, std::shared_ptr<ClickHouseWriteTransport> write_transport = nullptr);
     ~ClickHouseSession() override = default;
 
     int BeginSnapshot(const DatabaseSnapshotOptionsV1& options) override;
@@ -75,6 +84,8 @@ class ClickHouseSession : public IDbSession, public IArrowReadable, public IArro
 
     // 写入 Arrow batches：序列化为 Arrow IPC Stream，POST INSERT
     int WriteArrowBatches(const char* table, const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) override;
+    int WriteArrowBatchesWithPool(const char* table, const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+                                  arrow::MemoryPool* pool) override;
 
     // ==================== 行式接口（DDL 等）====================
 
@@ -109,11 +120,13 @@ class ClickHouseSession : public IDbSession, public IArrowReadable, public IArro
     int ParseArrowStream(const std::string& body, std::vector<std::shared_ptr<arrow::RecordBatch>>* batches);
 
     // 序列化 batches 为 Arrow IPC Stream
-    int SerializeArrowStream(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches, std::string* body);
+    int SerializeArrowStream(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches, arrow::MemoryPool* pool,
+                             std::shared_ptr<arrow::Buffer>* body);
 
     int ExecuteParameterizedHttp(const std::string& sql, const DatabaseParameterV1* parameters, size_t parameter_count);
 
     std::shared_ptr<httplib::Client> snapshot_client_;
+    std::shared_ptr<ClickHouseWriteTransport> write_transport_;
     std::string host_;
     int port_;
     std::string user_;

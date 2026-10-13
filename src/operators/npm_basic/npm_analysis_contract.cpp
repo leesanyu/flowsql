@@ -5,9 +5,11 @@
 
 #include <arrow/api.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <new>
 #include <utility>
 
 namespace flowsql::npm {
@@ -118,23 +120,49 @@ NpmObservationDomainError ValidateNpmObservationDomainMap(const NpmObservationDo
     return NpmObservationDomainError::kNone;
 }
 
-NpmObservationDomainError ResolveNpmObservationDomain(const NpmObservationDomainMap& domain_map, uint32_t source_id,
-                                                      uint64_t* observation_domain_id) {
-    if (!observation_domain_id) {
-        return NpmObservationDomainError::kNullOutput;
+NpmObservationDomainLookupError NpmObservationDomainLookup::Create(
+    const NpmObservationDomainMap& map, std::shared_ptr<INpmTaskBudget> budget,
+    std::unique_ptr<NpmObservationDomainLookup>* output) {
+    if (!output) return NpmObservationDomainLookupError::kNullOutput;
+    if (!budget || ValidateNpmObservationDomainMap(map) != NpmObservationDomainError::kNone)
+        return NpmObservationDomainLookupError::kInvalidConfiguration;
+    try {
+        auto lookup = std::unique_ptr<NpmObservationDomainLookup>(new NpmObservationDomainLookup);
+        lookup->namespace_ = map.input_namespace;
+        lookup->bindings_ = map.bindings;
+        std::sort(lookup->bindings_.begin(), lookup->bindings_.end(),
+                  [](const auto& left, const auto& right) { return left.source_id < right.source_id; });
+        lookup->source_id_as_domain_ = map.source_id_as_domain;
+        const uint64_t bytes = sizeof(NpmObservationDomainLookup) + lookup->namespace_.capacity() + 1 +
+                               lookup->bindings_.capacity() * sizeof(NpmSourceDomainBinding);
+        if (budget->Reserve(NpmBudgetCategory::kModuleState, bytes) != NpmBudgetError::kNone)
+            return NpmObservationDomainLookupError::kBudgetExceeded;
+        lookup->budget_ = std::move(budget);
+        lookup->charged_bytes_ = bytes;
+        *output = std::move(lookup);
+        return NpmObservationDomainLookupError::kNone;
+    } catch (const std::bad_alloc&) {
+        return NpmObservationDomainLookupError::kAllocationFailed;
     }
-    const auto validation_error = ValidateNpmObservationDomainMap(domain_map);
-    if (validation_error != NpmObservationDomainError::kNone) {
-        return validation_error;
+}
+
+NpmObservationDomainLookup::~NpmObservationDomainLookup() {
+    // Release storage before returning its tracked charge.
+    std::vector<NpmSourceDomainBinding>().swap(bindings_);
+    std::string().swap(namespace_);
+    if (charged_bytes_) budget_->Release(NpmBudgetCategory::kModuleState, charged_bytes_);
+}
+
+NpmObservationDomainError NpmObservationDomainLookup::Resolve(uint32_t source_id, uint64_t* domain) const noexcept {
+    if (!domain) return NpmObservationDomainError::kNullOutput;
+    const auto found = std::lower_bound(bindings_.begin(), bindings_.end(), source_id,
+                                        [](const auto& binding, uint32_t id) { return binding.source_id < id; });
+    if (found != bindings_.end() && found->source_id == source_id) {
+        *domain = found->observation_domain_id;
+        return NpmObservationDomainError::kNone;
     }
-    for (const auto& binding : domain_map.bindings) {
-        if (binding.source_id == source_id) {
-            *observation_domain_id = binding.observation_domain_id;
-            return NpmObservationDomainError::kNone;
-        }
-    }
-    if (domain_map.source_id_as_domain) {
-        *observation_domain_id = source_id;
+    if (source_id_as_domain_) {
+        *domain = source_id;
         return NpmObservationDomainError::kNone;
     }
     return NpmObservationDomainError::kUnknownSourceId;

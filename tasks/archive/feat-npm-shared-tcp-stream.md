@@ -205,4 +205,4 @@ Feature 完成时运行标准 CMake 构建、完整 CTest 与相关 Sanitizer，
 - 2026-09-30 T4：测试目录内的 `stream_probe` 消费 Data/Gap/End 并发射含身份、方向、区间、字节、捕获时间的类型化 Arrow 事件实体。相同 TCP 报文在单批次与逐包 RecordBatch 输入下，结果消费者与前台 stream 结果一致；`observing=session` 时结果消费者仍收到 stream、Basic、Session 全部实体，前台只返回 Session。输入 RecordBatch owner 在流仍存活时释放；结果/模块各 Finish 一次且任务计费回零。
 - A11 定向测试通过；A12 在标准 `cmake -B build src` 和 `cmake --build build -j$(nproc)` 构建后由完整 CTest 22/22 通过、0 失败验证，覆盖原有 NPM、参数、标签、SQLite/MySQL/PostgreSQL/ClickHouse 结果与 Scheduler 回归。生产 catalog 的 Basic/Session 两项断言继续通过，测试模块未注册到生产目录。
 - 独立 `FLOWSQL_NPM_TCP_STREAM_SANITIZERS=ON` 构建后，流核心、共享方向和运行时 ASan/UBSan/LeakSanitizer 3/3 通过、0 失败。沙箱内 LeakSanitizer 因 ptrace 限制无法启动，获准在沙箱外重跑通过。`clang-format-18 --dry-run --Werror`、`git diff --check` 与本轮允许文件审查通过；未提交或推送。
-- 接入说明位于 `docs/npm-tcp-stream.md`，README 更正生产边界：内部共享流已交付，DNS/HTTP/TLS/ICMP 生产模块仍未交付。Feature 已归档并在 Backlog 标记完成。
+- 接入说明位于 `docs/npm.md`，README 更正生产边界：内部共享流已交付，DNS/HTTP/TLS/ICMP 生产模块仍未交付。Feature 已归档并在 Backlog 标记完成。

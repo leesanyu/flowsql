@@ -13,10 +13,13 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -25,6 +28,7 @@
 #include <operators/npm_basic/npm_basic_result_consumer.h>
 #include <operators/npm_basic/npm_family_result_contract.h>
 #include <operators/npm_basic/npm_result_progress.h>
+#include <operators/npm_basic/output/npm_basic_result_collector.h>
 #include <operators/npm_basic/output/npm_basic_result_encoder.h>
 #include <operators/npm_basic/output/npm_result_router.h>
 #include <services/database/database_plugin.h>
@@ -293,6 +297,98 @@ void AssertSummary(const std::string& json, const char* run_id, const char* stat
     assert(document["entities"].IsArray() && document["entities"].Size() == entity_count);
 }
 
+std::vector<std::pair<NpmEntityDescriptorV1, std::shared_ptr<arrow::RecordBatch>>> RunTypedDelivery(
+    std::shared_ptr<INpmTaskBudget> budget, std::unique_ptr<INpmManagedResultConsumerV1> consumer,
+    const NpmResultContextV1& context) {
+    using namespace flowsql::npm;
+    using flowsql::packet::AddressFamily;
+    std::vector<NpmEntityDescriptorV1> entities;
+    for (auto family : {AddressFamily::kIPv4, AddressFamily::kIPv6}) {
+        entities.push_back(NpmBasicEntityDescriptorV1(family));
+        entities.push_back(NpmSessionEntityDescriptorV1(family));
+    }
+    auto router = std::make_shared<NpmResultRouter>(entities, "basic_ipv6", context, budget, std::move(consumer),
+                                                    [](const std::function<int()>& call) { return call(); });
+    NpmBasicFeatureConfig features;
+    features.session_enabled = true;
+    features.observing_entity = "basic_ipv6";
+    NpmBasicResultCollector collector(features, budget, router);
+    std::vector<std::pair<NpmEntityDescriptorV1, std::shared_ptr<arrow::RecordBatch>>> expected;
+    const auto append = [&](auto sample, const NpmEntityDescriptorV1& entity, auto encode) {
+        using Result = decltype(sample);
+        std::vector<Result> values;
+        for (uint64_t id = 1; id <= 513; ++id) {
+            Result row;
+            row.session_id = id;
+            row.observation_domain_id = UINT64_MAX;
+            row.revision = 1;
+            row.observed_at = 1000 + id;
+            row.transport_protocol = 17;
+            row.is_final = true;
+            row.end_reason = NpmSessionEndReason::kClosed;
+            row.protocol_status = NpmProtocolStatus::kIdentified;
+            row.protocol_id = 7;
+            row.protocol = std::string(64, 'p') + "结果";
+            if constexpr (std::is_same_v<decltype(row.a_ip), flowsql::network::IPv4Address>) {
+                row.a_ip = flowsql::network::IPv4Address::FromUInt32(UINT32_MAX);
+                row.b_ip = flowsql::network::IPv4Address::FromUInt32(0x0080ff00);
+            } else {
+                const uint8_t bytes[16] = {0, 0x80, 0xff, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 10, 11, 12};
+                std::memcpy(row.a_ip.bytes, bytes, 16);
+                std::memcpy(row.b_ip.bytes, bytes, 16);
+            }
+            if constexpr (std::is_same_v<Result, NpmBasicResult4> || std::is_same_v<Result, NpmBasicResult6>)
+                assert(collector.WriteBasic(row) == 0);
+            else
+                assert(collector.WriteSession(row) == 0);
+            values.push_back(std::move(row));
+        }
+        std::shared_ptr<arrow::RecordBatch> rows;
+        const auto encoded = encode(values, &rows, nullptr, false, nullptr);
+        assert(encoded == decltype(encoded)::kNone);
+        expected.emplace_back(entity, std::move(rows));
+    };
+    append(NpmBasicResult4{}, NpmBasicEntityDescriptorV1(AddressFamily::kIPv4),
+           EncodeNpmBasicResults<flowsql::network::IPv4Address>);
+    append(NpmBasicResult6{}, NpmBasicEntityDescriptorV1(AddressFamily::kIPv6),
+           EncodeNpmBasicResults<flowsql::network::IPv6Address>);
+    append(NpmSessionResult4{}, NpmSessionEntityDescriptorV1(AddressFamily::kIPv4),
+           EncodeNpmSessionResults<flowsql::network::IPv4Address>);
+    append(NpmSessionResult6{}, NpmSessionEntityDescriptorV1(AddressFamily::kIPv6),
+           EncodeNpmSessionResults<flowsql::network::IPv6Address>);
+    assert(collector.pending_typed_rows() > 0);
+    assert(collector.FlushAccepted() == 0 && collector.pending_typed_rows() == 0);
+    std::shared_ptr<arrow::RecordBatch> foreground;
+    assert(router->Drain(&foreground) == 0 && foreground->num_rows() == 513);
+    assert(foreground->Equals(*expected[1].second, true));
+    assert(collector.Finish() == 0 && collector.Finish() == 0);
+    assert(budget->Usage().pending_output_bytes > 0);
+    foreground.reset();
+    assert(budget->Usage().pending_output_bytes == 0);
+    return expected;
+}
+
+void AssertTypedReadback(const std::vector<std::shared_ptr<arrow::RecordBatch>>& actual,
+                         const arrow::RecordBatch& expected) {
+    int64_t offset = 0;
+    for (const auto& batch : actual) {
+        assert(batch->schema()->metadata()->Equals(*expected.schema()->metadata()));
+        for (int column = 0; column < expected.num_columns(); ++column) {
+            const auto& field = expected.schema()->field(column);
+            const int index = batch->schema()->GetFieldIndex(field->name());
+            assert(index >= 0 && batch->schema()->field(index)->Equals(*field, true));
+            if (!batch->column(index)->Equals(expected.column(column)->Slice(offset, batch->num_rows())))
+                std::fprintf(stderr, "typed readback mismatch: %s at %lld actual=%s expected=%s\n",
+                             field->name().c_str(), static_cast<long long>(offset),
+                             batch->column(index)->Slice(0, 4)->ToString().c_str(),
+                             expected.column(column)->Slice(offset, 4)->ToString().c_str());
+            assert(batch->column(index)->Equals(expected.column(column)->Slice(offset, batch->num_rows())));
+        }
+        offset += batch->num_rows();
+    }
+    assert(offset == 513);
+}
+
 void RemoveSqliteFiles(const std::string& path) {
     std::remove(path.c_str());
     std::remove((path + "-wal").c_str());
@@ -365,9 +461,11 @@ int main(int argc, char** argv) {
                 families.push_back(flowsql::npm::NpmFamilyEntityDescriptor(kind, family));
         auto budget = std::make_shared<BoundedBudget>();
         auto storage = CreateConsumer(factory.get(), {"task-family", "run-family"}, families, budget);
+        flowsql::npm::NpmResultRouter router(families, "", {"task-family", "run-family"}, budget, std::move(storage),
+                                             [](const std::function<int()>& call) { return call(); });
         for (const auto& entity : families) {
             auto expected = MakeRows(entity, UINT64_MAX, 1, true, true);
-            assert(storage->Consume({"task-family", "run-family"}, entity, *expected) == 0);
+            assert(router.Emit(entity.module_id, entity.entity_id, *expected) == 0);
             assert(budget->Usage().pending_output_bytes == 0);
             const auto query = "SELECT * FROM npm_" + entity.entity_id + "_history_v1 WHERE __npm_run_id='run-family'";
             flowsql::IBatchReader* raw = nullptr;
@@ -411,7 +509,36 @@ int main(int argc, char** argv) {
                                .c_str()) < 0);
             }
         }
-        assert(storage->Finish() == 0);
+        assert(router.Finish() == 0);
+        const NpmResultContextV1 typed_context{"task-typed", "run-typed"};
+        const auto expected =
+            RunTypedDelivery(budget, CreateConsumer(factory.get(), typed_context, families, budget), typed_context);
+        for (const auto& [entity, rows] : expected) {
+            const std::string query =
+                "SELECT * FROM npm_" + entity.entity_id +
+                "_history_v1 WHERE __npm_run_id='run-typed' ORDER BY length(session_id),session_id";
+            flowsql::IBatchReader* raw = nullptr;
+            assert(channel->CreateReader(query.c_str(), &raw) == 0 && raw);
+            const auto close = [](flowsql::IBatchReader* reader) {
+                reader->Close();
+                reader->Release();
+            };
+            std::unique_ptr<flowsql::IBatchReader, decltype(close)> reader(raw, close);
+            std::vector<std::shared_ptr<arrow::RecordBatch>> actual;
+            while (true) {
+                const uint8_t* data = nullptr;
+                size_t size = 0;
+                const int next = reader->Next(&data, &size);
+                if (next == 1) break;
+                assert(next == 0 && data && size);
+                auto input = std::make_shared<arrow::io::BufferReader>(
+                    arrow::Buffer::FromString(std::string(reinterpret_cast<const char*>(data), size)));
+                auto stream = arrow::ipc::RecordBatchStreamReader::Open(input).ValueOrDie();
+                while (auto batch = stream->Next().ValueOrDie()) actual.push_back(std::move(batch));
+            }
+            AssertTypedReadback(actual, *rows);
+        }
+        assert(budget->Usage().pending_output_bytes == 0);
     }
     if (argc == 2 && std::string(argv[1]) == "--storage-only") {
         channel.reset();

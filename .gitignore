@@ -64,6 +64,9 @@ Makefile
 # Logs
 *.log
 
+# Local benchmark and acceptance evidence cache
+/evidence/
+
 # Core dumps
 /core
 core.*

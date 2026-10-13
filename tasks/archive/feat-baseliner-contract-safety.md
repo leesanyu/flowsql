@@ -205,7 +205,7 @@ Relation 同时构建 routed 结果及 readiness，Baseliner Open 检查 V1，Su
 生产 PCAP → NPM 路径在既有 NPI `layer.cpp:91` 触发 IPv4 头未对齐成员访问。
 该依赖源码与 HEAD/切片起点相同且不在本轮允许列表，未越界修复，未关闭检查器。
 T4 保留未勾选、Feature 未归档；后续须先冻结 NPI 对齐安全读取及回归切片，再完成生产 Sanitizer 验收。
-实际数值、限制和原始证据见 [验收记录](../../docs/baseliner-acceptance.md) 与 `/tmp/baseliner-contract-safety-t4/`。
+实际数值、限制和原始证据见 [本地验收记录，未入库](../../evidence/baseliner-acceptance.md) 与 `/tmp/baseliner-contract-safety-t4/`。
 
 2026-10-11 续执行 T4：当前 NPI 对齐修复草稿全量构建、普通 packet/alignment 两项通过；
 定向 Sanitizer 在 alignment 测试退出时报告 16,752 bytes / 23 allocations，源为 NPI parser
@@ -244,4 +244,4 @@ T1/T2/T3 保持完成，T4 保持未勾选；NPI 新方案实施后再验收最�
 WSL IPv4 路由问题经端口与路由核查；仅在完整 CTest 期间临时改 lo，结束后恢复并核对原路由。
 本轮所有生产/CMake/测试文件与起点 SHA256 一致；新增网络布局及未来同版部署回归归独立 npi-wire-layout。
 完成文档、增量 diff/hash 与范围审查后勾选 T4，规格归档、Backlog 完成、工作台 WIP=0；未提交/推送。
-证据 [验收记录](../../docs/baseliner-acceptance.md) 与 /tmp/baseliner-contract-safety-closeout/verification.json。
+证据 [本地验收记录，未入库](../../evidence/baseliner-acceptance.md) 与 /tmp/baseliner-contract-safety-closeout/verification.json。

@@ -285,7 +285,7 @@ ASan/UBSan/LSan当前24个唯一测试通过（完整NPM主测试扩展后再次
 实际活动表/索引堆相对旧HEAD中位数下降IPv4 17.35%、IPv6 9.26%、mixed 13.32%；
 EOF快照实际堆增加28.54%～47.56%，IPv6/mixed峰RSS增加；未优化构建吞吐中位数下降1.48%～5.79%。
 IPv4地址参数下降63.87%，部分物理库占用改善；mixed页/索引/parts及短IPv6样本可能增加占用，不宣称所有成本改善。
-量化报告：[NPM分族成本验收](../../docs/npm-ip-family-cost.md)，包含全部口径、范围、预算/RSS、吞吐、页面/索引/压缩与复现条件。
+量化报告：[本地 NPM 分族成本验收，未入库](../../evidence/npm-ip-family-cost.md)，包含全部口径、范围、预算/RSS、吞吐、页面/索引/压缩与复现条件。
 59个生产/测量/主测试编译单元严格检查通过（仅排除已核实的既有公共头警告），142个Feature C++版权/clang-format通过，git diff --check通过。
 一次T5 Diff审查无P0/P1阻塞。原始证据、JUnit唯一覆盖、工具链/来源/二进制SHA256及起点保留审计：
 `/tmp/npm-ip-family-t5/final-audit.json`、`t5-diff-review.md`、`ctest-coverage.json`、`sanitizer-coverage.json`及各终端日志。

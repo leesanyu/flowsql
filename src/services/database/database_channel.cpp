@@ -233,6 +233,25 @@ int DatabaseChannel::WriteArrowBatches(const char* table,
     return ret;
 }
 
+int DatabaseChannel::WriteArrowBatchesWithPool(const char* table,
+                                               const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+                                               arrow::MemoryPool* pool) {
+    last_error_.clear();
+    if (!opened_ || !session_factory_) {
+        last_error_ = "channel not opened or session factory not set";
+        return -1;
+    }
+    auto session = session_factory_();
+    auto* writer = session ? dynamic_cast<IDatabaseArrowWriteV1*>(session.get()) : nullptr;
+    if (!writer) {
+        last_error_ = "session has no budgeted Arrow write capability";
+        return -1;
+    }
+    const int result = writer->WriteArrowBatchesWithPool(table, batches, pool);
+    if (result != 0) last_error_ = session->GetLastError();
+    return result;
+}
+
 int DatabaseChannel::ExecuteSql(const char* sql) {
     last_error_.clear();
     if (!opened_ || !session_factory_) {

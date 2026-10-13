@@ -37,45 +37,47 @@ struct NpmBasicDrainStatus {
     NpmSessionEncodeError session_encode_error = NpmSessionEncodeError::kNone;
 };
 
-/** Task-private typed router: only the observing entity is retained for foreground Arrow output. */
-class NpmBasicResultCollector final : public INpmResultWriter {
+/** Owns accepted typed rows until bounded, synchronous delivery through the task's router. */
+class NpmBasicResultCollector final : public INpmResultWriter, public INpmAcceptedResultDelivery {
  public:
-    NpmBasicResultCollector();
-    explicit NpmBasicResultCollector(NpmBasicFeatureConfig features);
+    NpmBasicResultCollector(NpmBasicFeatureConfig features, std::shared_ptr<INpmTaskBudget> budget,
+                            std::shared_ptr<NpmResultRouter> router = {});
+    ~NpmBasicResultCollector() override;
     NpmBasicResultCollector(const NpmBasicResultCollector&) = delete;
     NpmBasicResultCollector& operator=(const NpmBasicResultCollector&) = delete;
     NpmBasicResultCollector(NpmBasicResultCollector&&) = delete;
     NpmBasicResultCollector& operator=(NpmBasicResultCollector&&) = delete;
 
-    void BindRouter(std::shared_ptr<NpmResultRouter> router) { router_ = std::move(router); }
-    NpmBasicDrainStatus RouteEnds(const std::vector<NpmSessionEndEvent>& events, NpmBasicResultProjector& projector);
+    NpmBasicDrainStatus RouteEnds(const NpmSessionSnapshotBatch& events, NpmBasicResultProjector& projector);
     void UsePeriodicBasic() { periodic_basic_ = true; }
-    int Finish() { return router_ ? router_->Finish() : 0; }
-    bool has_router() const { return router_ != nullptr; }
+    int Finish();
+    int FlushAccepted() override;
+    size_t pending_typed_rows() const noexcept override;
+    void DiscardAccepted() noexcept override;
+    void Abort() noexcept;
+    uint64_t typed_storage_bytes() const noexcept;
     int WriteBasic(const NpmBasicResult4& result) override;
     int WriteBasic(const NpmBasicResult6& result) override;
     int WriteSession(const NpmSessionResult4& result) override;
     int WriteSession(const NpmSessionResult6& result) override;
 
-    /** Success consumes pending module records; failure leaves pending records and caller output unchanged. */
-    NpmBasicDrainStatus Drain(const std::vector<NpmSessionEndEvent>& events, NpmBasicResultProjector& projector,
-                              const std::shared_ptr<INpmTaskBudget>& budget,
+    /** Delivery failure is terminal; caller output is unchanged and accepted storage is discarded. */
+    NpmBasicDrainStatus Drain(const NpmSessionSnapshotBatch& events, NpmBasicResultProjector& projector,
                               std::shared_ptr<arrow::RecordBatch>* output);
 
     size_t pending_results() const noexcept;
 
  private:
-    template <typename Address>
-    int WriteBasicImpl(const NpmBasicFamilyResult<Address>&, std::vector<NpmBasicFamilyResult<Address>>&);
-    template <typename Address>
-    int WriteSessionImpl(const NpmSessionFamilyResult<Address>&, std::vector<NpmSessionFamilyResult<Address>>&);
+    struct TypedStorage;
+    template <typename Result>
+    int Accept(const Result&, std::vector<Result> TypedStorage::*, std::string_view entity);
+    int Fail(int code, std::string message);
+    bool RequiresEncoding(std::string_view entity) const;
     NpmBasicFeatureConfig features_;
     bool periodic_basic_ = false;
+    bool finished_ = false;
     std::shared_ptr<NpmResultRouter> router_;
-    std::vector<NpmBasicResult4> pending_basic4_;
-    std::vector<NpmBasicResult6> pending_basic6_;
-    std::vector<NpmSessionResult4> pending_session4_;
-    std::vector<NpmSessionResult6> pending_session6_;
+    std::unique_ptr<TypedStorage> typed_;
 };
 
 }  // namespace flowsql::npm

@@ -31,23 +31,18 @@ struct NpmPacketProcessStatus {
 };
 
 /** Processes one decoded packet. Ended-session output is replaced only after every callback succeeds. */
-NpmPacketProcessStatus ProcessNpmPacket(const NpmObservationDomainMap& domain_map, const packet::PacketView& packet,
+NpmPacketProcessStatus ProcessNpmPacket(const NpmObservationDomainLookup& domain_map, const packet::PacketView& packet,
                                         const packet::PacketFamilyLayerView& layer, NpmSessionTable& sessions,
                                         packet::IPacketFamilyProtocolIdentifier& identifier,
                                         const std::vector<INpmAnalysisModule*>& modules, INpmResultWriter& writer,
-                                        std::vector<NpmSessionSnapshot>* ended_sessions);
+                                        NpmSessionSnapshotBatch* ended_sessions);
 
 /** Processes one packet whose normalized binding was already built by the unique decode path. */
 NpmPacketProcessStatus ProcessNpmBoundPacket(
-    const packet::PacketView& packet, const packet::PacketFamilyLayerView& layer,
-    const NpmSessionPacketBinding& binding, uint32_t new_session_primary_label_id, NpmSessionTable& sessions,
+    const packet::PacketView& packet, const packet::PacketFamilyLayerView& layer, const NpmPacketBindingView& binding,
+    uint32_t new_session_primary_label_id, NpmSessionTable& sessions,
     packet::IPacketFamilyProtocolIdentifier& identifier, const std::vector<INpmAnalysisModule*>& modules,
-    INpmResultWriter& writer, std::vector<NpmSessionSnapshot>* ended_sessions, NpmTcpStreamProvider* streams = nullptr);
-
-struct NpmSessionEndEvent {
-    NpmSessionSnapshot snapshot;
-    int64_t observed_at = 0;
-};
+    INpmResultWriter& writer, NpmSessionSnapshotBatch* ended_sessions, NpmTcpStreamProvider* streams = nullptr);
 
 enum class NpmPacketBatchProcessError : uint8_t {
     kNone = 0,
@@ -73,11 +68,11 @@ struct NpmPacketBatchProcessStatus {
 
 /** Processes a validated packet batch; realtime callers defer event time until the released capture fact. */
 NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
-    const NpmObservationDomainMap& domain_map, const NpmPacketBatchView& batch, NpmSessionTable& sessions,
+    const NpmObservationDomainLookup& domain_map, const NpmPacketBatchView& batch, NpmSessionTable& sessions,
     packet::IPacketFamilyProtocolIdentifier& identifier, const std::vector<INpmAnalysisModule*>& modules,
-    INpmResultWriter& writer, std::vector<NpmSessionEndEvent>* ended_events,
-    const IFlowLabelMatcherV1* matcher = nullptr, const std::vector<NpmProtocolModuleAdapter*>& protocol_modules = {},
-    NpmTcpStreamProvider* streams = nullptr, bool advance_offline_progress = true);
+    INpmResultWriter& writer, NpmSessionSnapshotBatch* ended_events, const IFlowLabelMatcherV1* matcher = nullptr,
+    const std::vector<NpmProtocolModuleAdapter*>& protocol_modules = {}, NpmTcpStreamProvider* streams = nullptr,
+    bool advance_offline_progress = true);
 
 }  // namespace flowsql::npm
 

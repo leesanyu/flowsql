@@ -45,6 +45,7 @@ class NpmPacketBatchView final {
 
     int64_t num_rows() const;
     uint64_t owned_address_bytes() const;
+    size_t binding_key_count(packet::AddressFamily family, bool exclude_control) const;
 
     /** Reconstructs one row without copying raw_data. Both outputs are unchanged on error. */
     NpmPacketBatchError Get(int64_t row, packet::PacketView* packet_view,

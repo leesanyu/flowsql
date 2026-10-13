@@ -33,7 +33,7 @@ class NpmTcpStreamProvider final {
     NpmTcpStreamProvider& operator=(const NpmTcpStreamProvider&) = delete;
 
     int OnPacket(const NpmPacketView& packet, const NpmSessionView& session);
-    int OnSessionEnd(const NpmSessionSnapshot& session, int64_t observed_at_ns);
+    int OnSessionEnd(const NpmSessionView& session, NpmSessionEndReason reason, int64_t observed_at_ns);
     int AdvanceWatermark(int64_t watermark_ns);
     std::optional<int64_t> NextEventDeadlineNs() const;
     void Abort() noexcept;
@@ -50,7 +50,7 @@ class NpmTcpStreamProvider final {
                                 INpmResultEmitterV1& emitter) override;
     };
     struct Entry {
-        NpmSessionSnapshot snapshot;
+        NpmSessionSnapshotBatch snapshot;
         std::unique_ptr<NpmTcpStreamSharedDirection> directions[2];
         bool seen[2] = {};
         uint64_t charge = 0;

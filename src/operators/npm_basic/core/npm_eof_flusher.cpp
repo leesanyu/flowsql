@@ -39,6 +39,14 @@ NpmEofFlushStatus NpmEofFlusher::Flush(int64_t observed_at, NpmSessionTable& ses
                                        NpmBasicResultCollector& collector, NpmBasicResultProjector& projector,
                                        const std::shared_ptr<INpmTaskBudget>& budget,
                                        std::shared_ptr<arrow::RecordBatch>* output, NpmTcpStreamProvider* streams) {
+    struct Cleanup {
+        NpmEofFlusher& flusher;
+        NpmBasicResultCollector& collector;
+        ~Cleanup() {
+            if (flusher.state() == NpmEofFlushState::kFailed || flusher.state() == NpmEofFlushState::kCancelled)
+                collector.Abort();
+        }
+    } cleanup{*this, collector};
     if (state_ != NpmEofFlushState::kOpen) return TerminalStatus(state_);
 
     NpmEofFlushStatus status;
@@ -61,7 +69,7 @@ NpmEofFlushStatus NpmEofFlusher::Flush(int64_t observed_at, NpmSessionTable& ses
     }
 
     try {
-        std::vector<NpmSessionSnapshot> snapshots;
+        NpmSessionSnapshotBatch snapshots;
         status.session_error = sessions.FinishAllAtEof(&snapshots);
         if (status.session_error != NpmSessionTableError::kNone) {
             status.error = NpmEofFlushError::kSessionError;
@@ -69,11 +77,10 @@ NpmEofFlushStatus NpmEofFlusher::Flush(int64_t observed_at, NpmSessionTable& ses
             return status;
         }
 
-        std::vector<NpmSessionEndEvent> events;
-        events.reserve(snapshots.size());
+        snapshots.SetObservedAt(observed_at);
         if (streams) {
-            for (const auto& snapshot : snapshots) {
-                if (streams->OnSessionEnd(snapshot, observed_at) != 0) {
+            for (size_t row = 0; row < snapshots.size(); ++row) {
+                if (streams->OnSessionEnd(snapshots.View(row), snapshots.Row(row).facts.end_reason, observed_at) != 0) {
                     status.error = NpmEofFlushError::kModuleError;
                     status.module_error = EIO;
                     state_ = NpmEofFlushState::kFailed;
@@ -87,17 +94,14 @@ NpmEofFlushStatus NpmEofFlusher::Flush(int64_t observed_at, NpmSessionTable& ses
             state_ = NpmEofFlushState::kFailed;
             return status;
         }
-        for (auto& snapshot : snapshots) {
-            events.push_back(NpmSessionEndEvent{std::move(snapshot), observed_at});
-        }
-        if (collector.has_router()) {
-            status.drain_status = collector.RouteEnds(events, projector);
+        {
+            status.drain_status = collector.RouteEnds(snapshots, projector);
             if (status.drain_status.error != NpmBasicDrainError::kNone) {
                 status.error = NpmEofFlushError::kDrainError;
                 state_ = NpmEofFlushState::kFailed;
                 return status;
             }
-            events.clear();
+            snapshots.Clear();
         }
         for (auto* module : modules) {
             status.module_error = module->OnFinish(observed_at, collector);
@@ -116,7 +120,7 @@ NpmEofFlushStatus NpmEofFlusher::Flush(int64_t observed_at, NpmSessionTable& ses
             }
         }
 
-        status.drain_status = collector.Drain(events, projector, budget, output);
+        status.drain_status = collector.Drain(snapshots, projector, output);
         if (status.drain_status.error != NpmBasicDrainError::kNone) {
             status.error = NpmEofFlushError::kDrainError;
             state_ = NpmEofFlushState::kFailed;

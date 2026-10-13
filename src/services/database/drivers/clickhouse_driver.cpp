@@ -12,12 +12,26 @@
 
 #include <common/log.h>
 
+#include <cerrno>
 #include <iomanip>
 #include <limits>
+#include <mutex>
 #include <sstream>
 
 namespace flowsql {
 namespace database {
+
+struct ClickHouseWriteTransport {
+    ClickHouseWriteTransport(const std::string& host, int port) : client(host, port) {
+        client.set_connection_timeout(10);
+        client.set_read_timeout(60);
+        client.set_write_timeout(60);
+        client.set_keep_alive(true);
+        client.set_tcp_nodelay(true);
+    }
+    httplib::Client client;
+    std::mutex mutex;
+};
 
 // 表名转义：将反引号替换为双反引号，防止 SQL 注入（与 MySQL 驱动保持一致）
 static std::string QuoteIdentifier(const std::string& name) {
@@ -51,6 +65,7 @@ int ClickHouseDriver::Connect(const std::unordered_map<std::string, std::string>
         return -1;
     }
     connected_ = true;
+    write_transport_ = std::make_shared<ClickHouseWriteTransport>(host_, port_);
     LOG_INFO("ClickHouseDriver: connected to %s:%d/%s", host_.c_str(), port_, database_.c_str());
     return 0;
 }
@@ -80,14 +95,21 @@ std::shared_ptr<IDbSession> ClickHouseDriver::CreateSession() {
         last_error_ = "Driver not connected";
         return nullptr;
     }
-    return std::make_shared<ClickHouseSession>(host_, port_, user_, password_, database_);
+    return std::make_shared<ClickHouseSession>(host_, port_, user_, password_, database_, write_transport_);
 }
 
 // ==================== ClickHouseSession 实现 ====================
 
 ClickHouseSession::ClickHouseSession(const std::string& host, int port, const std::string& user,
-                                     const std::string& password, const std::string& database)
-    : host_(host), port_(port), user_(user), password_(password), database_(database) {}
+                                     const std::string& password, const std::string& database,
+                                     std::shared_ptr<ClickHouseWriteTransport> write_transport)
+    : write_transport_(write_transport ? std::move(write_transport)
+                                       : std::make_shared<ClickHouseWriteTransport>(host, port)),
+      host_(host),
+      port_(port),
+      user_(user),
+      password_(password),
+      database_(database) {}
 
 bool ClickHouseSession::Ping() {
     httplib::Client client(host_, port_);
@@ -370,22 +392,41 @@ int ClickHouseSession::ExecuteQueryArrow(const char* sql, std::vector<std::share
 
 int ClickHouseSession::WriteArrowBatches(const char* table,
                                          const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) {
-    last_error_.clear();
-    if (batches.empty()) return 0;
+    return WriteArrowBatchesWithPool(table, batches, arrow::default_memory_pool());
+}
 
-    std::string body;
-    if (SerializeArrowStream(batches, &body) != 0) return -1;
+int ClickHouseSession::WriteArrowBatchesWithPool(const char* table,
+                                                 const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+                                                 arrow::MemoryPool* pool) {
+    last_error_.clear();
+    if (!table || !*table || !pool) {
+        last_error_ = "invalid Arrow write table or memory pool";
+        return EINVAL;
+    }
+    if (batches.empty()) return 0;
+    for (const auto& batch : batches) {
+        if (!batch || !batch->schema()->Equals(*batches.front()->schema(), false)) {
+            last_error_ = "Arrow write batch schema mismatch";
+            return EINVAL;
+        }
+    }
+
+    std::shared_ptr<arrow::Buffer> body;
+    const int serialized = SerializeArrowStream(batches, pool, &body);
+    if (serialized != 0) return serialized;
 
     std::string query = "INSERT INTO " + QuoteIdentifier(table) + " FORMAT ArrowStream";
     std::string path = "/?database=" + database_ + "&query=" + httplib::detail::encode_url(query);
 
-    httplib::Client client(host_, port_);
-    client.set_connection_timeout(10);
-    client.set_read_timeout(60);
-
     httplib::Headers headers = {{"X-ClickHouse-User", user_}, {"X-ClickHouse-Key", password_}};
 
-    auto res = client.Post(path, headers, body, "application/octet-stream");
+    std::lock_guard<std::mutex> lock(write_transport_->mutex);
+    auto res = write_transport_->client.Post(
+        path, headers, static_cast<size_t>(body->size()),
+        [body](size_t offset, size_t length, httplib::DataSink& sink) {
+            return sink.write(reinterpret_cast<const char*>(body->data()) + offset, length);
+        },
+        "application/octet-stream");
     if (!res || res->status != 200) {
         last_error_ = res ? res->body : "Connection failed";
         return -1;
@@ -419,24 +460,21 @@ int ClickHouseSession::ParseArrowStream(const std::string& body,
 }
 
 int ClickHouseSession::SerializeArrowStream(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                                            std::string* body) {
-    if (batches.empty()) {
-        *body = "";
-        return 0;
-    }
-
+                                            arrow::MemoryPool* pool, std::shared_ptr<arrow::Buffer>* body) {
     auto schema = batches[0]->schema();
-    auto buffer_output_result = arrow::io::BufferOutputStream::Create();
+    auto buffer_output_result = arrow::io::BufferOutputStream::Create(4096, pool);
     if (!buffer_output_result.ok()) {
         last_error_ = buffer_output_result.status().ToString();
-        return -1;
+        return buffer_output_result.status().IsOutOfMemory() ? ENOSPC : EIO;
     }
     auto buffer_output = *buffer_output_result;
 
-    auto writer_result = arrow::ipc::MakeStreamWriter(buffer_output, schema);
+    auto options = arrow::ipc::IpcWriteOptions::Defaults();
+    options.memory_pool = pool;
+    auto writer_result = arrow::ipc::MakeStreamWriter(buffer_output, schema, options);
     if (!writer_result.ok()) {
         last_error_ = writer_result.status().ToString();
-        return -1;
+        return writer_result.status().IsOutOfMemory() ? ENOSPC : EIO;
     }
     auto writer = *writer_result;
 
@@ -444,24 +482,23 @@ int ClickHouseSession::SerializeArrowStream(const std::vector<std::shared_ptr<ar
         auto status = writer->WriteRecordBatch(*batch);
         if (!status.ok()) {
             last_error_ = status.ToString();
-            return -1;
+            return status.IsOutOfMemory() ? ENOSPC : EIO;
         }
     }
 
     auto close_status = writer->Close();
     if (!close_status.ok()) {
         last_error_ = close_status.ToString();
-        return -1;
+        return close_status.IsOutOfMemory() ? ENOSPC : EIO;
     }
 
     auto buffer_result = buffer_output->Finish();
     if (!buffer_result.ok()) {
         last_error_ = buffer_result.status().ToString();
-        return -1;
+        return buffer_result.status().IsOutOfMemory() ? ENOSPC : EIO;
     }
 
-    auto buf = *buffer_result;
-    *body = std::string(reinterpret_cast<const char*>(buf->data()), buf->size());
+    *body = *buffer_result;
     return 0;
 }
 
