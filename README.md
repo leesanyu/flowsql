@@ -838,7 +838,7 @@ INTO mysql.flowsql-mysql
 #### 结果、过滤与运行边界
 
 PCAP 默认使用 `run_mode='offline'`；两类来源均默认使用 `result_mode='periodic_snapshot'`。
-共享配置和模块配置见 [NPM 参数契约](tasks/archive/feat-npm-basic-parameters.md)，当前默认值与 Basic
+共享配置和模块配置见 [NPM 配置说明](docs/npm.md#共享与模块参数)，当前默认值与 Basic
 数据形状见上述周期统计说明及其[契约](tasks/archive/feat-npm-basic-periodic-stats.md)。
 
 | 结果实体 | Schema | 标签对数据形状的影响 |
@@ -857,7 +857,7 @@ Basic/Session 的 `flowsql.schema_version` 恒为 1；`primary_label_id` 未启�
 `unknown` 的协议 ID/名称为空。
 `session_id` 在任务内唯一，托管结果使用 `__npm_run_id` 区分运行。Basic 的 interval 列可按周期相加，
 累计列与 Session 累计性能指标不能跨 revision 直接求和。
-性能指标的解释与边界见 [Session 分析契约](tasks/archive/feat-npm-session-analysis.md)。
+性能指标的解释与边界见 [Session 会话性能指标](docs/npm.md#session-会话性能指标)。
 
 离线正常 EOF 立即结束剩余会话并排空结果，不等待 idle timeout。最终 `end_reason` 明确区分 `closed`、
 `idle_timeout`、`tuple_reuse` 和 `eof`；`eof` 不代表 TCP 正常关闭。取消、读取或消费者错误只异常清理，不输出伪装
@@ -950,7 +950,7 @@ INTO mysql.flowsql-mysql
 
 保留期从 run 创建时计算。到期的终态运行从公开查询关系中消失，物理数据由后续托管任务打开时分批清理；
 没有新任务时，物理回收可以延后。`writing` 运行不自动删除。非托管 DataFrame 目标不接受保留期配置。
-详细语义见 [NPM 多实体结果存储与查询](tasks/archive/feat-npm-result-query.md)。
+详细用法见 [NPM 结果保存与查询](docs/npm.md#保存所有实体并查询)。
 
 #### 生产实时边界
 
@@ -1317,11 +1317,11 @@ flowSQL/
 - [NetAdapter 采集与隔离真实联验](docs/netadapter.md)
 - [Flow Labeling 构建与配置](docs/flow-labeling.md)
 - [NPM 网络会话与协议分析：配置、结果与性能](docs/npm.md)
-- [NPM 参数契约](tasks/archive/feat-npm-basic-parameters.md)
-- [NPM Session 性能分析](tasks/archive/feat-npm-session-analysis.md)
-- [NPM 协议模块运行时](tasks/archive/feat-npm-protocol-analysis.md)
-- [NPM 多实体结果存储与查询](tasks/archive/feat-npm-result-query.md)
-- [NPM TLS 握手分析规格](tasks/archive/feat-npm-tls-handshake-analysis.md)
+- [NPM 共享与模块参数](docs/npm.md#共享与模块参数)
+- [NPM Session 会话性能指标](docs/npm.md#session-会话性能指标)
+- [NPM 协议组合与结果解读](docs/npm.md#组合协议分析与结果语义)
+- [NPM 结果保存与查询](docs/npm.md#保存所有实体并查询)
+- [NPM TLS 初始握手分析](docs/npm.md#tls-初始握手分析)
 - [Baseline 插件说明](src/plugins/baseline/README.md)
 - [Baseliner 基线分析：输入输出、恢复与性能](docs/baseliner.md)
 - [C++ 算子插件 Sample](samples/cpp_operator/README.md)

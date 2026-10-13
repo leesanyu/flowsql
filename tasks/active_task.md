@@ -1,22 +1,23 @@
 # 即时工作台
 
-WIP=0；NPM 优化与用户文档已验收，提交审计通过。
+WIP=0；NPM 用户说明与 Backlog 分类已验收；本地提交范围已冻结。
 
-- 关联 Feature：npm-ip-family-throughput、npm-clickhouse-columnar-write（均已验收归档）；用户授权的文档整理已完成。
-- 授权：2026-10-13 用户明确要求“提交代码”；执行本地 git commit，不推送。
-- 业务意图：将已完成的分族处理/批量结果优化、ClickHouse 列式写入、回归与测量工具、归档状态和用户文档作为可复核版本提交，证据缓存继续留在本地。
-- Non-Goals：不增加实现、不修改生产代码/测试/测量数字，不重新开展性能测量，不纳入忽略缓存或其他任务改动，不推送。
-- 当前 Atomic Slice：核对验收源码/产物身份、终端回归日志、文档检查和 Diff；按精确清单暂存、审查暂存区、提交并核对提交树及工作树。
-- 允许文件：tasks/active_task.md；evidence/doc-reorganization/commit-plan.json 中明确列出的 66 个路径仅允许暂存/提交（源码、测试、工具内容冻结不编辑）；本地审计缓存 evidence/doc-reorganization/commit-*、active-before-commit.md。精确清单生成于提交前，包含初始 HEAD、文件 SHA-256 及删除状态。
-- 验收命令：文档 verify_docs.py；验收源/二进制/日志 SHA-256 检查及 Python AST；git diff --check；暂存路径与 commit-plan.json 完全相符、暂存 blob 与工作树/冻结摘要一致；git diff --cached --check；git commit；git show/提交树核查；git status --short；git ls-files evidence docs/evidence 与 git check-ignore。
-- 时间盒：30 分钟，自 2026-10-13 15:44 UTC 起。
-- 停止条件：本地提交完成、提交树与审计一致、工作树状态明确且缓存未入库后置 WIP=0 并停止；若确认源码或产物与验收不符，先保存错误证据，重新冻结验证边界。
-- 起点：HEAD f9bdce72896204057961c414c0e3734508968730，暂存区为空；66 个待提交路径均属于上述已完成任务，前序文档验收和原文保存在 evidence/doc-reorganization/。
+- 关联：用户授权的 NPM 功能说明补充与 Backlog 分类整理，文档交付已完成，非新增 Feature。
+- 授权：用户明确要求“提交”；将本次文档整理执行本地 git commit，不推送。
+- 业务意图：将面向使用者的 NPM 说明、README 功能入口和分类后的需求池保存为可复核版本。
+- Non-Goals：不继续修改正文或 Feature 状态，不修改代码、接口、配置、性能数字和归档规格，不重新开展性能测量，不提交证据缓存，不推送。
+- 允许文件：tasks/active_task.md（提交边界/验收状态）；README.md、docs/npm.md、tasks/product_backlog.md（正文冻结，仅核验/暂存/提交）；evidence/npm-user-guide-backlog/（本地提交审计缓存，不入库）。
+- 本轮步骤：核对 Git 状态与四个允许文件的 Diff；重跑文档校验；冻结文件摘要；精确暂存四个文件；核对暂存路径和 blob；本地提交；核对提交树与工作树后停止。
+- 验收命令：python3 evidence/npm-user-guide-backlog/verify.py；git diff --check；精确路径与 SHA-256 校验；git diff --cached --check；git commit；git show/提交树核对；git status --short；git check-ignore。本轮仅文档，无需构建/CTest。
+- 时间盒：20 分钟，自 2026-10-13 16:18 UTC 起。
+- 停止条件：本地提交完成，提交树与冻结摘要一致，工作树状态明确，证据缓存未入库；若内容与前序验收不符，保存证据，不提交。
+- 起点：HEAD bdfb8a680952a152b32aeafb96a39cf74127e8f4；暂存区为空，仅上述四个跟踪文件有待提交修改。
 
 ## 完成证据
 
-- 2026-10-13：66 个提交路径冻结，46 个源码/CMake/测试路径与两项 Feature 的最终验收 SHA-256 完全一致，8 个测量二进制摘要一致；源码、测试和工具未新增修改。
-- 原始最终构建退出 0、完整 CTest 93/93（214.22 秒，零失败/跳过）、相关 ASan/UBSan/LSan 7/7（77.39 秒）的日志及证据 manifest 163 项摘要已核对。本轮未重跑构建、测试或性能测量；既有构建告警的来源与数量保持记录，不表述为全量零告警。
-- 文档复核 149 个本地链接及锚点、5 个 JSON 示例通过；两项 Python 工具 AST、C++ 版权与 git diff --check 通过。
-- 精确路径/内容、暂存区与提交树审计保存在忽略缓存 evidence/doc-reorganization/commit-{plan,validation,staged,verification}.json；本地提交结果以 Git HEAD 为准，未推送。
-- 两项 Feature 和文档整理已收口；evidence 缓存不入库，无其他任务待处理改动。完成后停止。
+- 2026-10-13 16:14 UTC：五份 NPM 归档规格中的使用者内容已补入 docs/npm.md，包含共享/模块参数、Session 指标与状态、协议组合、TLS 配置和可见性、结果查询/运行状态/保留期；新增导航，示例使用当前分族实体。README 的八处相关入口指向用户说明，归档规格保留。
+- Backlog 当前工作集的 34 条已完成 Feature 已归入五类能力目录；当前工作集保留 5 条待办，已完成能力共 47 条。52 条 Feature 原始整行集合逐字节一致，每条仅出现一次，优先级约定和待办顺序保留。
+- 执行 python3 evidence/npm-user-guide-backlog/verify.py：81 个相关本地链接/锚点、4 处 JSON 示例、31 个 Session/TLS 字段与参数名称/范围检查通过；现有性能章节逐字节不变。过滤/投影语义按当前 Scheduler 实现及既有回归核对，不采用旧规格已过期的限制。
+- git diff --check 与 Diff 审查通过；修改范围仅 README.md、docs/npm.md、tasks/product_backlog.md 和本工作台；其他 1,022 个跟踪文件摘要、HEAD 和空暂存区保持。证据缓存位于已忽略的 evidence/npm-user-guide-backlog/。
+- 整理切片仅涉及文档，未运行构建/CTest；整理完成时未暂存、提交或推送。后续本地提交按用户明确授权执行。
+- 2026-10-13 16:20 UTC：提交前重新执行文档验证，全项通过；四个文档的 Diff 已审查，其他 1,022 个跟踪文件、原 HEAD 和空暂存区不变。提交范围仅 README.md、docs/npm.md、tasks/product_backlog.md、tasks/active_task.md，按冻结摘要核对暂存内容及最终提交树；本地提交结果以 Git HEAD 和 evidence/npm-user-guide-backlog/commit-verification.json 为准，不推送。
