@@ -40,6 +40,7 @@ services:
         option: "db_path=./meta/flowsql_meta.db"
       - name: libflowsql_flow_labeling.so
         option: "eal_memory_mib=512"
+      - libflowsql_baseline.so
       - libflowsql_scheduler.so
       - libflowsql_bridge.so
       - libflowsql_builtin.so
