@@ -132,7 +132,7 @@ interface IBlockTransformTimeDrivenTaskV1 {
 /** V2 task combines the unchanged V1 data lifecycle with the optional time capability. */
 interface IBlockTransformTaskV2 : public IBlockTransformTaskV1, public IBlockTransformTimeDrivenTaskV1{};
 
-/** Atomically accept one poll's facts after the corresponding packet batch has been released. */
+/** Accept one poll's facts after packet processing, before output confirmation and source release. */
 interface IBlockTransformCaptureFactTaskV2 {
     virtual ~IBlockTransformCaptureFactTaskV2() = default;
     virtual int BindCaptureSources(const CaptureSourceSetV2& sources) = 0;

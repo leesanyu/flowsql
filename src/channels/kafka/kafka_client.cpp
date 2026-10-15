@@ -261,11 +261,23 @@ int Client::StartConsumer(const char* reset, uint32_t max_message_bytes) {
         Set(config.get(), "fetch.wait.max.ms", "50");
         Set(config.get(), "fetch.message.max.bytes", std::to_string(max_message_bytes));
         Set(config.get(), "fetch.max.bytes", "16777216");
+        if (binding_.snapshot.payload_kind == "packet") {
+            Set(config.get(), "partition.assignment.strategy", "range");
+            Set(config.get(), "message.max.bytes", std::to_string(max_message_bytes));
+            Set(config.get(), "queued.max.messages.kbytes", std::to_string((max_message_bytes + 1023) / 1024));
+            Set(config.get(), "fetch.max.bytes", std::to_string(max_message_bytes));
+            Set(config.get(), "receive.message.max.bytes", std::to_string(max_message_bytes + 65536));
+            rd_kafka_conf_set_rebalance_cb(config.get(), PacketRebalance);
+        }
         char error[512];
         consumer_ = rd_kafka_new(RD_KAFKA_CONSUMER, config.get(), error, sizeof(error));
         if (!consumer_) return EIO;
         config.release();
         rd_kafka_poll_set_consumer(consumer_);
+        if (binding_.snapshot.payload_kind == "packet") {
+            const int topology = CheckPacketTopology(3000);
+            if (topology) return topology;
+        }
         auto* topics = rd_kafka_topic_partition_list_new(1);
         rd_kafka_topic_partition_list_add(topics, binding_.snapshot.topic.c_str(), RD_KAFKA_PARTITION_UA);
         const auto rc = rd_kafka_subscribe(consumer_, topics);
@@ -283,9 +295,14 @@ int Client::PollMessage(uint32_t timeout_ms, KafkaMessageV1* message) {
     std::lock_guard<std::mutex> operation(operation_mutex_);
     *message = {};
     if (!consumer_) return EBADF;
+    if (binding_.snapshot.payload_kind == "packet" && Clock::now() - packet_metadata_at_ > std::chrono::seconds(1)) {
+        const int topology = CheckPacketTopology(250);
+        if (topology) return topology;
+    }
     auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     do {
         if (cancelled_) return ECANCELED;
+        if (packet_ownership_error_) return packet_ownership_error_;
         if (oauth_failed_ || (!ccache_.empty() && !ticket_ready_.load())) return EACCES;
         const auto callback = consumer_error_.load();
         if (callback == RD_KAFKA_RESP_ERR__AUTHENTICATION || callback == RD_KAFKA_RESP_ERR__SSL ||
@@ -296,9 +313,12 @@ int Client::PollMessage(uint32_t timeout_ms, KafkaMessageV1* message) {
         if (record) {
             std::unique_ptr<rd_kafka_message_t, decltype(&rd_kafka_message_destroy)> owner(record,
                                                                                            rd_kafka_message_destroy);
+            if (packet_ownership_error_) return packet_ownership_error_;
             if (record->err == RD_KAFKA_RESP_ERR__PARTITION_EOF) continue;
             if (record->err) return EIO;
-            if (record->len > message_limit_ || record->key_len > message_limit_) return EMSGSIZE;
+            if (record->len > message_limit_ || record->key_len > message_limit_ ||
+                (binding_.snapshot.payload_kind == "packet" && record->len > message_limit_ - record->key_len))
+                return EMSGSIZE;
             message->topic = rd_kafka_topic_name(record->rkt);
             message->partition = record->partition;
             message->offset = record->offset;
@@ -316,8 +336,17 @@ int Client::PollMessage(uint32_t timeout_ms, KafkaMessageV1* message) {
 int Client::CommitOffsets(const std::vector<KafkaOffsetV1>& offsets, uint32_t timeout_ms) {
     if (offsets.empty() || !timeout_ms || timeout_ms > 30000) return EINVAL;
     std::lock_guard<std::mutex> operation(operation_mutex_);
+    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     if (cancelled_) return ECANCELED;
     if (!consumer_) return EBADF;
+    if (binding_.snapshot.payload_kind == "packet") {
+        if (packet_ownership_error_) return packet_ownership_error_;
+        if (!packet_assigned_once_ || rd_kafka_assignment_lost(consumer_)) return ESTALE;
+        const int topology = CheckPacketTopology(std::min<uint32_t>(250, timeout_ms));
+        if (topology) return topology;
+        for (const auto& offset : offsets)
+            if (offset.partition != 0) return EINVAL;
+    }
     auto* positions = rd_kafka_topic_partition_list_new(offsets.size());
     for (const auto& offset : offsets) {
         if (offset.partition < 0 || offset.next_offset < 0) {
@@ -331,7 +360,6 @@ int Client::CommitOffsets(const std::vector<KafkaOffsetV1>& offsets, uint32_t ti
     auto rc = rd_kafka_commit_queue(consumer_, positions, queue, nullptr, nullptr);
     rd_kafka_topic_partition_list_destroy(positions);
     int result = rc ? EIO : ETIMEDOUT;
-    auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     while (!rc && !cancelled_ && Clock::now() < deadline) {
         auto* event = rd_kafka_queue_poll(queue, 25);
         if (!event) continue;
@@ -354,6 +382,69 @@ void Client::Error(rd_kafka_t*, int error, const char*, void* opaque) {
 }
 void Client::ConsumerError(rd_kafka_t*, int error, const char*, void* opaque) {
     static_cast<Client*>(opaque)->consumer_error_.store(error);
+}
+void Client::PacketRebalance(rd_kafka_t* consumer, rd_kafka_resp_err_t reason,
+                             rd_kafka_topic_partition_list_t* partitions, void* opaque) {
+    auto* self = static_cast<Client*>(opaque);
+    const bool initial = reason == RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS && !self->packet_assigned_once_ && partitions &&
+                         partitions->cnt == 1 && partitions->elems[0].partition == 0 &&
+                         partitions->elems[0].topic == self->binding_.snapshot.topic;
+    if (initial) {
+        self->packet_assigned_once_ = true;
+        if (rd_kafka_assign(consumer, partitions)) self->packet_ownership_error_ = ESTALE;
+    } else {
+        self->packet_ownership_error_ = ESTALE;
+        rd_kafka_assign(consumer, nullptr);
+    }
+}
+int Client::CheckPacketTopology(uint32_t timeout_ms) {
+    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    auto* topic = rd_kafka_topic_new(client_, binding_.snapshot.topic.c_str(), nullptr);
+    if (!topic) return EIO;
+    int result = ETIMEDOUT;
+    do {
+        if (cancelled_) {
+            result = ECANCELED;
+            break;
+        }
+        const rd_kafka_metadata_t* metadata = nullptr;
+        const auto callback = callback_error_.load();
+        if (oauth_failed_ || callback == RD_KAFKA_RESP_ERR__AUTHENTICATION || callback == RD_KAFKA_RESP_ERR__SSL ||
+            callback == RD_KAFKA_RESP_ERR_SASL_AUTHENTICATION_FAILED) {
+            result = EACCES;
+            break;
+        }
+        const auto rc = rd_kafka_metadata(client_, 0, topic, &metadata, 50);
+        if (rc == RD_KAFKA_RESP_ERR__TIMED_OUT) continue;
+        if (rc == RD_KAFKA_RESP_ERR__TRANSPORT || rc == RD_KAFKA_RESP_ERR__ALL_BROKERS_DOWN) {
+            result = EHOSTUNREACH;
+            continue;
+        }
+        if (rc) {
+            result = EHOSTUNREACH;
+            break;
+        }
+        result = EPROTO;
+        bool retry = false;
+        for (int i = 0; i < metadata->topic_cnt; ++i) {
+            const auto& found = metadata->topics[i];
+            if (found.topic != binding_.snapshot.topic) continue;
+            if (found.err == RD_KAFKA_RESP_ERR_LEADER_NOT_AVAILABLE ||
+                found.err == RD_KAFKA_RESP_ERR_NOT_LEADER_FOR_PARTITION) {
+                retry = true;
+                result = EHOSTUNREACH;
+            } else if (found.err)
+                result = found.err == RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED ? EACCES : ENOENT;
+            else if (found.partition_cnt == 1 && found.partitions[0].id == 0 && !found.partitions[0].err)
+                result = 0;
+        }
+        rd_kafka_metadata_destroy(metadata);
+        if (retry) continue;
+        break;
+    } while (Clock::now() < deadline);
+    rd_kafka_topic_destroy(topic);
+    if (!result) packet_metadata_at_ = Clock::now();
+    return result;
 }
 bool Client::Ticket(Clock::time_point deadline) {
     if (ccache_.empty() || Now() < ticket_expires_) return true;

@@ -15,6 +15,14 @@ export const connectionDraft = (row = {}) => ({
 export const channelDraft = (row = {}) => ({
   name: row.name || '', connection_name: row.connection_name || '', role: row.role || 'source',
   topic: row.topic || '', consumer_group: row.consumer_group || '', payload_kind: row.payload_kind || 'structured',
+  packet_source_enabled: row.payload_kind === 'packet' && row.payload_options?.source?.encoding === 'flowsql_packet_v1',
+  packet_source: {
+    stream_id: row.payload_kind === 'packet' ? row.payload_options?.source?.stream_id || '' : '',
+    observation_domain_id: row.payload_kind === 'packet' ? row.payload_options?.source?.observation_domain_id || '' : '',
+    inputs: (row.payload_kind === 'packet' ? row.payload_options?.source?.inputs : null)?.map((input) => ({ ...input })) || [{ source_id: 0, queue_id: 0, source_name: '' }],
+    ...Object.fromEntries(Object.entries({ offset_reset: 'earliest', commit_policy: 'after_success', max_packets_per_batch: 256, max_bytes_per_batch: 1048576, max_message_bytes: 2097152, max_wait_ms: 100 }).map(([key, fallback]) => [key, row.payload_kind === 'packet' ? row.payload_options?.source?.[key] ?? fallback : fallback]))
+  },
+  packet_sink: row.payload_kind === 'packet' && row.payload_options?.sink ? JSON.parse(JSON.stringify(row.payload_options.sink)) : undefined,
   sink_enabled: !!row.payload_options?.sink?.entity,
   sink: {
     entity: row.payload_options?.sink?.entity || 'result',
@@ -121,6 +129,23 @@ export const buildChannel = (draft, revision = 0) => {
       ...Object.fromEntries(['max_message_bytes', 'queue_max_messages', 'queue_max_bytes', 'delivery_timeout_ms'].map((key) => [key, sink[key]]))
     } }
   }
+  if (draft.role !== 'sink' && draft.payload_kind === 'packet' && draft.packet_source_enabled) {
+    const source = draft.packet_source, ids = new Set()
+    requireValue(/^[A-Za-z0-9_.-]{1,64}$/.test(source.stream_id), 'stream_id 需要 1～64 个字母、数字、点、下划线或短横线')
+    requireValue(typeof source.observation_domain_id === 'string' && /^[0-9]+$/.test(source.observation_domain_id) && BigInt(source.observation_domain_id) > 0n && BigInt(source.observation_domain_id) <= 18446744073709551615n, '观测域需要非零 uint64 十进制字符串')
+    requireValue(Array.isArray(source.inputs) && source.inputs.length >= 1 && source.inputs.length <= 32, '请配置 1～32 个采集输入')
+    const inputs = source.inputs.map((input) => {
+      for (const key of ['source_id', 'queue_id']) requireValue(Number.isInteger(input[key]) && input[key] >= 0 && input[key] <= 4294967295, '输入编号需要 uint32 整数')
+      requireValue(!ids.has(input.source_id), 'source_id 不得重复'); ids.add(input.source_id)
+      requireValue(typeof input.source_name === 'string' && !input.source_name.includes('\0') && new TextEncoder().encode(input.source_name).length >= 1 && new TextEncoder().encode(input.source_name).length <= 128, '采集输入名称需要 1～128 字节且无 NUL')
+      return { source_id: input.source_id, queue_id: input.queue_id, source_name: input.source_name }
+    })
+    requireValue(['earliest', 'latest', 'error'].includes(source.offset_reset) && ['after_success', 'none'].includes(source.commit_policy), '请选择合法位点策略')
+    const limits = [['max_packets_per_batch', 1, 4096], ['max_bytes_per_batch', 1024, 16777216], ['max_message_bytes', 1024, 16777216], ['max_wait_ms', 1, 1000]]
+    for (const [key, low, high] of limits) requireValue(Number.isInteger(source[key]) && source[key] >= low && source[key] <= high, `${key} 范围为 ${low}～${high}`)
+    payload.payload_options = { source: { encoding: 'flowsql_packet_v1', stream_id: source.stream_id, observation_domain_id: source.observation_domain_id, inputs, offset_reset: source.offset_reset, commit_policy: source.commit_policy, ...Object.fromEntries(limits.map(([key]) => [key, source[key]])) } }
+  }
+  if (draft.role !== 'source' && draft.payload_kind === 'packet' && draft.packet_sink !== undefined) payload.payload_options = { ...payload.payload_options, sink: JSON.parse(JSON.stringify(draft.packet_sink)) }
   if (revision) payload.expected_revision = revision
   return payload
 }

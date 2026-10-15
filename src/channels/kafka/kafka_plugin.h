@@ -1,6 +1,7 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
+#include <channels/pcapfile/packet_filter_domain.h>
 #include <common/iplugin.h>
 #include <framework/interfaces/iblock_stream_channel_descriptor.h>
 #include <framework/interfaces/iblock_stream_factory.h>
@@ -19,7 +20,8 @@ class Plugin final : public IPlugin,
                      public IBlockStreamFactory,
                      public IBlockStreamReaderFactoryV1,
                      public IBlockStreamChannelDescriptorV1,
-                     public IResultSinkFactoryV1 {
+                     public IResultSinkFactoryV1,
+                     public IFilterDomainResolverV1 {
  public:
     int Option(const char* options) override;
     int Load(IQuerier*) override;
@@ -39,6 +41,7 @@ class Plugin final : public IPlugin,
     int CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** output) override;
     void ReleaseReader(IBlockStreamChannel* reader) override;
     void DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptorV1&)> callback) const override;
+    int Resolve(const FilterDomainResolveRequestV1&, FilterDomainResolveResultV1*) const override;
 
  private:
     struct Verification {
@@ -70,6 +73,7 @@ class Plugin final : public IPlugin,
     Json options_;
     Store store_;
     Deployment deployment_;
+    IQuerier* querier_ = nullptr;
     std::mutex sessions_mutex_;
     std::condition_variable sessions_drained_;
     std::set<Client*> sessions_;

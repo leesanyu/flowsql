@@ -400,7 +400,7 @@ class CaptureFactProbeTask final : public IBlockTransformTaskV1, public IBlockTr
     int BindCaptureSources(const CaptureSourceSetV2&) override { return 0; }
     int AcceptCaptureFacts(const std::vector<CaptureProgressV1>& incoming) override {
         const auto& fact = incoming.front();
-        if (fact.packet_observed) assert(reader_->ReleaseCount() == processed);
+        if (fact.packet_observed) assert(reader_->ReleaseCount() + 1 == processed);
         facts.push_back(fact.fact_sequence);
         if (fact.fact_sequence == 3) reader_->Finish();
         return 0;
@@ -444,7 +444,7 @@ void TestCapturePipelineFactOrder() {
     failed_config.output_consumer = [](const BlockTransformOutputV1&) { return EIO; };
     BlockTransformPipelineRunner failed_runner(std::move(failed_config));
     assert(failed_runner.Run(&result, &error) == BlockTransformPipelineError::kOutputConsumerFailed);
-    assert(failed_reader.ReleaseCount() == 1 && failed_task.facts.empty());
+    assert(failed_reader.ReleaseCount() == 1 && failed_task.facts == std::vector<uint64_t>({1}));
     assert(failed_task.flushed == 0 && failed_task.cancelled == 1);
 }
 

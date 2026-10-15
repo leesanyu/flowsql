@@ -882,7 +882,7 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(BlockTransformPipe
         }
         std::string capture_contract_error;
         if (config_.capture_fact_task) {
-            if (event.batch->num_rows() <= 0 || !event.batch->schema()->Equals(*packet::PacketSchema(), true)) {
+            if (!event.batch->schema()->Equals(*packet::PacketSchema(), true)) {
                 capture_contract_error = "capture data is missing packet progress";
             } else {
                 const auto timestamps = std::static_pointer_cast<arrow::Int64Array>(event.batch->column(0));
@@ -900,7 +900,6 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(BlockTransformPipe
                         !proven.insert(fact.source_id).second)
                         capture_contract_error = "capture fact time exceeds processed packet time or source is invalid";
                 }
-                if (proven.size() != maxima.size()) capture_contract_error = "capture data is missing packet progress";
             }
         }
 
@@ -912,7 +911,10 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(BlockTransformPipe
         int transform_rc = static_cast<int>(BlockTransformStatusV1::kContinue);
         std::vector<BlockTransformOutputV1> outputs;
 
-        if (cancelled()) {
+        if (!capture_contract_error.empty()) {
+            block_error = BlockTransformPipelineError::kSourcePollFailed;
+            block_error_message = capture_contract_error;
+        } else if (cancelled()) {
             block_error = BlockTransformPipelineError::kCancelled;
             block_error_message = "block transform pipeline was cancelled";
         } else {
@@ -949,11 +951,29 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(BlockTransformPipe
                     block_error = BlockTransformPipelineError::kTransformFailed;
                     block_error_message = "transform ProcessBlock failed: " + transform_error();
                 }
-            } else {
-                block_error = deliver_outputs(outputs, &block_error_message);
             }
         }
 
+        if (block_error == BlockTransformPipelineError::kNone && !capture_facts.empty()) {
+            try {
+                const int fact_rc = config_.capture_fact_task->AcceptCaptureFacts(capture_facts);
+                if (fact_rc != 0) {
+                    block_error = BlockTransformPipelineError::kTransformFailed;
+                    block_error_message = "capture fact delivery failed with code " + std::to_string(fact_rc);
+                }
+            } catch (...) {
+                block_error = BlockTransformPipelineError::kTransformFailed;
+                block_error_message = "capture fact delivery threw";
+            }
+        }
+        if (block_error == BlockTransformPipelineError::kNone)
+            block_error = deliver_outputs(outputs, &block_error_message);
+        if (block_error == BlockTransformPipelineError::kNone && !capture_facts.empty()) {
+            bool fired = false, time_stop = false;
+            int next_poll_ms = 0;
+            block_error = service_time(&next_poll_ms, &fired, &time_stop, &block_error_message);
+            if (time_stop) transform_rc = static_cast<int>(BlockTransformStatusV1::kStop);
+        }
         if (block_error == BlockTransformPipelineError::kNone) {
             if (auto* acknowledgement = dynamic_cast<IBlockStreamAcknowledgementV1*>(config_.source)) {
                 try {
@@ -999,21 +1019,6 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(BlockTransformPipe
                     return fail(BlockTransformPipelineError::kTransformFailed, "input progress delivery failed");
             } catch (...) {
                 return fail(BlockTransformPipelineError::kTransformFailed, "input progress delivery threw");
-            }
-        }
-        if (!capture_contract_error.empty()) {
-            return fail(BlockTransformPipelineError::kSourcePollFailed, std::move(capture_contract_error));
-        }
-        if (!capture_facts.empty()) {
-            int fact_rc = 0;
-            try {
-                fact_rc = config_.capture_fact_task->AcceptCaptureFacts(capture_facts);
-            } catch (...) {
-                return fail(BlockTransformPipelineError::kTransformFailed, "capture fact delivery threw");
-            }
-            if (fact_rc != 0) {
-                return fail(BlockTransformPipelineError::kTransformFailed,
-                            "capture fact delivery failed with code " + std::to_string(fact_rc));
             }
         }
         if (transform_rc == static_cast<int>(BlockTransformStatusV1::kStop)) {

@@ -84,6 +84,27 @@
         <el-form-item label="Topic" required><el-input v-model="channel.topic" /></el-form-item>
         <el-form-item v-if="channel.role !== 'sink'" label="消费组" required><el-input v-model="channel.consumer_group" /></el-form-item>
         <el-form-item label="数据类别"><el-select v-model="channel.payload_kind"><el-option label="结构化数据" value="structured" /><el-option label="原始 packet" value="packet" /></el-select></el-form-item>
+        <template v-if="channel.role !== 'sink' && channel.payload_kind === 'packet'">
+          <el-form-item label="原始包接入"><el-select v-model="channel.packet_source_enabled"><el-option label="配置 flowsql_packet_v1" :value="true" /><el-option label="暂不配置" :value="false" /></el-select></el-form-item>
+          <template v-if="channel.packet_source_enabled">
+            <p class="hint">Topic 须预建为单分区并使用 delete 保留策略；一个观测域共用一个活动发布者。每次分析重启建立新的 run，位点续读不保留旧会话内存。</p>
+            <el-form-item label="stream_id" required><el-input v-model.trim="channel.packet_source.stream_id" /></el-form-item>
+            <el-form-item label="观测域 ID" required><el-input v-model.trim="channel.packet_source.observation_domain_id" placeholder="非零 uint64 十进制字符串" /></el-form-item>
+            <div v-for="(input, index) in channel.packet_source.inputs" :key="index" class="secret">
+              <el-form-item :label="`输入 ${index + 1}`"><el-input v-model="input.source_name" placeholder="探针 Capture V2 输入名称" /><el-button text type="danger" @click="channel.packet_source.inputs.splice(index, 1)">删除输入</el-button></el-form-item>
+              <el-form-item label="source_id"><el-input-number v-model="input.source_id" :min="0" :max="4294967295" :precision="0" /></el-form-item>
+              <el-form-item label="queue_id"><el-input-number v-model="input.queue_id" :min="0" :max="4294967295" :precision="0" /></el-form-item>
+            </div>
+            <el-button :disabled="channel.packet_source.inputs.length >= 32" @click="channel.packet_source.inputs.push({ source_id: channel.packet_source.inputs.length, queue_id: 0, source_name: '' })">新增采集输入</el-button>
+            <el-form-item label="无有效位点"><el-select v-model="channel.packet_source.offset_reset"><el-option label="从最早开始" value="earliest" /><el-option label="从最新开始" value="latest" /><el-option label="明确报错" value="error" /></el-select></el-form-item>
+            <el-form-item label="包确认策略"><el-select v-model="channel.packet_source.commit_policy"><el-option label="处理、事实和当次输出成功后确认" value="after_success" /><el-option label="不提交位点" value="none" /></el-select></el-form-item>
+            <el-form-item label="批次包数上限"><el-input-number v-model="channel.packet_source.max_packets_per_batch" :min="1" :max="4096" :precision="0" /></el-form-item>
+            <el-form-item label="原始字节上限"><el-input-number v-model="channel.packet_source.max_bytes_per_batch" :min="1024" :max="16777216" :precision="0" /></el-form-item>
+            <el-form-item label="包消息字节上限"><el-input-number v-model="channel.packet_source.max_message_bytes" :min="1024" :max="16777216" :precision="0" /></el-form-item>
+            <el-form-item label="最大等待毫秒"><el-input-number v-model="channel.packet_source.max_wait_ms" :min="1" :max="1000" :precision="0" /></el-form-item>
+          </template>
+        </template>
+        <p v-if="channel.role !== 'source' && channel.payload_kind === 'packet'" class="hint">packet 发布适配器尚未安装；保存 both 通道时保留独立的接入配置。</p>
         <template v-if="channel.role !== 'sink' && channel.payload_kind === 'structured'">
           <el-form-item label="结构化接入"><el-select v-model="channel.source_enabled"><el-option label="配置 JSON 字段" :value="true" /><el-option label="暂不配置" :value="false" /></el-select></el-form-item>
           <template v-if="channel.source_enabled">

@@ -1,9 +1,11 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 #include "kafka_reader.h"
+#include <framework/interfaces/ipacket_family.h>
 #include <cerrno>
 #include <cstring>
 #include <map>
+#include "kafka_packet_reader.h"
 #include "kafka_plugin.h"
 
 namespace flowsql::channels::kafka {
@@ -117,15 +119,17 @@ IBlockStreamChannel* Plugin::Get(const char* type, const char* name) {
         auto rows = store_.Query("channels", name);
         if (rows["items"].Empty()) return nullptr;
         auto& row = rows["items"][0];
-        if (Text(row, "payload_kind") != "structured" || Text(row, "role") == "sink" ||
-            !row.HasMember("payload_options") || !row["payload_options"].HasMember("source") ||
-            row["payload_options"]["source"].ObjectEmpty())
+        if (Text(row, "role") == "sink" || !row.HasMember("payload_options") ||
+            !row["payload_options"].HasMember("source") || row["payload_options"]["source"].ObjectEmpty())
             return nullptr;
-        auto config = ParseStructuredConfig(row["payload_options"]["source"]);
+        const auto kind = Text(row, "payload_kind");
+        const auto schema = kind == "packet"
+                                ? packet::PacketFamilySchema()
+                                : StructuredSchema(ParseStructuredConfig(row["payload_options"]["source"]));
         const auto key = std::string(name) + ":" + std::to_string(row["revision"].GetUint64());
         std::lock_guard<std::mutex> lock(readers_mutex_);
         auto& definition = definitions_[key];
-        if (!definition) definition = std::make_unique<Definition>(name, StructuredSchema(config));
+        if (!definition) definition = std::make_unique<Definition>(name, schema);
         return definition.get();
     } catch (...) {
         return nullptr;
@@ -146,9 +150,17 @@ void Plugin::List(std::function<void(const char*, const char*, IBlockStreamChann
 void Plugin::DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptorV1&)> callback) const {
     BlockStreamChannelTypeDescriptorV1 descriptor;
     descriptor.channel_type = "kafka";
-    descriptor.display_name = "Kafka 结构化 JSON";
+    descriptor.display_name = "Kafka 结构化 JSON / 原始包";
     descriptor.allowed_roles = {"source"};
     callback(descriptor);
+}
+int Plugin::Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const {
+    if (!request.target_category || std::string(request.target_category) != "kafka" || !request.output_schema ||
+        !request.output_schema->Equals(*packet::PacketFamilySchema(), true))
+        return ENOTSUP;
+    auto next = request;
+    next.target_category = "pcapfile";
+    return pcapfile::PcapFilterDomainResolver().Resolve(next, result);
 }
 int Plugin::CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** output) {
     if (!output) return EINVAL;
@@ -174,15 +186,24 @@ int Plugin::CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamCh
         if (value) ReleaseSession(value);
     });
     try {
-        if (!rc && raw->Snapshot().payload_kind != "structured") rc = ENOTSUP;
         if (!rc) {
             const auto& options = static_cast<Client*>(raw)->SourceOptions();
             if (options.empty())
                 rc = ENOTSUP;
             else {
-                auto reader = std::make_unique<StructuredReader>(config.source_name,
-                                                                 ParseStructuredConfig(Parse(options)), session);
-                rc = reader->Open();
+                std::unique_ptr<IBlockStreamChannel> reader;
+                if (raw->Snapshot().payload_kind == "packet") {
+                    auto* protocol = querier_ ? static_cast<IProtocol*>(querier_->First(IID_PROTOCOL)) : nullptr;
+                    if (!protocol)
+                        rc = ENODEV;
+                    else
+                        reader = std::make_unique<PacketReader>(
+                            config.source_name, ParsePacketSourceConfig(Parse(options)), session, protocol);
+                } else {
+                    reader = std::make_unique<StructuredReader>(config.source_name,
+                                                                ParseStructuredConfig(Parse(options)), session);
+                }
+                if (!rc) rc = reader->Open();
                 if (!rc) {
                     std::lock_guard<std::mutex> lock(readers_mutex_);
                     *output = reader.get();

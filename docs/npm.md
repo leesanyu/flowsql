@@ -39,6 +39,7 @@ INTO dataframe.session_metrics
 
 有限 PCAP 可同步执行；持续采集任务通过 `/scheduler/batch/submit` 异步提交。
 持续来源使用两段数据库目标保存多实体结果，例如 `INTO mysql.npm`；普通 DataFrame 不能作为持续来源的输出目标。
+远端探针可通过 [Kafka 原始包 source](kafka.md#原始包-packet-source) 输入同一实时主路径；源观测域及采集事实决定分析时间，重启建立新的 run 和空会话状态。
 
 ## 选择模块和结果
 

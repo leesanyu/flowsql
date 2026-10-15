@@ -115,6 +115,11 @@ for generation in range(2):
                                       "topic": "events", "consumer_group": "smoke", "payload_kind": "structured",
                                       "payload_options": {"source": {"encoding":"json", "entity":"metric", "fields":[{"name":"value","path":"/v","type":"int64","nullable":False}]},
                                                           "sink": {"encoding":"json", "entity":"alert", "schema_version":1, "record_kind":"upsert", "key_fields":["id"], "revision_field":"revision"}}})
+                post("channels/add", {"name": "packets", "connection_name": "persisted", "role": "both",
+                                      "topic": "packets", "consumer_group": "npm", "payload_kind": "packet",
+                                      "payload_options": {"source": {"encoding":"flowsql_packet_v1", "stream_id":"probe",
+                                          "observation_domain_id":"18446744073709551615",
+                                          "inputs":[{"source_id":0,"queue_id":2,"source_name":"eth0"}]}, "sink":{}}})
                 test_id = post("tests/start", {"target": "channel", "name": "events", "timeout_ms": 1}, 202)["test_id"]
                 for _ in range(100):
                     if post("tests/query", {"test_id": test_id})["status"] != "running":
@@ -136,6 +141,14 @@ for generation in range(2):
             assert channels[0]["payload_options"]["sink"]["revision_field"] == "revision"
             assert channels[0]["adapter_status"] == {"source":"ready", "sink":"ready"}
             assert capabilities["adapter_status"]["structured"]["sink"] == "available"
+            packets = post("channels/query", {"name": "packets"})["items"]
+            assert len(packets) == 1 and packets[0]["role"] == "both" and not packets[0]["in_use"]
+            assert packets[0]["payload_options"]["source"]["observation_domain_id"] == "18446744073709551615"
+            assert packets[0]["payload_options"]["source"]["inputs"][0]["queue_id"] == 2
+            assert packets[0]["payload_options"]["sink"] == {}
+            assert packets[0]["adapter_status"] == {"source":"ready", "sink":"not_installed"}
+            assert capabilities["adapter_status"]["packet"]["source"] == "available"
+            assert capabilities["packet_source"]["requires_async"] is True
         finally:
             if args.mode == "docker":
                 subprocess.run(["docker", "stop", "-t", "20", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)

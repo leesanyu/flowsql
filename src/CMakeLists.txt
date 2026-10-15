@@ -99,6 +99,7 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_config_channel ${CMAKE_BINARY_DI
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_connection_auth ${CMAKE_BINARY_DIR}/test_kafka_connection_auth)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_log_source ${CMAKE_BINARY_DIR}/test_kafka_log_source)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_result_sink ${CMAKE_BINARY_DIR}/test_kafka_result_sink)
+add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_packet_source ${CMAKE_BINARY_DIR}/test_kafka_packet_source)
 if(FLOWSQL_FLOW_LABELING_AVAILABLE)
     add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_flow_labeling ${CMAKE_BINARY_DIR}/test_flow_labeling)
 endif()

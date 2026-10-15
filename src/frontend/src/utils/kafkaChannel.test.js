@@ -3,6 +3,22 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { connectionDraft, channelDraft, buildConnection, buildChannel, blockedReason, kafkaError } from './kafkaChannel.js'
+test('packet edit retains uint64 domain and independent directions, validates inputs and budgets', () => {
+  const source = { encoding: 'flowsql_packet_v1', stream_id: 'probe-a', observation_domain_id: '18446744073709551615', inputs: [{ source_id: 4294967295, queue_id: 2, source_name: '探针/eth0' }], offset_reset: 'error', commit_policy: 'none', max_packets_per_batch: 9, max_bytes_per_batch: 8192, max_message_bytes: 16384, max_wait_ms: 75 }
+  const row = { name: 'packets', connection_name: 'auth', role: 'both', topic: 'packets', consumer_group: 'npm', payload_kind: 'packet', payload_options: { source, sink: {} } }
+  const draft = channelDraft(row)
+  assert.deepEqual(buildChannel(draft, 7).payload_options, row.payload_options)
+  assert.equal(buildChannel(draft, 7).expected_revision, 7)
+  draft.packet_source.inputs[0].source_name = 'changed'
+  assert.equal(source.inputs[0].source_name, '探针/eth0')
+  draft.role = 'sink'; assert.deepEqual(buildChannel(draft).payload_options, { sink: {} }); assert.equal(buildChannel(draft).consumer_group, undefined)
+  draft.role = 'source'; assert.equal(buildChannel(draft).payload_options.sink, undefined)
+  draft.packet_source.observation_domain_id = '18446744073709551616'; assert.throws(() => buildChannel(draft), /uint64/)
+  draft.packet_source.observation_domain_id = '7'; draft.packet_source.inputs.push({ ...draft.packet_source.inputs[0] }); assert.throws(() => buildChannel(draft), /重复/)
+  draft.packet_source.inputs.pop(); draft.packet_source.max_message_bytes = 1023; assert.throws(() => buildChannel(draft), /范围/)
+  draft.payload_kind = 'structured'; assert.equal(buildChannel(draft).payload_options, undefined)
+  assert.match(blockedReason({ in_use: true }, 'channels'), /正在使用/)
+})
 test('conditional auth payload drops hidden fields and never reuses masked passwords', () => {
   const d = connectionDraft({ name: 'auth', bootstrap_servers: ['localhost:9092'], security_protocol: 'SASL_SSL', sasl_mechanism: 'PLAIN', sasl: { username: 'alice' }, credential_bindings: { password: { configured: true } } })
   assert.deepEqual(buildConnection(d, 7), { name: 'auth', bootstrap_servers: ['localhost:9092'], security_protocol: 'SASL_SSL', tls: {}, sasl_mechanism: 'PLAIN', sasl: { username: 'alice' }, expected_revision: 7 })
@@ -130,6 +146,16 @@ test('Vue structured source form saves edited entity and preserves field units a
     await page.click('编辑'); await page.change('实体名称', 'renamed'); await page.change('无有效位点', 'latest'); await page.click('保存通道')
     assert.equal(saved[0].expected_revision, 3)
     assert.deepEqual(saved[0].payload_options.source, { ...source, entity: 'renamed', offset_reset: 'latest' })
+  } finally { page.app.unmount() }
+})
+test('Vue packet form keeps uint64 domain, revision and independent sink when edited', async () => {
+  const saved = [], source = { encoding: 'flowsql_packet_v1', stream_id: 'probe', observation_domain_id: '18446744073709551615', inputs: [{ source_id: 0, queue_id: 2, source_name: 'eth0' }], offset_reset: 'error', commit_policy: 'none', max_packets_per_batch: 17, max_bytes_per_batch: 8192, max_message_bytes: 16384, max_wait_ms: 75 }
+  const row = { name: 'packets', revision: 6, connection_name: 'auth', role: 'both', topic: 'packets', consumer_group: 'npm', payload_kind: 'packet', payload_options: { source, sink: {} }, adapter_status: { source: 'ready', sink: 'not_installed' } }
+  const page = await mountPage({ kafkaDefinitions: async () => ({ data: definitions }), kafkaQuery: async (kind) => ({ data: { items: kind === 'channels' ? [row] : [{ name: 'auth' }] } }), kafkaSave: async (_kind, payload) => { saved.push(payload) }, kafkaTestCancel: async () => {} })
+  try {
+    await page.click('编辑'); await page.change('stream_id', 'probe-edited'); await page.change('无有效位点', 'earliest'); await page.click('保存通道')
+    assert.equal(saved[0].expected_revision, 6)
+    assert.deepEqual(saved[0].payload_options, { source: { ...source, stream_id: 'probe-edited', offset_reset: 'earliest' }, sink: {} })
   } finally { page.app.unmount() }
 })
 

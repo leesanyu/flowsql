@@ -1,8 +1,8 @@
-# Kafka 连接、结构化接入与通道管理
+# Kafka 连接、结构化/原始包接入与通道管理
 
 FlowSQL 提供可复用的 Kafka 连接配置与具名通道管理。连接负责 broker、TLS/SASL 与凭证生命周期；通道引用连接，并指定 `source`、`sink` 或 `both`、Topic、消费组和数据类别。
 
-结构化 JSON source 可将外部日志、指标或业务记录转换为固定 Arrow Schema，供异步 SQL 分析使用。连接验证只证明认证和元数据访问；消费权限在实际任务中检查。结构化 sink 可将分析结果发布为逐行 JSON 信封；packet 方向尚未安装，返回 `KAFKA_DATA_ADAPTER_UNAVAILABLE`。source 只能用于 FROM、sink 只能用于 INTO，角色不符返回 `KAFKA_ROLE_MISMATCH`。
+结构化 JSON source 可将外部日志、指标或业务记录转换为固定 Arrow Schema，供异步 SQL 分析使用；packet source 保留探针原始包和采集进度，供 NPM 实时分析。连接验证只证明认证和元数据访问；消费权限在实际任务中检查。结构化 sink 可将分析结果发布为逐行 JSON 信封；packet sink 尚未安装，返回 `KAFKA_DATA_ADAPTER_UNAVAILABLE`。source 只能用于 FROM、sink 只能用于 INTO，角色不符返回 `KAFKA_ROLE_MISMATCH`。
 
 ## 原生安装与启用
 
@@ -117,7 +117,7 @@ docker compose -f docker-compose.yml -f config/docker-compose-kafka.yml up -d
 | --- | --- |
 | definitions/query | 实际版本、机制、字段条件、引用别名和方向数据能力。 |
 | connections/query / add / modify / remove | 连接 CRUD；query 支持 name、after、limit（1～100）；修改/删除要求 expected_revision。 |
-| channels/query / add / modify / remove | 通道 CRUD；structured source/sink 分别接受下文配置；packet 的 payload_options 只允许空方向对象。 |
+| channels/query / add / modify / remove | 通道 CRUD；structured source/sink、packet source 分别接受下文配置；packet sink 仅保留空方向对象。 |
 | tests/start / query / cancel | target 为 connection/channel；已保存目标带 name，可带 expected_revision；草稿使用 draft。query/cancel 使用 test_id。 |
 
 响应 code/stage 为脱敏固定值。HTTP 400 字段错误、404 未找到、409 冲突/引用/使用中、413 请求超限、429 验证并发、503 能力/Provider 不可用、500 持久化失败。认证、证书、超时和取消在验证终态中表达，不作为正常 EOF。
@@ -284,3 +284,110 @@ tools/test.sh doctor --filter '^test_kafka_' --location docker
 部署回归使用实际 `flowsql --config` 入口，检查配置/秘密只读挂载、私有临时目录、加密秘密和连接/通道重启恢复，以及旧验证结果不会跨重启沿用。
 
 依赖升级须同步源码校验、清单和缓存指纹，并重跑四协议、mTLS、PLAIN、两种 SCRAM、双身份 GSSAPI/续期、HTTPS OAuth/刷新、错误凭证、元数据副作用、真实 HTTP 与原生/Docker 回归。客户端编译和 ldd 通过均不能替代真实认证。
+
+## 原始包 packet source
+
+适用于同一远端探针的原始 Ethernet 包汇聚；先在探针侧保留原始字节和 Capture V2 的同次进度，再按 `flowsql_packet_v1` 发布。不能用日志、五元组或统计指标代替包，也不接收 PCAP 文件、JSON、Base64 或 Arrow IPC。接收端以 NPI 解码原始字节，输出规范 PacketFamily Schema，不信任远端层偏移缓存。
+
+先预建单分区、`cleanup.policy=delete` 的 Topic；部署方负责核实保留期与删除策略，客户端会检查分区数，不查询或修改 Topic 配置。同一 stream_id/Topic 只允许一个活动发布者，全部输入队列共享此分区；完整双向会话不能按方向分散到不同实例。独立分析使用不同消费组。准备已存在的连接 `collector` 后，通过 Web「Kafka 通道 → 原始 packet」或 `channels/add` 保存：
+
+```json
+{
+  "name":"remote_packets", "connection_name":"collector", "role":"source",
+  "topic":"probe_a_packets", "consumer_group":"npm_probe_a", "payload_kind":"packet",
+  "payload_options":{"source":{
+    "encoding":"flowsql_packet_v1", "stream_id":"probe-a", "observation_domain_id":"7",
+    "inputs":[{"source_id":0,"queue_id":0,"source_name":"probe-a/eth0"}],
+    "offset_reset":"earliest", "commit_policy":"after_success",
+    "max_packets_per_batch":256, "max_bytes_per_batch":1048576,
+    "max_message_bytes":2097152, "max_wait_ms":100
+  }}
+}
+```
+
+encoding、stream_id、observation_domain_id、inputs 必填。stream_id 匹配 `[A-Za-z0-9_.-]{1,64}`；观测域为非零 uint64 十进制字符串，Web 不转换为浮点数。输入 1～32 项，source_id/queue_id 为 uint32，source_id 唯一；source_name 为 1～128 字节 UTF-8、无 NUL 的诊断标签。名称不参与包的数字身份判断。
+
+| 参数 | 默认值；范围 | 实际约束 |
+| --- | --- | --- |
+| max_packets_per_batch | 256；1～4096 | 每消息最多一个批次，超限整条失败，不拆分。 |
+| max_bytes_per_batch | 1048576；1024～16777216 | 全部 captured_len 的总和。 |
+| max_message_bytes | 2097152；1024～16777216 | key 与完整二进制 value 的总字节数，需同时满足 broker/producer 限额。 |
+| max_wait_ms | 100；1～1000 | 单次 poll 等待上限，超时无进度且永不当作 EOF。 |
+| offset_reset | earliest；earliest/latest/error | 仅无有效已提交位点时生效。 |
+| commit_policy | after_success；after_success/none | 当前消息处理、事实及当次结果交付成功后提交 offset+1；none 不提交。 |
+
+创建后 `adapter_status.source=ready` 表示配置完整，可见 PacketFamily 的 `source_schema`；读 ACL 仍未验证。空方向配置为 configuration_required，运行前须补齐；both 独立保存两个方向，packet sink 仍不可执行。一个 source 在同一进程只允许一个活动 reader，期间修改/删除受租约保护；不同配置名不能让同组任务安全共享分析状态。
+
+Scheduler 进程须加载 Kafka、NPI、数据库和 BinAddonHost，并激活 NPM 插件，参见 [NPM 准备步骤](npm.md#运行准备与快速开始)。使用既有 async 任务 API 提交：
+
+```sql
+SELECT * FROM kafka.remote_packets
+USING npm.basic
+WITH features='basic,session'
+INTO mysql.npm;
+```
+
+持续分析只支持两段数据库托管目标；协议模块 DNS/HTTP1/TLS 仍需现有 labeling 配置，见 [NPM 模块参数](npm.md#共享与模块参数)。来源能力自动选择 realtime、绑定配置中的观测域；显式冲突的 run_mode/source_domains 拒绝。WHERE 使用 PacketFamily 精确 residual 过滤，不向 Kafka 下推；过滤后的空批仍传递同次进度与确认身份。
+
+### flowsql_packet_v1 外部发布格式
+
+Kafka key 必须是 stream_id 的原始 UTF-8 字节，不允许 null。value 所有整数为大端、逐字段编码，有符号数用二补码；不使用 C++ struct 内存布局。每消息对应一个采集 poll，允许零包但有事实，两者皆零不发送。
+
+| 区段 | 字段顺序 |
+| --- | --- |
+| 固定头 56 bytes | `FSPK` 4 bytes；version:u16=1；reserved:u16=0；stream_epoch:16非零bytes；domain:u64；capture_generation:u64；poll_sequence:u64；packet_count:u32；fact_count:u32。 |
+| 每包 32 bytes 头 + 原文 | source_id:u32；timestamp_ns:i64；captured_len:u32；wire_len:u32；link_type:u32=1；sequence:u64；恰好 captured_len 个 bytes。 |
+| 每事实 28 bytes | source_id:u32；queue_id:u32；fact_sequence:u64；capture_time_ns:i64；flags:u8；backlog:u8；reserved:u16=0。 |
+
+value 总长恰为 `56 + Σ(32+captured_len) + 28×fact_count`。flags bit0 表示 packet_observed，bit1 表示 source_idle_confirmed，不可同时为真；其他位为0。backlog 为 0 unknown、1 empty、2 present。包最多4096、事实最多32，并须满足通道预算；缺失或未知字段、尾随字节、截断信封、tombstone、错误 key 均使任务失败，不跳过或送 DLQ。
+
+timestamp_ns/capture_time_ns 是采集端非负 UTC Unix ns，Kafka timestamp 和消费者墙钟不代替它。wire_len 不小于 captured_len；内部 malformed/truncated 报文按实际 layer status 保留。来源须匹配配置，事实 source_id 不重复且 queue_id 匹配。packet_observed 与本消息该输入是否有包一致，为真时事实时间不得超过本批该输入最大包时间。允许省略某输入的事实，接收端不会补造空闲。
+
+writer 每次重开更换非零16字节 stream_epoch；generation、poll_sequence、包 sequence、事实 fact_sequence 均非零。poll 从1逐条加1；包 sequence 保留 reader 全局顺序，可有过滤缺口但必须严格递增；每输入事实序号严格递增。消费可从段中部建立基准，后续 poll 缺口/重复、epoch 或 generation 变化立即失败。下面是可直接运行的独立 Python 格式编码示例；实际发布时将 value 与 stream_id key 交给部署方的 Kafka producer：
+
+```python
+import struct
+import uuid
+
+stream_id = b"probe-a"
+epoch = uuid.uuid4().bytes  # writer 重开时更换，后续 poll 保留
+# 零包、单输入的显式 idle/empty 消息；时间必须来自真实采集事实
+capture_time_ns = 1_700_000_000_000_000_000
+value = struct.pack(
+    ">4sHH16sQQQII", b"FSPK", 1, 0, epoch, 7, 1, 1, 0, 1
+) + struct.pack(
+    ">IIQqBBH", 0, 0, 1, capture_time_ns, 2, 1, 0
+)
+assert len(value) == 84
+# producer.produce("probe_a_packets", key=stream_id, value=value)
+```
+
+### 进度、失败和重启
+
+零包事实消息返回零行规范批次，仍经过处理→事实→本次结果交付→确认→归还。普通超时、partition EOF、lag=0 都不产生事实。只有明确 empty/idle 才推进采集时间，多个输入取安全最小值；积压、unknown、缺事实或时钟回拨暂停候选。传输延迟会延后周期交付，不允许本地墙钟提前关闭远端周期。
+
+初次分配后撤销、丢失、重分配或 Topic 分区数变化都会终止旧任务；不会自动接回内存会话。错误诊断包含阶段、实际 first_offset、当前/末次确认 offset、poll、epoch/generation 和 commit_uncertain，不含包内容或秘密。提交失败可能已在 broker 生效，按不确定终止，不能根据本地错误推断一定重放；Release、Close、Cancel、析构不提交。提交成功只覆盖本批成功处理和当次输出，不能证明活动 NPM 状态或未来 Flush 已持久化。
+
+| 操作 | 可观察结果和适用边界 |
+| --- | --- |
+| stop | 停止拉取并成功收尾，任务 stopped；末尾不完整周期标 period_complete=false，run completed。 |
+| cancel / error | 无成功 Flush，run incomplete；已确认位点不回退，未确认批次可能重放。 |
+| 同组重启 | 从有效已提交位点继续，新 run_id、空会话状态；不能与旧 session/revision 拼接。 |
+| none + 新组/无有效提交位点 + earliest | 在保留期内从最早可用记录重算；none 不清除已有组位点。重放允许跨 run 重复分析，不自动去重。 |
+| latest | 跳过已有数据，可能从会话中间开始，不保证完整会话。 |
+| 新 epoch 边界 | 旧 run 失败且不确认边界消息；after_success 同组重启可从边界建立新 run。跨历史 epoch 重算应隔离 Topic，不自动跳过旧段。 |
+
+远端采集丢包计数未知时为 unavailable，不能填零；消费者本地收到/交付计数只描述本进程。客户端预取、解码信封和一个 outstanding Arrow 批次分别有界；Arrow 原字节自持所有权。max_bytes/message 不等于 RSS 上限，NPM 还有自己的会话预算。部署重启须持久化 Provider 数据库及原 master key、重挂凭证和私有运行目录；分析续读仍遵循新 run/空状态约束。
+
+### packet source 验证与性能口径
+
+标准入口为 `tools/test.sh integration --filter '^test_kafka_packet_(native|docker)$' --jobs 2`。使用统一运行时测试配置、受管 Kafka 和隔离 Topic/组，在真实位置先验证认证/元数据，再执行实际消费；原生和 Docker 均覆盖11种身份组合，以及 GSSAPI/OAuth 更新后的继续读取。完整回归使用不带筛选的 `tools/test.sh all --jobs 4`，环境不可用为失败，不计跳过通过。
+
+固定性能负载为每消息256个96字节 IPv4/UDP Ethernet 帧、64消息，共16384包、单分区、单消费实例、after_success。计时包含 reader 创建、分配、接收解码和逐消息提交；结果记录 packet/s、message/s、原始/完整信封 byte/s、初始/最终 lag、进程 CPU 秒和峰值 RSS、预装消息从捕获时间至交付的 p50/p95、取消耗时。预装排队延迟包含发布及消费前等待，峰值 RSS 包含进程插件；此口径不能替代含 NPM/数据库的端到端容量或生产承诺。每次结果带执行日期和原生/Docker位置，本地原始证据不入库。
+
+2026-10-15 在 Linux x86_64、Kafka 4.1.0、librdkafka 2.16.0、PLAINTEXT 下的验收样本如下。两个位置并行验收，期间另有 Sanitizer 编译，未固定 CPU 亲和性；这是一轮运行成本记录，不能据此比较原生与 Docker 的性能优劣。完整信封字节数包含 key 和固定/逐包/事实头，不含 Kafka 协议、压缩或网络开销。
+
+| 执行位置 | wall s | packet/s | message/s | 原始 bytes/s | 信封 bytes/s | lag 初始→最终 | CPU s | 峰值 RSS KiB | 预装交付 p50/p95 ms | cancel ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 原生 | 1.1764 | 13927 | 54.40 | 1337020 | 1787530 | 64→0 | 0.1143 | 91240 | 483.5 / 671.0 | 0.0153 |
+| Docker | 1.1755 | 13938 | 54.44 | 1338020 | 1788870 | 64→0 | 0.1193 | 74896 | 471.5 / 676.1 | 0.0146 |

@@ -43,7 +43,8 @@ int Plugin::Option(const char* options) {
         return EINVAL;
     }
 }
-int Plugin::Load(IQuerier*) {
+int Plugin::Load(IQuerier* querier) {
+    querier_ = querier;
     try {
         std::ifstream file(Text(options_, "master_key_file"), std::ios::binary);
         std::string value((std::istreambuf_iterator<char>(file)), {});

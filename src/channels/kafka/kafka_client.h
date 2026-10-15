@@ -42,6 +42,11 @@ class Client final : public IKafkaClientSessionV1, public IKafkaConsumerSessionV
     rd_kafka_t* consumer_ = nullptr;
     std::unique_ptr<rd_kafka_conf_t, decltype(&rd_kafka_conf_destroy)> consumer_config_{nullptr, rd_kafka_conf_destroy};
     uint32_t message_limit_ = 0;
+    bool packet_assigned_once_ = false;
+    std::atomic<int> packet_ownership_error_{0};
+    std::chrono::steady_clock::time_point packet_metadata_at_{};
+    int CheckPacketTopology(uint32_t timeout_ms);
+    static void PacketRebalance(rd_kafka_t*, rd_kafka_resp_err_t, rd_kafka_topic_partition_list_t*, void*);
     std::filesystem::path temporary_;
     std::atomic<bool> cancelled_{false};
     std::atomic<int> callback_error_{0}, consumer_error_{0};

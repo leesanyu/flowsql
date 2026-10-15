@@ -983,7 +983,7 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
             released_ = true;
             ++fixture_->release_blocks;
             if (fixture_->hold_last_release && step_ == batches_.size()) {
-                // Hold the processed batch until Stop/Cancel wakes this reader, before its fact is accepted.
+                // Facts and current outputs are accepted before release; hold the batch until Stop/Cancel.
                 std::unique_lock<std::mutex> lock(wait_mutex_);
                 ASSERT_TRUE(wait_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return cancelled_.load(); }));
             }
@@ -2857,7 +2857,7 @@ int main() {
             capture_fixture.hold_last_release = true;
             const int readers_before = capture_fixture.release_calls;
             const int blocks_before = capture_fixture.release_blocks;
-            const std::string task_id = cancel ? "npm-pending-fact-cancel" : "npm-pending-fact-stop";
+            const std::string task_id = cancel ? "npm-fact-before-release-cancel" : "npm-fact-before-release-stop";
             rapidjson::Document request;
             request.SetObject();
             request.AddMember("runtime_task_id", rapidjson::Value(task_id.c_str(), request.GetAllocator()),
@@ -2885,7 +2885,14 @@ int main() {
             ASSERT_TRUE(!run_id.empty());
             ASSERT_EQ(capture_fixture.release_blocks.load(), blocks_before + 1);
             const auto history_sql = "SELECT * FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + run_id + "'";
-            ASSERT_EQ(QueryCount(db, history_sql), 0);
+            const auto prefix = query_history(run_id, "npm_fact_before_release_history");
+            ASSERT_EQ(prefix->num_rows(), 3);
+            for (int64_t row = 0; row < prefix->num_rows(); ++row) {
+                ASSERT_EQ(prefix->GetColumnByName("period_complete")->GetScalar(row).ValueOrDie()->ToString(), "true");
+                ASSERT_EQ(prefix->GetColumnByName("is_final")->GetScalar(row).ValueOrDie()->ToString(), "false");
+                ASSERT_EQ(prefix->GetColumnByName("__npm_run_status")->GetScalar(row).ValueOrDie()->ToString(),
+                          "writing");
+            }
             const std::string stop_body =
                 "{\"runtime_task_id\":\"" + task_id + "\",\"mode\":\"" + (cancel ? "cancel" : "stop") + "\"}";
             ASSERT_EQ(stop_batch("/scheduler/batch/stop", stop_body, rsp), error::OK);
@@ -2897,7 +2904,14 @@ int main() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
             ASSERT_EQ(std::string(status["status"].GetString()), cancel ? "cancelled" : "stopped");
-            ASSERT_EQ(QueryCount(db, history_sql), cancel ? 0 : 4);
+            ASSERT_EQ(QueryCount(db, history_sql), cancel ? 3 : 4);
+            if (cancel) {
+                const auto history = query_history(run_id, "npm_cancelled_fact_history");
+                ASSERT_TRUE(normalized(history) == normalized(prefix));
+                for (int64_t row = 0; row < history->num_rows(); ++row)
+                    ASSERT_EQ(history->GetColumnByName("__npm_run_status")->GetScalar(row).ValueOrDie()->ToString(),
+                              "incomplete");
+            }
             if (!cancel) {
                 const auto history = query_history(run_id, "npm_pending_fact_history");
                 ASSERT_TRUE(normalized(history) == eof_rows);
