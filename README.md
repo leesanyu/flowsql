@@ -22,6 +22,7 @@ FlowSQL 是一个全栈式实时数据处理与分析平台，通过扩展的 SQ
 - **配置资源版本化**：JSON/YAML/XML 配置通道持久化，消费者通过精确 revision 冻结任务配置
 - **在线基线检测**：Baseline 插件通过 `IBaselineService` 提供 `Optional Bootstrap`、在线 rolling、基线 band、maturity / score trust 和 Relation fusion 能力
 - **SQL 基线分析**：`explore.baseliner` 分析已落库数据或 DataFrame，支持 Value/Ratio/Relation 评估、未来预测和独立的最终模型参数输出
+- **Kafka 结构化接入与认证**：[JSON source 的固定 Schema、异步 SQL、位点确认与重放，以及连接/通道 Web 管理和 TLS/SASL 部署](docs/kafka.md)；packet/sink 尚未安装
 - **Web 管理**：Vue.js 前端 + REST API，支持通道/算子/任务管理
 
 ## 快速开始
@@ -1330,3 +1331,5 @@ flowSQL/
 ## 许可证
 
 MIT License
+
+开发与验收使用 [统一测试环境说明](docs/testing.md)：`tools/test.sh unit|doctor|integration|all`，数据库/Kafka 依赖与真实覆盖按运行时配置统一管理。

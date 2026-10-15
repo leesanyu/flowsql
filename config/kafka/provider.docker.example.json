@@ -1,0 +1,7 @@
+{
+  "db_path": "/opt/flowsql/kafka-state/kafka.db",
+  "master_key_file": "/opt/flowsql/secrets/kafka-master.key",
+  "runtime_directory": "/opt/flowsql/kafka-runtime",
+  "files": {},
+  "environments": {}
+}

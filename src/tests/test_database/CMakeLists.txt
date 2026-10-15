@@ -89,3 +89,12 @@ target_compile_options(test_database_manager PRIVATE -UNDEBUG)
 set_target_properties(test_database_manager PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
+
+foreach(database_test test_database test_connection_pool test_sqlite test_mysql test_postgres test_clickhouse)
+    add_test(NAME ${database_test} COMMAND $<TARGET_FILE:${database_test}>)
+    set_tests_properties(${database_test} PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output TIMEOUT 180)
+endforeach()
+
+add_test(NAME test_database_manager COMMAND $<TARGET_FILE:test_database_manager> --integration)
+add_test(NAME test_database_manager_unit COMMAND $<TARGET_FILE:test_database_manager> --unit)
+set_tests_properties(test_database_manager test_database_manager_unit PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output TIMEOUT 180)

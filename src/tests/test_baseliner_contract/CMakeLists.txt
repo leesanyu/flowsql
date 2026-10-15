@@ -13,16 +13,9 @@ target_compile_options(test_baseliner_dataframe PRIVATE -UNDEBUG -Wall -Wextra -
 set_target_properties(test_baseliner_dataframe PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_baseliner_dataframe COMMAND $<TARGET_FILE:test_baseliner_dataframe>)
 set_tests_properties(test_baseliner_dataframe PROPERTIES LABELS "baseliner;dataframe" TIMEOUT 60)
-# These tests write isolated fixtures into the directories used by their original slices.
-add_test(NAME test_baseliner_workspace COMMAND ${CMAKE_COMMAND} -E make_directory
-    /tmp/baseline-operator-t3 /tmp/baseline-operator-t4)
-set_tests_properties(test_baseliner_workspace PROPERTIES FIXTURES_SETUP baseliner_workspace LABELS "baseliner;fixture" TIMEOUT 10)
-# Existing Baseline tests also write fixtures under slice-specific directories.
-# Prepare these when CTest loads that directory, including standalone Baseline runs.
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/baseline_workspace.cmake"
-    "file(MAKE_DIRECTORY /tmp/baseline-operator-t5 /tmp/baseline-b09-evaluation/rolling)\n")
-set_property(DIRECTORY "${CMAKE_SOURCE_DIR}/tests/test_baseline" APPEND PROPERTY
-    TEST_INCLUDE_FILES "${CMAKE_CURRENT_BINARY_DIR}/baseline_workspace.cmake")
+# Workspaces are created per test invocation at runtime; no historical /tmp slice directories.
+add_test(NAME test_baseliner_workspace COMMAND ${CMAKE_COMMAND} -E true)
+set_tests_properties(test_baseliner_workspace PROPERTIES FIXTURES_SETUP baseliner_workspace TIMEOUT 10)
 add_executable(test_baseliner_operator test_baseliner_operator.cpp ${CMAKE_SOURCE_DIR}/framework/core/pipeline.cpp)
 target_link_libraries(test_baseliner_operator PRIVATE flowsql_baseliner_contract flowsql_baseline flowsql_database flowsql_common)
 target_compile_options(test_baseliner_operator PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-unused-parameter -Wno-pessimizing-move)
@@ -56,9 +49,6 @@ target_compile_options(test_baseliner_snapshot PRIVATE -UNDEBUG -Wall)
 set_target_properties(test_baseliner_snapshot PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_baseliner_snapshot COMMAND $<TARGET_FILE:test_baseliner_snapshot>)
 set_tests_properties(test_baseliner_snapshot PROPERTIES LABELS "baseliner;database" TIMEOUT 90)
-if(DEFINED ENV{BASELINER_TEST_DB_OPTIONS})
-    set_tests_properties(test_baseliner_snapshot PROPERTIES ENVIRONMENT "BASELINER_TEST_DB_OPTIONS=$ENV{BASELINER_TEST_DB_OPTIONS}")
-endif()
 
 add_executable(test_baseliner_aggregation test_baseliner_aggregation.cpp)
 target_link_libraries(test_baseliner_aggregation PRIVATE flowsql_baseliner_contract)
@@ -78,9 +68,6 @@ target_compile_options(test_baseliner_poll PRIVATE -UNDEBUG -Wall -Wextra -Werro
 set_target_properties(test_baseliner_poll PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_baseliner_poll COMMAND $<TARGET_FILE:test_baseliner_poll>)
 set_tests_properties(test_baseliner_poll PROPERTIES LABELS "baseliner;poll;database" TIMEOUT 90 FIXTURES_REQUIRED baseliner_workspace)
-if(DEFINED ENV{BASELINER_TEST_DB_OPTIONS})
-    set_tests_properties(test_baseliner_poll PROPERTIES ENVIRONMENT "BASELINER_TEST_DB_OPTIONS=$ENV{BASELINER_TEST_DB_OPTIONS}")
-endif()
 
 add_executable(test_baseliner_atomic test_baseliner_atomic.cpp)
 target_link_libraries(test_baseliner_atomic PRIVATE flowsql_database flowsql_baseliner_contract)
@@ -96,9 +83,6 @@ set_target_properties(test_baseliner_store PROPERTIES RUNTIME_OUTPUT_DIRECTORY $
 add_test(NAME test_baseliner_store COMMAND $<TARGET_FILE:test_baseliner_store>)
 set_tests_properties(test_baseliner_store PROPERTIES LABELS "baseliner;storage" TIMEOUT 90)
 
-if(DEFINED ENV{BASELINER_TEST_DB_OPTIONS})
-    set_tests_properties(test_baseliner_atomic test_baseliner_store PROPERTIES ENVIRONMENT "BASELINER_TEST_DB_OPTIONS=$ENV{BASELINER_TEST_DB_OPTIONS}")
-endif()
 
 add_executable(test_baseliner_recovery test_baseliner_recovery.cpp)
 target_link_libraries(test_baseliner_recovery PRIVATE flowsql_database flowsql_baseliner_contract flowsql_baseline flowsql_common)
@@ -107,9 +91,6 @@ target_compile_options(test_baseliner_recovery PRIVATE -UNDEBUG -Wall -Wextra -W
 set_target_properties(test_baseliner_recovery PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_baseliner_recovery COMMAND $<TARGET_FILE:test_baseliner_recovery>)
 set_tests_properties(test_baseliner_recovery PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output LABELS "baseliner;recovery" TIMEOUT 900)
-if(DEFINED ENV{BASELINER_TEST_DB_OPTIONS})
-    set_tests_properties(test_baseliner_recovery PROPERTIES ENVIRONMENT "BASELINER_TEST_DB_OPTIONS=$ENV{BASELINER_TEST_DB_OPTIONS}")
-endif()
 
 add_executable(test_baseliner_maintenance test_baseliner_maintenance.cpp)
 target_link_libraries(test_baseliner_maintenance PRIVATE flowsql_baseliner_contract flowsql_baseline flowsql_database flowsql_common)
@@ -119,9 +100,6 @@ add_dependencies(test_baseliner_maintenance flowsql_baseliner)
 add_test(NAME test_baseliner_maintenance COMMAND $<TARGET_FILE:test_baseliner_maintenance>)
 set_tests_properties(test_baseliner_maintenance PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output LABELS "baseliner;maintenance" TIMEOUT 120)
 
-if(DEFINED ENV{BASELINER_TEST_DB_OPTIONS})
-    set_tests_properties(test_baseliner_maintenance PROPERTIES ENVIRONMENT "BASELINER_TEST_DB_OPTIONS=$ENV{BASELINER_TEST_DB_OPTIONS}")
-endif()
 
 add_executable(test_baseliner_lifecycle test_baseliner_lifecycle.cpp ${CMAKE_SOURCE_DIR}/framework/core/pipeline.cpp)
 target_link_libraries(test_baseliner_lifecycle PRIVATE flowsql_baseliner_contract flowsql_baseline flowsql_database flowsql_common)
@@ -131,9 +109,6 @@ set_target_properties(test_baseliner_lifecycle PROPERTIES RUNTIME_OUTPUT_DIRECTO
 add_test(NAME test_baseliner_lifecycle COMMAND $<TARGET_FILE:test_baseliner_lifecycle>)
 set_tests_properties(test_baseliner_lifecycle PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output LABELS "baseliner;lifecycle" TIMEOUT 45)
 
-if(DEFINED ENV{BASELINER_TEST_DB_OPTIONS})
-    set_tests_properties(test_baseliner_lifecycle PROPERTIES ENVIRONMENT "BASELINER_TEST_DB_OPTIONS=$ENV{BASELINER_TEST_DB_OPTIONS}")
-endif()
 
 add_executable(test_baseliner_production test_baseliner_production.cpp ${CMAKE_SOURCE_DIR}/framework/core/channel_adapter.cpp)
 target_link_libraries(test_baseliner_production PRIVATE flowsql_baseliner_contract flowsql_common flowsql_database)
@@ -143,13 +118,6 @@ target_compile_options(test_baseliner_production PRIVATE -UNDEBUG -Wall -Wextra 
 set_target_properties(test_baseliner_production PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_baseliner_production COMMAND $<TARGET_FILE:test_baseliner_production>)
 set_tests_properties(test_baseliner_production PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output LABELS "baseliner;production;database" TIMEOUT 600)
-if(DEFINED ENV{BASELINER_TEST_DB_OPTIONS})
-    set_tests_properties(test_baseliner_production PROPERTIES ENVIRONMENT "BASELINER_TEST_DB_OPTIONS=$ENV{BASELINER_TEST_DB_OPTIONS}")
-endif()
-
-if(DEFINED ENV{BASELINER_PRODUCTION_DB_OPTIONS})
-    set_property(TEST test_baseliner_production APPEND PROPERTY ENVIRONMENT "BASELINER_PRODUCTION_DB_OPTIONS=$ENV{BASELINER_PRODUCTION_DB_OPTIONS}")
-endif()
 
 add_executable(test_baseliner_cost test_baseliner_cost.cpp)
 target_link_libraries(test_baseliner_cost PRIVATE flowsql_baseliner_contract flowsql_baseline flowsql_database flowsql_common)

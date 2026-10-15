@@ -1,0 +1,243 @@
+{
+  "schema_version": 1,
+  "tests": {
+    "test_mysql": {
+      "services": [
+        "mysql"
+      ],
+      "role": "driver",
+      "location": "both",
+      "resources": [
+        "database_driver"
+      ]
+    },
+    "test_postgres": {
+      "services": [
+        "postgres"
+      ],
+      "role": "driver",
+      "location": "both",
+      "resources": [
+        "database_driver"
+      ]
+    },
+    "test_clickhouse": {
+      "services": [
+        "clickhouse"
+      ],
+      "role": "driver",
+      "location": "both",
+      "resources": [
+        "database_driver"
+      ]
+    },
+    "test_database": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "driver",
+      "location": "both",
+      "resources": [
+        "database_driver"
+      ]
+    },
+    "test_database_manager": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "driver",
+      "location": "both",
+      "resources": [
+        "database_driver"
+      ]
+    },
+    "test_npm_result_backends": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "npm",
+      "location": "both",
+      "resources": [
+        "database_npm"
+      ]
+    },
+    "test_baseliner_snapshot": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "source",
+      "location": "both",
+      "resources": [
+        "database_baseliner"
+      ]
+    },
+    "test_baseliner_poll": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "source",
+      "location": "both",
+      "resources": [
+        "database_baseliner"
+      ]
+    },
+    "test_baseliner_atomic": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "source",
+      "location": "both",
+      "resources": [
+        "database_baseliner"
+      ]
+    },
+    "test_baseliner_store": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "source",
+      "location": "both",
+      "resources": [
+        "database_baseliner"
+      ]
+    },
+    "test_baseliner_recovery": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "source",
+      "location": "both",
+      "resources": [
+        "database_baseliner"
+      ]
+    },
+    "test_baseliner_maintenance": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "source",
+      "location": "both",
+      "resources": [
+        "database_baseliner"
+      ]
+    },
+    "test_baseliner_lifecycle": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "source",
+      "location": "both",
+      "resources": [
+        "database_baseliner"
+      ]
+    },
+    "test_baseliner_production": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "production",
+      "location": "both",
+      "resources": [
+        "database_baseliner"
+      ]
+    },
+    "test_kafka_real_native": {
+      "services": [
+        "kafka"
+      ],
+      "role": "auth",
+      "location": "native",
+      "resources": [
+        "kafka_auth_native"
+      ]
+    },
+    "test_kafka_deployment_native": {
+      "services": [
+        "kafka"
+      ],
+      "role": "auth",
+      "location": "native",
+      "resources": [
+        "kafka_deployment_native"
+      ]
+    },
+    "test_kafka_real_docker": {
+      "services": [
+        "kafka"
+      ],
+      "role": "auth",
+      "location": "docker",
+      "resources": [
+        "kafka_auth_docker"
+      ]
+    },
+    "test_kafka_deployment_docker": {
+      "services": [
+        "kafka"
+      ],
+      "role": "auth",
+      "location": "docker",
+      "resources": [
+        "kafka_deployment_docker"
+      ]
+    },
+    "test_environment_failures": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse",
+        "kafka"
+      ],
+      "role": "driver",
+      "location": "native",
+      "resources": [
+        "database_driver",
+        "database_npm",
+        "database_baseliner",
+        "environment_faults"
+      ]
+    },
+    "test_kafka_source_native": {
+      "services": [
+        "kafka"
+      ],
+      "role": "auth",
+      "location": "native",
+      "resources": [
+        "kafka_source_native"
+      ]
+    },
+    "test_kafka_source_docker": {
+      "services": [
+        "kafka"
+      ],
+      "role": "auth",
+      "location": "docker",
+      "resources": [
+        "kafka_source_docker"
+      ]
+    }
+  }
+}

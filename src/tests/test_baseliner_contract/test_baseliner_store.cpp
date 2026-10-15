@@ -6,6 +6,7 @@
 #include <operators/baseliner/result_codec.h>
 #include <plugins/baseline/baseline_plugin.h>
 #include <services/database/database_plugin.h>
+#include <tests/common/test_environment.h>
 #include <unistd.h>
 #include <cassert>
 #include <cctype>
@@ -433,11 +434,8 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, IDatabaseChannel* cross_sch
 }
 
 int main() {
-    const char* path = std::getenv("BASELINER_TEST_DB_OPTIONS");
-    assert(path);
-    std::ifstream input(path);
     std::ostringstream options;
-    options << input.rdbuf();
+    options << flowsql::test::BaselinerOptions();
     // A read-only alternate default database on the same server exercises explicit source schema.
     std::istringstream channels(options.str());
     std::string channel_options;

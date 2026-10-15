@@ -5,6 +5,7 @@
 #include <operators/npm_basic/npm_result_progress.h>
 #include <operators/npm_basic/output/npm_basic_result_encoder.h>
 #include <services/database/database_plugin.h>
+#include <tests/common/test_environment.h>
 #include <unistd.h>
 #include <cassert>
 #include <fstream>
@@ -362,18 +363,15 @@ void Test(database::DatabasePlugin& plugin, const std::string& category, const s
 }
 }  // namespace
 int main() {
-    const char* path = std::getenv("BASELINER_TEST_DB_OPTIONS");
-    Check(path, "four real source options required");
-    std::ifstream file(path);
     std::ostringstream options;
-    options << file.rdbuf();
+    options << flowsql::test::BaselinerOptions();
     std::string isolated_options = options.str();
     const auto sqlite = isolated_options.find("type=sqlite");
     const auto path_field = isolated_options.find("path=", sqlite);
     Check(sqlite != std::string::npos && path_field != std::string::npos, "sqlite test path required");
     const auto path_end = isolated_options.find_first_of(";|\n", path_field);
     isolated_options.replace(path_field, path_end - path_field,
-                             "path=/tmp/baseline-operator-t3/poll-" +
+                             "path=" + flowsql::test::WorkspacePath("poll-") +
                                  std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + ".db");
     database::DatabasePlugin plugin;
     const int saved = dup(STDOUT_FILENO);

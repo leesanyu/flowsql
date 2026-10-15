@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "project": "flowsql_test",
+  "managed": true,
+  "budgets": {
+    "preparation_seconds": 60,
+    "connection_seconds": 3
+  },
+  "images": {
+    "mysql": "mysql@sha256:a3dff78d876222746a0bacc36dd7e4bf9e673c85fb7ee0d12ed25bd32c43c19b",
+    "postgres": "postgres@sha256:2586e2a95d1c9b31cb2967feb562948f7d364854453d703039b6efa45fe48417",
+    "clickhouse": "clickhouse/clickhouse-server@sha256:85b97f63dcfff47790d26bb5d5801637aaddb2b93e5e9aee27a686c2fb2b9916",
+    "runtime": "sha256:8985d167def8e281d7dc513d0ca3fc698d430603db1796783af2a57c20dbec50",
+    "harness": "sha256:806badf83ccd32445de543b25fbff22fa0831e2bc6736a61aec0106ddc59e8de"
+  },
+  "databases": {
+    "mysql": {
+      "user": "flowsql_test",
+      "password_ref": "file:@state/secrets/mysql",
+      "endpoints": {
+        "native": {
+          "host": "127.0.0.1",
+          "port": 23306
+        },
+        "docker": {
+          "host": "mysql",
+          "port": 3306
+        }
+      },
+      "roles": {
+        "driver": "test_driver",
+        "npm": "test_npm",
+        "source": "test_source",
+        "target": "test_target",
+        "production": "test_production"
+      }
+    },
+    "postgres": {
+      "user": "flowsql_test",
+      "password_ref": "file:@state/secrets/postgres",
+      "endpoints": {
+        "native": {
+          "host": "127.0.0.1",
+          "port": 25432
+        },
+        "docker": {
+          "host": "postgres",
+          "port": 5432
+        }
+      },
+      "roles": {
+        "driver": "test_driver",
+        "npm": "test_npm",
+        "source": "test_source",
+        "target": "test_target",
+        "production": "test_production"
+      }
+    },
+    "clickhouse": {
+      "user": "flowsql_test",
+      "password_ref": "file:@state/secrets/clickhouse",
+      "endpoints": {
+        "native": {
+          "host": "127.0.0.1",
+          "port": 28123
+        },
+        "docker": {
+          "host": "clickhouse",
+          "port": 8123
+        }
+      },
+      "roles": {
+        "driver": "test_driver",
+        "npm": "test_npm",
+        "source": "test_source",
+        "target": "test_target",
+        "production": "test_production"
+      }
+    }
+  },
+  "kafka": {
+    "version": "4.1.0",
+    "distribution_url": "https://archive.apache.org/dist/kafka/4.1.0/kafka_2.13-4.1.0.tgz",
+    "distribution_sha512": "2f611fa1117747a3567ab5d8e59c24a3dc5cd3c0d50a67cf718ab5203bd5ca69d9a1e2c705ee07b8363d71de48964bfd65fac31100a91b458fbd6a2eb3c8ede5",
+    "hosts": {
+      "native": "localhost",
+      "docker": "kafka"
+    },
+    "profiles": [
+      "PLAINTEXT",
+      "SSL",
+      "MTLS",
+      "PLAIN",
+      "SCRAM-SHA-256",
+      "SCRAM-SHA-512",
+      "GSSAPI",
+      "OAUTHBEARER"
+    ],
+    "password_ref": "file:@state/secrets/kafka",
+    "topic": "events",
+    "second_topic": "eventsbob",
+    "group": "flowsql_test",
+    "realm": "FLOWSQL.TEST",
+    "service_name": "kafka"
+  }
+}

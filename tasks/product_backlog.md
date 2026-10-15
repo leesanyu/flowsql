@@ -2,7 +2,7 @@
 
 本文件只记录 Feature 级目标，不记录实施拆分、迭代安排或验收细节。每个 Feature 的契约、非目标、主链路和原子任务分别放在对应规格文件中。
 
-状态约定：`[ ]` 待规划，`[-]` 进行中，`[x]` 已完成。
+状态约定：`[ ]` 待办（含已立项、未实施），`[-]` 进行中，`[x]` 已完成。
 
 ## 目录
 
@@ -20,12 +20,13 @@
 
 ## 当前工作集
 
-仅保留待规划或进行中的 Feature；已完成条目按能力归入下方分类。
+仅保留待办或进行中的 Feature；已完成条目按能力归入下方分类。
 
 | 状态 | Feature | 优先级 | 目标 | 规格 |
 | --- | --- | --- | --- | --- |
-| [ ] | Kafka 连接与认证 (`kafka-connection-auth`) | P1 | 让接入不同安全策略 Kafka 集群的部署者和通道用户，在 Web 中创建和管理可复用连接配置及具名 source/sink/both 通道，获得可验证、可诊断且可持续运行的认证接入能力，并明确配置保存、连接验证与数据读写能力的不同状态；覆盖 PLAINTEXT、SSL、SASL_PLAINTEXT、SASL_SSL，交付 TLS 服务端与双向认证、主机名校验及 PLAIN、SCRAM-SHA-256/512、GSSAPI、OAUTHBEARER，包含凭证引用、脱敏与适用的更新/续期、构建能力检查和分阶段错误诊断，供四类数据通道复用；不管理集群、账号或 ACL，不将普通配置通道用于保密资源，不承诺未经适配和验收的云厂商专用认证。 | [规格](specs/feat-kafka-connection-auth.md) |
-| [ ] | Kafka 结构化数据接入 (`kafka-log-source`) | P1 | 让使用外部日志、指标或业务记录的分析用户，通过 Kafka 将结构化消息转换为分析算子可消费的数据批次；依赖 kafka-connection-auth，交付具名数据 source 与明确的实体 Schema，固定字段映射、类型、单位、时间和空值语义，保留 Topic、分区和位点等消息元数据，并明确消费确认、重放及非法消息处理边界；不自动识别任意格式、实现各产品专用日志解析器或从日志恢复原始包，编码支持范围在规格中冻结。 | 待创建 |
+| [x] | 测试环境可重复执行与预防约束 (`test-environment`) | P1 | 面向本地开发、WSL/Docker 及后续任务的数据库与 Kafka 回归，预防连接/认证配置分散、依赖准备遗漏、网络路径不确定和环境失败误计通过；交付统一运行时配置、数据库/Kafka 及必要身份服务的隔离夹具、执行前真实连接认证与依赖预检、一致的测试入口和新测试接入规则，使新终端及重复执行无需手工拼接配置，所需依赖不可用时有界失败并准确归因，完整验收可证明全部必需用例实际执行，并区分 Kafka 元数据验证与实际读写权限。 | [归档](archive/feat-test-environment.md) |
+| [x] | Kafka 连接与认证 (`kafka-connection-auth`) | P1 | 让接入不同安全策略 Kafka 集群的部署者和通道用户，在 Web 中创建和管理可复用连接配置及具名 source/sink/both 通道，获得可验证、可诊断且可持续运行的认证接入能力，并明确配置保存、连接验证与数据读写能力的不同状态；覆盖 PLAINTEXT、SSL、SASL_PLAINTEXT、SASL_SSL，交付 TLS 服务端与双向认证、主机名校验及 PLAIN、SCRAM-SHA-256/512、GSSAPI、OAUTHBEARER，包含凭证引用、脱敏与适用的更新/续期、构建能力检查和分阶段错误诊断，供四类数据通道复用；不管理集群、账号或 ACL，不将普通配置通道用于保密资源，不承诺未经适配和验收的云厂商专用认证。 | [规格](archive/feat-kafka-connection-auth.md) |
+| [x] | Kafka 结构化数据接入 (`kafka-log-source`) | P1 | 让使用外部日志、指标或业务记录的分析用户，通过 Kafka 将结构化消息转换为分析算子可消费的数据批次；依赖 kafka-connection-auth，交付具名数据 source 与明确的实体 Schema，固定字段映射、类型、单位、时间和空值语义，保留 Topic、分区和位点等消息元数据，并明确消费确认、重放及非法消息处理边界；不自动识别任意格式、实现各产品专用日志解析器或从日志恢复原始包，编码支持范围在规格中冻结。 | [规格](archive/feat-kafka-log-source.md) |
 | [ ] | 分析结果 Kafka 发布 (`kafka-result-sink`) | P1 | 让需要向 SIEM、告警系统或其他订阅者交付分析结果的用户，将数据库查询、DataFrame 或可对接的算子输出形成的标准结果批次发布到 Kafka；依赖 kafka-connection-auth，交付可由 SQL INTO 使用的结果 sink，携带实体与 Schema 版本、结果身份和适用的 revision，区分新增事件与更新记录，并明确有界发送、确认、重复、停止排空及失败语义；不包含 NPM 全部启用实体的直接持续发布接线，不承诺跨 Kafka、外部存储和算子状态的端到端 Exactly-once。 | 待创建 |
 | [ ] | Kafka 原始包接入与 NPM 分析 (`kafka-packet-source`) | P2 | 让通过 Kafka 汇聚远端探针流量的 NPM 用户，消费原始包并由现有 NPM 产生会话、协议和性能事实；依赖 kafka-connection-auth，交付具名 packet source，保留原始包与必要采集元数据，明确消费位点、重放、分区顺序、时间进度及重启后的分析连续性边界；不以五元组或统计指标替代原始包，不承诺透明迁移有状态会话或跨崩溃延续同一分析状态及端到端 Exactly-once。 | 待创建 |
 | [ ] | 原始包 Kafka 发布 (`kafka-packet-sink`) | P2 | 让需要将网卡采集数据送往集中分析端的分布式采集部署，通过 Kafka 发布原始包与必要采集元数据；依赖 kafka-connection-auth，交付可由 SQL INTO 使用的 packet sink、与 packet source 一致的版本化消息契约和有界批量写出，明确分区路由、发送确认、背压、发送失败及采集丢包的可观察行为；不包含探针部署管理或磁盘缓冲，不以 Kafka 持久化承诺采集端零丢包。 | 待创建 |

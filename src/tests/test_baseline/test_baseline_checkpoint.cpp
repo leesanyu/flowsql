@@ -8,6 +8,7 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <tests/common/test_environment.h>
 #include <cassert>
 #include <cstring>
 #include <fstream>
@@ -311,7 +312,7 @@ RelationRollingObservation RelationObservation(int64_t t, std::string source = "
     return o;
 }
 std::string RelationOptions() {
-    const auto path = "/tmp/baseline-operator-t5/relation-fast.yaml";
+    const auto path = flowsql::test::WorkspacePath("baseline-operator-t5/relation-fast.yaml");
     std::ofstream(path) << R"(baseline:
   rolling_config:
     relation_rolling:
@@ -586,7 +587,8 @@ void RelationCapacityAndEmpty() {
 }
 void RelationFusionCleanup() {
     auto options = RelationOptions();
-    std::ofstream("/tmp/baseline-operator-t5/relation-fast.yaml", std::ios::app) << R"(      relation_fusion:
+    std::ofstream(flowsql::test::WorkspacePath("baseline-operator-t5/relation-fast.yaml"), std::ios::app)
+        << R"(      relation_fusion:
         fusion_state_max_sources: 2
         fusion_state_ttl_buckets: 3
         fusion_state_cleanup_interval_updates: 1

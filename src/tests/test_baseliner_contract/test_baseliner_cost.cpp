@@ -15,6 +15,7 @@
 #include <services/database/database_plugin.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
+#include <tests/common/test_environment.h>
 #include <unistd.h>
 #include <cassert>
 #include <chrono>
@@ -588,7 +589,7 @@ void InputScenario(int mode, const std::string& root) {
 }
 }  // namespace
 int main() {
-    auto root = "/tmp/baseline-operator-t73/cost-" +
+    auto root = flowsql::test::WorkspacePath("baseline-operator-t73/cost-") +
                 std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
     assert(std::filesystem::create_directories(root));
     std::vector<rapidjson::Document> measurements;

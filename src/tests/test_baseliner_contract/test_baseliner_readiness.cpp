@@ -5,6 +5,7 @@
 #include <plugins/baseline/baseline_plugin.h>
 #include <plugins/baseline/checkpoint/state_codec.h>
 #include <rapidjson/document.h>
+#include <tests/common/test_environment.h>
 #include <cassert>
 #include <fstream>
 #include <iostream>
@@ -203,7 +204,7 @@ void LowSupportAndInitialization() {
     assert(r->PredictRolling("s", 2).status == BaselineStatus::kOk);
 }
 std::string RelationOptions() {
-    const std::string path = "/tmp/baseliner-contract-safety-c1/relation.yml";
+    const std::string path = flowsql::test::WorkspacePath("baseliner-contract-safety-c1/relation.yml");
     std::ofstream(path) << R"(baseline:
   rolling_config:
     relation_rolling:

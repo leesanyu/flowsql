@@ -8,6 +8,7 @@
 //
 // 环境要求：可写的临时目录（/tmp）
 //
+#include <tests/common/test_environment.h>
 #include <atomic>
 #include <cassert>
 #include <cerrno>
@@ -36,13 +37,11 @@ static int g_passed = 0;
 
 // 生成唯一临时文件路径
 static std::string TmpYaml(const char* suffix) {
-    return std::string("/tmp/flowsql_test_") + suffix + ".yml";
+    return flowsql::test::WorkspacePath(std::string("flowsql_test_") + suffix + ".yml");
 }
 
 // 删除文件（忽略错误）
-static void RemoveFile(const std::string& path) {
-    remove(path.c_str());
-}
+static void RemoveFile(const std::string& path) { remove(path.c_str()); }
 
 static void AssertSingleRow(IDatabaseChannel* channel, const char* sql, const std::vector<std::string>& values) {
     IBatchReader* raw_reader = nullptr;
@@ -326,8 +325,7 @@ void test_update_channel() {
     // 验证内存中配置也已更新（通过 List 回调）
     bool found_new = false;
     plugin.List([&](const char*, const char*, const char* config_json) {
-        if (config_json && std::string(config_json).find("/new/path.db") != std::string::npos)
-            found_new = true;
+        if (config_json && std::string(config_json).find("/new/path.db") != std::string::npos) found_new = true;
     });
     assert(found_new);
     printf("  In-memory config also updated\n");
@@ -576,30 +574,23 @@ void test_concurrent_add_remove() {
 // 才能真正证明"加密存储 → 重启 → 解密 → 认证成功"路径正确。
 //
 // 环境变量（与 test_plugin_e2e.cpp 一致）：
-//   MYSQL_HOST/PORT/USER/PASSWORD/DATABASE
-//   CH_HOST/PORT/USER/PASSWORD/DATABASE
+//   使用统一 config/testing/environment.json 与必需数据库 fixture
 // ============================================================
-static std::string GetEnv(const char* key, const char* def) {
-    const char* v = getenv(key);
-    return v ? v : def;
-}
 
 void test_password_restart_decrypt_mysql() {
     printf("[TEST] TQ-B4a: MySQL password channel restart decrypt...\n");
 
-    std::string host = GetEnv("MYSQL_HOST",     "127.0.0.1");
-    std::string port = GetEnv("MYSQL_PORT",     "3306");
-    std::string user = GetEnv("MYSQL_USER",     "flowsql_user");
-    std::string pass = GetEnv("MYSQL_PASSWORD", "flowSQL@user");
-    std::string db   = GetEnv("MYSQL_DATABASE", "flowsql_db");
+    auto parameters = flowsql::test::DatabaseParameters("mysql");
+    const auto host = parameters.at("host"), port = parameters.at("port"), user = parameters.at("user"),
+               pass = parameters.at("password"), db = parameters.at("database");
 
     std::string yml = TmpYaml("tqb4_mysql");
     RemoveFile(yml);
 
-    std::string cfg = "type=mysql;name=pwmysql"
-                      ";host=" + host + ";port=" + port +
-                      ";user=" + user + ";password=" + pass +
-                      ";database=" + db;
+    std::string cfg =
+        "type=mysql;name=pwmysql"
+        ";host=" +
+        host + ";port=" + port + ";user=" + user + ";password=" + pass + ";database=" + db;
 
     // 第一个实例：添加含密码的 MySQL 通道，验证 YAML 加密
     {
@@ -625,13 +616,7 @@ void test_password_restart_decrypt_mysql() {
         plugin2.Start();
 
         IDatabaseChannel* ch = plugin2.Get("mysql", "pwmysql");
-        if (ch == nullptr) {
-            printf("  [SKIP] MySQL not available: %s\n", plugin2.LastError());
-            RemoveFile(yml);
-            g_passed++;  // 环境不可用时跳过，不算失败
-            printf("[SKIP] TQ-B4a: MySQL not available\n");
-            return;
-        }
+        assert(ch != nullptr && "required integration backend unavailable");
         assert(ch->IsConnected());
 
         AssertSingleRow(ch, "SELECT DATABASE(), 1", {db, "1"});
@@ -646,19 +631,17 @@ void test_password_restart_decrypt_mysql() {
 void test_password_restart_decrypt_clickhouse() {
     printf("[TEST] TQ-B4b: ClickHouse password channel restart decrypt...\n");
 
-    std::string host = GetEnv("CH_HOST",     "127.0.0.1");
-    std::string port = GetEnv("CH_PORT",     "8123");
-    std::string user = GetEnv("CH_USER",     "flowsql_user");
-    std::string pass = GetEnv("CH_PASSWORD", "flowSQL@user");
-    std::string db   = GetEnv("CH_DATABASE", "flowsql_db");
+    auto parameters = flowsql::test::DatabaseParameters("clickhouse");
+    const auto host = parameters.at("host"), port = parameters.at("port"), user = parameters.at("user"),
+               pass = parameters.at("password"), db = parameters.at("database");
 
     std::string yml = TmpYaml("tqb4_ch");
     RemoveFile(yml);
 
-    std::string cfg = "type=clickhouse;name=pwch"
-                      ";host=" + host + ";port=" + port +
-                      ";user=" + user + ";password=" + pass +
-                      ";database=" + db;
+    std::string cfg =
+        "type=clickhouse;name=pwch"
+        ";host=" +
+        host + ";port=" + port + ";user=" + user + ";password=" + pass + ";database=" + db;
 
     // 第一个实例：添加含密码的 ClickHouse 通道，验证 YAML 加密
     {
@@ -684,13 +667,7 @@ void test_password_restart_decrypt_clickhouse() {
         plugin2.Start();
 
         IDatabaseChannel* ch = plugin2.Get("clickhouse", "pwch");
-        if (ch == nullptr) {
-            printf("  [SKIP] ClickHouse not available: %s\n", plugin2.LastError());
-            RemoveFile(yml);
-            g_passed++;
-            printf("[SKIP] TQ-B4b: ClickHouse not available\n");
-            return;
-        }
+        assert(ch != nullptr && "required integration backend unavailable");
         assert(ch->IsConnected());
 
         // ClickHouse 通道走 Arrow 路径，用 Ping 验证连接真实可用
@@ -789,7 +766,8 @@ void test_concurrent_update_channel() {
     // N 个线程并发更新同一通道，每个线程写入不同路径
     for (int i = 0; i < N; ++i) {
         threads.emplace_back([&plugin, &update_ok, i]() {
-            std::string cfg = "type=sqlite;name=target;path=/tmp/v" + std::to_string(i) + ".db";
+            std::string cfg =
+                "type=sqlite;name=target;path=" + flowsql::test::WorkspacePath("v" + std::to_string(i) + ".db");
             if (plugin.UpdateChannel(cfg.c_str()) == 0) update_ok++;
         });
     }
@@ -797,14 +775,14 @@ void test_concurrent_update_channel() {
 
     printf("  update_ok=%d/%d\n", update_ok.load(), N);
 
-    // 验证内存中配置是某次合法更新的结果（路径格式为 /tmp/vN.db）
+    // 验证内存中配置是某次合法更新的结果。
     bool valid_final = false;
     plugin.List([&](const char* type, const char* name, const char* config_json) {
         if (std::string(name) == "target" && config_json) {
             std::string j(config_json);
-            // 最终路径应匹配 /tmp/vN.db 格式
+            // 最终路径应匹配本轮工作目录中的一个候选路径。
             for (int i = 0; i < N; ++i) {
-                if (j.find("/tmp/v" + std::to_string(i) + ".db") != std::string::npos) {
+                if (j.find(flowsql::test::WorkspacePath("v" + std::to_string(i) + ".db")) != std::string::npos) {
                     valid_final = true;
                     printf("  Final config: %s\n", config_json);
                     break;
@@ -819,7 +797,7 @@ void test_concurrent_update_channel() {
     std::string content((std::istreambuf_iterator<char>(f)), {});
     bool yaml_valid = false;
     for (int i = 0; i < N; ++i) {
-        if (content.find("/tmp/v" + std::to_string(i) + ".db") != std::string::npos) {
+        if (content.find(flowsql::test::WorkspacePath("v" + std::to_string(i) + ".db")) != std::string::npos) {
             yaml_valid = true;
             break;
         }
@@ -870,7 +848,7 @@ void test_concurrent_list_with_add_remove() {
     for (int i = 0; i < 5; ++i) {
         threads.emplace_back([&plugin, i]() {
             std::string name = "dyn" + std::to_string(i);
-            std::string cfg  = "type=sqlite;name=" + name + ";path=:memory:";
+            std::string cfg = "type=sqlite;name=" + name + ";path=:memory:";
             for (int r = 0; r < 10; ++r) {
                 plugin.AddChannel(cfg.c_str());
                 plugin.RemoveChannel("sqlite", name.c_str());
@@ -908,8 +886,7 @@ void test_restart_recovery_field_values() {
         plugin.Load(nullptr);
         plugin.Start();
         // 添加含完整字段的 MySQL 通道（不实际连接，只验证配置持久化）
-        assert(plugin.AddChannel(
-            "type=mysql;name=myconn;host=192.168.1.100;port=3307;database=myapp;user=admin") == 0);
+        assert(plugin.AddChannel("type=mysql;name=myconn;host=192.168.1.100;port=3307;database=myapp;user=admin") == 0);
     }
 
     {
@@ -925,9 +902,9 @@ void test_restart_recovery_field_values() {
                 std::string j(config_json ? config_json : "");
                 // 验证各字段值正确恢复
                 assert(j.find("192.168.1.100") != std::string::npos);
-                assert(j.find("3307")          != std::string::npos);
-                assert(j.find("myapp")         != std::string::npos);
-                assert(j.find("admin")         != std::string::npos);
+                assert(j.find("3307") != std::string::npos);
+                assert(j.find("myapp") != std::string::npos);
+                assert(j.find("admin") != std::string::npos);
                 printf("  Recovered config: %s\n", j.c_str());
             }
         });
@@ -1035,11 +1012,12 @@ void test_channel_lease_protects_lifecycle() {
     assert(lease->IsConnected());
 
     assert(plugin.Release("sqlite", "leasedb") == EBUSY);
-    assert(plugin.UpdateChannel("type=sqlite;name=leasedb;path=/tmp/flowsql_t0_lease.db") == EBUSY);
+    const auto replacement = "type=sqlite;name=leasedb;path=" + flowsql::test::WorkspacePath("flowsql_t0_lease.db");
+    assert(plugin.UpdateChannel(replacement.c_str()) == EBUSY);
     assert(plugin.RemoveChannel("sqlite", "leasedb") == EBUSY);
 
     lease.reset();
-    assert(plugin.UpdateChannel("type=sqlite;name=leasedb;path=/tmp/flowsql_t0_lease.db") == 0);
+    assert(plugin.UpdateChannel(replacement.c_str()) == 0);
     auto second_lease = plugin.AcquireChannel("sqlite", "leasedb");
     assert(second_lease != nullptr);
     assert(plugin.RemoveChannel("sqlite", "leasedb") == EBUSY);
@@ -1054,7 +1032,14 @@ void test_channel_lease_protects_lifecycle() {
 // ============================================================
 // main
 // ============================================================
-int main() {
+int main(int argc, char** argv) {
+    const bool integration_only = argc > 1 && std::string(argv[1]) == "--integration";
+    const bool unit_only = argc > 1 && std::string(argv[1]) == "--unit";
+    if (integration_only) {
+        test_password_restart_decrypt_mysql();
+        test_password_restart_decrypt_clickhouse();
+        return g_passed == 2 ? 0 : 1;
+    }
     printf("=== DatabasePlugin Manager Tests ===\n\n");
 
     test_add_channel_no_config_file();
@@ -1070,8 +1055,10 @@ int main() {
     test_password_encrypted_in_yaml();
     test_add_channel_invalid_config();
     test_concurrent_add_remove();
-    test_password_restart_decrypt_mysql();
-    test_password_restart_decrypt_clickhouse();
+    if (!unit_only) {
+        test_password_restart_decrypt_mysql();
+        test_password_restart_decrypt_clickhouse();
+    }
     test_concurrent_add_remove_same_channel();
     test_concurrent_update_channel();
     test_concurrent_list_with_add_remove();
@@ -1080,6 +1067,6 @@ int main() {
     test_add_channel_then_get();
     test_channel_lease_protects_lifecycle();
 
-    printf("\n=== Results: %d/22 passed ===\n", g_passed);
-    return (g_passed == 22) ? 0 : 1;
+    printf("\n=== Results: %d/%d passed ===\n", g_passed, unit_only ? 20 : 22);
+    return (g_passed == (unit_only ? 20 : 22)) ? 0 : 1;
 }

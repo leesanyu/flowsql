@@ -1,0 +1,38 @@
+add_executable(test_kafka_structured test_kafka_structured.cpp)
+target_include_directories(test_kafka_structured PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_kafka_structured PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-unused-parameter)
+target_link_libraries(test_kafka_structured PRIVATE flowsql_kafka_store)
+set_target_properties(test_kafka_structured PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_kafka_structured COMMAND ${CMAKE_BINARY_DIR}/output/test_kafka_structured)
+add_executable(test_kafka_reader test_kafka_reader.cpp
+    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_client.cpp
+    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_reader.cpp
+    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_plugin.cpp
+    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_control.cpp)
+target_include_directories(test_kafka_reader PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_kafka_reader PRIVATE -UNDEBUG)
+target_link_libraries(test_kafka_reader PRIVATE flowsql_kafka_store FlowSQL::KafkaClient)
+set_target_properties(test_kafka_reader PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_kafka_reader COMMAND ${CMAKE_BINARY_DIR}/output/test_kafka_reader)
+set_tests_properties(test_kafka_reader PROPERTIES TIMEOUT 90)
+add_executable(test_kafka_execution test_kafka_execution.cpp ${CMAKE_SOURCE_DIR}/framework/core/pipeline.cpp)
+target_include_directories(test_kafka_execution PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_kafka_execution PRIVATE -UNDEBUG)
+add_thirddepen(test_kafka_execution arrow rapidjson)
+target_link_libraries(test_kafka_execution flowsql_common)
+set_target_properties(test_kafka_execution PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_kafka_execution COMMAND ${CMAKE_BINARY_DIR}/output/test_kafka_execution)
+
+add_executable(kafka_source_real kafka_source_real.cpp)
+target_include_directories(kafka_source_real PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(kafka_source_real PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-unused-parameter -Wno-type-limits)
+target_link_libraries(kafka_source_real PRIVATE flowsql_kafka_store FlowSQL::KafkaClient flowsql_common ${CMAKE_DL_LIBS})
+add_dependencies(kafka_source_real flowsql_kafka flowsql_scheduler flowsql_builtin flowsql_catalog flowsql_task)
+set_target_properties(kafka_source_real PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME test_kafka_source_environment COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_source_environment.py)
+foreach(location native docker)
+    add_test(NAME test_kafka_source_${location} COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/real_source.py --location ${location})
+    set_tests_properties(test_kafka_source_${location} PROPERTIES TIMEOUT 1800)
+endforeach()

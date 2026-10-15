@@ -14,6 +14,7 @@
 #include <rapidjson/writer.h>
 #include <services/database/database_channel.h>
 #include <services/database/database_plugin.h>
+#include <tests/common/test_environment.h>
 #include <unistd.h>
 #include <cassert>
 #include <condition_variable>
@@ -630,11 +631,8 @@ void FailedOutputIsEmpty() {
     std::cout << "PASS maintenance followed by validation failure leaves outputs empty and forbids Flush\n";
 }
 void RealDatabaseCancellation() {
-    const char* path = std::getenv("BASELINER_TEST_DB_OPTIONS");
-    assert(path);
-    std::ifstream input(path);
     std::ostringstream options;
-    options << input.rdbuf();
+    options << flowsql::test::BaselinerOptions();
     database::DatabasePlugin plugin;
     int saved = dup(STDOUT_FILENO);
     FILE* quiet = fopen("/dev/null", "w");

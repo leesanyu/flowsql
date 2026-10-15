@@ -1,0 +1,95 @@
+--- a/src/rdkafka_conf.h
++++ b/src/rdkafka_conf.h
+@@ -317,6 +317,7 @@
+         struct {
+                 const struct rd_kafka_sasl_provider *provider;
+                 char *principal;
++                char *flowsql_ccache;
+                 char *mechanisms;
+                 char *service_name;
+                 char *kinit_cmd;
+--- a/src/rdkafka_conf.c
++++ b/src/rdkafka_conf.c
+@@ -1019,6 +1019,8 @@
+      "Kerberos principal name that Kafka runs as, "
+      "not including /hostname@REALM",
+      .sdef = "kafka"},
++    {_RK_GLOBAL, "sasl.kerberos.flowsql.ccache", _RK_C_STR,
++     _RK(sasl.flowsql_ccache), "FlowSQL private MIT Kerberos credential cache."},
+     {_RK_GLOBAL, "sasl.kerberos.principal", _RK_C_STR, _RK(sasl.principal),
+      "This client's Kerberos principal name. "
+      "(Not supported on Windows, will use the logon user's principal).",
+--- a/src/rdkafka_sasl_cyrus.c
++++ b/src/rdkafka_sasl_cyrus.c
+@@ -45,6 +45,8 @@
+ #endif
+ 
+ #include <sasl/sasl.h>
++#include <gssapi/gssapi_ext.h>
++#include <gssapi/gssapi_krb5.h>
+ 
+ /**
+  * @brief Process-global lock to avoid simultaneous invocation of
+@@ -67,6 +69,7 @@
+  */
+ typedef struct rd_kafka_sasl_cyrus_state_s {
+         sasl_conn_t *conn;
++        gss_cred_id_t flowsql_cred;
+         sasl_callback_t callbacks[16];
+ } rd_kafka_sasl_cyrus_state_t;
+ 
+@@ -489,6 +492,10 @@
+                 sasl_dispose(&state->conn);
+                 mtx_unlock(&rktrans->rktrans_rkb->rkb_rk->rk_conf.sasl.lock);
+         }
++        if (state->flowsql_cred) {
++                OM_uint32 minor;
++                gss_release_cred(&minor, &state->flowsql_cred);
++        }
+         rd_free(state);
+         rktrans->rktrans_sasl.state = NULL;
+ }
+@@ -555,6 +562,33 @@
+                 return -1;
+         }
+ 
++        if (rk->rk_conf.sasl.flowsql_ccache &&
++            !strcmp(rk->rk_conf.sasl.mechanisms, "GSSAPI")) {
++                OM_uint32 major, minor;
++                gss_name_t desired = GSS_C_NO_NAME;
++                gss_buffer_desc principal = {
++                    strlen(rk->rk_conf.sasl.principal), rk->rk_conf.sasl.principal};
++                gss_key_value_element_desc item = {
++                    "ccache", rk->rk_conf.sasl.flowsql_ccache};
++                gss_key_value_set_desc store = {1, &item};
++                major = gss_import_name(&minor, &principal,
++                                       GSS_KRB5_NT_PRINCIPAL_NAME, &desired);
++                if (major == GSS_S_COMPLETE) {
++                        major = gss_acquire_cred_from(
++                            &minor, desired, 0, GSS_C_NO_OID_SET,
++                            GSS_C_INITIATE, &store, &state->flowsql_cred,
++                            NULL, NULL);
++                        gss_release_name(&minor, &desired);
++                }
++                if (major != GSS_S_COMPLETE ||
++                    sasl_setprop(state->conn, SASL_GSS_CREDS,
++                                 state->flowsql_cred) != SASL_OK) {
++                        rd_snprintf(errstr, errstr_size,
++                                    "Private GSSAPI credential unavailable");
++                        return -1;
++                }
++        }
++
+         if (rk->rk_conf.debug & RD_KAFKA_DBG_SECURITY) {
+                 const char *avail_mechs;
+                 sasl_listmech(state->conn, NULL, NULL, " ", NULL, &avail_mechs,
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -377,3 +377,7 @@
+     FILES "rdkafka.h" "rdkafka_mock.h"
+     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/librdkafka"
+ )
++
++# FlowSQL private MIT Kerberos credential-store support.
++find_library(FLOWSQL_GSSAPI_LIBRARY gssapi_krb5 REQUIRED)
++target_link_libraries(rdkafka PRIVATE ${FLOWSQL_GSSAPI_LIBRARY})

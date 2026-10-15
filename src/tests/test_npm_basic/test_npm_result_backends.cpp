@@ -5,6 +5,7 @@
 #include <arrow/io/memory.h>
 #include <arrow/ipc/reader.h>
 #include <rapidjson/document.h>
+#include <tests/common/test_environment.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -939,14 +940,12 @@ void TestBackend(const Backend& backend) {
 
 int main() {
     DatabasePlugin plugin;
-    const char* options =
-        "type=mysql;name=t3mysql;host=127.0.0.1;port=3306;user=flowsql_user;password=flowSQL@user;"
-        "database=flowsql_npm_family_t4|"
-        "type=postgres;name=t3postgres;host=127.0.0.1;port=5432;user=flowsql_user;password=flowSQL@postgres;"
-        "database=flowsql_npm_family_t4|"
-        "type=clickhouse;name=t3clickhouse;host=127.0.0.1;port=8123;user=flowsql_user;password=flowSQL@user;"
-        "database=flowsql_npm_family_t4";
-    assert(plugin.Option(options) == 0);
+    std::string options;
+    for (const char* backend : {"mysql", "postgres", "clickhouse"}) {
+        if (!options.empty()) options += '|';
+        options += flowsql::test::DatabaseOptions(backend, std::string("t3") + backend, "npm");
+    }
+    assert(plugin.Option(options.c_str()) == 0);
     assert(plugin.Load(nullptr) == 0);
     assert(plugin.Start() == 0);
 

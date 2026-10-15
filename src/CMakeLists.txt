@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.12)
 
 project(flowsql)
 include(CTest)
+include(${CMAKE_SOURCE_DIR}/tests/test_environment/register.cmake)
 
 # 设置编译参数
 set(CMAKE_CXX_STANDARD 17)
@@ -95,6 +96,8 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_npm_basic ${CMAKE_BINARY_DIR}/te
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_pcapfile_import ${CMAKE_BINARY_DIR}/test_pcapfile_import)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_framework ${CMAKE_BINARY_DIR}/test_framework)
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_config_channel ${CMAKE_BINARY_DIR}/test_config_channel)
+add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_connection_auth ${CMAKE_BINARY_DIR}/test_kafka_connection_auth)
+add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_log_source ${CMAKE_BINARY_DIR}/test_kafka_log_source)
 if(FLOWSQL_FLOW_LABELING_AVAILABLE)
     add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_flow_labeling ${CMAKE_BINARY_DIR}/test_flow_labeling)
 endif()
@@ -138,6 +141,9 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/services/router ${CMAKE_BINARY_DIR}/router)
 
 # Stage 3: Router 测试
 add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_router ${CMAKE_BINARY_DIR}/test_router)
+add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_environment ${CMAKE_BINARY_DIR}/test_environment)
 
 # 通用入口（flowsql 可执行文件）
 add_subdirectory(${CMAKE_SOURCE_DIR}/app ${CMAKE_BINARY_DIR}/app)
+
+flowsql_finalize_environment("${CMAKE_SOURCE_DIR}")

@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { createConfigChannelApi } from './configChannel.js'
+import { createKafkaChannelApi } from './kafkaChannel.js'
 
 const api = axios.create({
   baseURL: 'http://localhost:8081',  // WebPlugin 对外端口，统一入口
@@ -92,7 +93,11 @@ export const formatPreviewCell = (value) => {
   return String(value)
 }
 
+// Kafka credentials use a client without the generic request/error console logger.
+const kafkaApi = createKafkaChannelApi(axios.create({ baseURL: api.defaults.baseURL, timeout: 30000 }))
+
 export default {
+  ...kafkaApi,
   ...createConfigChannelApi(api),
   // WebPlugin 直接处理的路由
   health: () => api.get('/api/health'),

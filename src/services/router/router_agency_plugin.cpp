@@ -205,6 +205,10 @@ void RouterAgencyPlugin::Dispatch(const httplib::Request& req, httplib::Response
 int RouterAgencyPlugin::HttpStatus(int32_t rc) {
     switch (rc) {
         case error::OK:             return 200;
+        case error::ACCEPTED:
+            return 202;
+        case error::TOO_MANY_REQUESTS:
+            return 429;
         case error::BAD_REQUEST:    return 400;
         case error::NOT_FOUND:      return 404;
         case error::CONFLICT:       return 409;

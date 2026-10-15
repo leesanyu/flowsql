@@ -1,0 +1,51 @@
+add_executable(test_kafka_channel_admin test_kafka_store.cpp)
+target_include_directories(test_kafka_channel_admin PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_kafka_channel_admin PRIVATE -UNDEBUG)
+target_link_libraries(test_kafka_channel_admin PRIVATE flowsql_kafka_store)
+set_target_properties(test_kafka_channel_admin PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_kafka_channel_admin COMMAND ${CMAKE_BINARY_DIR}/output/test_kafka_channel_admin)
+add_executable(test_kafka_connection_auth test_kafka_client.cpp
+    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_reader.cpp
+    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_client.cpp
+    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_plugin.cpp
+    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_control.cpp)
+target_include_directories(test_kafka_connection_auth PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_kafka_connection_auth PRIVATE -UNDEBUG)
+target_link_libraries(test_kafka_connection_auth PRIVATE flowsql_kafka_store FlowSQL::KafkaClient)
+set_target_properties(test_kafka_connection_auth PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_kafka_connection_auth COMMAND ${CMAKE_BINARY_DIR}/output/test_kafka_connection_auth)
+set_tests_properties(test_kafka_connection_auth PROPERTIES TIMEOUT 40)
+
+add_executable(test_kafka_control test_kafka_control.cpp
+    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_reader.cpp
+    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_client.cpp
+    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_plugin.cpp
+    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_control.cpp)
+target_include_directories(test_kafka_control PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_kafka_control PRIVATE -UNDEBUG)
+target_link_libraries(test_kafka_control PRIVATE flowsql_kafka_store FlowSQL::KafkaClient)
+set_target_properties(test_kafka_control PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_kafka_control COMMAND ${CMAKE_BINARY_DIR}/output/test_kafka_control)
+set_tests_properties(test_kafka_control PROPERTIES TIMEOUT 40)
+add_executable(test_kafka_web_e2e test_kafka_web_e2e.cpp)
+target_include_directories(test_kafka_web_e2e PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_kafka_web_e2e PRIVATE -UNDEBUG)
+add_dependencies(test_kafka_web_e2e flowsql_kafka flowsql_web flowsql_gateway flowsql_router flowsql_scheduler)
+add_thirddepen(test_kafka_web_e2e rapidjson httplib)
+target_link_libraries(test_kafka_web_e2e flowsql_kafka_store ${CMAKE_DL_LIBS})
+set_target_properties(test_kafka_web_e2e PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_kafka_web_e2e COMMAND ${CMAKE_BINARY_DIR}/output/test_kafka_web_e2e)
+set_tests_properties(test_kafka_web_e2e PROPERTIES TIMEOUT 90)
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME test_kafka_dependency_cache COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_dependency_cache.py)
+set_tests_properties(test_kafka_dependency_cache PROPERTIES TIMEOUT 90)
+
+foreach(location native docker)
+    add_test(NAME test_kafka_real_${location} COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_SOURCE_DIR}/../tools/test_environment/runner.py kafka --location ${location})
+    add_test(NAME test_kafka_deployment_${location} COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_SOURCE_DIR}/../tools/test_environment/runner.py deployment --location ${location})
+    set_tests_properties(test_kafka_real_${location} PROPERTIES TIMEOUT 900)
+    set_tests_properties(test_kafka_deployment_${location} PROPERTIES TIMEOUT 300)
+endforeach()

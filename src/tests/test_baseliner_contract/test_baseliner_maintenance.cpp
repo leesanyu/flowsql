@@ -11,6 +11,7 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <services/database/database_plugin.h>
+#include <tests/common/test_environment.h>
 #include <unistd.h>
 #include <cassert>
 #include <chrono>
@@ -725,11 +726,8 @@ void ManagedMatrix(std::shared_ptr<IDatabaseChannel> target) {
     std::cout << "PASS failed maintenance preserves generation " << target->Category() << std::endl;
 }
 void ManagedDatabases() {
-    const char* path = std::getenv("BASELINER_TEST_DB_OPTIONS");
-    assert(path);
-    std::ifstream input(path);
     std::ostringstream options;
-    options << input.rdbuf();
+    options << flowsql::test::BaselinerOptions();
     database::DatabasePlugin db;
     std::cout << std::flush;
     int saved = dup(STDOUT_FILENO);

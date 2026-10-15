@@ -24,11 +24,14 @@
 #include <type_traits>
 #include <unordered_set>
 
+#include <framework/interfaces/iblock_stream_acknowledgement.h>
+#include <framework/interfaces/iblock_stream_schema.h>
 #include <framework/interfaces/iblock_transform_dataframe_input.h>
 #include <framework/interfaces/iblock_transform_execution_policy.h>
 #include <framework/interfaces/iblock_transform_model_output.h>
 #include <framework/interfaces/iblock_transform_result_output.h>
 #include <framework/interfaces/iblock_transform_source_config.h>
+#include <framework/interfaces/ikafka_connection_service.h>
 #include "framework/core/channel_adapter.h"
 #include "framework/core/dataframe.h"
 #include "framework/core/dataframe_channel.h"
@@ -66,6 +69,21 @@
 
 namespace flowsql {
 namespace scheduler {
+
+static std::shared_ptr<arrow::Schema> BlockSourceArrowSchema(IChannel* source) {
+    auto* capability = dynamic_cast<IBlockStreamSchemaV1*>(source);
+    return capability ? capability->ArrowSchema() : packet::PacketSchema();
+}
+
+static int AcknowledgeProcessedBlock(IBlockStreamChannel* source, const std::shared_ptr<arrow::RecordBatch>& batch) {
+    auto* capability = dynamic_cast<IBlockStreamAcknowledgementV1*>(source);
+    if (!capability) return 0;
+    try {
+        return capability->AcknowledgeBlock(batch);
+    } catch (...) {
+        return EFAULT;
+    }
+}
 
 static std::string EnsureExecutionErrorJson(const std::string& rsp, const std::string& fallback_error,
                                             ErrorCodeId fallback_code, ErrorStageId fallback_stage) {
@@ -499,7 +517,7 @@ int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source, IBlockStr
     if (source_residual) {
         std::shared_ptr<arrow::Schema> filtered_schema;
         std::string filter_error;
-        const auto open_rc = source_filter.Open(packet::PacketSchema(), &filtered_schema, &filter_error);
+        const auto open_rc = source_filter.Open(BlockSourceArrowSchema(source), &filtered_schema, &filter_error);
         if (open_rc != FilterEvalError::kNone) {
             if (error) *error = "source-stage residual Open failed: " + filter_error;
             return EINVAL;
@@ -509,7 +527,18 @@ int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source, IBlockStr
     int64_t rows = 0;
     bool schema_ready = false;
     bool stopped = false;
+    const auto control = SchedulerBatchRuntime::CurrentControl();
     while (true) {
+        if (control && control->cancel_requested.load()) {
+            source->Cancel();
+            if (rows_affected) *rows_affected = rows;
+            if (terminal) *terminal = BlockExecutionTerminal::kCancelled;
+            return ECANCELED;
+        }
+        if (control && control->stop_requested.load()) {
+            stopped = true;
+            break;
+        }
         const BlockPollEvent event = source->PollBlock(100);
         if (event.kind == BlockPollEvent::kData) {
             if (!event.batch) {
@@ -519,13 +548,14 @@ int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source, IBlockStr
             int64_t batch_rows = event.batch->num_rows();
             int rc = 0;
             bool schema_failed = false;
+            bool acknowledgement_failed = false;
             try {
                 if (!schema_ready) {
                     schema = event.batch->schema();
-                    if (!schema || !schema->Equals(flowsql::packet::PacketSchema())) {
+                    if (!schema || !schema->Equals(BlockSourceArrowSchema(source))) {
                         rc = EINVAL;
                         schema_failed = true;
-                        if (error) *error = "block source schema does not match packet schema";
+                        if (error) *error = "block source schema does not match declared schema";
                     } else {
                         rc = op->OnSchemaReady(schema);
                         schema_ready = rc == 0;
@@ -557,6 +587,14 @@ int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source, IBlockStr
                 schema_failed = !schema_ready;
                 if (error) *error = "block operator threw an unknown exception";
             }
+            if (!schema_failed && (rc == 0 || rc == 1)) {
+                const int ack_rc = AcknowledgeProcessedBlock(source, event.batch);
+                if (ack_rc) {
+                    rc = ack_rc;
+                    acknowledgement_failed = true;
+                    if (error) *error = "block source acknowledgement failed";
+                }
+            }
             int release_rc = 0;
             try {
                 release_rc = source->ReleaseBlock(event.batch);
@@ -567,7 +605,7 @@ int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source, IBlockStr
                 if (error) *error = "block source ReleaseBlock failed";
                 return release_rc;
             }
-            if (schema_failed) {
+            if (schema_failed || acknowledgement_failed) {
                 if (error && error->empty()) *error = op->LastError();
                 return rc;
             }
@@ -827,7 +865,7 @@ int SchedulerPlugin::BuildBlockSourceFilterPlan(IBlockStreamChannel* source, con
     }
     if (!source_expression) return 0;
 
-    const auto source_schema = packet::PacketSchema();
+    const auto source_schema = BlockSourceArrowSchema(source);
     std::shared_ptr<const BoundFilterExpr> bound_source_filter;
     const int filter_rc =
         ResolveAndBindStageFilter(querier_, FilterDomainTargetKindV1::kSource,
@@ -951,7 +989,7 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
         return EINVAL;
     }
     auto source_schema =
-        (database_source || dataframe_source) ? std::shared_ptr<arrow::Schema>{} : packet::PacketSchema();
+        (database_source || dataframe_source) ? std::shared_ptr<arrow::Schema>{} : BlockSourceArrowSchema(source);
 
     const auto& params = !stmt.operator_with_params.empty() ? stmt.operator_with_params.front() : stmt.with_params;
     std::string with_params_json = MakeWithParamsJson(params);
@@ -1499,7 +1537,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         }
     }
 
-    const auto source_schema = packet::PacketSchema();
+    const auto source_schema = BlockSourceArrowSchema(source);
     struct StagePlan {
         BlockTransformProviderRef provider;
         std::string with_params_json;
@@ -1827,7 +1865,7 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink, const std
         auto* dst = dynamic_cast<IDataFrameChannel*>(sink);
         if (!src || !dst) return -1;
 
-        const auto source_schema = packet::PacketSchema();
+        const auto source_schema = BlockSourceArrowSchema(source);
         BlockFilterStage source_filter(source_residual);
         if (source_residual) {
             std::shared_ptr<arrow::Schema> filtered_schema;
@@ -1840,7 +1878,14 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink, const std
         }
         int64_t rows = 0;
         bool wrote = false;
+        const auto control = SchedulerBatchRuntime::CurrentControl();
         while (true) {
+            if (control && control->cancel_requested.load()) {
+                src->Cancel();
+                if (error) *error = "block source cancelled";
+                return ECANCELED;
+            }
+            if (control && control->stop_requested.load()) break;
             const BlockPollEvent event = src->PollBlock(100);
             if (event.kind == BlockPollEvent::kData) {
                 if (!event.batch) {
@@ -1878,6 +1923,10 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink, const std
                 } catch (...) {
                     if (error) *error = "block source sink threw an unknown exception";
                     rc = EFAULT;
+                }
+                if (rc == 0) {
+                    rc = AcknowledgeProcessedBlock(src, event.batch);
+                    if (rc && error) *error = "block source acknowledgement failed";
                 }
                 int release_rc = 0;
                 try {
@@ -2165,6 +2214,36 @@ int32_t SchedulerPlugin::ResolveSourceBindings(const SqlStatement& stmt, SourceR
     if (stmt.sources.empty()) {
         return fail(error::BAD_REQUEST, "source channel not found");
     }
+
+    // Kafka control definitions exist before a data adapter is installed. Resolve role and
+    // capability through the catalog IID, without opening credentials or a network client.
+    auto kafka_binding = [&](const std::string& reference, const char* usage) -> int32_t {
+        if (reference.rfind("kafka.", 0) != 0) return error::OK;
+        const std::string stage = std::string(usage) == "source" ? "source_resolve" : "sink_resolve";
+        auto reject = [&](int32_t status, const char* code) {
+            if (err_rsp) *err_rsp = BuildExecutionErrorJson(code, code, stage);
+            return status;
+        };
+        auto* catalog =
+            querier_ ? static_cast<IKafkaChannelCatalogV1*>(querier_->First(IID_KAFKA_CHANNEL_CATALOG_V1)) : nullptr;
+        if (!catalog) return reject(error::UNAVAILABLE, "KAFKA_PROVIDER_UNAVAILABLE");
+        KafkaChannelDescriptionV1 description;
+        int rc = catalog->DescribeChannel(reference.substr(6).c_str(), &description);
+        if (rc == ENOENT) return reject(error::NOT_FOUND, "KAFKA_CHANNEL_NOT_FOUND");
+        if (rc != 0) return reject(error::UNAVAILABLE, "KAFKA_PROVIDER_UNAVAILABLE");
+        if (description.role != "both" && description.role != usage)
+            return reject(error::BAD_REQUEST, "KAFKA_ROLE_MISMATCH");
+        if (!(std::string(usage) == "source" ? description.source_adapter_available
+                                             : description.sink_adapter_available))
+            return reject(error::UNAVAILABLE, "KAFKA_DATA_ADAPTER_UNAVAILABLE");
+        return error::OK;
+    };
+    for (const auto& reference : stmt.sources) {
+        auto rc = kafka_binding(reference, "source");
+        if (rc != error::OK) return rc;
+    }
+    auto kafka_sink_rc = kafka_binding(stmt.dest, "sink");
+    if (kafka_sink_rc != error::OK) return kafka_sink_rc;
 
     for (const auto& source_ref : stmt.sources) {
         ParsedChannelRef ref;

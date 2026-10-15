@@ -1,0 +1,7 @@
+# Test services only. The clients still run in the unchanged CLIENT_IMAGE.
+ARG CLIENT_IMAGE=flowsql:kafka-auth
+FROM ${CLIENT_IMAGE}
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    openjdk-21-jre-headless krb5-kdc krb5-admin-server openssl python3-cryptography \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace

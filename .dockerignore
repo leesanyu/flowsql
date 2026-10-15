@@ -35,3 +35,10 @@ src/plugins/*
 src/plugins/npi/*
 !src/plugins/npi/conf/
 !src/plugins/npi/conf/protocols.yml
+
+# Kafka release metadata and safe deployment example; never include real credentials.
+!build/output/share/
+!build/output/share/kafka/
+!build/output/share/kafka/**
+!config/kafka/
+!config/kafka/provider.example.json

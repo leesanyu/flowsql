@@ -1,0 +1,7 @@
+{
+  "db_path": "./meta/kafka.db",
+  "master_key_file": "./secrets/kafka-master.key",
+  "runtime_directory": "./runtime/kafka",
+  "files": {},
+  "environments": {}
+}

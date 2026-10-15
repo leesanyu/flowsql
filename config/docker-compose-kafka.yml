@@ -1,0 +1,16 @@
+# docker compose -f docker-compose.yml -f config/docker-compose-kafka.yml up -d
+# First prepare config/kafka/provider.json and secrets/kafka-master.key as described in docs/kafka.md.
+services:
+  scheduler:
+    command:
+      - flowsql
+      - --config
+      - /opt/flowsql/kafka/deploy-scheduler.yaml
+    volumes:
+      - ./config/kafka:/opt/flowsql/kafka:ro
+      - ./secrets:/opt/flowsql/secrets:ro
+      - kafka-state:/opt/flowsql/kafka-state
+    tmpfs:
+      - /opt/flowsql/kafka-runtime:mode=0700
+volumes:
+  kafka-state:

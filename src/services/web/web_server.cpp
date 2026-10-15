@@ -157,6 +157,10 @@ int32_t ProxyConfigPost(const std::string& host, int port, const std::string& pa
     *response = result->body;
     switch (result->status) {
         case 200: return error::OK;
+        case 202:
+            return error::ACCEPTED;
+        case 429:
+            return error::TOO_MANY_REQUESTS;
         case 400: return error::BAD_REQUEST;
         case 404: return error::NOT_FOUND;
         case 409: return error::CONFLICT;
@@ -169,6 +173,10 @@ int32_t ProxyConfigPost(const std::string& host, int port, const std::string& pa
 int ConfigHttpStatus(int32_t code) {
     switch (code) {
         case error::OK: return 200;
+        case error::ACCEPTED:
+            return 202;
+        case error::TOO_MANY_REQUESTS:
+            return 429;
         case error::BAD_REQUEST: return 400;
         case error::NOT_FOUND: return 404;
         case error::CONFLICT: return 409;
@@ -702,6 +710,17 @@ int WebServer::Init(const std::string& db_path) {
     server_.Post("/api/channels/database/preview", [db_proxy](const httplib::Request& req, httplib::Response& res) {
         db_proxy("/channels/database/preview", req.body, res);
     });
+    for (const char* operation : {"definitions/query", "connections/query", "connections/add", "connections/modify",
+                                  "connections/remove", "channels/query", "channels/add", "channels/modify",
+                                  "channels/remove", "tests/start", "tests/query", "tests/cancel"}) {
+        const std::string target = std::string("/channels/kafka/") + operation;
+        server_.Post(std::string("/api") + target, [this, target](const httplib::Request& req, httplib::Response& res) {
+            std::string response;
+            int32_t code = ProxyConfigPost(scheduler_host_, scheduler_port_, target, req.body, &response);
+            res.status = ConfigHttpStatus(code);
+            res.set_content(response, "application/json");
+        });
+    }
     for (const char* operation : {"list", "publish", "history", "resolve"}) {
         const std::string target = std::string("/channels/config/") + operation;
         server_.Post(std::string("/api") + target, [this, target](const httplib::Request& req, httplib::Response& res) {
@@ -1085,6 +1104,14 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
         [proxy](const std::string&, const std::string& req, std::string& rsp) {
             return proxy("/channels/database/preview", req, rsp);
         }});
+    for (const char* operation : {"definitions/query", "connections/query", "connections/add", "connections/modify",
+                                  "connections/remove", "channels/query", "channels/add", "channels/modify",
+                                  "channels/remove", "tests/start", "tests/query", "tests/cancel"}) {
+        const std::string target = std::string("/channels/kafka/") + operation;
+        cb({"POST", "/api" + target, [this, target](const std::string&, const std::string& req, std::string& rsp) {
+                return ProxyConfigPost(scheduler_host_, scheduler_port_, target, req, &rsp);
+            }});
+    }
     for (const char* operation : {"list", "publish", "history", "resolve"}) {
         const std::string target = std::string("/channels/config/") + operation;
         cb({"POST", "/api" + target,

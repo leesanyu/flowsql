@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "pipeline.h"
+#include <framework/interfaces/iblock_stream_acknowledgement.h>
 #include <map>
 #include <set>
 #include "packet_codec.h"
@@ -949,6 +950,19 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(BlockTransformPipe
             }
         }
 
+        if (block_error == BlockTransformPipelineError::kNone) {
+            if (auto* acknowledgement = dynamic_cast<IBlockStreamAcknowledgementV1*>(config_.source)) {
+                try {
+                    if (acknowledgement->AcknowledgeBlock(event.batch) != 0) {
+                        block_error = BlockTransformPipelineError::kSourceReleaseFailed;
+                        block_error_message = "block source acknowledgement failed";
+                    }
+                } catch (...) {
+                    block_error = BlockTransformPipelineError::kSourceReleaseFailed;
+                    block_error_message = "block source acknowledgement threw";
+                }
+            }
+        }
         int release_rc = 0;
         try {
             release_rc = config_.source->ReleaseBlock(event.batch);

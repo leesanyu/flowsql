@@ -1,22 +1,13 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 // test_postgres.cpp — PostgreSQL 驱动独立测试套件
 //
-// 环境变量：
-//   PG_HOST     (默认 127.0.0.1)
-//   PG_PORT     (默认 5432)
-//   PG_USER     (默认 flowsql_user)
-//   PG_PASSWORD (默认 flowSQL@postgres)
-//   PG_DATABASE (默认 flowsql_db)
-//
-#include <cassert>
+// 配置来自 config/testing/environment.json；使用 tools/test.sh integration 执行。
+// 必需服务不可用时非零失败。
+#include <tests/common/test_environment.h>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -40,14 +31,7 @@ static int g_passed = 0;
 static int g_skipped = 0;
 
 static std::unordered_map<std::string, std::string> GetPostgresParams() {
-    std::unordered_map<std::string, std::string> p;
-    p["host"] = getenv("PG_HOST") ? getenv("PG_HOST") : "127.0.0.1";
-    p["port"] = getenv("PG_PORT") ? getenv("PG_PORT") : "5432";
-    p["user"] = getenv("PG_USER") ? getenv("PG_USER") : "flowsql_user";
-    p["password"] = getenv("PG_PASSWORD") ? getenv("PG_PASSWORD") : "flowSQL@postgres";
-    p["database"] = getenv("PG_DATABASE") ? getenv("PG_DATABASE") : "flowsql_db";
-    p["timeout"] = "5";
-    return p;
+    return flowsql::test::DriverParameters("postgres");
 }
 
 static std::string UniqueName(const char* prefix) {
@@ -126,11 +110,12 @@ static void test_basic_crud() {
 
     const std::string table = UniqueName("pg_test_crud");
     DropTableIfExists(session.get(), table);
-    assert(session->ExecuteSql(("CREATE TABLE " + table +
-                                " (id BIGINT, name TEXT, price DOUBLE PRECISION, stock INTEGER)").c_str()) == 0);
-    assert(session->ExecuteSql(("INSERT INTO " + table +
-                                " VALUES (1,'Apple',1.50,100),(2,'Banana',0.75,200),(3,'Orange',2.00,50)")
-                                   .c_str()) == 3);
+    assert(session->ExecuteSql(
+               ("CREATE TABLE " + table + " (id BIGINT, name TEXT, price DOUBLE PRECISION, stock INTEGER)").c_str()) ==
+           0);
+    assert(session->ExecuteSql(
+               ("INSERT INTO " + table + " VALUES (1,'Apple',1.50,100),(2,'Banana',0.75,200),(3,'Orange',2.00,50)")
+                   .c_str()) == 3);
 
     IResultSet* rs = nullptr;
     assert(session->ExecuteQuery(("SELECT COUNT(*) FROM " + table).c_str(), &rs) == 0);
@@ -243,15 +228,16 @@ static void test_reader_writer_type_matrix() {
     const uint8_t bytes3[] = {0x01, 0x00, 0x02};
     (void)b_bin.Append(bytes3, sizeof(bytes3));
 
-    auto batch = arrow::RecordBatch::Make(schema, 3, {
-        b_i32.Finish().ValueOrDie(),
-        b_i64.Finish().ValueOrDie(),
-        b_f32.Finish().ValueOrDie(),
-        b_f64.Finish().ValueOrDie(),
-        b_str.Finish().ValueOrDie(),
-        b_bool.Finish().ValueOrDie(),
-        b_bin.Finish().ValueOrDie(),
-    });
+    auto batch = arrow::RecordBatch::Make(schema, 3,
+                                          {
+                                              b_i32.Finish().ValueOrDie(),
+                                              b_i64.Finish().ValueOrDie(),
+                                              b_f32.Finish().ValueOrDie(),
+                                              b_f64.Finish().ValueOrDie(),
+                                              b_str.Finish().ValueOrDie(),
+                                              b_bool.Finish().ValueOrDie(),
+                                              b_bin.Finish().ValueOrDie(),
+                                          });
 
     auto ipc = SerializeBatch(batch);
     assert(writer->Write(ipc->data(), static_cast<size_t>(ipc->size())) == 0);
@@ -287,10 +273,8 @@ static void test_reader_writer_type_matrix() {
     auto v2 = bin_arr->GetView(2);
     assert(v0.size() == 1 && v0.data()[0] == 'A');
     assert(v1.size() == 2 && v1.data()[0] == 'B' && v1.data()[1] == 'C');
-    assert(v2.size() == 3 &&
-           static_cast<unsigned char>(v2.data()[0]) == 0x01 &&
-           static_cast<unsigned char>(v2.data()[1]) == 0x00 &&
-           static_cast<unsigned char>(v2.data()[2]) == 0x02);
+    assert(v2.size() == 3 && static_cast<unsigned char>(v2.data()[0]) == 0x01 &&
+           static_cast<unsigned char>(v2.data()[1]) == 0x00 && static_cast<unsigned char>(v2.data()[2]) == 0x02);
 
     reader->Close();
     reader->Release();
@@ -385,7 +369,8 @@ static void test_concurrent_writers() {
                 (void)name_b.Append("v");
             }
             auto schema = arrow::schema({arrow::field("id", arrow::int64()), arrow::field("name", arrow::utf8())});
-            auto batch = arrow::RecordBatch::Make(schema, 10, {id_b.Finish().ValueOrDie(), name_b.Finish().ValueOrDie()});
+            auto batch =
+                arrow::RecordBatch::Make(schema, 10, {id_b.Finish().ValueOrDie(), name_b.Finish().ValueOrDie()});
             auto ipc = SerializeBatch(batch);
             if (writer->Write(ipc->data(), static_cast<size_t>(ipc->size())) != 0) {
                 writer->Release();
@@ -430,12 +415,12 @@ int main() {
 
     if (!IsPostgresAvailable()) {
         auto p = GetPostgresParams();
-        printf("[SKIP] PostgreSQL not available at %s:%s (user=%s database=%s)\n",
-               p["host"].c_str(), p["port"].c_str(), p["user"].c_str(), p["database"].c_str());
-        printf("       Set PG_HOST/PG_PORT/PG_USER/PG_PASSWORD/PG_DATABASE\n");
-        g_skipped++;
+        printf("[FAIL] PostgreSQL not available at %s:%s (user=%s database=%s)\n", p["host"].c_str(), p["port"].c_str(),
+               p["user"].c_str(), p["database"].c_str());
+        printf("       Run tools/test.sh integration for configured dependencies.\n");
+
         printf("\n=== Summary: passed=%d skipped=%d ===\n", g_passed, g_skipped);
-        return 0;
+        return 1;
     }
 
     test_connect_disconnect();

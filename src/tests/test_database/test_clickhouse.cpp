@@ -1,29 +1,20 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 // test_clickhouse.cpp — ClickHouse 驱动独立测试套件
 //
 // 设计原则：
 //   1. 每个测试函数自建自清数据，不依赖其他测试的状态
-//   2. 通过环境变量配置连接参数，ClickHouse 不可用时自动跳过
+//   2. 通过统一测试配置连接，必需依赖不可用时失败
 //   3. 每个测试使用唯一表名（时间戳后缀），避免并发冲突
 //
-// 环境变量：
-//   CH_HOST     (默认 127.0.0.1)
-//   CH_PORT     (默认 8123)
-//   CH_USER     (默认 default)
-//   CH_PASSWORD (默认 空)
-//   CH_DATABASE (默认 default)
-//
-#include <cassert>
-#include <cmath>
+// 配置来自 config/testing/environment.json；使用 tools/test.sh integration 执行。
+// 必需服务不可用时非零失败。
+#include <tests/common/test_environment.h>
 #include <atomic>
+#include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,8 +27,8 @@
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
 
-#include <services/database/drivers/clickhouse_driver.h>
 #include <services/database/capability_interfaces.h>
+#include <services/database/drivers/clickhouse_driver.h>
 
 using namespace flowsql;
 using namespace flowsql::database;
@@ -46,19 +37,13 @@ using namespace flowsql::database;
 // 全局：统计
 // ============================================================
 static int g_skipped = 0;
-static int g_passed  = 0;
+static int g_passed = 0;
 
 // ============================================================
 // 辅助：从环境变量读取连接参数
 // ============================================================
 static std::unordered_map<std::string, std::string> GetClickHouseParams() {
-    std::unordered_map<std::string, std::string> p;
-    p["host"]     = getenv("CH_HOST")     ? getenv("CH_HOST")     : "127.0.0.1";
-    p["port"]     = getenv("CH_PORT")     ? getenv("CH_PORT")     : "8123";
-    p["user"]     = getenv("CH_USER")     ? getenv("CH_USER")     : "flowsql_user";
-    p["password"] = getenv("CH_PASSWORD") ? getenv("CH_PASSWORD") : "flowSQL@user";
-    p["database"] = getenv("CH_DATABASE") ? getenv("CH_DATABASE") : "flowsql_db";
-    return p;
+    return flowsql::test::DriverParameters("clickhouse");
 }
 
 // ============================================================
@@ -79,7 +64,7 @@ static bool IsClickHouseAvailable() {
 // ============================================================
 static std::string UniqueTable(const char* prefix) {
     auto now = std::chrono::steady_clock::now().time_since_epoch();
-    auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
     return std::string(prefix) + "_" + std::to_string(ms);
 }
 
@@ -96,19 +81,19 @@ static void DropTableIfExists(IDbSession* session, const std::string& table) {
 // ============================================================
 static std::shared_ptr<arrow::RecordBatch> MakeTypeMatrixBatch() {
     auto schema = arrow::schema({
-        arrow::field("c_int32",   arrow::int32()),
-        arrow::field("c_int64",   arrow::int64()),
+        arrow::field("c_int32", arrow::int32()),
+        arrow::field("c_int64", arrow::int64()),
         arrow::field("c_float32", arrow::float32()),
         arrow::field("c_float64", arrow::float64()),
-        arrow::field("c_string",  arrow::utf8()),
-        arrow::field("c_bool",    arrow::boolean()),
+        arrow::field("c_string", arrow::utf8()),
+        arrow::field("c_bool", arrow::boolean()),
     });
 
-    arrow::Int32Builder   b_i32;
-    arrow::Int64Builder   b_i64;
-    arrow::FloatBuilder   b_f32;
-    arrow::DoubleBuilder  b_f64;
-    arrow::StringBuilder  b_str;
+    arrow::Int32Builder b_i32;
+    arrow::Int64Builder b_i64;
+    arrow::FloatBuilder b_f32;
+    arrow::DoubleBuilder b_f64;
+    arrow::StringBuilder b_str;
     arrow::BooleanBuilder b_bool;
 
     (void)b_i32.AppendValues({1, 2, 3});
@@ -142,8 +127,8 @@ void test_connect_disconnect() {
     assert(rc == 0);
     assert(driver.IsConnected());
     assert(driver.Ping());
-    printf("  Connected to %s:%s/%s, Ping OK\n",
-           params["host"].c_str(), params["port"].c_str(), params["database"].c_str());
+    printf("  Connected to %s:%s/%s, Ping OK\n", params["host"].c_str(), params["port"].c_str(),
+           params["database"].c_str());
 
     driver.Disconnect();
     assert(!driver.IsConnected());
@@ -162,7 +147,7 @@ void test_connect_wrong_password() {
     ClickHouseDriver driver;
     auto params = GetClickHouseParams();
     params["password"] = "definitely_wrong_password_xyz_12345";
-    params["user"]     = "nonexistent_user_xyz";
+    params["user"] = "nonexistent_user_xyz";
 
     int rc = driver.Connect(params);
     assert(rc != 0);
@@ -214,8 +199,7 @@ void test_ddl() {
     DropTableIfExists(session.get(), table);
 
     // 建表（ClickHouse MergeTree 引擎）
-    std::string create_sql = "CREATE TABLE " + table +
-        " (id Int32, name String) ENGINE = MergeTree() ORDER BY id";
+    std::string create_sql = "CREATE TABLE " + table + " (id Int32, name String) ENGINE = MergeTree() ORDER BY id";
     std::string error;
     int rc = session->ExecuteSql(create_sql.c_str());
     assert(rc == 0);
@@ -247,14 +231,13 @@ void test_execute_query_arrow() {
     // 建表并插入数据
     std::string error;
     assert(session->ExecuteSql(
-        ("CREATE TABLE " + table + " (id Int32, val String) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
-    assert(session->ExecuteSql(
-        ("INSERT INTO " + table + " VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma')").c_str()) == 0);
+               ("CREATE TABLE " + table + " (id Int32, val String) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
+    assert(session->ExecuteSql(("INSERT INTO " + table + " VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma')").c_str()) ==
+           0);
 
     // 查询
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-    int rc = session->ExecuteQueryArrow(("SELECT * FROM " + table + " ORDER BY id").c_str(),
-                                        &batches);
+    int rc = session->ExecuteQueryArrow(("SELECT * FROM " + table + " ORDER BY id").c_str(), &batches);
     assert(rc == 0);
     assert(!batches.empty());
 
@@ -263,8 +246,7 @@ void test_execute_query_arrow() {
     for (const auto& b : batches) total_rows += b->num_rows();
     assert(total_rows == 3);
     assert(batches[0]->num_columns() == 2);
-    printf("  Query returned %lld rows, %d columns\n",
-           (long long)total_rows, batches[0]->num_columns());
+    printf("  Query returned %lld rows, %d columns\n", (long long)total_rows, batches[0]->num_columns());
 
     DropTableIfExists(session.get(), table);
     g_passed++;
@@ -287,15 +269,14 @@ void test_write_arrow_batches() {
 
     std::string error;
     assert(session->ExecuteSql(
-        ("CREATE TABLE " + table +
-         " (id Int32, name String) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
+               ("CREATE TABLE " + table + " (id Int32, name String) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
 
     // 构造 batch
     auto schema = arrow::schema({
-        arrow::field("id",   arrow::int32()),
+        arrow::field("id", arrow::int32()),
         arrow::field("name", arrow::utf8()),
     });
-    arrow::Int32Builder  b_id;
+    arrow::Int32Builder b_id;
     arrow::StringBuilder b_name;
     (void)b_id.AppendValues({10, 20, 30});
     (void)b_name.AppendValues({"foo", "bar", "baz"});
@@ -338,11 +319,11 @@ void test_arrow_type_matrix() {
 
     std::string error;
     // ClickHouse 类型映射：Int32/Int64/Float32/Float64/String/Bool
-    assert(session->ExecuteSql(
-        ("CREATE TABLE " + table +
-         " (c_int32 Int32, c_int64 Int64, c_float32 Float32,"
-         "  c_float64 Float64, c_string String, c_bool Bool)"
-         " ENGINE = MergeTree() ORDER BY c_int32").c_str()) == 0);
+    assert(session->ExecuteSql(("CREATE TABLE " + table +
+                                " (c_int32 Int32, c_int64 Int64, c_float32 Float32,"
+                                "  c_float64 Float64, c_string String, c_bool Bool)"
+                                " ENGINE = MergeTree() ORDER BY c_int32")
+                                   .c_str()) == 0);
 
     auto batch = MakeTypeMatrixBatch();
     int rc = session->WriteArrowBatches(table.c_str(), {batch});
@@ -350,17 +331,14 @@ void test_arrow_type_matrix() {
 
     // 回读并逐列逐行验证
     std::vector<std::shared_ptr<arrow::RecordBatch>> read_batches;
-    rc = session->ExecuteQueryArrow(
-        ("SELECT * FROM " + table + " ORDER BY c_int32").c_str(),
-        &read_batches);
+    rc = session->ExecuteQueryArrow(("SELECT * FROM " + table + " ORDER BY c_int32").c_str(), &read_batches);
     assert(rc == 0);
     assert(!read_batches.empty());
 
     int64_t total = 0;
     for (const auto& b : read_batches) total += b->num_rows();
     assert(total == 3);
-    printf("  Read back %lld rows with %d columns\n",
-           (long long)total, read_batches[0]->num_columns());
+    printf("  Read back %lld rows with %d columns\n", (long long)total, read_batches[0]->num_columns());
 
     // 逐列逐行验证值（设计要求：不允许只验证行数）
     auto& rb = read_batches[0];
@@ -377,8 +355,8 @@ void test_arrow_type_matrix() {
     assert(col_i64->Value(0) == 100LL);
     assert(col_i64->Value(1) == 200LL);
     assert(col_i64->Value(2) == 300LL);
-    printf("  c_int64: %lld, %lld, %lld\n",
-           (long long)col_i64->Value(0), (long long)col_i64->Value(1), (long long)col_i64->Value(2));
+    printf("  c_int64: %lld, %lld, %lld\n", (long long)col_i64->Value(0), (long long)col_i64->Value(1),
+           (long long)col_i64->Value(2));
 
     // c_float32（浮点比较允许小误差）
     auto col_f32 = std::static_pointer_cast<arrow::FloatArray>(rb->column(2));
@@ -399,8 +377,8 @@ void test_arrow_type_matrix() {
     assert(col_str->GetString(0) == "hello");
     assert(col_str->GetString(1) == "world");
     assert(col_str->GetString(2) == "clickhouse");
-    printf("  c_string: %s, %s, %s\n",
-           col_str->GetString(0).c_str(), col_str->GetString(1).c_str(), col_str->GetString(2).c_str());
+    printf("  c_string: %s, %s, %s\n", col_str->GetString(0).c_str(), col_str->GetString(1).c_str(),
+           col_str->GetString(2).c_str());
 
     // c_bool（ClickHouse Bool 类型，Arrow 读回为 BooleanArray 或 UInt8Array，兼容两种）
     // 用 column type id 判断
@@ -410,16 +388,14 @@ void test_arrow_type_matrix() {
         assert(col_bool->Value(0) == true);
         assert(col_bool->Value(1) == false);
         assert(col_bool->Value(2) == true);
-        printf("  c_bool (BooleanArray): %d, %d, %d\n",
-               col_bool->Value(0), col_bool->Value(1), col_bool->Value(2));
+        printf("  c_bool (BooleanArray): %d, %d, %d\n", col_bool->Value(0), col_bool->Value(1), col_bool->Value(2));
     } else {
         // ClickHouse 某些版本将 Bool 映射为 UInt8
         auto col_u8 = std::static_pointer_cast<arrow::UInt8Array>(bool_col);
         assert(col_u8->Value(0) == 1);
         assert(col_u8->Value(1) == 0);
         assert(col_u8->Value(2) == 1);
-        printf("  c_bool (UInt8Array): %u, %u, %u\n",
-               col_u8->Value(0), col_u8->Value(1), col_u8->Value(2));
+        printf("  c_bool (UInt8Array): %u, %u, %u\n", col_u8->Value(0), col_u8->Value(1), col_u8->Value(2));
     }
 
     DropTableIfExists(session.get(), table);
@@ -443,12 +419,11 @@ void test_large_batch_write() {
 
     std::string error;
     assert(session->ExecuteSql(
-        ("CREATE TABLE " + table +
-         " (id Int32, val Float64) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
+               ("CREATE TABLE " + table + " (id Int32, val Float64) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
 
     // 构造 10000 行
     const int N = 10000;
-    arrow::Int32Builder  b_id;
+    arrow::Int32Builder b_id;
     arrow::DoubleBuilder b_val;
     for (int i = 0; i < N; ++i) {
         (void)b_id.Append(i);
@@ -458,7 +433,7 @@ void test_large_batch_write() {
     (void)b_id.Finish(&a_id);
     (void)b_val.Finish(&a_val);
     auto schema = arrow::schema({arrow::field("id", arrow::int32()), arrow::field("val", arrow::float64())});
-    auto batch  = arrow::RecordBatch::Make(schema, N, {a_id, a_val});
+    auto batch = arrow::RecordBatch::Make(schema, N, {a_id, a_val});
 
     int rc = session->WriteArrowBatches(table.c_str(), {batch});
     assert(rc == 0);
@@ -515,8 +490,7 @@ void test_error_nonexistent_table() {
 
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
     std::string error;
-    int rc = session->ExecuteQueryArrow(
-        "SELECT * FROM ch_nonexistent_table_xyz_12345", &batches);
+    int rc = session->ExecuteQueryArrow("SELECT * FROM ch_nonexistent_table_xyz_12345", &batches);
     assert(rc != 0);
     assert(session->GetLastError()[0] != '\0');
     printf("  Correctly failed: %s\n", session->GetLastError());
@@ -563,9 +537,8 @@ void test_concurrent_sessions() {
     std::string error;
     DropTableIfExists(setup_session.get(), table);
     assert(setup_session->ExecuteSql(
-        ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
-    assert(setup_session->ExecuteSql(
-        ("INSERT INTO " + table + " VALUES (1),(2),(3),(4),(5)").c_str()) == 0);
+               ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
+    assert(setup_session->ExecuteSql(("INSERT INTO " + table + " VALUES (1),(2),(3),(4),(5)").c_str()) == 0);
 
     const int THREADS = 8;
     std::atomic<int> success_count{0};
@@ -575,18 +548,25 @@ void test_concurrent_sessions() {
     for (int i = 0; i < THREADS; ++i) {
         threads.emplace_back([&driver, &table, &success_count, &fail_count]() {
             auto session = driver.CreateSession();
-            if (!session) { fail_count++; return; }
+            if (!session) {
+                fail_count++;
+                return;
+            }
 
             std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
             std::string err;
-            int rc = session->ExecuteQueryArrow(
-                ("SELECT * FROM " + table).c_str(), &batches);
-            if (rc != 0) { fail_count++; return; }
+            int rc = session->ExecuteQueryArrow(("SELECT * FROM " + table).c_str(), &batches);
+            if (rc != 0) {
+                fail_count++;
+                return;
+            }
 
             int64_t total = 0;
             for (const auto& b : batches) total += b->num_rows();
-            if (total == 5) success_count++;
-            else fail_count++;
+            if (total == 5)
+                success_count++;
+            else
+                fail_count++;
         });
     }
     for (auto& t : threads) t.join();
@@ -622,7 +602,7 @@ void test_concurrent_writers() {
         std::string error;
         DropTableIfExists(setup_session.get(), table);
         assert(setup_session->ExecuteSql(
-            ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
+                   ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
         tables.push_back(table);
     }
 
@@ -639,7 +619,7 @@ void test_concurrent_writers() {
             std::shared_ptr<arrow::Array> a_id;
             (void)b_id.Finish(&a_id);
             auto schema = arrow::schema({arrow::field("id", arrow::int32())});
-            auto batch  = arrow::RecordBatch::Make(schema, ROWS_PER_THREAD, {a_id});
+            auto batch = arrow::RecordBatch::Make(schema, ROWS_PER_THREAD, {a_id});
 
             std::string err;
             int rc = session->WriteArrowBatches(tables[i].c_str(), {batch});
@@ -715,13 +695,12 @@ void test_empty_result_set() {
     std::string table = UniqueTable("ch_test_empty");
     std::string error;
     DropTableIfExists(session.get(), table);
-    assert(session->ExecuteSql(
-        ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
+    assert(session->ExecuteSql(("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) ==
+           0);
 
     // 查询空表
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-    int rc = session->ExecuteQueryArrow(
-        ("SELECT * FROM " + table + " WHERE 1=0").c_str(), &batches);
+    int rc = session->ExecuteQueryArrow(("SELECT * FROM " + table + " WHERE 1=0").c_str(), &batches);
     assert(rc == 0);
     assert(batches.empty());
     printf("  Empty result set: batches.size()=%zu\n", batches.size());
@@ -768,11 +747,9 @@ void test_concurrent_read_write_mixed() {
     std::string table = UniqueTable("ch_test_rw_mixed");
     std::string error;
     DropTableIfExists(setup.get(), table);
-    assert(setup->ExecuteSql(
-        ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
+    assert(setup->ExecuteSql(("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
     // 预写 10 行，保证读线程有数据可读
-    assert(setup->ExecuteSql(
-        ("INSERT INTO " + table + " SELECT number FROM numbers(10)").c_str()) == 0);
+    assert(setup->ExecuteSql(("INSERT INTO " + table + " SELECT number FROM numbers(10)").c_str()) == 0);
 
     const int READERS = 8, WRITERS = 4;
     std::atomic<int> read_ok{0}, write_ok{0}, read_fail{0};
@@ -781,12 +758,17 @@ void test_concurrent_read_write_mixed() {
     for (int i = 0; i < READERS; ++i) {
         threads.emplace_back([&driver, &table, &read_ok, &read_fail]() {
             auto s = driver.CreateSession();
-            if (!s) { read_fail++; return; }
+            if (!s) {
+                read_fail++;
+                return;
+            }
             std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
             std::string err;
             int rc = s->ExecuteQueryArrow(("SELECT * FROM " + table).c_str(), &batches);
-            if (rc == 0) read_ok++;
-            else read_fail++;
+            if (rc == 0)
+                read_ok++;
+            else
+                read_fail++;
         });
     }
     for (int i = 0; i < WRITERS; ++i) {
@@ -798,15 +780,14 @@ void test_concurrent_read_write_mixed() {
             std::shared_ptr<arrow::Array> a;
             (void)b.Finish(&a);
             auto schema = arrow::schema({arrow::field("id", arrow::int32())});
-            auto batch  = arrow::RecordBatch::Make(schema, 5, {a});
+            auto batch = arrow::RecordBatch::Make(schema, 5, {a});
             std::string err;
             if (s->WriteArrowBatches(table.c_str(), {batch}) == 0) write_ok++;
         });
     }
     for (auto& t : threads) t.join();
 
-    printf("  read_ok=%d read_fail=%d write_ok=%d\n",
-           read_ok.load(), read_fail.load(), write_ok.load());
+    printf("  read_ok=%d read_fail=%d write_ok=%d\n", read_ok.load(), read_fail.load(), write_ok.load());
     assert(read_fail == 0);
     assert(read_ok == READERS);
     assert(write_ok == WRITERS);
@@ -831,9 +812,9 @@ void test_concurrent_connect_failure() {
         threads.emplace_back([&fail_count]() {
             ClickHouseDriver driver;
             std::unordered_map<std::string, std::string> bad_params;
-            bad_params["host"]     = "127.0.0.1";
-            bad_params["port"]     = "19999";  // 不可达端口
-            bad_params["user"]     = "default";
+            bad_params["host"] = "127.0.0.1";
+            bad_params["port"] = "19999";  // 不可达端口
+            bad_params["user"] = "default";
             bad_params["password"] = "";
             bad_params["database"] = "default";
             int rc = driver.Connect(bad_params);
@@ -867,19 +848,18 @@ void test_nullable_null_handling() {
     std::string table = UniqueTable("ch_test_nullable");
     std::string error;
     DropTableIfExists(session.get(), table);
-    assert(session->ExecuteSql(
-        ("CREATE TABLE " + table +
-         " (id Int32, val Nullable(String))"
-         " ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
+    assert(session->ExecuteSql(("CREATE TABLE " + table +
+                                " (id Int32, val Nullable(String))"
+                                " ENGINE = MergeTree() ORDER BY id")
+                                   .c_str()) == 0);
 
     // 直接用 SQL 插入含 NULL 的数据
-    assert(session->ExecuteSql(
-        ("INSERT INTO " + table + " VALUES (1, 'hello'), (2, NULL), (3, 'world')").c_str()) == 0);
+    assert(session->ExecuteSql(("INSERT INTO " + table + " VALUES (1, 'hello'), (2, NULL), (3, 'world')").c_str()) ==
+           0);
 
     // 回读验证
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-    int rc = session->ExecuteQueryArrow(
-        ("SELECT * FROM " + table + " ORDER BY id").c_str(), &batches);
+    int rc = session->ExecuteQueryArrow(("SELECT * FROM " + table + " ORDER BY id").c_str(), &batches);
     assert(rc == 0);
     assert(!batches.empty());
 
@@ -893,8 +873,7 @@ void test_nullable_null_handling() {
     assert(val_col->IsNull(1));    // 第二行（index=1）应为 NULL
     assert(!val_col->IsNull(0));   // 第一行非 NULL
     assert(!val_col->IsNull(2));   // 第三行非 NULL
-    printf("  Row 0: non-null, Row 1: null=%s, Row 2: non-null\n",
-           val_col->IsNull(1) ? "true" : "false");
+    printf("  Row 0: non-null, Row 1: null=%s, Row 2: non-null\n", val_col->IsNull(1) ? "true" : "false");
 
     DropTableIfExists(session.get(), table);
     g_passed++;
@@ -916,8 +895,8 @@ void test_multi_batch_write() {
     std::string table = UniqueTable("ch_test_multibatch");
     std::string error;
     DropTableIfExists(session.get(), table);
-    assert(session->ExecuteSql(
-        ("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) == 0);
+    assert(session->ExecuteSql(("CREATE TABLE " + table + " (id Int32) ENGINE = MergeTree() ORDER BY id").c_str()) ==
+           0);
 
     // 构造 3 个 batch，各 100 行
     const int BATCHES = 3, ROWS = 100;
@@ -936,8 +915,7 @@ void test_multi_batch_write() {
 
     // 回读验证总行数
     std::vector<std::shared_ptr<arrow::RecordBatch>> read_batches;
-    rc = session->ExecuteQueryArrow(
-        ("SELECT count() FROM " + table).c_str(), &read_batches);
+    rc = session->ExecuteQueryArrow(("SELECT count() FROM " + table).c_str(), &read_batches);
     assert(rc == 0);
     auto count_col = std::static_pointer_cast<arrow::UInt64Array>(read_batches[0]->column(0));
     int64_t total = static_cast<int64_t>(count_col->Value(0));
@@ -977,8 +955,7 @@ void test_injection_error_distinction() {
 
     // 场景 2：查询不存在的表 — 错误应包含表名相关信息
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-    int rc2 = session->ExecuteQueryArrow(
-        "SELECT * FROM ch_nonexistent_xyz_99999", &batches);
+    int rc2 = session->ExecuteQueryArrow("SELECT * FROM ch_nonexistent_xyz_99999", &batches);
     assert(rc2 != 0);
     assert(session->GetLastError()[0] != '\0');
     std::string saved_error2 = session->GetLastError();
@@ -1010,9 +987,9 @@ int main() {
     test_connect_unreachable();
 
     if (!IsClickHouseAvailable()) {
-        printf("\n[SKIP] ClickHouse not available, skipping T1/T4-T16\n");
-        printf("  Set CH_HOST/CH_PORT/CH_USER/CH_PASSWORD/CH_DATABASE to enable\n");
-        g_skipped += 14;
+        printf("\n[FAIL] ClickHouse not available, required dependency failed\n");
+        printf("  Run tools/test.sh integration to prepare configured dependencies\n");
+        return 1;
     } else {
         test_connect_disconnect();
         test_ddl();
@@ -1038,4 +1015,3 @@ int main() {
     printf("\n=== Results: %d passed, %d skipped ===\n", g_passed, g_skipped);
     return 0;
 }
-

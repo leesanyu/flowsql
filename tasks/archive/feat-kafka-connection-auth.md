@@ -1,7 +1,7 @@
 # Feature: Kafka 连接与认证及通道 Web 管理
 
 标识：`kafka-connection-auth`
-状态：`[ ]` 待实施；本文件为规格，全部 Feature Task 尚未执行。
+状态：`[x]` 已完成；T1～T5 已按顺序实施并完整验收，2026-10-14 归档。
 优先级：P1
 前置 Feature：`web-console`、`routing-services`、`operator-catalog`（均已完成）。
 后续消费者：`kafka-log-source`、`kafka-result-sink`、`kafka-packet-source`、`kafka-packet-sink`。
@@ -108,6 +108,7 @@ OpenSession 原子校验角色、冻结两类 revision 并取得租约，在锁�
 网络认证由 Probe 或后续数据操作驱动，取消通过已返回会话生效；查询/管理锁不覆盖网络、续期或方法排空。
 Cancel 与轮询/认证等待可并发，Release 销毁客户端并归还租约；Provider 停止先取消并排空会话，再释放库和配置存储。
 每个 source 会话独立拥有消费组/分区状态，每个 sink 会话独立拥有在途发送状态；both 不共享取消或位点。
+管理发现额外使用独立 IID 的 IKafkaChannelCatalogV1 返回无秘密的角色和方向能力，不创建客户端；Scheduler 据此在数据适配器未安装时返回稳定错误。
 后续数据 Feature 通过 QueryInterface 获取独立版本化能力；返回指针借用至 Release，不支持时返回 ENOTSUP 和空值。
 新增 reader/writer 能力在后续规格冻结，不改变本接口、不暴露 librdkafka 指针，不让数据走控制面 HTTP。
 
@@ -202,11 +203,11 @@ Web 列表显示名称、角色、Topic、连接、协议/机制、配置 revisi
 
 ## Feature Task
 
-- `[ ]` T1：交付冻结的依赖清单、可复现构建与共享缓存、连接/通道/租约公共契约及持久化，确认实际能力与 GSSAPI 多身份隔离，保证角色隔离、原子配置和重启恢复。
-- `[ ]` T2：交付基于系统认证组件的 TLS、PLAIN/SCRAM、Kerberos 和 OAuth 客户端及凭证生命周期，保证标准认证、刷新和失败行为可验证。
-- `[ ]` T3：交付脱敏 CRUD、独立连接验证及管理发现控制面，保证保存、验证、使用中保护和数据就绪状态有明确结果。
-- `[ ]` T4：交付 Kafka 连接与 source/sink/both 通道的完整 Web 管理，使用户无需手写服务端配置即可完成日常操作。
-- `[ ]` T5：交付完整运行时依赖、真实认证矩阵、Web 联验及原生/Docker 部署回归，使标准机制、管理流程和既有通道在最终运行环境中可用。
+- `[x]` T1：交付冻结的依赖清单、可复现构建与共享缓存、连接/通道/租约公共契约及持久化，确认实际能力与 GSSAPI 多身份隔离，保证角色隔离、原子配置和重启恢复。
+- `[x]` T2：交付基于系统认证组件的 TLS、PLAIN/SCRAM、Kerberos 和 OAuth 客户端及凭证生命周期，保证标准认证、刷新和失败行为可验证。
+- `[x]` T3：交付脱敏 CRUD、独立连接验证及管理发现控制面，保证保存、验证、使用中保护和数据就绪状态有明确结果。
+- `[x]` T4：交付 Kafka 连接与 source/sink/both 通道的完整 Web 管理，使用户无需手写服务端配置即可完成日常操作。
+- `[x]` T5：交付完整运行时依赖、真实认证矩阵、Web 联验及原生/Docker 部署回归，使标准机制、管理流程和既有通道在最终运行环境中可用。
 
 ## 测试锚点与完成出口
 
@@ -231,4 +232,24 @@ T1～T5 全部达到后才完成 Feature；真实环境覆盖四类安全协议�
 
 ## 完成证据
 
-本 Feature 尚未实施；本节只在实际验证后记录证据，不将规格撰写或客户端文档列为通过的认证结果。
+- T1 已完成：固定 librdkafka 2.16.0 与源码 SHA256、私有 GSSAPI credential-store 补丁、依赖构建及匹配缓存复用通过；实际能力覆盖声明机制与 codec。
+- T1 身份验证：真实临时 KDC 下两 principal 完成 40 次并行 GSSAPI 握手，私有身份隔离且全局缓存保持；不作为 T2/T5 Kafka 全认证矩阵通过的证据。
+- T1 公共头文件及 SQLite Store 已交付；目标编译、test_kafka_channel_admin 1/1（0.14 秒）、clang-format 与 Diff 检查通过，覆盖角色、租约、引用、并发 revision、秘密加密和重启恢复。
+- T1 本地证据缓存：evidence/kafka-connection-auth/t1-*.log，未入库。
+
+- T2 已完成：Provider/客户端构建及两个定向 CTest 通过；真实 Kafka 4.1.0 覆盖九组基础认证、GSSAPI 双身份并行与 70 秒续期、HTTPS 签名 OAuth 与刷新，六类失败/副作用检查通过，共 18 项；无秘密输出，权限保持 unverified。
+- T2 证据：evidence/kafka-connection-auth/t2-native-matrix.log、native-matrix/results.json 及各案例日志（未入库）；客户端/Provider clang-format 通过。
+
+- T3 已完成：脱敏 CRUD/definitions、草稿/已保存配置异步验证、202/429 与八并发、取消/停止释放、revision 与旧验证失效、只读 Catalog IID 和 SQL 角色/适配器边界通过；Web/Gateway/Router/Kafka 真 HTTP 及四个 CTest 4/4（2.59 秒）通过。
+- T3 构建、改动行格式和 Diff 检查通过；完整证据位于 evidence/kafka-connection-auth/t3-*.log，未入库。
+
+- T4 已完成：Kafka 两页签、完整 CRUD/详情/复制、条件认证与引用/秘密操作、草稿验证/取消、409 保留及使用中保护；35 个前端测试（含真实 Vue 交互与既有 Stream 回归）通过，Vite build 通过；证据 t4-frontend-tests.log、t4-vite.log 未入库。
+
+- T5 已完成：最终配置及全量构建成功退出；固定依赖源码校验、五项缓存/失败/并发检查、离线匹配复用与完整运行库/SASL 插件/kinit/CA 检查通过。
+- 最终原生与 Docker 各 21/21 真实认证矩阵通过：四类协议、mTLS、PLAIN、双 SCRAM、不同 Topic ACL 下两 principal 并行及 70 秒续期、HTTPS 签名 OAuth 自动刷新；七类失败与两种续期失败通过。每组正常认证均完成客户端和真实 Web/Gateway/Router/Provider HTTP 联验。
+- 元数据副作用检查通过：测试 broker 开启自动创建仍未创建缺失 Topic，消费组为空，测试 Topic 尾位点为零；读写权限保持 unverified。
+- 原生/Docker 的真实 flowsql --config 入口、配置文件加载、连接/通道与加密秘密跨重启恢复、keep 解密复用、验证结果不跨重启、租约释放通过；Docker 配置/秘密只读挂载、持久状态和 0700 临时目录通过。
+- 最终镜像 flowsql:kafka-auth 已构建，Kafka/Web/Router/Scheduler 插件 SHA256 与最后原生构建一致；Docker Desktop 的测试身份服务在独立夹具中运行，子客户端使用未增加测试组件的发布镜像。
+- 全量 CTest 98/98（435.76 秒）、前端 35/35、Vite build、clang-format、Python/脚本语法、Diff 和允许范围检查通过。既有 Baseliner 回归补齐外部数据库测试配置与临时目录后通过，未修改该 Feature 代码。
+- 用户文档 docs/kafka.md、安全示例与 Compose 覆盖、依赖版本/许可证元数据已交付；已有部署有效配置、用户其他文件、HEAD 与暂存区保持。T1～T5 全部完成，Backlog 标记 [x]，工作台 WIP=0；未提交或推送。
+- 最终本地证据（未入库）：evidence/kafka-connection-auth/t5-acceptance.json、t5-ctest-final.log、t5-native-matrix-accepted.log、t5-docker-matrix-final.log、real-native/results.json、real-docker-container-client/results.json、t5-*-deployment-final.log、t5-plugin-hashes.json、t5-source-hashes.json、t5-final-scope.json。

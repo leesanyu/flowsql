@@ -98,3 +98,13 @@ build/output/static/
 *.egg-info/
 __pycache__/
 *.pyc
+
+# Deployment-owned Kafka credentials, local configuration and state.
+/secrets/
+/runtime/kafka/
+/meta/kafka.db*
+/config/kafka/provider.json
+/config/kafka/deploy-scheduler.yaml
+
+# Private, reproducible test environment state and dependency cache.
+/.test-environment/

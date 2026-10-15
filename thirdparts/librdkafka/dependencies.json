@@ -1,0 +1,105 @@
+{
+  "librdkafka": {
+    "version": "2.16.0",
+    "url": "https://codeload.github.com/confluentinc/librdkafka/tar.gz/refs/tags/v2.16.0",
+    "sha256": "e6b61de61d3282879a88e4ee3d9f634a8b05bf78a9198dfc25c4820c0c9ed231",
+    "license": "BSD-2-Clause",
+    "link": "static-pic-private",
+    "patch": "gssapi-session-cache.patch"
+  },
+  "platform": "Linux x86_64 Ubuntu 24.04",
+  "required_features": [
+    "ssl",
+    "sasl",
+    "sasl_plain",
+    "sasl_scram",
+    "sasl_gssapi",
+    "sasl_oauthbearer",
+    "http",
+    "oidc",
+    "gzip",
+    "lz4",
+    "zstd"
+  ],
+  "system_packages": [
+    "libssl-dev",
+    "libcurl4-openssl-dev",
+    "libsasl2-dev",
+    "libsasl2-modules-gssapi-mit",
+    "libkrb5-dev",
+    "krb5-user",
+    "zlib1g-dev",
+    "liblz4-dev",
+    "libzstd-dev"
+  ],
+  "system_components": [
+    {
+      "name": "OpenSSL",
+      "verified_version": "3.0.13",
+      "runtime_abi": "libssl.so.3 / libcrypto.so.3",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "libcurl",
+      "verified_version": "8.5.0",
+      "runtime_abi": "libcurl.so.4",
+      "license": "curl"
+    },
+    {
+      "name": "Cyrus SASL",
+      "verified_version": "2.1.28",
+      "runtime_abi": "libsasl2.so.2 / libgssapiv2.so.2",
+      "license": "BSD-style"
+    },
+    {
+      "name": "MIT Kerberos",
+      "verified_version": "1.20.1",
+      "runtime_abi": "libgssapi_krb5.so.2 / libkrb5.so.3",
+      "license": "MIT-style"
+    },
+    {
+      "name": "zlib",
+      "verified_version": "1.3",
+      "runtime_abi": "libz.so.1",
+      "license": "Zlib"
+    },
+    {
+      "name": "lz4",
+      "verified_version": "1.9.4",
+      "runtime_abi": "liblz4.so.1",
+      "license": "BSD-2-Clause"
+    },
+    {
+      "name": "zstd",
+      "verified_version": "1.5.5",
+      "runtime_abi": "libzstd.so.1",
+      "license": "BSD-3-Clause"
+    }
+  ],
+  "abi_scope": "Ubuntu 24.04 Linux x86_64; compatible security updates within listed SONAMEs; authentication regression required on upgrade",
+  "build_options": {
+    "PIC": true,
+    "static": true,
+    "ssl": true,
+    "sasl_cyrus": true,
+    "curl_oidc": true,
+    "gzip": true,
+    "snappy": "bundled",
+    "lz4": "system",
+    "zstd": "system",
+    "plugins": false
+  },
+  "runtime_packages": [
+    "libssl3t64",
+    "libcurl4t64",
+    "libsasl2-2",
+    "libsasl2-modules-gssapi-mit",
+    "libgssapi-krb5-2",
+    "libkrb5-3",
+    "krb5-user",
+    "zlib1g",
+    "liblz4-1",
+    "libzstd1",
+    "ca-certificates"
+  ]
+}

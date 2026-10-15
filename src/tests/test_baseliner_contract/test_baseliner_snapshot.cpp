@@ -4,6 +4,7 @@
 #include <operators/baseliner/snapshot_input.h>
 #include <operators/baseliner/snapshot_reader.h>
 #include <services/database/database_plugin.h>
+#include <tests/common/test_environment.h>
 #include <unistd.h>
 #include <cassert>
 #include <cstdio>
@@ -606,11 +607,8 @@ void Test(database::DatabasePlugin& plugin, const std::string& category, const s
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     assert(ToBucket(-1, 60) == -1 && ToBucket(60, 60) == 1);
-    const char* path = std::getenv("BASELINER_TEST_DB_OPTIONS");
-    Check(path != nullptr, "BASELINER_TEST_DB_OPTIONS required (four real sources, no skip)");
-    std::ifstream file(path);
     std::ostringstream options;
-    options << file.rdbuf();
+    options << flowsql::test::BaselinerOptions();
     database::DatabasePlugin plugin;
     const int saved = dup(STDOUT_FILENO);
     FILE* quiet = std::fopen("/dev/null", "w");

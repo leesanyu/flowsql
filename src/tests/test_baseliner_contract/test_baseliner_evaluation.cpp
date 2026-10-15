@@ -4,6 +4,7 @@
 #include <operators/baseliner/result_codec.h>
 #include <plugins/baseline/baseline_plugin.h>
 #include <rapidjson/document.h>
+#include <tests/common/test_environment.h>
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -467,7 +468,7 @@ void SampledAndDownweight() {
     }
 }
 void RelationVersionsAndForecast() {
-    const std::string path = "/tmp/baseline-operator-t4/relation-fast.yaml";
+    const std::string path = flowsql::test::WorkspacePath("baseline-operator-t4/relation-fast.yaml");
     std::ofstream(path) << R"(baseline:
   rolling_config:
     relation_rolling:
@@ -575,7 +576,7 @@ void RelationVersionsAndForecast() {
     task->Close();
 }
 void FinalModelParameters() {
-    const std::string path = "/tmp/baseline-operator-t4/model-parameters.yaml";
+    const std::string path = flowsql::test::WorkspacePath("baseline-operator-t4/model-parameters.yaml");
     std::ofstream(path) << R"(baseline:
   rolling_config:
     relation_rolling:

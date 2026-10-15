@@ -23,6 +23,7 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <services/database/database_plugin.h>
+#include <tests/common/test_environment.h>
 #include <unistd.h>
 #include <cassert>
 #include <chrono>
@@ -1311,15 +1312,15 @@ int main() {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     QueryOwnership();
     if (std::getenv("BASELINER_QUERY_OWNERSHIP_ONLY")) return 0;
-    const char* path = std::getenv("BASELINER_PRODUCTION_DB_OPTIONS");
-    if (!path) path = std::getenv("BASELINER_TEST_DB_OPTIONS");
-    assert(path);
-    std::ifstream input(path);
     std::ostringstream o;
-    o << input.rdbuf();
-    assert(!o.str().empty());
+    auto configured = flowsql::test::BaselinerOptions(true);
+    for (const auto* backend : {"sqlite", "mysql", "postgres", "clickhouse"}) {
+        const auto name = std::string("name=t73") + backend;
+        configured.replace(configured.find(name), name.size(), std::string("name=t2") + backend);
+    }
+    o << configured;
     auto unique = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-    auto root = "/tmp/baseline-operator-t73/production-" + unique;
+    auto root = flowsql::test::WorkspacePath("baseline-operator-t73/production-") + unique;
     std::filesystem::create_directories(root);
     std::ofstream(root + "/stream.yml") << "stream:\n  channels: []\n";
     Pcap(root + "/input.pcap");

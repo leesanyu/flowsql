@@ -1,13 +1,9 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
-#include <cassert>
+#include <tests/common/test_environment.h>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -22,12 +18,12 @@
 #include <rapidjson/document.h>
 
 #include <common/error_code.h>
-#include <common/loader.hpp>
 #include <framework/core/dataframe.h>
 #include <framework/core/sql_parser.h>
 #include <framework/interfaces/idatabase_channel.h>
 #include <framework/interfaces/idatabase_factory.h>
 #include <framework/interfaces/irouter_handle.h>
+#include <common/loader.hpp>
 
 using namespace flowsql;
 
@@ -61,53 +57,30 @@ static std::string TABLE_ADULTS;  // e2e_adults_<suffix>
 // 辅助：获取 MySQL 连接参数（从环境变量读取）
 // ============================================================
 static std::unordered_map<std::string, std::string> GetMysqlParams() {
-    std::unordered_map<std::string, std::string> p;
-    p["host"]     = getenv("MYSQL_HOST")     ? getenv("MYSQL_HOST")     : "127.0.0.1";
-    p["port"]     = getenv("MYSQL_PORT")     ? getenv("MYSQL_PORT")     : "3306";
-    p["user"]     = getenv("MYSQL_USER")     ? getenv("MYSQL_USER")     : "flowsql_user";
-    p["password"] = getenv("MYSQL_PASSWORD") ? getenv("MYSQL_PASSWORD") : "flowSQL@user";
-    p["database"] = getenv("MYSQL_DATABASE") ? getenv("MYSQL_DATABASE") : "flowsql_db";
-    p["charset"]  = "utf8mb4";
-    return p;
+    return flowsql::test::DriverParameters("mysql");
 }
 
 // 辅助：构建 plugin option 字符串
 static std::string MakeMysqlOption(const std::string& name) {
     auto p = GetMysqlParams();
-    return "type=mysql;name=" + name +
-           ";host=" + p["host"] +
-           ";port=" + p["port"] +
-           ";user=" + p["user"] +
-           ";password=" + p["password"] +
-           ";database=" + p["database"] +
-           ";charset=" + p["charset"];
+    return "type=mysql;name=" + name + ";host=" + p["host"] + ";port=" + p["port"] + ";user=" + p["user"] +
+           ";password=" + p["password"] + ";database=" + p["database"] + ";charset=" + p["charset"];
 }
 
 static std::unordered_map<std::string, std::string> GetPostgresParams() {
-    std::unordered_map<std::string, std::string> p;
-    p["host"] = getenv("PG_HOST") ? getenv("PG_HOST") : "127.0.0.1";
-    p["port"] = getenv("PG_PORT") ? getenv("PG_PORT") : "5432";
-    p["user"] = getenv("PG_USER") ? getenv("PG_USER") : "flowsql_user";
-    p["password"] = getenv("PG_PASSWORD") ? getenv("PG_PASSWORD") : "flowSQL@postgres";
-    p["database"] = getenv("PG_DATABASE") ? getenv("PG_DATABASE") : "flowsql_db";
-    p["timeout"] = "5";
-    return p;
+    auto parameters = flowsql::test::DriverParameters("postgres");
+    parameters["timeout"] = "3";
+    return parameters;
 }
 
 static std::string MakePostgresOption(const std::string& name) {
     auto p = GetPostgresParams();
-    return "type=postgres;name=" + name +
-           ";host=" + p["host"] +
-           ";port=" + p["port"] +
-           ";user=" + p["user"] +
-           ";password=" + p["password"] +
-           ";database=" + p["database"] +
-           ";timeout=" + p["timeout"];
+    return "type=postgres;name=" + name + ";host=" + p["host"] + ";port=" + p["port"] + ";user=" + p["user"] +
+           ";password=" + p["password"] + ";database=" + p["database"] + ";timeout=" + p["timeout"];
 }
 
 // 辅助：将 Arrow RecordBatch 序列化为 IPC buffer
-static std::shared_ptr<arrow::Buffer> SerializeBatch(
-        const std::shared_ptr<arrow::RecordBatch>& batch) {
+static std::shared_ptr<arrow::Buffer> SerializeBatch(const std::shared_ptr<arrow::RecordBatch>& batch) {
     auto sink = arrow::io::BufferOutputStream::Create().ValueOrDie();
     auto ipc_w = arrow::ipc::MakeStreamWriter(sink, batch->schema()).ValueOrDie();
     (void)ipc_w->WriteRecordBatch(*batch);
@@ -131,8 +104,10 @@ static bool StartsWith(const std::string& text, const std::string& prefix) {
 static std::string QuoteMySqlIdentifier(const std::string& name) {
     std::string result = "`";
     for (char c : name) {
-        if (c == '`') result += "``";
-        else result += c;
+        if (c == '`')
+            result += "``";
+        else
+            result += c;
     }
     result += "`";
     return result;
@@ -158,9 +133,7 @@ static void CleanupMysqlE2eTables(IDatabaseChannel* db_ch) {
     reader->Release();
 
     for (const auto& table : tables) {
-        if (StartsWith(table, "e2e_") ||
-            StartsWith(table, "mt_readers_") ||
-            StartsWith(table, "mt_writers_")) {
+        if (StartsWith(table, "e2e_") || StartsWith(table, "mt_readers_") || StartsWith(table, "mt_writers_")) {
             db_ch->ExecuteSql(("DROP TABLE IF EXISTS " + QuoteMySqlIdentifier(table)).c_str());
         }
     }
@@ -242,21 +215,28 @@ void test_create_reader() {
     // 数据准备：通过 CreateWriter 写入测试数据（自动建表）
     {
         auto schema = arrow::schema({
-            arrow::field("id",    arrow::int64()),
-            arrow::field("name",  arrow::utf8()),
+            arrow::field("id", arrow::int64()),
+            arrow::field("name", arrow::utf8()),
             arrow::field("score", arrow::float64()),
         });
-        arrow::Int64Builder  id_b;
+        arrow::Int64Builder id_b;
         arrow::StringBuilder name_b;
-        arrow::DoubleBuilder  score_b;
-        (void)id_b.Append(1); (void)id_b.Append(2); (void)id_b.Append(3);
-        (void)name_b.Append("Alice"); (void)name_b.Append("Bob"); (void)name_b.Append("Charlie");
-        (void)score_b.Append(95.5); (void)score_b.Append(87.3); (void)score_b.Append(92.1);
-        auto batch = arrow::RecordBatch::Make(schema, 3, {
-            id_b.Finish().ValueOrDie(),
-            name_b.Finish().ValueOrDie(),
-            score_b.Finish().ValueOrDie(),
-        });
+        arrow::DoubleBuilder score_b;
+        (void)id_b.Append(1);
+        (void)id_b.Append(2);
+        (void)id_b.Append(3);
+        (void)name_b.Append("Alice");
+        (void)name_b.Append("Bob");
+        (void)name_b.Append("Charlie");
+        (void)score_b.Append(95.5);
+        (void)score_b.Append(87.3);
+        (void)score_b.Append(92.1);
+        auto batch = arrow::RecordBatch::Make(schema, 3,
+                                              {
+                                                  id_b.Finish().ValueOrDie(),
+                                                  name_b.Finish().ValueOrDie(),
+                                                  score_b.Finish().ValueOrDie(),
+                                              });
         WriteTestData(db_ch, TABLE_USERS.c_str(), batch);
     }
 
@@ -296,23 +276,27 @@ void test_create_writer() {
     assert(rc == 0 && writer != nullptr);
 
     auto schema = arrow::schema({
-        arrow::field("key",    arrow::int64()),
-        arrow::field("value",  arrow::utf8()),
+        arrow::field("key", arrow::int64()),
+        arrow::field("value", arrow::utf8()),
         arrow::field("amount", arrow::float64()),
     });
 
-    arrow::Int64Builder  key_b;
+    arrow::Int64Builder key_b;
     arrow::StringBuilder val_b;
-    arrow::DoubleBuilder  amt_b;
-    (void)key_b.Append(100); (void)key_b.Append(200);
-    (void)val_b.Append("hello"); (void)val_b.Append("world");
-    (void)amt_b.Append(3.14); (void)amt_b.Append(2.71);
+    arrow::DoubleBuilder amt_b;
+    (void)key_b.Append(100);
+    (void)key_b.Append(200);
+    (void)val_b.Append("hello");
+    (void)val_b.Append("world");
+    (void)amt_b.Append(3.14);
+    (void)amt_b.Append(2.71);
 
-    auto batch = arrow::RecordBatch::Make(schema, 2, {
-        key_b.Finish().ValueOrDie(),
-        val_b.Finish().ValueOrDie(),
-        amt_b.Finish().ValueOrDie(),
-    });
+    auto batch = arrow::RecordBatch::Make(schema, 2,
+                                          {
+                                              key_b.Finish().ValueOrDie(),
+                                              val_b.Finish().ValueOrDie(),
+                                              amt_b.Finish().ValueOrDie(),
+                                          });
 
     auto buf = SerializeBatch(batch);
     rc = writer->Write(buf->data(), static_cast<size_t>(buf->size()));
@@ -328,7 +312,8 @@ void test_create_writer() {
     IBatchReader* reader = nullptr;
     rc = db_ch->CreateReader(("SELECT * FROM " + TABLE_AUTO).c_str(), &reader);
     assert(rc == 0 && reader != nullptr);
-    const uint8_t* rbuf = nullptr; size_t rlen = 0;
+    const uint8_t* rbuf = nullptr;
+    size_t rlen = 0;
     assert(reader->Next(&rbuf, &rlen) == 0);
     printf("  Verified: read back %zu bytes\n", rlen);
     reader->Close();
@@ -383,8 +368,7 @@ void test_sql_parser_where() {
         assert(stmt.dest == "result");
     }
     {
-        auto stmt = parser.Parse(
-            "SELECT col1, col2 FROM mysql.mydb.users WHERE age>18 USING explore.chisquare");
+        auto stmt = parser.Parse("SELECT col1, col2 FROM mysql.mydb.users WHERE age>18 USING explore.chisquare");
         assert(stmt.error.empty());
         assert(stmt.where_clause == "age>18");
         assert(stmt.columns.size() == 2);
@@ -392,17 +376,27 @@ void test_sql_parser_where() {
         assert(stmt.op_name == "chisquare");
     }
     {
-        auto stmt = parser.Parse(
-            "SELECT * FROM mysql.db1.orders WHERE status='pending' AND amount>1000 INTO result");
+        auto stmt = parser.Parse("SELECT * FROM mysql.db1.orders WHERE status='pending' AND amount>1000 INTO result");
         assert(stmt.error.empty());
         assert(stmt.where_clause == "status='pending' AND amount>1000");
         assert(stmt.dest == "result");
     }
     {
-        auto stmt = parser.Parse(
-            "SELECT * FROM mysql.mydb.users WHERE age>18; DROP TABLE users");
-        assert(!stmt.error.empty());
-        printf("  Injection rejected: %s\n", stmt.error.c_str());
+        auto stmt = parser.Parse("SELECT * FROM mysql.mydb.users WHERE age>18; DROP TABLE users");
+        // Native database SQL remains intact in Parse; standalone predicate validation is separate.
+        assert(stmt.error.empty());
+        assert(stmt.where_clause == "age>18; DROP TABLE users");
+        assert(!SqlParser::ValidateWhereClause(stmt.where_clause));
+        auto* factory = static_cast<IDatabaseFactory*>(PluginLoader::Single()->First(IID_DATABASE_FACTORY));
+        auto* channel = factory->Get("mysql", "testdb");
+        IBatchReader* rejected = nullptr;
+        const auto injected = "SELECT * FROM " + TABLE_USERS + "; DROP TABLE " + TABLE_USERS;
+        assert(channel->CreateReader(injected.c_str(), &rejected) != 0 && !rejected);
+        IBatchReader* retained = nullptr;
+        assert(channel->CreateReader(("SELECT * FROM " + TABLE_USERS).c_str(), &retained) == 0 && retained);
+        retained->Close();
+        retained->Release();
+        printf("  Native SQL preserved; multiple statements rejected; table retained\n");
     }
     {
         auto stmt = parser.Parse("SELECT * FROM test.data INTO result");
@@ -421,36 +415,40 @@ void test_dataframe_filter() {
 
     DataFrame df;
     df.SetSchema({
-        {"name",  DataType::STRING, 0, ""},
-        {"age",   DataType::INT32,  0, ""},
+        {"name", DataType::STRING, 0, ""},
+        {"age", DataType::INT32, 0, ""},
         {"score", DataType::DOUBLE, 0, ""},
     });
-    df.AppendRow({std::string("Alice"),   int32_t(25), double(95.5)});
-    df.AppendRow({std::string("Bob"),     int32_t(17), double(87.3)});
+    df.AppendRow({std::string("Alice"), int32_t(25), double(95.5)});
+    df.AppendRow({std::string("Bob"), int32_t(17), double(87.3)});
     df.AppendRow({std::string("Charlie"), int32_t(30), double(92.1)});
-    df.AppendRow({std::string("Diana"),   int32_t(15), double(88.0)});
+    df.AppendRow({std::string("Diana"), int32_t(15), double(88.0)});
     assert(df.RowCount() == 4);
 
     {
-        DataFrame df2; df2.FromArrow(df.ToArrow());
+        DataFrame df2;
+        df2.FromArrow(df.ToArrow());
         assert(df2.Filter("age>18") == 0);
         assert(df2.RowCount() == 2);
         printf("  age>18: %d rows\n", df2.RowCount());
     }
     {
-        DataFrame df2; df2.FromArrow(df.ToArrow());
+        DataFrame df2;
+        df2.FromArrow(df.ToArrow());
         assert(df2.Filter("name=Bob") == 0);
         assert(df2.RowCount() == 1);
         printf("  name=Bob: %d rows\n", df2.RowCount());
     }
     {
-        DataFrame df2; df2.FromArrow(df.ToArrow());
+        DataFrame df2;
+        df2.FromArrow(df.ToArrow());
         assert(df2.Filter("score>=90") == 0);
         assert(df2.RowCount() == 2);
         printf("  score>=90: %d rows\n", df2.RowCount());
     }
     {
-        DataFrame df2; df2.FromArrow(df.ToArrow());
+        DataFrame df2;
+        df2.FromArrow(df.ToArrow());
         assert(df2.Filter("nonexistent=1") == -1);
         printf("  nonexistent column: error handled\n");
     }
@@ -528,8 +526,7 @@ void test_e2e_db_where_to_df() {
     auto* db_ch = dynamic_cast<IDatabaseChannel*>(factory->Get("mysql", "testdb"));
 
     IBatchReader* reader = nullptr;
-    int rc = db_ch->CreateReader(
-        ("SELECT * FROM " + TABLE_USERS + " WHERE score>90").c_str(), &reader);
+    int rc = db_ch->CreateReader(("SELECT * FROM " + TABLE_USERS + " WHERE score>90").c_str(), &reader);
     assert(rc == 0 && reader != nullptr);
 
     const uint8_t* buf = nullptr;
@@ -566,7 +563,7 @@ void test_e2e_df_to_db() {
 
     DataFrame df;
     df.SetSchema({{"city", DataType::STRING, 0, ""}, {"population", DataType::INT64, 0, ""}});
-    df.AppendRow({std::string("Beijing"),  int64_t(21540000)});
+    df.AppendRow({std::string("Beijing"), int64_t(21540000)});
     df.AppendRow({std::string("Shanghai"), int64_t(24870000)});
     df.AppendRow({std::string("Shenzhen"), int64_t(17560000)});
 
@@ -632,8 +629,8 @@ void test_e2e_df_filter_to_db() {
 
     DataFrame df;
     df.SetSchema({{"name", DataType::STRING, 0, ""}, {"age", DataType::INT32, 0, ""}});
-    df.AppendRow({std::string("Alice"),   int32_t(25)});
-    df.AppendRow({std::string("Bob"),     int32_t(17)});
+    df.AppendRow({std::string("Alice"), int32_t(25)});
+    df.AppendRow({std::string("Bob"), int32_t(17)});
     df.AppendRow({std::string("Charlie"), int32_t(30)});
     df.Filter("age>18");
     assert(df.RowCount() == 2);
@@ -692,8 +689,7 @@ void test_concurrent_readers() {
     // 准备数据表（使用全局后缀保证唯一）
     std::string table = "mt_readers_" + g_suffix;
     {
-        auto schema = arrow::schema({arrow::field("id", arrow::int32()),
-                                     arrow::field("name", arrow::utf8())});
+        auto schema = arrow::schema({arrow::field("id", arrow::int32()), arrow::field("name", arrow::utf8())});
         arrow::Int32Builder id_b;
         arrow::StringBuilder name_b;
         for (int i = 0; i < 20; ++i) {
@@ -720,17 +716,20 @@ void test_concurrent_readers() {
             IBatchReader* reader = nullptr;
             // 多线程同时调用同一 db_ch 的 CreateReader
             int rc = db_ch->CreateReader(query.c_str(), &reader);
-            if (rc != 0 || !reader) { errors++; return; }
+            if (rc != 0 || !reader) {
+                errors++;
+                return;
+            }
 
             int rows = 0;
-            const uint8_t* buf; size_t len;
+            const uint8_t* buf;
+            size_t len;
             while (reader->Next(&buf, &len) == 0) {
                 auto b = arrow::Buffer::Wrap(buf, static_cast<int64_t>(len));
                 auto inp = std::make_shared<arrow::io::BufferReader>(b);
                 auto s = arrow::ipc::RecordBatchStreamReader::Open(inp).ValueOrDie();
                 std::shared_ptr<arrow::RecordBatch> batch;
-                if (s->ReadNext(&batch).ok() && batch)
-                    rows += static_cast<int>(batch->num_rows());
+                if (s->ReadNext(&batch).ok() && batch) rows += static_cast<int>(batch->num_rows());
             }
             reader->Close();
             reader->Release();
@@ -744,8 +743,7 @@ void test_concurrent_readers() {
     }
     for (auto& t : threads) t.join();
 
-    printf("  threads=%d success=%d errors=%d\n",
-           N_THREADS, success.load(), errors.load());
+    printf("  threads=%d success=%d errors=%d\n", N_THREADS, success.load(), errors.load());
     assert(errors == 0);
     assert(success == N_THREADS);
     for (int c : row_counts) {
@@ -773,14 +771,12 @@ void test_concurrent_writers() {
     std::atomic<int> errors{0};
 
     std::vector<std::string> tables;
-    for (int i = 0; i < N_THREADS; ++i)
-        tables.push_back("mt_writers_" + g_suffix + "_" + std::to_string(i));
+    for (int i = 0; i < N_THREADS; ++i) tables.push_back("mt_writers_" + g_suffix + "_" + std::to_string(i));
 
     std::vector<std::thread> threads;
     for (int i = 0; i < N_THREADS; ++i) {
         threads.emplace_back([&, i]() {
-            auto schema = arrow::schema({arrow::field("id", arrow::int32()),
-                                         arrow::field("val", arrow::utf8())});
+            auto schema = arrow::schema({arrow::field("id", arrow::int32()), arrow::field("val", arrow::utf8())});
             arrow::Int32Builder id_b;
             arrow::StringBuilder val_b;
             for (int r = 0; r < ROWS_PER_THREAD; ++r) {
@@ -796,21 +792,26 @@ void test_concurrent_writers() {
             IBatchWriter* writer = nullptr;
             // 多线程同时调用同一 db_ch 的 CreateWriter（各写不同表）
             int rc = db_ch->CreateWriter(tables[i].c_str(), &writer);
-            if (rc != 0 || !writer) { errors++; return; }
+            if (rc != 0 || !writer) {
+                errors++;
+                return;
+            }
 
             rc = writer->Write(buf->data(), static_cast<size_t>(buf->size()));
             BatchWriteStats stats;
             writer->Close(&stats);
             writer->Release();
 
-            if (rc != 0) { errors++; return; }
+            if (rc != 0) {
+                errors++;
+                return;
+            }
             success++;
         });
     }
     for (auto& t : threads) t.join();
 
-    printf("  threads=%d success=%d errors=%d\n",
-           N_THREADS, success.load(), errors.load());
+    printf("  threads=%d success=%d errors=%d\n", N_THREADS, success.load(), errors.load());
     assert(errors == 0);
     assert(success == N_THREADS);
 
@@ -819,7 +820,8 @@ void test_concurrent_writers() {
         std::string query = "SELECT COUNT(*) FROM " + tables[i];
         IBatchReader* reader = nullptr;
         assert(db_ch->CreateReader(query.c_str(), &reader) == 0);
-        const uint8_t* buf; size_t len;
+        const uint8_t* buf;
+        size_t len;
         int count = 0;
         if (reader->Next(&buf, &len) == 0) {
             auto b = arrow::Buffer::Wrap(buf, static_cast<int64_t>(len));
@@ -827,10 +829,10 @@ void test_concurrent_writers() {
             auto s = arrow::ipc::RecordBatchStreamReader::Open(inp).ValueOrDie();
             std::shared_ptr<arrow::RecordBatch> batch;
             if (s->ReadNext(&batch).ok() && batch && batch->num_rows() > 0)
-                count = static_cast<int>(
-                    std::static_pointer_cast<arrow::Int64Array>(batch->column(0))->Value(0));
+                count = static_cast<int>(std::static_pointer_cast<arrow::Int64Array>(batch->column(0))->Value(0));
         }
-        reader->Close(); reader->Release();
+        reader->Close();
+        reader->Release();
         assert(count == ROWS_PER_THREAD);
         printf("  table %s: %d rows OK\n", tables[i].c_str(), count);
     }
@@ -894,9 +896,11 @@ void test_p3_add_channel_then_query(IDatabaseFactory* factory, const std::string
     IBatchReader* reader = nullptr;
     int rc = ch->CreateReader("SELECT * FROM p3_t", &reader);
     assert(rc == 0 && reader != nullptr);
-    const uint8_t* buf; size_t len;
+    const uint8_t* buf;
+    size_t len;
     assert(reader->Next(&buf, &len) == 0);
-    reader->Close(); reader->Release();
+    reader->Close();
+    reader->Release();
     printf("  Query after AddChannel succeeded (no restart needed)\n");
 
     factory->RemoveChannel("sqlite", "p3db");  // 清理
@@ -941,30 +945,23 @@ void test_p4_concurrent_add_channels(IDatabaseFactory* factory) {
 static std::string g_ch_suffix;
 
 static std::string MakeClickHouseOption(const std::string& name) {
-    const char* host = getenv("CH_HOST")     ? getenv("CH_HOST")     : "127.0.0.1";
-    const char* port = getenv("CH_PORT")     ? getenv("CH_PORT")     : "8123";
-    const char* user = getenv("CH_USER")     ? getenv("CH_USER")     : "flowsql_user";
-    const char* pass = getenv("CH_PASSWORD") ? getenv("CH_PASSWORD") : "flowSQL@user";
-    const char* db   = getenv("CH_DATABASE") ? getenv("CH_DATABASE") : "flowsql_db";
-    return "type=clickhouse;name=" + name +
-           ";host=" + host + ";port=" + port +
-           ";user=" + user + ";password=" + pass + ";database=" + db;
+    return flowsql::test::DatabaseOptions("clickhouse", name);
 }
 
 static std::shared_ptr<arrow::RecordBatch> MakeChTypeMatrixBatch() {
     auto schema = arrow::schema({
-        arrow::field("c_int32",   arrow::int32()),
-        arrow::field("c_int64",   arrow::int64()),
+        arrow::field("c_int32", arrow::int32()),
+        arrow::field("c_int64", arrow::int64()),
         arrow::field("c_float32", arrow::float32()),
         arrow::field("c_float64", arrow::float64()),
-        arrow::field("c_string",  arrow::utf8()),
-        arrow::field("c_bool",    arrow::boolean()),
+        arrow::field("c_string", arrow::utf8()),
+        arrow::field("c_bool", arrow::boolean()),
     });
-    arrow::Int32Builder   b_i32;
-    arrow::Int64Builder   b_i64;
-    arrow::FloatBuilder   b_f32;
-    arrow::DoubleBuilder  b_f64;
-    arrow::StringBuilder  b_str;
+    arrow::Int32Builder b_i32;
+    arrow::Int64Builder b_i64;
+    arrow::FloatBuilder b_f32;
+    arrow::DoubleBuilder b_f64;
+    arrow::StringBuilder b_str;
     arrow::BooleanBuilder b_bool;
     (void)b_i32.AppendValues({1, 2, 3});
     (void)b_i64.AppendValues({100LL, 200LL, 300LL});
@@ -973,9 +970,12 @@ static std::shared_ptr<arrow::RecordBatch> MakeChTypeMatrixBatch() {
     (void)b_str.AppendValues({"hello", "world", "clickhouse"});
     (void)b_bool.AppendValues(std::vector<bool>{true, false, true});
     std::shared_ptr<arrow::Array> a_i32, a_i64, a_f32, a_f64, a_str, a_bool;
-    (void)b_i32.Finish(&a_i32); (void)b_i64.Finish(&a_i64);
-    (void)b_f32.Finish(&a_f32); (void)b_f64.Finish(&a_f64);
-    (void)b_str.Finish(&a_str); (void)b_bool.Finish(&a_bool);
+    (void)b_i32.Finish(&a_i32);
+    (void)b_i64.Finish(&a_i64);
+    (void)b_f32.Finish(&a_f32);
+    (void)b_f64.Finish(&a_f64);
+    (void)b_str.Finish(&a_str);
+    (void)b_bool.Finish(&a_bool);
     return arrow::RecordBatch::Make(schema, 3, {a_i32, a_i64, a_f32, a_f64, a_str, a_bool});
 }
 
@@ -1010,17 +1010,20 @@ void test_clickhouse_create_arrow_reader(IDatabaseFactory* factory) {
     {
         std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
         ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
-        ch->ExecuteQueryArrow(
-            ("CREATE TABLE " + table + " (id Int32, val String)"
-             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy);
+        ch->ExecuteQueryArrow(("CREATE TABLE " + table +
+                               " (id Int32, val String)"
+                               " ENGINE = MergeTree() ORDER BY id")
+                                  .c_str(),
+                              &dummy);
     }
-    auto schema = arrow::schema({arrow::field("id", arrow::int32()),
-                                  arrow::field("val", arrow::utf8())});
-    arrow::Int32Builder b_id; arrow::StringBuilder b_val;
+    auto schema = arrow::schema({arrow::field("id", arrow::int32()), arrow::field("val", arrow::utf8())});
+    arrow::Int32Builder b_id;
+    arrow::StringBuilder b_val;
     (void)b_id.AppendValues({1, 2, 3});
     (void)b_val.AppendValues({"a", "b", "c"});
     std::shared_ptr<arrow::Array> a_id, a_val;
-    (void)b_id.Finish(&a_id); (void)b_val.Finish(&a_val);
+    (void)b_id.Finish(&a_id);
+    (void)b_val.Finish(&a_val);
     auto batch = arrow::RecordBatch::Make(schema, 3, {a_id, a_val});
     ch->WriteArrowBatches(table.c_str(), {batch});
 
@@ -1037,8 +1040,7 @@ void test_clickhouse_create_arrow_reader(IDatabaseFactory* factory) {
     for (const auto& b : batches) total += b->num_rows();
     assert(total == 3);
     assert(batches[0]->num_columns() == 2);
-    printf("  CreateArrowReader: %lld rows, %d columns\n",
-           (long long)total, batches[0]->num_columns());
+    printf("  CreateArrowReader: %lld rows, %d columns\n", (long long)total, batches[0]->num_columns());
     reader->Release();
 
     // 清理
@@ -1061,9 +1063,11 @@ void test_clickhouse_create_arrow_writer(IDatabaseFactory* factory) {
     {
         std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
         ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
-        ch->ExecuteQueryArrow(
-            ("CREATE TABLE " + table + " (id Int32)"
-             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy);
+        ch->ExecuteQueryArrow(("CREATE TABLE " + table +
+                               " (id Int32)"
+                               " ENGINE = MergeTree() ORDER BY id")
+                                  .c_str(),
+                              &dummy);
     }
 
     // 通过 CreateArrowWriter 写入
@@ -1110,11 +1114,12 @@ void test_clickhouse_arrow_type_matrix(IDatabaseFactory* factory) {
     {
         std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
         ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
-        ch->ExecuteQueryArrow(
-            ("CREATE TABLE " + table +
-             " (c_int32 Int32, c_int64 Int64, c_float32 Float32,"
-             "  c_float64 Float64, c_string String, c_bool Bool)"
-             " ENGINE = MergeTree() ORDER BY c_int32").c_str(), &dummy);
+        ch->ExecuteQueryArrow(("CREATE TABLE " + table +
+                               " (c_int32 Int32, c_int64 Int64, c_float32 Float32,"
+                               "  c_float64 Float64, c_string String, c_bool Bool)"
+                               " ENGINE = MergeTree() ORDER BY c_int32")
+                                  .c_str(),
+                              &dummy);
     }
 
     auto batch = MakeChTypeMatrixBatch();
@@ -1122,8 +1127,7 @@ void test_clickhouse_arrow_type_matrix(IDatabaseFactory* factory) {
     assert(rc == 0);
 
     std::vector<std::shared_ptr<arrow::RecordBatch>> read_batches;
-    rc = ch->ExecuteQueryArrow(
-        ("SELECT * FROM " + table + " ORDER BY c_int32").c_str(), &read_batches);
+    rc = ch->ExecuteQueryArrow(("SELECT * FROM " + table + " ORDER BY c_int32").c_str(), &read_batches);
     assert(rc == 0);
     assert(!read_batches.empty());
     int64_t total = 0;
@@ -1203,13 +1207,16 @@ void test_concurrent_arrow_readers(IDatabaseFactory* factory) {
     {
         std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
         ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
-        ch->ExecuteQueryArrow(
-            ("CREATE TABLE " + table + " (id Int32)"
-             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy);
+        ch->ExecuteQueryArrow(("CREATE TABLE " + table +
+                               " (id Int32)"
+                               " ENGINE = MergeTree() ORDER BY id")
+                                  .c_str(),
+                              &dummy);
         auto schema = arrow::schema({arrow::field("id", arrow::int32())});
         arrow::Int32Builder b;
         for (int i = 0; i < 10; ++i) (void)b.Append(i);
-        std::shared_ptr<arrow::Array> a; (void)b.Finish(&a);
+        std::shared_ptr<arrow::Array> a;
+        (void)b.Finish(&a);
         auto batch = arrow::RecordBatch::Make(schema, 10, {a});
         ch->WriteArrowBatches(table.c_str(), {batch});
     }
@@ -1222,15 +1229,23 @@ void test_concurrent_arrow_readers(IDatabaseFactory* factory) {
             IArrowReader* reader = nullptr;
             std::string err;
             int rc = ch->CreateArrowReader(("SELECT * FROM " + table).c_str(), &reader);
-            if (rc != 0 || !reader) { fail++; return; }
+            if (rc != 0 || !reader) {
+                fail++;
+                return;
+            }
             std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
             rc = reader->ExecuteQueryArrow(nullptr, &batches);
             reader->Release();
-            if (rc != 0) { fail++; return; }
+            if (rc != 0) {
+                fail++;
+                return;
+            }
             int64_t total = 0;
             for (const auto& b : batches) total += b->num_rows();
-            if (total == 10) success++;
-            else fail++;
+            if (total == 10)
+                success++;
+            else
+                fail++;
         });
     }
     for (auto& t : threads) t.join();
@@ -1264,9 +1279,11 @@ void test_concurrent_arrow_writers(IDatabaseFactory* factory) {
         tables.push_back(t);
         std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
         ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + t).c_str(), &dummy);
-        ch->ExecuteQueryArrow(
-            ("CREATE TABLE " + t + " (id Int32)"
-             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy);
+        ch->ExecuteQueryArrow(("CREATE TABLE " + t +
+                               " (id Int32)"
+                               " ENGINE = MergeTree() ORDER BY id")
+                                  .c_str(),
+                              &dummy);
     }
 
     std::atomic<int> success{0}, fail{0};
@@ -1276,18 +1293,24 @@ void test_concurrent_arrow_writers(IDatabaseFactory* factory) {
             IArrowWriter* writer = nullptr;
             std::string err;
             int rc = ch->CreateArrowWriter(tables[i].c_str(), &writer);
-            if (rc != 0 || !writer) { fail++; return; }
+            if (rc != 0 || !writer) {
+                fail++;
+                return;
+            }
 
             auto schema = arrow::schema({arrow::field("id", arrow::int32())});
             arrow::Int32Builder b;
             for (int r = 0; r < ROWS; ++r) (void)b.Append(r);
-            std::shared_ptr<arrow::Array> a; (void)b.Finish(&a);
+            std::shared_ptr<arrow::Array> a;
+            (void)b.Finish(&a);
             auto batch = arrow::RecordBatch::Make(schema, ROWS, {a});
 
             rc = writer->WriteBatches(tables[i].c_str(), {batch});
             writer->Release();
-            if (rc == 0) success++;
-            else fail++;
+            if (rc == 0)
+                success++;
+            else
+                fail++;
         });
     }
     for (auto& t : threads) t.join();
@@ -1340,10 +1363,8 @@ void test_t41_query_sqlite_channel(PluginLoader* loader, IDatabaseFactory* facto
     bool found_sqlite = false;
     for (auto& it : d.GetArray()) {
         if (!it.IsObject()) continue;
-        if (it.HasMember("type") && it["type"].IsString() &&
-            it.HasMember("name") && it["name"].IsString() &&
-            std::string(it["type"].GetString()) == "sqlite" &&
-            std::string(it["name"].GetString()) == sqlite_name) {
+        if (it.HasMember("type") && it["type"].IsString() && it.HasMember("name") && it["name"].IsString() &&
+            std::string(it["type"].GetString()) == "sqlite" && std::string(it["name"].GetString()) == sqlite_name) {
             found_sqlite = true;
             break;
         }
@@ -1365,10 +1386,8 @@ void test_t42_query_mysql_channel(PluginLoader* loader) {
     bool found_mysql = false;
     for (auto& it : d.GetArray()) {
         if (!it.IsObject()) continue;
-        if (it.HasMember("type") && it["type"].IsString() &&
-            it.HasMember("name") && it["name"].IsString() &&
-            std::string(it["type"].GetString()) == "mysql" &&
-            std::string(it["name"].GetString()) == "testdb") {
+        if (it.HasMember("type") && it["type"].IsString() && it.HasMember("name") && it["name"].IsString() &&
+            std::string(it["type"].GetString()) == "mysql" && std::string(it["name"].GetString()) == "testdb") {
             found_mysql = true;
             break;
         }
@@ -1434,10 +1453,8 @@ void test_t43_query_clickhouse_channel(PluginLoader* loader) {
     bool found = false;
     for (auto& it : d.GetArray()) {
         if (!it.IsObject()) continue;
-        if (it.HasMember("type") && it["type"].IsString() &&
-            it.HasMember("name") && it["name"].IsString() &&
-            std::string(it["type"].GetString()) == "clickhouse" &&
-            std::string(it["name"].GetString()) == "ch1") {
+        if (it.HasMember("type") && it["type"].IsString() && it.HasMember("name") && it["name"].IsString() &&
+            std::string(it["type"].GetString()) == "clickhouse" && std::string(it["name"].GetString()) == "ch1") {
             found = true;
             break;
         }
@@ -1455,9 +1472,11 @@ void test_t46_describe_clickhouse_format(PluginLoader* loader, IDatabaseFactory*
     {
         std::vector<std::shared_ptr<arrow::RecordBatch>> dummy;
         ch->ExecuteQueryArrow(("DROP TABLE IF EXISTS " + table).c_str(), &dummy);
-        ch->ExecuteQueryArrow(
-            ("CREATE TABLE " + table + " (id Int32, name String)"
-             " ENGINE = MergeTree() ORDER BY id").c_str(), &dummy);
+        ch->ExecuteQueryArrow(("CREATE TABLE " + table +
+                               " (id Int32, name String)"
+                               " ENGINE = MergeTree() ORDER BY id")
+                                  .c_str(),
+                              &dummy);
     }
 
     auto describe = FindDbRoute(loader, "/channels/database/describe");
@@ -1499,10 +1518,8 @@ void test_t47_query_postgres_channel(PluginLoader* loader, const std::string& pg
     bool found = false;
     for (auto& it : d.GetArray()) {
         if (!it.IsObject()) continue;
-        if (it.HasMember("type") && it["type"].IsString() &&
-            it.HasMember("name") && it["name"].IsString() &&
-            std::string(it["type"].GetString()) == "postgres" &&
-            std::string(it["name"].GetString()) == pg_name) {
+        if (it.HasMember("type") && it["type"].IsString() && it.HasMember("name") && it["name"].IsString() &&
+            std::string(it["type"].GetString()) == "postgres" && std::string(it["name"].GetString()) == pg_name) {
             found = true;
             break;
         }
@@ -1511,11 +1528,8 @@ void test_t47_query_postgres_channel(PluginLoader* loader, const std::string& pg
     printf("[PASS] T47: postgres channel listed\n");
 }
 
-void test_t48_t49_postgres_tables_describe(PluginLoader* loader,
-                                           IDatabaseFactory* factory,
-                                           const std::string& pg_name,
-                                           const std::string& schema,
-                                           const std::string& table) {
+void test_t48_t49_postgres_tables_describe(PluginLoader* loader, IDatabaseFactory* factory, const std::string& pg_name,
+                                           const std::string& schema, const std::string& table) {
     printf("[TEST] T48/T49: postgres tables+describe with schema...\n");
     auto* pg = dynamic_cast<IDatabaseChannel*>(factory->Get("postgres", pg_name.c_str()));
     assert(pg != nullptr);
@@ -1526,8 +1540,8 @@ void test_t48_t49_postgres_tables_describe(PluginLoader* loader,
 
     auto tables = FindDbRoute(loader, "/channels/database/tables");
     assert(tables != nullptr);
-    std::string tables_req = std::string("{\"type\":\"postgres\",\"name\":\"") + pg_name +
-                             "\",\"schema\":\"" + schema + "\"}";
+    std::string tables_req =
+        std::string("{\"type\":\"postgres\",\"name\":\"") + pg_name + "\",\"schema\":\"" + schema + "\"}";
     std::string tables_rsp;
     assert(tables("/channels/database/tables", tables_req, tables_rsp) == error::OK);
 
@@ -1546,8 +1560,8 @@ void test_t48_t49_postgres_tables_describe(PluginLoader* loader,
 
     auto describe = FindDbRoute(loader, "/channels/database/describe");
     assert(describe != nullptr);
-    std::string desc_req = std::string("{\"type\":\"postgres\",\"name\":\"") + pg_name +
-                           "\",\"schema\":\"" + schema + "\",\"table\":\"" + table + "\"}";
+    std::string desc_req = std::string("{\"type\":\"postgres\",\"name\":\"") + pg_name + "\",\"schema\":\"" + schema +
+                           "\",\"table\":\"" + table + "\"}";
     std::string desc_rsp;
     assert(describe("/channels/database/describe", desc_req, desc_rsp) == error::OK);
 
@@ -1567,11 +1581,8 @@ void test_t48_t49_postgres_tables_describe(PluginLoader* loader,
     printf("[PASS] T48/T49: postgres schema routes\n");
 }
 
-void test_t50_postgres_preview_with_schema(PluginLoader* loader,
-                                           IDatabaseFactory* factory,
-                                           const std::string& pg_name,
-                                           const std::string& schema,
-                                           const std::string& table) {
+void test_t50_postgres_preview_with_schema(PluginLoader* loader, IDatabaseFactory* factory, const std::string& pg_name,
+                                           const std::string& schema, const std::string& table) {
     printf("[TEST] T50: postgres preview with schema...\n");
     auto* pg = dynamic_cast<IDatabaseChannel*>(factory->Get("postgres", pg_name.c_str()));
     assert(pg != nullptr);
@@ -1582,8 +1593,8 @@ void test_t50_postgres_preview_with_schema(PluginLoader* loader,
 
     auto preview = FindDbRoute(loader, "/channels/database/preview");
     assert(preview != nullptr);
-    std::string preview_req = std::string("{\"type\":\"postgres\",\"name\":\"") + pg_name +
-                              "\",\"schema\":\"" + schema + "\",\"table\":\"" + table + "\"}";
+    std::string preview_req = std::string("{\"type\":\"postgres\",\"name\":\"") + pg_name + "\",\"schema\":\"" +
+                              schema + "\",\"table\":\"" + table + "\"}";
     std::string preview_rsp;
     assert(preview("/channels/database/preview", preview_req, preview_rsp) == error::OK);
 
@@ -1628,12 +1639,13 @@ void test_postgres_plugin_get_reader_writer(IDatabaseFactory* factory, const std
     (void)bin_b.Append(b0, sizeof(b0));
     (void)bin_b.Append(b1, sizeof(b1));
     (void)bin_b.Append(b2, sizeof(b2));
-    auto batch = arrow::RecordBatch::Make(schema, 3, {
-        id_b.Finish().ValueOrDie(),
-        name_b.Finish().ValueOrDie(),
-        flag_b.Finish().ValueOrDie(),
-        bin_b.Finish().ValueOrDie(),
-    });
+    auto batch = arrow::RecordBatch::Make(schema, 3,
+                                          {
+                                              id_b.Finish().ValueOrDie(),
+                                              name_b.Finish().ValueOrDie(),
+                                              flag_b.Finish().ValueOrDie(),
+                                              bin_b.Finish().ValueOrDie(),
+                                          });
     WriteTestData(pg, table.c_str(), batch);
 
     IBatchReader* reader = nullptr;
@@ -1657,11 +1669,11 @@ int main(int argc, char* argv[]) {
 
     // 生成唯一后缀，避免重跑时表名冲突
     auto ts = std::chrono::system_clock::now().time_since_epoch().count();
-    g_suffix    = std::to_string(ts % 1000000);
-    TABLE_USERS  = "e2e_users_"  + g_suffix;
-    TABLE_AUTO   = "e2e_auto_"   + g_suffix;
+    g_suffix = std::to_string(ts % 1000000);
+    TABLE_USERS = "e2e_users_" + g_suffix;
+    TABLE_AUTO = "e2e_auto_" + g_suffix;
     TABLE_CITIES = "e2e_cities_" + g_suffix;
-    TABLE_COPY   = "e2e_copy_"   + g_suffix;
+    TABLE_COPY = "e2e_copy_" + g_suffix;
     TABLE_ADULTS = "e2e_adults_" + g_suffix;
     printf("  Test suffix: %s\n\n", g_suffix.c_str());
 
@@ -1675,25 +1687,26 @@ int main(int argc, char* argv[]) {
     const char* options[] = {opt.c_str()};
     int ret = loader->Load(plugin_dir.c_str(), relapath, options, 1);
     if (ret != 0) {
-        printf("[SKIP] Plugin not found: %s\n", plugin_name.c_str());
-        return 0;
+        printf("[FAIL] Plugin not found: %s\n", plugin_name.c_str());
+        return 1;
     }
     loader->StartAll();
 
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
     bool mysql_ready = false;
     if (!factory) {
-        printf("[SKIP] No database factory for MySQL suite\n");
+        printf("[FAIL] No database factory for MySQL suite\n");
+        return 1;
     } else {
         auto* ch = factory->Get("mysql", "testdb");
         mysql_ready = (ch && ch->IsConnected());
     }
     if (!mysql_ready) {
+        return 1;
         auto p = GetMysqlParams();
-        printf("[SKIP] MySQL not available at %s:%s (user=%s database=%s)\n",
-               p["host"].c_str(), p["port"].c_str(),
+        printf("[FAIL] MySQL not available at %s:%s (user=%s database=%s)\n", p["host"].c_str(), p["port"].c_str(),
                p["user"].c_str(), p["database"].c_str());
-        printf("       Set MYSQL_HOST/MYSQL_PORT/MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE\n");
+        printf("       Use tools/test.sh integration\n");
     }
 
     if (mysql_ready) {
@@ -1737,8 +1750,7 @@ int main(int argc, char* argv[]) {
         // P1-P3: Epic 6 插件层 E2E（复用已加载的 factory，需要 config_file 支持）
         {
             printf("\n=== Epic 6 Plugin E2E Tests (P1-P3) ===\n\n");
-            auto ts_p = std::chrono::system_clock::now().time_since_epoch().count();
-            std::string p_yml = "/tmp/flowsql_p123_" + std::to_string(ts_p % 1000000) + ".yml";
+            std::string p_yml = flowsql::test::WorkspacePath("flowsql_p123.yml");
 
             // 通过 Option 设置 config_file（factory 已加载，直接调用 Option 追加配置）
             auto* p_factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
@@ -1773,10 +1785,11 @@ int main(int argc, char* argv[]) {
 
     std::string ch_opt = MakeClickHouseOption("ch1");
     const char* ch_relapath[] = {plugin_name.c_str()};
-    const char* ch_options[]  = {ch_opt.c_str()};
+    const char* ch_options[] = {ch_opt.c_str()};
     int ch_ret = loader->Load(plugin_dir.c_str(), ch_relapath, ch_options, 1);
     if (ch_ret != 0) {
-        printf("[SKIP] Plugin not found for ClickHouse tests\n");
+        printf("[FAIL] Plugin not found for ClickHouse tests\n");
+        return 1;
     } else {
         loader->StartAll();
 
@@ -1787,7 +1800,8 @@ int main(int argc, char* argv[]) {
             ch_ready = (ch_ch && ch_ch->IsConnected());
         }
         if (!ch_ready) {
-            printf("[SKIP] ClickHouse not available. Set CH_HOST/CH_PORT/CH_USER/CH_PASSWORD/CH_DATABASE\n");
+            printf("[FAIL] ClickHouse not available. Use tools/test.sh integration\n");
+            return 1;
         } else {
             test_clickhouse_connect(ch_factory);
             test_t43_query_clickhouse_channel(loader);
@@ -1818,7 +1832,8 @@ int main(int argc, char* argv[]) {
 
     int pg_ret = loader->Load(plugin_dir.c_str(), pg_relapath, pg_options, 1);
     if (pg_ret != 0) {
-        printf("[SKIP] Plugin not found for PostgreSQL tests\n");
+        printf("[FAIL] Plugin not found for PostgreSQL tests\n");
+        return 1;
     } else {
         loader->StartAll();
         auto* pg_factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
@@ -1828,16 +1843,16 @@ int main(int argc, char* argv[]) {
             pg_ready = (pg_ch && pg_ch->IsConnected());
         }
         if (!pg_ready) {
+            return 1;
             auto p = GetPostgresParams();
-            printf("[SKIP] PostgreSQL not available at %s:%s (user=%s database=%s)\n",
-                   p["host"].c_str(), p["port"].c_str(), p["user"].c_str(), p["database"].c_str());
-            printf("       Set PG_HOST/PG_PORT/PG_USER/PG_PASSWORD/PG_DATABASE\n");
+            printf("[FAIL] PostgreSQL not available at %s:%s (user=%s database=%s)\n", p["host"].c_str(),
+                   p["port"].c_str(), p["user"].c_str(), p["database"].c_str());
+            printf("       Use tools/test.sh integration\n");
         } else {
             test_postgres_plugin_get_reader_writer(pg_factory, pg_name);
             test_t47_query_postgres_channel(loader, pg_name);
             test_t48_t49_postgres_tables_describe(loader, pg_factory, pg_name, pg_schema, pg_table);
-            test_t50_postgres_preview_with_schema(
-                loader, pg_factory, pg_name, pg_preview_schema, pg_preview_table);
+            test_t50_postgres_preview_with_schema(loader, pg_factory, pg_name, pg_preview_schema, pg_preview_table);
             printf("\n=== PostgreSQL plugin E2E tests passed ===\n");
         }
         loader->StopAll();

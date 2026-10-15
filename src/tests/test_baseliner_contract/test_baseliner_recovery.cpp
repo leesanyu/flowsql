@@ -11,6 +11,7 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <services/database/database_plugin.h>
+#include <tests/common/test_environment.h>
 #include <unistd.h>
 #include <cassert>
 #include <chrono>
@@ -777,11 +778,8 @@ void Matrix(database::DatabasePlugin& db, const std::shared_ptr<Loaded>& owner, 
 }
 }  // namespace
 int main() {
-    const char* path = std::getenv("BASELINER_TEST_DB_OPTIONS");
-    assert(path);
-    std::ifstream input(path);
     std::ostringstream options;
-    options << input.rdbuf();
+    options << flowsql::test::BaselinerOptions();
     database::DatabasePlugin db;
     int saved = dup(STDOUT_FILENO);
     FILE* quiet = fopen("/dev/null", "w");

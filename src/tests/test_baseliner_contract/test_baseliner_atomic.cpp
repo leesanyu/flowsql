@@ -3,6 +3,7 @@
 #include <framework/interfaces/idatabase_atomic_target.h>
 #include <operators/baseliner/writer_fence.h>
 #include <services/database/database_plugin.h>
+#include <tests/common/test_environment.h>
 #include <unistd.h>
 #include <cassert>
 #include <chrono>
@@ -210,11 +211,8 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, const std::string& backend)
 }
 
 int main() {
-    const char* path = std::getenv("BASELINER_TEST_DB_OPTIONS");
-    assert(path);
-    std::ifstream input(path);
     std::ostringstream options;
-    options << input.rdbuf();
+    options << flowsql::test::BaselinerOptions();
     database::DatabasePlugin plugin;
     int saved = dup(STDOUT_FILENO);
     FILE* quiet = fopen("/dev/null", "w");

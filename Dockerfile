@@ -18,12 +18,22 @@ COPY src/python/ ./python/
 RUN python3 -m venv /opt/flowsql/venv \
     && /opt/flowsql/venv/bin/pip install --no-cache-dir "pyarrow==22.0.0" -r ./python/requirements.txt
 
+# Kafka authentication runtime: shared libraries, dynamically loaded GSSAPI SASL module,
+# private-ticket kinit tool and system CA. No development packages enter the runtime.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libcurl4t64 libsasl2-2 libsasl2-modules-gssapi-mit \
+    libgssapi-krb5-2 libkrb5-3 krb5-user ca-certificates \
+    zlib1g liblz4-1 libzstd1 libicu74 \
+    && rm -rf /var/lib/apt/lists/*
+
 # 复制构建产物
 COPY build/output/flowsql          ./bin/flowsql
 COPY build/output/lib*.so          ./bin/
 COPY .thirdparts_installed/yaml-cpp/lib/libyaml-cpp.so.0.9.0 ./bin/libyaml-cpp.so.0.9
 COPY build/output/static/          ./bin/static/
 COPY config/                       ./config/
+COPY build/output/share/kafka/ ./share/kafka/
+COPY config/kafka/provider.example.json ./config/kafka/provider.example.json
 COPY config/docker/flowsql.yml     ./config/flowsql.yml
 COPY src/plugins/npi/conf/protocols.yml ./config/protocols.yml
 

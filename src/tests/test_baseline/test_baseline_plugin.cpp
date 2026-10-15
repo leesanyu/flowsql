@@ -1,6 +1,7 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <tests/common/test_environment.h>
 #include <atomic>
 #include <cassert>
 #include <cmath>
@@ -324,9 +325,7 @@ baseline:
     std::printf("[PASS] B1 calendar schema rejects task-scoped fields\n");
 }
 
-void AssertSnapshotHasTask(const std::string& json,
-                           const char* expected_task_id,
-                           uint64_t expected_count) {
+void AssertSnapshotHasTask(const std::string& json, const char* expected_task_id, uint64_t expected_count) {
     rapidjson::Document doc;
     doc.Parse(json.c_str());
     assert(!doc.HasParseError());
@@ -353,20 +352,17 @@ void TestCreateTaskUsesConfigIdentity() {
     std::printf("[TEST] B1 task config identity...\n");
     auto env = LoadBaselineService();
 
-    auto [status, task] = env.service->CreateValueTask(
-        ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [status, task] = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(task != nullptr);
     assert(std::string(task->Id()) == "baseline_task_bps");
     assert(std::string(task->Name()) == "link bps baseline");
 
-    auto [snapshot_status, snapshot] =
-        env.service->QueryServiceSnapshot(BaselineSerializationFormat::kJson);
+    auto [snapshot_status, snapshot] = env.service->QueryServiceSnapshot(BaselineSerializationFormat::kJson);
     assert(snapshot_status == BaselineStatus::kOk);
     AssertSnapshotHasTask(snapshot, "baseline_task_bps", 1);
 
-    auto [dup_status, dup_task] = env.service->CreateValueTask(
-        ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [dup_status, dup_task] = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(dup_status == BaselineStatus::kInvalidArgument);
     assert(dup_task == nullptr);
 
@@ -383,23 +379,22 @@ void TestInvalidTaskConfigRejected() {
     std::printf("[TEST] B1 invalid task config rejected...\n");
     auto env = LoadBaselineService();
 
-    auto [status, task] = env.service->CreateValueTask(
-        R"({"schema_version":1})", BaselineSerializationFormat::kJson);
+    auto [status, task] = env.service->CreateValueTask(R"({"schema_version":1})", BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kParseFailed);
     assert(task == nullptr);
 
-    auto [legacy_status, legacy_task] = env.service->CreateValueTask(
-        LegacyValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [legacy_status, legacy_task] =
+        env.service->CreateValueTask(LegacyValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(legacy_status == BaselineStatus::kParseFailed);
     assert(legacy_task == nullptr);
 
-    auto [basic_sampled_status, basic_sampled_task] = env.service->CreateValueTask(
-        BasicValueWithSampledProfileConfig(), BaselineSerializationFormat::kJson);
+    auto [basic_sampled_status, basic_sampled_task] =
+        env.service->CreateValueTask(BasicValueWithSampledProfileConfig(), BaselineSerializationFormat::kJson);
     assert(basic_sampled_status == BaselineStatus::kParseFailed);
     assert(basic_sampled_task == nullptr);
 
-    auto [sampled_default_status, sampled_default_task] = env.service->CreateValueTask(
-        SampledValueWithDefaultProfileConfig(), BaselineSerializationFormat::kJson);
+    auto [sampled_default_status, sampled_default_task] =
+        env.service->CreateValueTask(SampledValueWithDefaultProfileConfig(), BaselineSerializationFormat::kJson);
     assert(sampled_default_status == BaselineStatus::kParseFailed);
     assert(sampled_default_task == nullptr);
 
@@ -442,31 +437,24 @@ void TestStateControlBindingContract() {
     std::printf("[PASS] optional state control binding contract\n");
 }
 
-ValueBootstrapInput BuildValueHistoryForSeries(const std::string& series_key,
-                                               double base_value) {
+ValueBootstrapInput BuildValueHistoryForSeries(const std::string& series_key, double base_value) {
     ValueBootstrapInput input;
     input.series_key = series_key;
     for (int64_t bucket = 0; bucket < 200; ++bucket) {
-        input.observations.push_back(
-            ValueBootstrapPoint{bucket, base_value + static_cast<double>(bucket % 10), 1});
+        input.observations.push_back(ValueBootstrapPoint{bucket, base_value + static_cast<double>(bucket % 10), 1});
     }
     return input;
 }
 
-ValueBootstrapInput BuildValueHistory() {
-    return BuildValueHistoryForSeries("svc-a", 100.0);
-}
+ValueBootstrapInput BuildValueHistory() { return BuildValueHistoryForSeries("svc-a", 100.0); }
 
 ValueBootstrapInput BuildEventValueHistory() {
     ValueBootstrapInput input;
     input.series_key = "svc-event";
     for (int64_t bucket = 0; bucket < 200; ++bucket) {
         const bool event_bucket =
-            (bucket >= 20 && bucket < 25) ||
-            (bucket >= 80 && bucket < 85) ||
-            (bucket >= 140 && bucket < 145);
-        const double value = 100.0 + static_cast<double>(bucket % 3) +
-                             (event_bucket ? 400.0 : 0.0);
+            (bucket >= 20 && bucket < 25) || (bucket >= 80 && bucket < 85) || (bucket >= 140 && bucket < 145);
+        const double value = 100.0 + static_cast<double>(bucket % 3) + (event_bucket ? 400.0 : 0.0);
         input.observations.push_back(ValueBootstrapPoint{bucket, value, 1});
     }
     return input;
@@ -476,8 +464,7 @@ RatioBootstrapInput BuildRatioHistory() {
     RatioBootstrapInput input;
     input.series_key = "svc-a";
     for (int64_t bucket = 0; bucket < 200; ++bucket) {
-        input.observations.push_back(
-            RatioBootstrapPoint{bucket, 95.0 + static_cast<double>(bucket % 3), 100.0});
+        input.observations.push_back(RatioBootstrapPoint{bucket, 95.0 + static_cast<double>(bucket % 3), 100.0});
     }
     return input;
 }
@@ -507,10 +494,7 @@ RelationBootstrapInput BuildRelationHistory() {
     return input;
 }
 
-RelationRollingObservation BuildRelationObservation(int64_t bucket,
-                                                    double g1,
-                                                    double g2,
-                                                    double g3) {
+RelationRollingObservation BuildRelationObservation(int64_t bucket, double g1, double g2, double g3) {
     RelationRollingObservation obs;
     obs.series_key = "svc-a";
     obs.bucket_id = bucket;
@@ -867,8 +851,8 @@ void TestTaskBootstrapPredictAndExport() {
     std::printf("[TEST] B1 task bootstrap predict export...\n");
     auto env = LoadBaselineService();
 
-    auto [value_status, value_task] = env.service->CreateValueTask(
-        ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [value_status, value_task] =
+        env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(value_status == BaselineStatus::kOk);
     assert(value_task != nullptr);
     const BootstrapTrainResult value_train = value_task->Bootstrap(BuildValueHistory());
@@ -893,8 +877,7 @@ void TestTaskBootstrapPredictAndExport() {
         value_task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson);
     assert(value_artifact_status == BaselineStatus::kOk);
     assert(value_artifact.find("\"document_kind\":\"bootstrap_artifact\"") != std::string::npos);
-    auto [value_seed_status, value_seed] =
-        value_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
+    auto [value_seed_status, value_seed] = value_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
     assert(value_seed_status == BaselineStatus::kOk);
     assert(value_seed.find("\"document_kind\":\"bootstrap_seed\"") != std::string::npos);
     assert(value_seed.find("\"algorithm_version\":\"b1-bootstrap-v1\"") != std::string::npos);
@@ -919,16 +902,15 @@ void TestTaskBootstrapPredictAndExport() {
     assert(value_seed.find("\"maturity_init\"") != std::string::npos);
     assert(value_seed.find("\"model\"") == std::string::npos);
 
-    auto [sampled_value_status, sampled_value_task] = env.service->CreateValueTask(
-        SampledValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [sampled_value_status, sampled_value_task] =
+        env.service->CreateValueTask(SampledValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(sampled_value_status == BaselineStatus::kOk);
     assert(sampled_value_task != nullptr);
-    const BootstrapTrainResult sampled_value_train =
-        sampled_value_task->Bootstrap(BuildSampledValueHistory());
+    const BootstrapTrainResult sampled_value_train = sampled_value_task->Bootstrap(BuildSampledValueHistory());
     assert(sampled_value_train.status == BaselineStatus::kOk);
 
-    auto [ratio_status, ratio_task] = env.service->CreateRatioTask(
-        RatioTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [ratio_status, ratio_task] =
+        env.service->CreateRatioTask(RatioTaskConfig(), BaselineSerializationFormat::kJson);
     assert(ratio_status == BaselineStatus::kOk);
     assert(ratio_task != nullptr);
     const BootstrapTrainResult ratio_train = ratio_task->Bootstrap(BuildRatioHistory());
@@ -946,8 +928,7 @@ void TestTaskBootstrapPredictAndExport() {
     assert(ratio_sequence.predictions[1].bucket_id == 221);
     assert(ratio_sequence.predictions[0].baseline_mu >= 0.0);
     assert(ratio_sequence.predictions[0].baseline_mu <= 1.0);
-    auto [ratio_seed_status, ratio_seed] =
-        ratio_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
+    auto [ratio_seed_status, ratio_seed] = ratio_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
     assert(ratio_seed_status == BaselineStatus::kOk);
     assert(ratio_seed.find("\"feature_type\":\"ratio\"") != std::string::npos);
     assert(ratio_seed.find("\"calendar_ref\"") != std::string::npos);
@@ -962,12 +943,11 @@ void TestTaskBootstrapPredictAndExport() {
     assert(ratio_seed.find("\"ratio_prior_init\"") != std::string::npos);
     assert(ratio_seed.find("\"model\"") == std::string::npos);
 
-    auto [relation_status, relation_task] = env.service->CreateRelationTask(
-        RelationTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [relation_status, relation_task] =
+        env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
     assert(relation_status == BaselineStatus::kOk);
     assert(relation_task != nullptr);
-    const BootstrapTrainResult relation_train =
-        relation_task->Bootstrap(BuildRelationHistory());
+    const BootstrapTrainResult relation_train = relation_task->Bootstrap(BuildRelationHistory());
     assert(relation_train.status == BaselineStatus::kOk);
     auto [relation_snapshot_status, relation_snapshot] =
         relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
@@ -976,19 +956,16 @@ void TestTaskBootstrapPredictAndExport() {
     relation_snapshot_doc.Parse(relation_snapshot.c_str());
     assert(!relation_snapshot_doc.HasParseError());
     assert(relation_snapshot_doc.HasMember("document_kind"));
-    assert(std::string(relation_snapshot_doc["document_kind"].GetString()) ==
-           "relation_task_snapshot");
+    assert(std::string(relation_snapshot_doc["document_kind"].GetString()) == "relation_task_snapshot");
     assert(relation_snapshot_doc.HasMember("relation_runtime"));
     const auto& relation_runtime = relation_snapshot_doc["relation_runtime"];
     assert(relation_runtime["routed_shard_count"].GetUint64() == 16);
     assert(relation_runtime["source_state_count"].GetUint64() == 1);
     assert(relation_runtime["routed_seed_count"].GetUint64() > 0);
-    auto [basis_status, basis_json] =
-        relation_task->QueryBootstrapBasis(BaselineSerializationFormat::kJson);
+    auto [basis_status, basis_json] = relation_task->QueryBootstrapBasis(BaselineSerializationFormat::kJson);
     assert(basis_status == BaselineStatus::kOk);
     assert(basis_json.find("\"support_explicit\"") != std::string::npos);
-    auto [relation_seed_status, relation_seed] =
-        relation_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
+    auto [relation_seed_status, relation_seed] = relation_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
     assert(relation_seed_status == BaselineStatus::kOk);
     assert(relation_seed.find("\"feature_type\":\"relation\"") != std::string::npos);
     assert(relation_seed.find("\"calendar_ref\"") != std::string::npos);
@@ -1017,42 +994,35 @@ void TestValueTaskKeepsBootstrapPerSeriesAndExportsAll() {
     std::printf("[TEST] B1 value task keeps bootstrap per series and exports all...\n");
 
     auto env = LoadBaselineService();
-    auto [value_status, value_task] = env.service->CreateValueTask(
-        ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [value_status, value_task] =
+        env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(value_status == BaselineStatus::kOk);
     assert(value_task != nullptr);
 
-    const BootstrapTrainResult train_a =
-        value_task->Bootstrap(BuildValueHistoryForSeries("svc-a", 100.0));
+    const BootstrapTrainResult train_a = value_task->Bootstrap(BuildValueHistoryForSeries("svc-a", 100.0));
     assert(train_a.status == BaselineStatus::kOk);
     ValueBootstrapInput no_replace_input = BuildValueHistoryForSeries("svc-a", 120.0);
     no_replace_input.options.force_replace_existing_artifact = false;
-    const BootstrapTrainResult no_replace_result =
-        value_task->Bootstrap(no_replace_input);
+    const BootstrapTrainResult no_replace_result = value_task->Bootstrap(no_replace_input);
     assert(no_replace_result.status == BaselineStatus::kInvalidArgument);
-    const BootstrapTrainResult train_b =
-        value_task->Bootstrap(BuildValueHistoryForSeries("svc-b", 500.0));
+    const BootstrapTrainResult train_b = value_task->Bootstrap(BuildValueHistoryForSeries("svc-b", 500.0));
     assert(train_b.status == BaselineStatus::kOk);
 
-    const BootstrapPrediction prediction_a =
-        value_task->PredictBootstrap("svc-a", 220, BootstrapPredictionOptions{});
-    const BootstrapPrediction prediction_b =
-        value_task->PredictBootstrap("svc-b", 220, BootstrapPredictionOptions{});
+    const BootstrapPrediction prediction_a = value_task->PredictBootstrap("svc-a", 220, BootstrapPredictionOptions{});
+    const BootstrapPrediction prediction_b = value_task->PredictBootstrap("svc-b", 220, BootstrapPredictionOptions{});
     assert(prediction_a.status == BaselineStatus::kOk);
     assert(prediction_b.status == BaselineStatus::kOk);
     assert(prediction_a.series_key == "svc-a");
     assert(prediction_b.series_key == "svc-b");
     assert(prediction_b.baseline_mu > prediction_a.baseline_mu + 300.0);
 
-    auto [artifact_status, artifact_json] =
-        value_task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson);
+    auto [artifact_status, artifact_json] = value_task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson);
     assert(artifact_status == BaselineStatus::kOk);
     assert(artifact_json.find("\"series_artifacts\"") != std::string::npos);
     assert(artifact_json.find("\"series_key\":\"svc-a\"") != std::string::npos);
     assert(artifact_json.find("\"series_key\":\"svc-b\"") != std::string::npos);
 
-    auto [seed_status, seed_json] =
-        value_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
+    auto [seed_status, seed_json] = value_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
     assert(seed_status == BaselineStatus::kOk);
     assert(seed_json.find("\"series_seeds\"") != std::string::npos);
     assert(seed_json.find("\"series_key\":\"svc-a\"") != std::string::npos);
@@ -1079,17 +1049,16 @@ void TestValueTaskKeepsBootstrapPerSeriesAndExportsAll() {
         BaselineSerializationFormat::kJson);
     assert(reload_status == BaselineStatus::kOk);
     assert(reload_task != nullptr);
-    assert(reload_task->LoadBootstrapArtifact(
-               artifact_json, BaselineSerializationFormat::kJson) ==
+    assert(reload_task->LoadBootstrapArtifact(artifact_json, BaselineSerializationFormat::kJson) ==
            BaselineStatus::kIncompatibleArtifact);
 
     assert(value_task->Close() == BaselineStatus::kOk);
-    auto [restored_status, restored_task] = env.service->CreateValueTask(
-        ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [restored_status, restored_task] =
+        env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(restored_status == BaselineStatus::kOk);
     assert(restored_task != nullptr);
-    assert(restored_task->LoadBootstrapArtifact(
-               artifact_json, BaselineSerializationFormat::kJson) == BaselineStatus::kOk);
+    assert(restored_task->LoadBootstrapArtifact(artifact_json, BaselineSerializationFormat::kJson) ==
+           BaselineStatus::kOk);
     const BootstrapPrediction reloaded_prediction_a =
         restored_task->PredictBootstrap("svc-a", 220, BootstrapPredictionOptions{});
     const BootstrapPrediction reloaded_prediction_b =
@@ -1105,8 +1074,8 @@ void TestB4RelationSubmitObservation() {
     std::printf("[TEST] B4 relation submit observation routes summaries...\n");
 
     auto env = LoadBaselineService();
-    auto [status, relation_task] = env.service->CreateRelationTask(
-        RelationTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [status, relation_task] =
+        env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(relation_task != nullptr);
 
@@ -1141,8 +1110,7 @@ void TestB4RelationSubmitObservation() {
     assert(!has_basis_scoped);
     assert(!top1_routed_series_key.empty());
 
-    auto [snapshot_status, snapshot] =
-        relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
+    auto [snapshot_status, snapshot] = relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
     assert(snapshot_status == BaselineStatus::kOk);
     rapidjson::Document snapshot_doc;
     snapshot_doc.Parse(snapshot.c_str());
@@ -1156,8 +1124,7 @@ void TestB4RelationSubmitObservation() {
     rapidjson::Document source_snapshot_doc;
     source_snapshot_doc.Parse(source_snapshot.c_str());
     assert(!source_snapshot_doc.HasParseError());
-    assert(std::string(source_snapshot_doc["document_kind"].GetString()) ==
-           "relation_series_snapshot");
+    assert(std::string(source_snapshot_doc["document_kind"].GetString()) == "relation_series_snapshot");
     assert(source_snapshot_doc["series_key"].GetString() == std::string("svc-a"));
     assert(source_snapshot_doc["source_series_key"].GetString() == std::string("svc-a"));
     assert(source_snapshot_doc.HasMember("basis_by_metric"));
@@ -1167,8 +1134,7 @@ void TestB4RelationSubmitObservation() {
     assert(source_snapshot_doc["routed_summaries"].Size() > 0);
 
     auto [wrong_source_status, wrong_source_snapshot] =
-        relation_task->QuerySeriesSnapshot(top1_routed_series_key,
-                                           BaselineSerializationFormat::kJson);
+        relation_task->QuerySeriesSnapshot(top1_routed_series_key, BaselineSerializationFormat::kJson);
     assert(wrong_source_status == BaselineStatus::kInvalidArgument);
     assert(wrong_source_snapshot.empty());
 
@@ -1177,29 +1143,26 @@ void TestB4RelationSubmitObservation() {
     routed_query.metric = "bps";
     routed_query.summary = "top1_share";
     routed_query.feature_type = "ratio";
-    RollingPrediction routed_prediction =
-        relation_task->PredictRoutedSummary(routed_query, 101);
+    RollingPrediction routed_prediction = relation_task->PredictRoutedSummary(routed_query, 101);
     assert(routed_prediction.status == BaselineStatus::kOk);
 
     auto [routed_snapshot_status, routed_snapshot] =
-        relation_task->QueryRoutedSummarySnapshot(routed_query,
-                                                  BaselineSerializationFormat::kJson);
+        relation_task->QueryRoutedSummarySnapshot(routed_query, BaselineSerializationFormat::kJson);
     assert(routed_snapshot_status == BaselineStatus::kOk);
     rapidjson::Document routed_snapshot_doc;
     routed_snapshot_doc.Parse(routed_snapshot.c_str());
     assert(!routed_snapshot_doc.HasParseError());
-    assert(std::string(routed_snapshot_doc["document_kind"].GetString()) ==
-           "rolling_series_snapshot");
+    assert(std::string(routed_snapshot_doc["document_kind"].GetString()) == "rolling_series_snapshot");
     assert(routed_snapshot_doc["last_seen_bucket"].GetInt64() == 100);
 
-    auto [multi_status, multi_task] = env.service->CreateRelationTask(
-        MultiMetricRelationTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [multi_status, multi_task] =
+        env.service->CreateRelationTask(MultiMetricRelationTaskConfig(), BaselineSerializationFormat::kJson);
     assert(multi_status == BaselineStatus::kOk);
     assert(multi_task != nullptr);
     RelationRollingSubmitOptions mismatch_options;
     mismatch_options.include_diagnostics = true;
-    RelationRollingResult mismatch_result = multi_task->SubmitObservation(
-        BuildMismatchedRelationMetricOrderObservation(), mismatch_options);
+    RelationRollingResult mismatch_result =
+        multi_task->SubmitObservation(BuildMismatchedRelationMetricOrderObservation(), mismatch_options);
     assert(mismatch_result.status == BaselineStatus::kInvalidArgument);
     assert(mismatch_result.routed_results.empty());
 
@@ -1208,8 +1171,8 @@ void TestB4RelationSubmitObservation() {
     const std::size_t task_id_pos = seeded_config.find(old_task_id);
     assert(task_id_pos != std::string::npos);
     seeded_config.replace(task_id_pos, old_task_id.size(), "baseline_task_client_mix_seeded");
-    auto [seeded_status, seeded_task] = env.service->CreateRelationTask(
-        seeded_config, BaselineSerializationFormat::kJson);
+    auto [seeded_status, seeded_task] =
+        env.service->CreateRelationTask(seeded_config, BaselineSerializationFormat::kJson);
     assert(seeded_status == BaselineStatus::kOk);
     assert(seeded_task != nullptr);
     assert(seeded_task->Bootstrap(BuildRelationHistory()).status == BaselineStatus::kOk);
@@ -1255,8 +1218,8 @@ baseline:
     }
     {
         auto env = LoadBaselineService("config_file=" + routed_disabled_config + ";strict=false");
-        auto [status, relation_task] = env.service->CreateRelationTask(
-            RelationTaskConfig(), BaselineSerializationFormat::kJson);
+        auto [status, relation_task] =
+            env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         assert(relation_task != nullptr);
 
@@ -1325,8 +1288,8 @@ baseline:
     }
     {
         auto env = LoadBaselineService("config_file=" + stream_disabled_config + ";strict=false");
-        auto [status, relation_task] = env.service->CreateRelationTask(
-            RelationTaskConfig(), BaselineSerializationFormat::kJson);
+        auto [status, relation_task] =
+            env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         assert(relation_task != nullptr);
 
@@ -1349,8 +1312,7 @@ baseline:
     }
     flowsql::baseline::ResetBaselineRuntimeConfig();
 
-    const std::string universal_disabled_config =
-        "/tmp/flowsql_b4_relation_universal_disabled.yaml";
+    const std::string universal_disabled_config = "/tmp/flowsql_b4_relation_universal_disabled.yaml";
     {
         std::ofstream file(universal_disabled_config);
         file << R"(
@@ -1366,8 +1328,8 @@ baseline:
     }
     {
         auto env = LoadBaselineService("config_file=" + universal_disabled_config + ";strict=false");
-        auto [status, relation_task] = env.service->CreateRelationTask(
-            RelationTaskConfig(), BaselineSerializationFormat::kJson);
+        auto [status, relation_task] =
+            env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         assert(relation_task != nullptr);
 
@@ -1392,8 +1354,8 @@ void TestB5RelationFusionSubmitAndSnapshot() {
 
     {
         auto env = LoadBaselineService();
-        auto [status, relation_task] = env.service->CreateRelationTask(
-            RelationTaskConfig(), BaselineSerializationFormat::kJson);
+        auto [status, relation_task] =
+            env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         assert(relation_task != nullptr);
         assert(relation_task->Bootstrap(BuildRelationHistory()).status == BaselineStatus::kOk);
@@ -1430,8 +1392,7 @@ void TestB5RelationFusionSubmitAndSnapshot() {
         missing_metric_obs.series_key = "svc-a";
         missing_metric_obs.bucket_id = 21;
         missing_metric_obs.group_idx = {1, 2, 3};
-        RelationRollingResult missing_metric_result =
-            relation_task->SubmitObservation(missing_metric_obs, options);
+        RelationRollingResult missing_metric_result = relation_task->SubmitObservation(missing_metric_obs, options);
         assert(!missing_metric_result.has_fusion_result);
         auto [missing_metric_status, missing_metric_snapshot] =
             relation_task->QuerySeriesSnapshot("svc-a", BaselineSerializationFormat::kJson);
@@ -1462,8 +1423,7 @@ void TestB5RelationFusionSubmitAndSnapshot() {
         routed_query.summary = "top1_share";
         routed_query.feature_type = "ratio";
         auto [routed_status, routed_snapshot] =
-            relation_task->QueryRoutedSummarySnapshot(routed_query,
-                                                      BaselineSerializationFormat::kJson);
+            relation_task->QueryRoutedSummarySnapshot(routed_query, BaselineSerializationFormat::kJson);
         assert(routed_status == BaselineStatus::kOk);
         rapidjson::Document routed_doc;
         routed_doc.Parse(routed_snapshot.c_str());
@@ -1482,8 +1442,7 @@ void TestB5RelationFusionSubmitAndSnapshot() {
         assert(!rebuilt_doc["relation_fusion"].HasMember("bucket_id"));
     }
 
-    const std::string fusion_disabled_config =
-        "/tmp/flowsql_b5_relation_fusion_disabled.yaml";
+    const std::string fusion_disabled_config = "/tmp/flowsql_b5_relation_fusion_disabled.yaml";
     {
         std::ofstream file(fusion_disabled_config);
         file << R"(
@@ -1496,18 +1455,16 @@ baseline:
         assert(file.good());
     }
     {
-        auto disabled_env =
-            LoadBaselineService("config_file=" + fusion_disabled_config + ";strict=false");
+        auto disabled_env = LoadBaselineService("config_file=" + fusion_disabled_config + ";strict=false");
         auto [disabled_status, disabled_task] =
-            disabled_env.service->CreateRelationTask(
-                RelationTaskConfig(), BaselineSerializationFormat::kJson);
+            disabled_env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
         assert(disabled_status == BaselineStatus::kOk);
         assert(disabled_task != nullptr);
         assert(disabled_task->Bootstrap(BuildRelationHistory()).status == BaselineStatus::kOk);
         RelationRollingSubmitOptions disabled_options;
         disabled_options.include_fusion_result = true;
-        RelationRollingResult disabled_result = disabled_task->SubmitObservation(
-            BuildRelationObservation(20, 5, 5, 90), disabled_options);
+        RelationRollingResult disabled_result =
+            disabled_task->SubmitObservation(BuildRelationObservation(20, 5, 5, 90), disabled_options);
         assert(disabled_result.status == BaselineStatus::kOk);
         assert(!disabled_result.has_fusion_result);
         auto [disabled_snapshot_status, disabled_snapshot] =
@@ -1528,8 +1485,7 @@ baseline:
 void TestB7RelationFusionStateCleanup() {
     std::printf("[TEST] B7 relation fusion state cleanup...\n");
 
-    const std::string cleanup_config =
-        "/tmp/flowsql_b7_relation_fusion_cleanup.yaml";
+    const std::string cleanup_config = "/tmp/flowsql_b7_relation_fusion_cleanup.yaml";
     {
         std::ofstream file(cleanup_config);
         file << R"(
@@ -1547,8 +1503,8 @@ baseline:
     }
 
     auto env = LoadBaselineService("config_file=" + cleanup_config + ";strict=false");
-    auto [status, relation_task] = env.service->CreateRelationTask(
-        RelationTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [status, relation_task] =
+        env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(relation_task != nullptr);
 
@@ -1558,18 +1514,15 @@ baseline:
 
     RelationRollingObservation old_a = BuildRelationObservation(10, 5, 5, 90);
     old_a.series_key = "svc-old-a";
-    RelationRollingResult old_a_result =
-        relation_task->SubmitObservation(old_a, options);
+    RelationRollingResult old_a_result = relation_task->SubmitObservation(old_a, options);
     assert(old_a_result.status == BaselineStatus::kOk);
 
     RelationRollingObservation old_b = BuildRelationObservation(11, 5, 5, 90);
     old_b.series_key = "svc-old-b";
-    RelationRollingResult old_b_result =
-        relation_task->SubmitObservation(old_b, options);
+    RelationRollingResult old_b_result = relation_task->SubmitObservation(old_b, options);
     assert(old_b_result.status == BaselineStatus::kOk);
 
-    auto [before_status, before_snapshot] =
-        relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
+    auto [before_status, before_snapshot] = relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
     assert(before_status == BaselineStatus::kOk);
     rapidjson::Document before_doc;
     before_doc.Parse(before_snapshot.c_str());
@@ -1578,12 +1531,10 @@ baseline:
 
     RelationRollingObservation current = BuildRelationObservation(100, 5, 5, 90);
     current.series_key = "svc-current";
-    RelationRollingResult current_result =
-        relation_task->SubmitObservation(current, options);
+    RelationRollingResult current_result = relation_task->SubmitObservation(current, options);
     assert(current_result.status == BaselineStatus::kOk);
 
-    auto [after_status, after_snapshot] =
-        relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
+    auto [after_status, after_snapshot] = relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
     assert(after_status == BaselineStatus::kOk);
     rapidjson::Document after_doc;
     after_doc.Parse(after_snapshot.c_str());
@@ -1616,8 +1567,7 @@ baseline:
 void TestB7RelationFusionStateCapacityCleanup() {
     std::printf("[TEST] B7 relation fusion capacity cleanup...\n");
 
-    const std::string cleanup_config =
-        "/tmp/flowsql_b7_relation_fusion_capacity_cleanup.yaml";
+    const std::string cleanup_config = "/tmp/flowsql_b7_relation_fusion_capacity_cleanup.yaml";
     {
         std::ofstream file(cleanup_config);
         file << R"(
@@ -1635,8 +1585,8 @@ baseline:
     }
 
     auto env = LoadBaselineService("config_file=" + cleanup_config + ";strict=false");
-    auto [status, relation_task] = env.service->CreateRelationTask(
-        RelationTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [status, relation_task] =
+        env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(relation_task != nullptr);
 
@@ -1646,21 +1596,17 @@ baseline:
 
     RelationRollingObservation first = BuildRelationObservation(10, 5, 5, 90);
     first.series_key = "svc-capacity-a";
-    assert(relation_task->SubmitObservation(first, options).status ==
-           BaselineStatus::kOk);
+    assert(relation_task->SubmitObservation(first, options).status == BaselineStatus::kOk);
 
     RelationRollingObservation second = BuildRelationObservation(11, 5, 5, 90);
     second.series_key = "svc-capacity-b";
-    assert(relation_task->SubmitObservation(second, options).status ==
-           BaselineStatus::kOk);
+    assert(relation_task->SubmitObservation(second, options).status == BaselineStatus::kOk);
 
     RelationRollingObservation third = BuildRelationObservation(12, 5, 5, 90);
     third.series_key = "svc-capacity-c";
-    assert(relation_task->SubmitObservation(third, options).status ==
-           BaselineStatus::kOk);
+    assert(relation_task->SubmitObservation(third, options).status == BaselineStatus::kOk);
 
-    auto [snapshot_status, snapshot_json] =
-        relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
+    auto [snapshot_status, snapshot_json] = relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
     assert(snapshot_status == BaselineStatus::kOk);
     rapidjson::Document snapshot;
     snapshot.Parse(snapshot_json.c_str());
@@ -1746,23 +1692,21 @@ baseline:
     }
 
     auto env = LoadBaselineService("config_file=" + config_path + ";strict=true");
-    auto [value_status, value_task] = env.service->CreateValueTask(
-        ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [value_status, value_task] =
+        env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(value_status == BaselineStatus::kOk);
     assert(value_task != nullptr);
 
     const BootstrapTrainResult train = value_task->Bootstrap(BuildEventValueHistory());
     assert(train.status == BaselineStatus::kOk);
 
-    auto [artifact_status, artifact_json] =
-        value_task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson);
+    auto [artifact_status, artifact_json] = value_task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson);
     assert(artifact_status == BaselineStatus::kOk);
     assert(artifact_json.find("\"event_block\"") != std::string::npos);
     assert(artifact_json.find("\"active_event_codes\"") != std::string::npos);
     assert(artifact_json.find("\"holiday\"") != std::string::npos);
 
-    auto [seed_status, seed_json] =
-        value_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
+    auto [seed_status, seed_json] = value_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
     assert(seed_status == BaselineStatus::kOk);
     assert(seed_json.find("\"event_hint\"") != std::string::npos);
     assert(seed_json.find("\"event\"") != std::string::npos);
@@ -2003,7 +1947,7 @@ void AssertEventStateJsonNear(const rapidjson::Value& left, const rapidjson::Val
 void TestReviewRollingConsumesEventHint() {
     std::printf("[TEST] Review Rolling consumes event hints without learning event effects...\n");
     for (const std::string alignment : {"absolute_utc", "local_wall_clock"}) {
-        const std::string path = "/tmp/baseline-b09-evaluation/rolling/public_events.yaml";
+        const std::string path = flowsql::test::WorkspacePath("baseline-b09-evaluation/rolling/public_events.yaml");
         {
             std::ofstream file(path);
             file << "calendars:\n  - calendar_id: cn-holiday\n    calendar_version: '2026.1'\n    entries:\n";
@@ -2307,24 +2251,21 @@ void TestTaskRejectsIncompatibleBootstrapArtifact() {
     std::printf("[TEST] B1 task rejects incompatible bootstrap artifact...\n");
 
     auto env = LoadBaselineService();
-    auto [value_status, value_task] = env.service->CreateValueTask(
-        ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [value_status, value_task] =
+        env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(value_status == BaselineStatus::kOk);
     assert(value_task != nullptr);
     const BootstrapTrainResult train = value_task->Bootstrap(BuildValueHistory());
     assert(train.status == BaselineStatus::kOk);
-    auto [artifact_status, artifact_json] =
-        value_task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson);
+    auto [artifact_status, artifact_json] = value_task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson);
     assert(artifact_status == BaselineStatus::kOk);
-    assert(value_task->LoadBootstrapArtifact(
-               artifact_json, BaselineSerializationFormat::kJson) == BaselineStatus::kOk);
+    assert(value_task->LoadBootstrapArtifact(artifact_json, BaselineSerializationFormat::kJson) == BaselineStatus::kOk);
 
-    auto [other_status, other_task] = env.service->CreateValueTask(
-        OtherValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [other_status, other_task] =
+        env.service->CreateValueTask(OtherValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(other_status == BaselineStatus::kOk);
     assert(other_task != nullptr);
-    assert(other_task->LoadBootstrapArtifact(
-               artifact_json, BaselineSerializationFormat::kJson) ==
+    assert(other_task->LoadBootstrapArtifact(artifact_json, BaselineSerializationFormat::kJson) ==
            BaselineStatus::kIncompatibleArtifact);
 
     std::string bad_schema_json = artifact_json;
@@ -2332,32 +2273,24 @@ void TestTaskRejectsIncompatibleBootstrapArtifact() {
     const std::size_t schema_pos = bad_schema_json.find(schema_needle);
     assert(schema_pos != std::string::npos);
     bad_schema_json.replace(schema_pos, schema_needle.size(), "\"schema_version\":2");
-    assert(value_task->LoadBootstrapArtifact(
-               bad_schema_json, BaselineSerializationFormat::kJson) ==
+    assert(value_task->LoadBootstrapArtifact(bad_schema_json, BaselineSerializationFormat::kJson) ==
            BaselineStatus::kIncompatibleArtifact);
 
     std::string bad_algorithm_json = artifact_json;
     const std::string algorithm_needle = "\"algorithm_version\":\"b1-bootstrap-v1\"";
     const std::size_t algorithm_pos = bad_algorithm_json.find(algorithm_needle);
     assert(algorithm_pos != std::string::npos);
-    bad_algorithm_json.replace(algorithm_pos,
-                               algorithm_needle.size(),
-                               "\"algorithm_version\":\"unknown\"");
-    assert(value_task->LoadBootstrapArtifact(
-               bad_algorithm_json, BaselineSerializationFormat::kJson) ==
+    bad_algorithm_json.replace(algorithm_pos, algorithm_needle.size(), "\"algorithm_version\":\"unknown\"");
+    assert(value_task->LoadBootstrapArtifact(bad_algorithm_json, BaselineSerializationFormat::kJson) ==
            BaselineStatus::kIncompatibleArtifact);
 
     std::string bad_top_task_json = artifact_json;
-    const std::string top_task_needle =
-        "\"task_identity\":{\"task_id\":\"baseline_task_bps\"";
+    const std::string top_task_needle = "\"task_identity\":{\"task_id\":\"baseline_task_bps\"";
     const std::size_t top_task_pos = bad_top_task_json.find(top_task_needle);
     assert(top_task_pos != std::string::npos);
-    bad_top_task_json.replace(
-        top_task_pos,
-        top_task_needle.size(),
-        "\"task_identity\":{\"task_id\":\"baseline_task_other\"");
-    assert(value_task->LoadBootstrapArtifact(
-               bad_top_task_json, BaselineSerializationFormat::kJson) ==
+    bad_top_task_json.replace(top_task_pos, top_task_needle.size(),
+                              "\"task_identity\":{\"task_id\":\"baseline_task_other\"");
+    assert(value_task->LoadBootstrapArtifact(bad_top_task_json, BaselineSerializationFormat::kJson) ==
            BaselineStatus::kIncompatibleArtifact);
 
     std::printf("[PASS] B1 task rejects incompatible bootstrap artifact\n");
@@ -2410,15 +2343,14 @@ baseline:
     }
 
     auto env = LoadBaselineService("config_file=" + config_path + ";strict=true");
-    auto [value_status, value_task] = env.service->CreateValueTask(
-        ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [value_status, value_task] =
+        env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(value_status == BaselineStatus::kOk);
     assert(value_task != nullptr);
     const BootstrapTrainResult train = value_task->Bootstrap(BuildValueHistory());
     assert(train.status == BaselineStatus::kOk);
 
-    auto [seed_status, seed_json] =
-        value_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
+    auto [seed_status, seed_json] = value_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
     assert(seed_status == BaselineStatus::kOk);
 
     rapidjson::Document doc;
@@ -2443,15 +2375,14 @@ void TestRuntimeConfigDefaultDailyHarmonicOrder() {
     std::printf("[TEST] B1 runtime config default daily harmonic order...\n");
 
     auto env = LoadBaselineService();
-    auto [value_status, value_task] = env.service->CreateValueTask(
-        ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [value_status, value_task] =
+        env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(value_status == BaselineStatus::kOk);
     assert(value_task != nullptr);
     const BootstrapTrainResult train = value_task->Bootstrap(BuildValueHistory());
     assert(train.status == BaselineStatus::kOk);
 
-    auto [seed_status, seed_json] =
-        value_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
+    auto [seed_status, seed_json] = value_task->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
     assert(seed_status == BaselineStatus::kOk);
 
     rapidjson::Document doc;
@@ -2473,8 +2404,7 @@ void TestB2ValueRollingEmptyStart() {
     std::printf("[TEST] B2 value rolling empty start...\n");
 
     auto env = LoadBaselineService();
-    auto [status, task] =
-        env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [status, task] = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(task != nullptr);
 
@@ -2504,8 +2434,7 @@ void TestB2ValueRollingEmptyStart() {
     ValueRollingObservation second = first;
     second.bucket_id = 101;
     second.value = 110.0;
-    RollingBaselineResult second_result =
-        task->SubmitObservation(second, RollingSubmitOptions{});
+    RollingBaselineResult second_result = task->SubmitObservation(second, RollingSubmitOptions{});
     assert(second_result.status == BaselineStatus::kOk);
     assert(second_result.can_score);
     assert(second_result.can_update);
@@ -2523,8 +2452,7 @@ void TestB2SampledValueLowSupportStart() {
     std::printf("[TEST] B2 sampled value low support start...\n");
 
     auto env = LoadBaselineService();
-    auto [status, task] = env.service->CreateValueTask(SampledValueTaskConfig(),
-                                                       BaselineSerializationFormat::kJson);
+    auto [status, task] = env.service->CreateValueTask(SampledValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(task != nullptr);
 
@@ -2552,8 +2480,7 @@ void TestB2RatioRollingInputAndEmptyStart() {
     std::printf("[TEST] B2 ratio rolling input and empty start...\n");
 
     auto env = LoadBaselineService();
-    auto [status, task] =
-        env.service->CreateRatioTask(RatioTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [status, task] = env.service->CreateRatioTask(RatioTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(task != nullptr);
 
@@ -2562,8 +2489,7 @@ void TestB2RatioRollingInputAndEmptyStart() {
     invalid.bucket_id = 100;
     invalid.numerator = 11.0;
     invalid.denominator = 10.0;
-    RollingBaselineResult invalid_result =
-        task->SubmitObservation(invalid, RollingSubmitOptions{});
+    RollingBaselineResult invalid_result = task->SubmitObservation(invalid, RollingSubmitOptions{});
     assert(invalid_result.status == BaselineStatus::kInvalidArgument);
 
     RatioRollingObservation first;
@@ -2586,16 +2512,14 @@ void TestB2RollingSnapshotAndBootstrapWarmup() {
     std::printf("[TEST] B2 rolling snapshot and bootstrap warm-up...\n");
 
     auto env = LoadBaselineService();
-    auto [status, task] =
-        env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [status, task] = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(task != nullptr);
 
     const BootstrapTrainResult train = task->Bootstrap(BuildValueHistory());
     assert(train.status == BaselineStatus::kOk);
 
-    auto [task_snapshot_status, task_snapshot_json] =
-        task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
+    auto [task_snapshot_status, task_snapshot_json] = task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
     assert(task_snapshot_status == BaselineStatus::kOk);
     rapidjson::Document task_doc;
     task_doc.Parse(task_snapshot_json.c_str());
@@ -2653,8 +2577,7 @@ void TestB2RollingPredict() {
     std::printf("[TEST] B2 rolling predict...\n");
 
     auto env = LoadBaselineService();
-    auto [status, task] =
-        env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [status, task] = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(task != nullptr);
 
@@ -2665,8 +2588,7 @@ void TestB2RollingPredict() {
     first.series_key = "link-predict";
     first.bucket_id = 100;
     first.value = 100.0;
-    assert(task->SubmitObservation(first, RollingSubmitOptions{}).status ==
-           BaselineStatus::kOk);
+    assert(task->SubmitObservation(first, RollingSubmitOptions{}).status == BaselineStatus::kOk);
 
     RollingPrediction past = task->PredictRolling("link-predict", 99);
     assert(past.status == BaselineStatus::kInvalidArgument);
@@ -2678,8 +2600,7 @@ void TestB2RollingPredict() {
     assert(prediction.baseline_upper >= prediction.baseline_mu);
     assert(prediction.baseline_upper > prediction.baseline_lower);
     assert(prediction.band_z == 3.0);
-    const RollingPredictionSequence sequence =
-        task->PredictRolling("link-predict", 101, 3);
+    const RollingPredictionSequence sequence = task->PredictRolling("link-predict", 101, 3);
     assert(sequence.status == BaselineStatus::kOk);
     assert(sequence.series_key == "link-predict");
     assert(sequence.start_bucket_id == 101);
@@ -2691,8 +2612,7 @@ void TestB2RollingPredict() {
     assert(sequence.predictions[0].status == BaselineStatus::kOk);
     assert(sequence.predictions[1].status == BaselineStatus::kOk);
     assert(sequence.predictions[2].status == BaselineStatus::kOk);
-    const RollingPredictionSequence empty_sequence =
-        task->PredictRolling("link-predict", 101, 0);
+    const RollingPredictionSequence empty_sequence = task->PredictRolling("link-predict", 101, 0);
     assert(empty_sequence.status == BaselineStatus::kInvalidArgument);
 
     ValueRollingObservation second = first;
@@ -2712,8 +2632,7 @@ void TestB2RollingPredict() {
     ratio_first.bucket_id = 100;
     ratio_first.numerator = 80.0;
     ratio_first.denominator = 100.0;
-    assert(ratio_task->SubmitObservation(ratio_first, RollingSubmitOptions{}).status ==
-           BaselineStatus::kOk);
+    assert(ratio_task->SubmitObservation(ratio_first, RollingSubmitOptions{}).status == BaselineStatus::kOk);
 
     RollingPrediction ratio_prediction = ratio_task->PredictRolling("ratio-predict", 101);
     assert(ratio_prediction.status == BaselineStatus::kOk);
@@ -2722,8 +2641,7 @@ void TestB2RollingPredict() {
     assert(ratio_prediction.baseline_lower <= ratio_prediction.baseline_mu);
     assert(ratio_prediction.baseline_upper >= ratio_prediction.baseline_mu);
     assert(ratio_prediction.band_z == 3.0);
-    const RollingPredictionSequence ratio_sequence =
-        ratio_task->PredictRolling("ratio-predict", 101, 2);
+    const RollingPredictionSequence ratio_sequence = ratio_task->PredictRolling("ratio-predict", 101, 2);
     assert(ratio_sequence.status == BaselineStatus::kOk);
     assert(ratio_sequence.predictions.size() == 2);
     assert(ratio_sequence.predictions[0].bucket_id == 101);
@@ -2737,8 +2655,7 @@ void TestB2RollingFailureSemantics() {
 
     {
         auto env = LoadBaselineService();
-        auto [status, task] =
-            env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
+        auto [status, task] = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         ValueRollingObservation obs;
         obs.series_key = "link-disabled";
@@ -2753,31 +2670,27 @@ void TestB2RollingFailureSemantics() {
 
     {
         auto env = LoadBaselineService();
-        auto [status, task] =
-            env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
+        auto [status, task] = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         ValueRollingObservation obs;
         obs.series_key = "link-dup";
         obs.bucket_id = 10;
         obs.value = 10.0;
-        assert(task->SubmitObservation(obs, RollingSubmitOptions{}).status ==
-               BaselineStatus::kOk);
-        assert(task->SubmitObservation(obs, RollingSubmitOptions{}).status ==
-               BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, RollingSubmitOptions{}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, RollingSubmitOptions{}).status == BaselineStatus::kInvalidArgument);
     }
 
     {
         auto env = LoadBaselineService();
-        auto [status, task] = env.service->CreateValueTask(SampledValueTaskConfig(),
-                                                           BaselineSerializationFormat::kJson);
+        auto [status, task] =
+            env.service->CreateValueTask(SampledValueTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         ValueRollingObservation obs;
         obs.series_key = "sampled-existing";
         obs.bucket_id = 10;
         obs.value = 10.0;
         obs.sample_count = 20;
-        assert(task->SubmitObservation(obs, RollingSubmitOptions{}).status ==
-               BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, RollingSubmitOptions{}).status == BaselineStatus::kOk);
         obs.bucket_id = 11;
         obs.sample_count = 2;
         RollingBaselineResult low = task->SubmitObservation(obs, RollingSubmitOptions{});
@@ -2788,8 +2701,7 @@ void TestB2RollingFailureSemantics() {
 
     {
         auto env = LoadBaselineService();
-        auto [status, task] =
-            env.service->CreateRatioTask(RatioTaskConfig(), BaselineSerializationFormat::kJson);
+        auto [status, task] = env.service->CreateRatioTask(RatioTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         RatioRollingObservation obs;
         obs.series_key = "ratio-low-den";
@@ -3342,8 +3254,7 @@ baseline:
     }
 
     auto env = LoadBaselineService("config_file=" + config_path + ";strict=false");
-    auto [status, task] =
-        env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [status, task] = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(task != nullptr);
 
@@ -3378,8 +3289,7 @@ void TestB6SameTaskSerializedCrossThreadHandoff() {
     std::printf("[TEST] B6 same task serialized cross-thread handoff...\n");
 
     auto env = LoadBaselineService();
-    auto [status, task] =
-        env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
+    auto [status, task] = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(task != nullptr);
 
@@ -3402,18 +3312,15 @@ void TestB6SameTaskSerializedCrossThreadHandoff() {
     assert(train.status == BaselineStatus::kOk);
 
     BaselineSerializationResult exported_artifact;
-    std::thread export_thread([&]() {
-        exported_artifact =
-            task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson);
-    });
+    std::thread export_thread(
+        [&]() { exported_artifact = task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson); });
     export_thread.join();
     assert(exported_artifact.first == BaselineStatus::kOk);
     assert(!exported_artifact.second.empty());
 
     BaselineStatus load_status = BaselineStatus::kParseFailed;
     std::thread load_thread([&]() {
-        load_status = task->LoadBootstrapArtifact(
-            exported_artifact.second, BaselineSerializationFormat::kJson);
+        load_status = task->LoadBootstrapArtifact(exported_artifact.second, BaselineSerializationFormat::kJson);
     });
     load_thread.join();
     assert(load_status == BaselineStatus::kOk);
@@ -3432,18 +3339,14 @@ void TestB6SameTaskSerializedCrossThreadHandoff() {
     assert(submit_result.bucket_id == 220);
 
     BaselineSerializationResult series_snapshot;
-    std::thread query_thread([&]() {
-        series_snapshot =
-            task->QuerySeriesSnapshot("svc-a", BaselineSerializationFormat::kJson);
-    });
+    std::thread query_thread(
+        [&]() { series_snapshot = task->QuerySeriesSnapshot("svc-a", BaselineSerializationFormat::kJson); });
     query_thread.join();
     assert(series_snapshot.first == BaselineStatus::kOk);
     assert(series_snapshot.second.find("\"series_key\":\"svc-a\"") != std::string::npos);
 
     BaselineSerializationResult config_export;
-    std::thread config_thread([&]() {
-        config_export = task->ExportConfig(BaselineSerializationFormat::kJson);
-    });
+    std::thread config_thread([&]() { config_export = task->ExportConfig(BaselineSerializationFormat::kJson); });
     config_thread.join();
     assert(config_export.first == BaselineStatus::kOk);
     assert(config_export.second.find("baseline_task_bps") != std::string::npos);
@@ -3454,9 +3357,7 @@ void TestB6SameTaskSerializedCrossThreadHandoff() {
     assert(close_status == BaselineStatus::kOk);
 
     RollingPrediction after_close_prediction;
-    std::thread after_close_thread([&]() {
-        after_close_prediction = task->PredictRolling("svc-a", 221);
-    });
+    std::thread after_close_thread([&]() { after_close_prediction = task->PredictRolling("svc-a", 221); });
     after_close_thread.join();
     assert(after_close_prediction.status == BaselineStatus::kInvalidArgument);
 
@@ -3467,18 +3368,14 @@ void TestB6RelationSerializedLifecycleSequence() {
     std::printf("[TEST] B6 relation serialized lifecycle sequence...\n");
 
     auto env = LoadBaselineService();
-    auto [status, task] =
-        env.service->CreateRelationTask(RelationTaskConfig(),
-                                        BaselineSerializationFormat::kJson);
+    auto [status, task] = env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(task != nullptr);
 
     RelationRollingSubmitOptions options;
     RelationRollingResult cold_submit;
-    std::thread cold_submit_thread([&]() {
-        cold_submit =
-            task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options);
-    });
+    std::thread cold_submit_thread(
+        [&]() { cold_submit = task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options); });
     cold_submit_thread.join();
     assert(cold_submit.status == BaselineStatus::kOk);
     assert(cold_submit.series_key == "svc-a");
@@ -3490,27 +3387,20 @@ void TestB6RelationSerializedLifecycleSequence() {
     assert(train.status == BaselineStatus::kOk);
 
     BaselineSerializationResult artifact;
-    std::thread export_thread([&]() {
-        artifact = task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson);
-    });
+    std::thread export_thread([&]() { artifact = task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson); });
     export_thread.join();
     assert(artifact.first == BaselineStatus::kOk);
-    assert(artifact.second.find("\"document_kind\":\"bootstrap_artifact\"") !=
-           std::string::npos);
+    assert(artifact.second.find("\"document_kind\":\"bootstrap_artifact\"") != std::string::npos);
 
     BaselineStatus load_status = BaselineStatus::kParseFailed;
-    std::thread load_thread([&]() {
-        load_status = task->LoadBootstrapArtifact(
-            artifact.second, BaselineSerializationFormat::kJson);
-    });
+    std::thread load_thread(
+        [&]() { load_status = task->LoadBootstrapArtifact(artifact.second, BaselineSerializationFormat::kJson); });
     load_thread.join();
     assert(load_status == BaselineStatus::kOk);
 
     RelationRollingResult seeded_submit;
-    std::thread seeded_submit_thread([&]() {
-        seeded_submit =
-            task->SubmitObservation(BuildRelationObservation(20, 50, 25, 25), options);
-    });
+    std::thread seeded_submit_thread(
+        [&]() { seeded_submit = task->SubmitObservation(BuildRelationObservation(20, 50, 25, 25), options); });
     seeded_submit_thread.join();
     assert(seeded_submit.status == BaselineStatus::kOk);
     bool has_basis_scoped_routed = false;
@@ -3520,17 +3410,14 @@ void TestB6RelationSerializedLifecycleSequence() {
     assert(has_basis_scoped_routed);
 
     BaselineSerializationResult series_snapshot;
-    std::thread snapshot_thread([&]() {
-        series_snapshot =
-            task->QuerySeriesSnapshot("svc-a", BaselineSerializationFormat::kJson);
-    });
+    std::thread snapshot_thread(
+        [&]() { series_snapshot = task->QuerySeriesSnapshot("svc-a", BaselineSerializationFormat::kJson); });
     snapshot_thread.join();
     assert(series_snapshot.first == BaselineStatus::kOk);
     rapidjson::Document snapshot_doc;
     snapshot_doc.Parse(series_snapshot.second.c_str());
     assert(!snapshot_doc.HasParseError());
-    assert(std::string(snapshot_doc["document_kind"].GetString()) ==
-           "relation_series_snapshot");
+    assert(std::string(snapshot_doc["document_kind"].GetString()) == "relation_series_snapshot");
     assert(snapshot_doc["routed_summaries"].Size() > 0);
 
     BaselineStatus close_status = BaselineStatus::kParseFailed;
@@ -3539,10 +3426,8 @@ void TestB6RelationSerializedLifecycleSequence() {
     assert(close_status == BaselineStatus::kOk);
 
     RelationRollingResult after_close;
-    std::thread after_close_thread([&]() {
-        after_close =
-            task->SubmitObservation(BuildRelationObservation(21, 50, 25, 25), options);
-    });
+    std::thread after_close_thread(
+        [&]() { after_close = task->SubmitObservation(BuildRelationObservation(21, 50, 25, 25), options); });
     after_close_thread.join();
     assert(after_close.status == BaselineStatus::kInvalidArgument);
 
@@ -3558,8 +3443,7 @@ void TestB6DifferentTasksMayRunInParallel() {
     assert(value_status == BaselineStatus::kOk);
     assert(value_task != nullptr);
     auto [relation_status, relation_task] =
-        env.service->CreateRelationTask(RelationTaskConfig(),
-                                        BaselineSerializationFormat::kJson);
+        env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
     assert(relation_status == BaselineStatus::kOk);
     assert(relation_task != nullptr);
 
@@ -3581,8 +3465,7 @@ void TestB6DifferentTasksMayRunInParallel() {
         ready.fetch_add(1, std::memory_order_release);
         while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
         RelationRollingSubmitOptions options;
-        relation_result = relation_task->SubmitObservation(
-            BuildRelationObservation(100, 60, 30, 10), options);
+        relation_result = relation_task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options);
     });
 
     while (ready.load(std::memory_order_acquire) < 2) std::this_thread::yield();
@@ -3595,8 +3478,7 @@ void TestB6DifferentTasksMayRunInParallel() {
     assert(relation_result.status == BaselineStatus::kOk);
     assert(relation_result.series_key == "svc-a");
 
-    auto [snapshot_status, snapshot_json] =
-        env.service->QueryServiceSnapshot(BaselineSerializationFormat::kJson);
+    auto [snapshot_status, snapshot_json] = env.service->QueryServiceSnapshot(BaselineSerializationFormat::kJson);
     assert(snapshot_status == BaselineStatus::kOk);
     rapidjson::Document snapshot;
     snapshot.Parse(snapshot_json.c_str());

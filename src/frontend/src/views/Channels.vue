@@ -65,6 +65,9 @@
             <span>配置通道</span>
             <el-tag size="small" effect="plain">{{ configChannelCount }}</el-tag>
           </div>
+          <div class="channel-type-item" :class="{ active: activeChannelType === 'kafka' }" @click="switchChannelType('kafka')">
+            <span>Kafka 通道</span><el-tag size="small" effect="plain">{{ kafkaChannelCount }}</el-tag>
+          </div>
         </div>
 
         <div class="channel-main">
@@ -166,6 +169,7 @@
               </template>
             </el-table-column>
           </el-table>
+          <KafkaChannels v-else-if="activeChannelType === 'kafka'" :search-text="searchText" @count-change="kafkaChannelCount = $event" />
           <ConfigChannels
             v-else-if="activeChannelType === 'config'"
             :search-text="searchText"
@@ -501,6 +505,7 @@ import api, {
 } from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ConfigChannels from './ConfigChannels.vue'
+import KafkaChannels from './KafkaChannels.vue'
 import { normalizeStreamOptions as buildStreamOptions } from '../utils/streamChannel.js'
 
 const searchText = ref('')
@@ -514,6 +519,7 @@ const dbChannels = ref([])
 const dfChannels = ref([])
 const streamChannels = ref([])
 const configChannelCount = ref(0)
+const kafkaChannelCount = ref(0)
 const streamDefinitions = ref([])
 const loadingDb = ref(false)
 const loadingDf = ref(false)
@@ -579,6 +585,7 @@ const sectionTitle = computed(() => {
   if (activeChannelType.value === 'dataframe') return 'DataFrame 通道'
   if (activeChannelType.value === 'database') return '数据库通道'
   if (activeChannelType.value === 'config') return '配置通道'
+  if (activeChannelType.value === 'kafka') return 'Kafka 通道'
   return 'Stream 通道'
 })
 

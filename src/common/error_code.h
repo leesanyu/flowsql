@@ -11,12 +11,14 @@ namespace error {
 
 // 业务错误码，由 fnRouterHandler 返回
 // RouterAgencyPlugin 负责将其映射为 HTTP 状态码
-constexpr int32_t OK             =  0;  // 200 OK
-constexpr int32_t BAD_REQUEST    = -1;  // 400 Bad Request
-constexpr int32_t NOT_FOUND      = -2;  // 404 Not Found
-constexpr int32_t CONFLICT       = -3;  // 409 Conflict
-constexpr int32_t INTERNAL_ERROR = -4;  // 500 Internal Server Error
-constexpr int32_t UNAVAILABLE    = -5;  // 503 Service Unavailable
+constexpr int32_t ACCEPTED = 1;            // 202 Accepted
+constexpr int32_t TOO_MANY_REQUESTS = -7;  // 429 Too Many Requests
+constexpr int32_t OK = 0;                  // 200 OK
+constexpr int32_t BAD_REQUEST = -1;        // 400 Bad Request
+constexpr int32_t NOT_FOUND = -2;          // 404 Not Found
+constexpr int32_t CONFLICT = -3;           // 409 Conflict
+constexpr int32_t INTERNAL_ERROR = -4;     // 500 Internal Server Error
+constexpr int32_t UNAVAILABLE = -5;        // 503 Service Unavailable
 constexpr int32_t PAYLOAD_TOO_LARGE = -6;  // 413 Payload Too Large
 
 }  // namespace error
