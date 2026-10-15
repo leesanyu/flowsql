@@ -11,6 +11,7 @@ import sys
 import uuid
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"tools"))
 from test_environment.config import Config, STATE, EnvironmentError
+from test_environment.cleanup import cleanup_project, project_resources, temporary_project
 from test_environment.fixture import private_write, probe_database, runtime_command, prepare_kafka, prepare_databases, wait_databases
 from test_environment.runner import existing_kafka_manifest,kafka_probe
 
@@ -93,7 +94,7 @@ def fresh(data):
 c=modified(fresh)
 deadline=time.monotonic()+60
 compose=STATE/c.data['project']/'compose.json'
-try:
+with temporary_project(c.data['project']):
     prepare_databases(c,['mysql','postgres','clickhouse'],deadline,'docker')
     wait_databases(c,['mysql','postgres','clickhouse'],'docker',deadline)
     document=json.loads(compose.read_text())
@@ -102,8 +103,10 @@ try:
         assert probe_database(c,backend,'driver','docker',True,10)['permissions']=='verified'
     passed.append('empty-state-no-export-no-published-port')
     print('PASS empty-state-no-export-no-published-port',flush=True)
-finally:
-    if compose.exists():subprocess.run(['docker','compose','-f',str(compose),'stop'],capture_output=True,timeout=60)
+assert not any(project_resources(c.data['project']).values()), 'temporary project leaked Docker resources'
+cleanup_project(c.data['project'],apply=True)  # Repeated cleanup must also succeed.
+passed.append('temporary-project-reclaimed-and-repeatable')
+print('PASS temporary-project-reclaimed-and-repeatable',flush=True)
 
 # Valid bootstrap and TLS, but the returned advertised SSL broker is unreachable.
 c=modified(lambda data:data.update(project='flowsql_advertised_'+uuid.uuid4().hex[:8],managed=True))

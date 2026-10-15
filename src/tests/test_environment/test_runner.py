@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[3]/"tools"))
 from test_environment.config import EnvironmentError
-from test_environment.runner import case, select, preflight
+from test_environment.runner import case, select, preflight, main
 from test_environment.config import Config
 
 class RunnerTests(unittest.TestCase):
@@ -55,6 +55,33 @@ class RunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root,patch("test_environment.runner.dependencies",return_value={"integration":declaration}),patch("test_environment.runner.preflight",side_effect=EnvironmentError("authentication_failed","connect","mysql")),patch("test_environment.runner.report_path",return_value=Path(root)/"report.json"):
             self.assertEqual(case("integration",[sys.executable,"-c","raise AssertionError('must not execute')"]),1)
             self.assertFalse(json.loads((Path(root)/"report.json").read_text())["executed"])
+
+    def test_active_case_holds_project_lock_through_execution(self):
+        from test_environment.cleanup import project_activity
+        declaration={"services":["mysql"],"role":"driver","resources":[],"location":"native"}
+        def while_running(*args, **kwargs):
+            with self.assertRaises(EnvironmentError) as error:
+                with project_activity(Config().data["project"], exclusive=True):
+                    pass
+            self.assertEqual(error.exception.category, "resource_busy")
+            return subprocess.CompletedProcess(args, 0, stdout="passed", stderr="")
+        import subprocess
+        with tempfile.TemporaryDirectory() as root,patch("test_environment.runner.dependencies",return_value={"integration":declaration}),patch("test_environment.runner.preflight"),patch("test_environment.runner.subprocess.run",side_effect=while_running),patch("test_environment.runner.report_path",return_value=Path(root)/"report.json"):
+            self.assertEqual(case("integration",["example"]),0)
+
+    def test_cleanup_requires_explicit_project_and_defaults_to_preview(self):
+        with patch("sys.argv", ["runner", "cleanup", "--project", "flowsql_lifecycle"]),patch("test_environment.runner.cleanup_project",return_value={}) as cleanup:
+            self.assertEqual(main(),0)
+            cleanup.assert_called_once_with("flowsql_lifecycle", apply=False)
+        with patch("sys.argv", ["runner", "cleanup", "--project", "flowsql_lifecycle", "--apply"]),patch("test_environment.runner.cleanup_project",return_value={}) as cleanup:
+            self.assertEqual(main(),0)
+            cleanup.assert_called_once_with("flowsql_lifecycle", apply=True)
+        for arguments in (["cleanup"], ["cleanup", "--project", "flowsql_lifecycle", "--typo"], ["unit", "--apply"]):
+            with self.subTest(arguments=arguments),patch("sys.argv", ["runner", *arguments]),contextlib.redirect_stderr(io.StringIO()),patch("test_environment.runner.cleanup_project") as cleanup:
+                with self.assertRaises(SystemExit) as error:
+                    main()
+                self.assertEqual(error.exception.code,2)
+                cleanup.assert_not_called()
 
 if __name__=="__main__":
     # Expected inner failure/skip reports are assertions, not this suite's coverage result.

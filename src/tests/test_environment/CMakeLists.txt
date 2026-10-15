@@ -21,6 +21,7 @@ target_compile_options(test_environment_kafka_probe PRIVATE -UNDEBUG)
 set_target_properties(test_environment_kafka_probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_environment_fixture COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_fixture.py)
 add_test(NAME test_environment_runner COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_runner.py)
+add_test(NAME test_environment_cleanup COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_cleanup.py)
 
 add_test(NAME test_environment_failures COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/../tools/test_environment/acceptance.py)
 set_tests_properties(test_environment_failures PROPERTIES TIMEOUT 240 WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output)

@@ -17,6 +17,7 @@ import urllib.parse
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tools"))
 from test_environment.config import BACKENDS, Config, EnvironmentError, STATE, dependencies
+from test_environment.cleanup import cleanup_project, project_activity
 from test_environment.fixture import (deployment, fingerprint, kafka_matrix, lock, prepare_databases,
                                       prepare_kafka, private_write, probe_database, runtime_command, wait_databases)
 
@@ -192,6 +193,7 @@ def case(name, command):
         with contextlib.ExitStack() as stack:
             if declaration:
                 config=Config()
+                stack.enter_context(project_activity(config.data["project"]))
                 for resource in sorted(declaration["resources"]):stack.enter_context(lock(config.data["project"]+"-"+resource))
                 location=declaration["location"]
                 if location=="both":location=os.environ.get("FLOWSQL_TEST_LOCATION","docker")
@@ -262,11 +264,13 @@ def run(mode, config_path, location, pattern, jobs):
     source_before=sources()
     (evidence/"sources-before.json").write_text(json.dumps(source_before,indent=2))
     (evidence/"artifacts-before.json").write_text(json.dumps(before,indent=2))
+    activity=contextlib.ExitStack()
     try:
         declared=dependencies()
         selected=[declared[name] for name in names if name in declared]
         if selected:
             config=Config(config_path)
+            activity.enter_context(project_activity(config.data["project"]))
             # Freeze the public runtime config for this run. References remain private external bindings.
             frozen=STATE / "runs" / run_id / "environment.json"
             data=json.loads(json.dumps(config.data))
@@ -300,6 +304,8 @@ def run(mode, config_path, location, pattern, jobs):
     except EnvironmentError as error:
         summary["environment_error"]=error.result();success=False
         print(json.dumps(error.result()),flush=True)
+    finally:
+        activity.close()
     after=artifacts()
     (evidence/"artifacts-after.json").write_text(json.dumps(after,indent=2))
     source_after=sources()
@@ -316,25 +322,35 @@ def run(mode, config_path, location, pattern, jobs):
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument("mode",choices=("unit","doctor","integration","all","case","kafka","deployment"))
+    parser.add_argument("mode",choices=("unit","doctor","integration","all","case","kafka","deployment","cleanup"))
     parser.add_argument("--config")
     parser.add_argument("--location",choices=("native","docker"),default=os.environ.get("FLOWSQL_TEST_LOCATION","docker"))
     parser.add_argument("--filter")
     parser.add_argument("--jobs",type=int,default=1)
     parser.add_argument("--name")
+    parser.add_argument("--project",help="exact test project for cleanup; no default")
+    parser.add_argument("--apply",action="store_true",help="apply cleanup (default: preview)")
     arguments,command=parser.parse_known_args()
     if command[:1]==["--"]:command=command[1:]
+    if arguments.mode=="cleanup" and (not arguments.project or command):
+        parser.error("cleanup requires --project and accepts no trailing arguments")
+    if arguments.mode!="cleanup" and (arguments.project or arguments.apply):
+        parser.error("--project/--apply require cleanup")
     try:
+        if arguments.mode=="cleanup":
+            print(json.dumps(cleanup_project(arguments.project,apply=arguments.apply),indent=2));return 0
         if arguments.mode=="case":return case(arguments.name,command)
         if arguments.mode=="doctor":
             config=Config(arguments.config)
             selected=[value for name,value in dependencies().items() if not arguments.filter or re.search(arguments.filter,name)]
             if not selected:raise EnvironmentError("config_invalid","selection")
-            print(json.dumps(preflight(config,selected,arguments.location),indent=2));return 0
+            with project_activity(config.data["project"]):
+                print(json.dumps(preflight(config,selected,arguments.location),indent=2));return 0
         if arguments.mode in ("kafka","deployment"):
             config=Config(arguments.config)
             output=REPO/"evidence/test-environment"/os.environ.get("FLOWSQL_TEST_RUN_ID","direct")/(arguments.mode+"-"+arguments.location+"-"+uuid.uuid4().hex[:8])
-            print(json.dumps((kafka_matrix if arguments.mode=="kafka" else deployment)(config,arguments.location,output)));return 0
+            with project_activity(config.data["project"]):
+                print(json.dumps((kafka_matrix if arguments.mode=="kafka" else deployment)(config,arguments.location,output)));return 0
         return run(arguments.mode,arguments.config,arguments.location,arguments.filter,arguments.jobs)
     except EnvironmentError as error:
         print(json.dumps(error.result()),flush=True);return 1

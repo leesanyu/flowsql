@@ -37,6 +37,17 @@ Kafka 分发优先从固定摘要的官方 Kafka 4.1.0 镜像提取并核对版�
 
 默认测试资源归属独立 `flowsql_test` 项目，数据库按 driver/npm/source/target/production 隔离；相同角色的共享表由清单中的资源锁串行保护。Kafka Broker、KDC、HTTPS token/JWKS 同处一个独立网络，证书 SAN 与 principal 匹配实际服务地址。真实矩阵的服务/Topic/ACL/票据使用独立运行身份，完成或取消释放本轮进程和客户端。已存在同名用户容器、网络或卷不能冒充受管资源。
 
+临时数据库验收项目（`flowsql_empty_*`）在本轮成功或异常退出时自动移除其容器、卷和网络，准备部分失败也执行回收；清理错误使测试失败。可复用的主测试项目在普通测试后保留，避免每次重新初始化。显式清理 Docker 测试资源使用：
+
+```bash
+# 默认只预览；必须明确填写配置中的 project，示例为默认项目
+tools/test.sh cleanup --project flowsql_test
+# 确认后移除该测试项目的容器、卷（含测试数据）和网络
+tools/test.sh cleanup --project flowsql_test --apply
+```
+
+清理不读取凭证或 Compose 文件，状态目录丢失后的孤立卷也可按精确 `flowsql.test.project` 标签识别。无该标签的卷、其他项目及业务资源保留；发现冲突 Compose 标签，或卷/网络被其他项目容器引用时整批拒绝删除。标准测试入口持有项目活动共享锁，清理使用非阻塞独占锁；同一项目的并发命令须使用同一 `FLOWSQL_TEST_STATE`。清理失败返回非零，重复清理空项目成功。该命令仅管理 Docker 资源，不终止原生 Kafka 进程；强制结束整个测试进程（如 SIGKILL）无法保证 finally 执行，遗留 Docker 资源需用此入口显式清理。
+
 私有状态默认在 Linux 文件系统 `/tmp/flowsql-test-<uid>/`，父目录 0700、凭证 0600；可用 `FLOWSQL_TEST_STATE` 指向持久 Linux 路径。WSL 的 Windows 盘符挂载可能始终呈现 0777，此时应换私有状态位置，不能放宽凭证权限检查。默认凭证 `file:@state/secrets/<backend>` 由入口首次生成，以后复用；也支持 `file:/private/path` 和 `env:VARIABLE`。切勿把秘密写进 tracked JSON、日志或命令行。修改初始化密码不会改变已有卷里的账号；真实认证不匹配必须失败，不会自动清卷。
 
 准备总预算默认 60 秒，单次连接最多 3 秒；认证、配置和明确权限错误立即失败。GSSAPI 双身份续期及 OAuth 刷新的长驻留时间是测试预算，独立于准备预算。`doctor` 只读查询数据库与 Kafka 元数据，不建表/Topic、不发布/订阅/消费、不加入组或提交位点；读写权限无法证明时显示 `unverified`。业务集成的建表/写入/清理权限只在专用测试库验证。
@@ -54,6 +65,7 @@ Kafka 分发优先从固定摘要的官方 Kafka 4.1.0 镜像提取并核对版�
 | tls_validation_failed / mechanism_unavailable | 核对 CA、SAN、安全协议、服务端机制与客户端能力；保持校验开启。 |
 | kerberos_unavailable / token_service_unavailable / credential_expired | 核对独立身份服务、信任与续期，初次认证成功不能替代续期验收。 |
 | preparation_timeout / test_failed | 查看该轮脱敏日志与明确失败阶段，修复后重跑相同选择。 |
+| resource_busy | 等待该项目测试结束，核对卷/网络引用；不要强制清理正在使用的项目。 |
 
 新增依赖测试时，在同一 Atomic Slice 中完成四件事：声明 dependencies.json 的服务/角色/位置/锁；接入 `tests/common/test_environment.h` 的参数/Options 或 Kafka 受管 manifest；用标准 `add_test(NAME ... COMMAND ...)` 注册；验证正常执行和至少一个必要依赖失效路径。共享 fixture 在 CTest 运行时从清单派生，CMake 不读取 MYSQL/PG/CH 密码或临时 Baseliner options。每轮临时文件用 `WorkspacePath`，不引用旧任务的 `/tmp` 目录。完整说明及约束见 [AGENTS.md](../AGENTS.md) 4.4。
 
