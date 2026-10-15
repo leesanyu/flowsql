@@ -35,7 +35,7 @@ int main() {
     auto capabilities = call("definitions/query", "{}");
     assert(capabilities.HasMember("sasl_mechanisms"));
     assert(capabilities["adapter_status"]["structured"]["sink"] == "available");
-    assert(capabilities["adapter_status"]["packet"]["sink"] == "not_installed");
+    assert(capabilities["adapter_status"]["packet"]["sink"] == "available");
     assert(capabilities["structured_sink"]["write_permission"] == "unverified");
     assert(capabilities["structured_sink"]["types"].Size() == 15);
     assert(capabilities["structured_source"]["requires_async"].GetBool());

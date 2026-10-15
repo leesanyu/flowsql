@@ -39,7 +39,7 @@ class Runtime {
  public:
     PluginLoader* loader = PluginLoader::Single();
     const std::filesystem::path root;
-    explicit Runtime(std::filesystem::path workspace, const std::string& kafka_options = "")
+    explicit Runtime(std::filesystem::path workspace, const std::string& kafka_options = "", unsigned batch_workers = 1)
         : root(std::move(workspace)) {
         std::filesystem::create_directories(root);
         const auto database = "type=sqlite;name=results;path=" + (root / "results.db").string();
@@ -48,13 +48,15 @@ class Runtime {
         const auto addon =
             "operator_db_path=" + (root / "operators.db").string() + ";upload_dir=" + (root / "uploads").string();
         const auto task = "db_path=" + (root / "tasks.db").string();
-        const auto npi = std::string("{\"ldfile\":\"") + PACKET_NPI_CONFIG + "\",\"concurrency\":1}";
+        const auto npi = std::string("{\"ldfile\":\"") + PACKET_NPI_CONFIG +
+                         "\",\"concurrency\":" + std::to_string(batch_workers) + "}";
+        const auto scheduler = "stream_workers=1;batch_workers=" + std::to_string(batch_workers);
         const char* libraries[] = {"libflowsql_database.so", "libflowsql_builtin.so",       "libflowsql_catalog.so",
                                    "libflowsql_npi.so",      "libflowsql_scheduler.so",     "libflowsql_binaddon.so",
                                    "libflowsql_task.so",     "libflowsql_flow_labeling.so", "libflowsql_kafka.so"};
-        const char* options[] = {
-            database.c_str(), nullptr,      catalog.c_str(), npi.c_str(),          "stream_workers=1;batch_workers=1",
-            addon.c_str(),    task.c_str(), nullptr,         kafka_options.c_str()};
+        const char* options[] = {database.c_str(), nullptr,           catalog.c_str(),
+                                 npi.c_str(),      scheduler.c_str(), addon.c_str(),
+                                 task.c_str(),     nullptr,           kafka_options.c_str()};
         Check(loader->Load(get_absolute_process_path(), libraries, options, kafka_options.empty() ? 8 : 9) == 0,
               "plugins_load");
         libraries_.active = true;

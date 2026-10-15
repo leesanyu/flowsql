@@ -4,6 +4,7 @@
 #ifndef _FLOWSQL_SCHEDULER_SCHEDULER_PLUGIN_H_
 #define _FLOWSQL_SCHEDULER_SCHEDULER_PLUGIN_H_
 
+#include <framework/interfaces/ipacket_sink.h>
 #include <framework/interfaces/iresult_sink.h>
 #include <atomic>
 #include <functional>
@@ -47,6 +48,8 @@ struct SqlStatement;
 struct BoundFilterExpr;
 
 namespace scheduler {
+int CreateExclusiveBlockReader(IQuerier*, const std::string&, IBlockStreamChannel*, const std::string&,
+                               std::shared_ptr<IBlockStreamChannel>*, std::string*);
 
 struct GroupNodeResolvedSourceMeta {
     std::vector<std::string> sources;
@@ -256,6 +259,7 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
         bool has_block_source = false;
     };
     int32_t ResolveSourceBindings(const SqlStatement& stmt, SourceResolveResult* out, std::string* err_rsp);
+    int32_t TryExecutePacketSink(const SourceResolveResult&, const SqlStatement&, std::string&, bool* handled);
     std::string QueryStreamChannelRole(const std::string& type, const std::string& name);
     int TryAcquireStreamTaskLeases(const std::string& runtime_task_id, const std::vector<std::string>& source_keys,
                                    const std::vector<std::string>& sink_keys, std::string* conflict_key_out,

@@ -146,9 +146,11 @@ for generation in range(2):
             assert packets[0]["payload_options"]["source"]["observation_domain_id"] == "18446744073709551615"
             assert packets[0]["payload_options"]["source"]["inputs"][0]["queue_id"] == 2
             assert packets[0]["payload_options"]["sink"] == {}
-            assert packets[0]["adapter_status"] == {"source":"ready", "sink":"not_installed"}
+            assert packets[0]["adapter_status"] == {"source":"ready", "sink":"configuration_required"}
             assert capabilities["adapter_status"]["packet"]["source"] == "available"
+            assert capabilities["adapter_status"]["packet"]["sink"] == "available"
             assert capabilities["packet_source"]["requires_async"] is True
+            assert capabilities["packet_sink"]["requires_async"] is True
         finally:
             if args.mode == "docker":
                 subprocess.run(["docker", "stop", "-t", "20", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)

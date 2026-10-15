@@ -278,6 +278,44 @@
       "resources": [
         "kafka_packet_docker"
       ]
+    },
+    "test_kafka_packet_sink_native": {
+      "services": [
+        "kafka"
+      ],
+      "role": "auth",
+      "location": "native",
+      "resources": [
+        "kafka_packet_sink_native"
+      ]
+    },
+    "test_kafka_packet_sink_docker": {
+      "services": [
+        "kafka"
+      ],
+      "role": "auth",
+      "location": "docker",
+      "resources": [
+        "kafka_packet_sink_docker"
+      ]
+    },
+    "test_kafka_packet_sink_e2e": {
+      "services": [
+        "kafka"
+      ],
+      "role": "auth",
+      "location": "native",
+      "resources": [
+        "kafka_packet_sink_capture"
+      ]
+    },
+    "test_kafka_packet_sink_capture": {
+      "services": [],
+      "role": "auth",
+      "location": "native",
+      "resources": [
+        "kafka_packet_sink_capture"
+      ]
     }
   }
 }

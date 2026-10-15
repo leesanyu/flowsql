@@ -4,7 +4,9 @@
 #define FLOWSQL_CHANNELS_NETADAPTER_READER_H_
 #include <framework/core/capture_progress_tracker.h>
 #include <framework/core/packet_filter_plan.h>
+#include <framework/interfaces/iblock_stream_schema.h>
 #include <framework/interfaces/icapture_backend.h>
+#include <framework/interfaces/ipacket_family.h>
 #include <plugins/npi/iprotocol.h>
 #include <atomic>
 #include <chrono>
@@ -14,7 +16,7 @@
 #include "netadapter_budget.h"
 #include "netadapter_config.h"
 namespace flowsql::channels::netadapter {
-class NetAdapterReader final : public ICaptureBlockStreamReaderV2 {
+class NetAdapterReader final : public ICaptureBlockStreamReaderV2, public IBlockStreamSchemaV1 {
  public:
     using MonotonicNow = std::function<std::chrono::steady_clock::time_point()>;
     NetAdapterReader(std::string name, CaptureBackendConfigV1 config, uint64_t domain, uint64_t generation,
@@ -26,6 +28,7 @@ class NetAdapterReader final : public ICaptureBlockStreamReaderV2 {
     const char* Name() override { return name_.c_str(); }
     const char* Type() override { return ChannelType::kBlockStream; }
     const char* Schema() override { return "packet"; }
+    std::shared_ptr<arrow::Schema> ArrowSchema() const override { return packet::PacketFamilySchema(); }
     int Open() override;
     int Close() override;
     bool IsOpened() const override { return opened_ && !terminal_; }

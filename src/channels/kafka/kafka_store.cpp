@@ -287,16 +287,17 @@ void Store::ValidateChannel(const rapidjson::Value& c) {
             Require(i->value.IsObject(), "INVALID_PAYLOAD_OPTIONS");
             if (i->value.ObjectEmpty()) continue;
             const bool source = std::string(i->name.GetString()) == "source";
-            Require(kind == "structured" || source, "KAFKA_DATA_ADAPTER_UNAVAILABLE");
             try {
-                if (kind == "packet")
+                if (kind == "packet" && source)
                     ParsePacketSourceConfig(i->value);
+                else if (kind == "packet")
+                    ParsePacketSinkConfig(i->value);
                 else if (source)
                     ParseStructuredConfig(i->value);
                 else
                     ParseSinkConfig(i->value);
             } catch (const std::invalid_argument&) {
-                throw Failure(400, kind == "packet" ? "INVALID_PACKET_SOURCE"
+                throw Failure(400, kind == "packet" ? (source ? "INVALID_PACKET_SOURCE" : "INVALID_PACKET_SINK")
                                    : source         ? "INVALID_STRUCTURED_SOURCE"
                                                     : "INVALID_STRUCTURED_SINK");
             }
@@ -412,22 +413,20 @@ Json Store::Public(Json definition, const std::string& kind) {
         auto role = Text(definition, "role");
         for (auto direction : {"source", "sink"})
             if (role == "both" || role == direction) {
-                std::string state = "not_installed";
+                std::string state;
                 const bool packet_source =
                     Text(definition, "payload_kind") == "packet" && std::string(direction) == "source";
-                if (Text(definition, "payload_kind") == "structured" || packet_source) {
-                    const bool configured = definition.HasMember("payload_options") &&
-                                            definition["payload_options"].HasMember(direction) &&
-                                            !definition["payload_options"][direction].ObjectEmpty();
-                    state = configured ? "ready" : "configuration_required";
-                    if (configured && std::string(direction) == "source")
-                        String(definition, "source_schema",
-                               (packet_source
-                                    ? packet::PacketFamilySchema()
-                                    : StructuredSchema(ParseStructuredConfig(definition["payload_options"]["source"])))
-                                   ->ToString(true),
-                               a);
-                }
+                const bool configured = definition.HasMember("payload_options") &&
+                                        definition["payload_options"].HasMember(direction) &&
+                                        !definition["payload_options"][direction].ObjectEmpty();
+                state = configured ? "ready" : "configuration_required";
+                if (configured && std::string(direction) == "source")
+                    String(definition, "source_schema",
+                           (packet_source
+                                ? packet::PacketFamilySchema()
+                                : StructuredSchema(ParseStructuredConfig(definition["payload_options"]["source"])))
+                               ->ToString(true),
+                           a);
                 String(status, direction, state, a);
             }
         definition.AddMember("adapter_status", status, a);

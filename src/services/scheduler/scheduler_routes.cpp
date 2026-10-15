@@ -78,9 +78,9 @@ static std::shared_ptr<IBlockStreamChannel> HoldExclusiveBlockReader(IBlockStrea
     });
 }
 
-static int CreateExclusiveBlockReader(IQuerier* querier, const std::string& task_id, IBlockStreamChannel* legacy_source,
-                                      const std::string& pushed_filter_plan_json,
-                                      std::shared_ptr<IBlockStreamChannel>* reader_out, std::string* error) {
+int CreateExclusiveBlockReader(IQuerier* querier, const std::string& task_id, IBlockStreamChannel* legacy_source,
+                               const std::string& pushed_filter_plan_json,
+                               std::shared_ptr<IBlockStreamChannel>* reader_out, std::string* error) {
     if (!querier || !legacy_source || pushed_filter_plan_json.empty() || !reader_out || !error) {
         return EINVAL;
     }
@@ -886,6 +886,11 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
     if (source_rc != error::OK) {
         rsp = source_err_rsp.empty() ? BuildErrorJson("source resolve failed") : source_err_rsp;
         return source_rc;
+    }
+    if (stmt.dest.rfind("kafka.", 0) == 0) {
+        bool handled = false;
+        const auto packet_rc = TryExecutePacketSink(source_resolved, stmt, rsp, &handled);
+        if (handled) return packet_rc;
     }
     if (source_resolved.has_stream_source && source_resolved.has_non_stream_source) {
         rsp = BuildErrorJson("mixed stream and non-stream sources are not supported");

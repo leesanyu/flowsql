@@ -188,6 +188,11 @@ int Plugin::CreateWriter(const ResultSinkContextV1& context, std::unique_ptr<IRe
     KafkaChannelDescriptionV1 description;
     int rc = DescribeChannel(name.c_str(), &description);
     if (rc) return rc;
+    try {
+        if (Text(store_.Query("channels", name)["items"][0], "payload_kind") == "packet") return ENOTSUP;
+    } catch (const Failure& e) {
+        return e.status == 404 ? ENOENT : EINVAL;
+    }
     if (description.role == "source") return EINVAL;
     if (!description.sink_adapter_available) return ENOTSUP;
     IKafkaClientSessionV1* raw = nullptr;

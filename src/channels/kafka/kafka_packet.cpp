@@ -1,6 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 #include "kafka_packet.h"
+#include <arrow/api.h>
+#include <framework/interfaces/ipacket_family.h>
 
 #include <algorithm>
 #include <charconv>
@@ -87,6 +89,109 @@ arrow::Status Preflight(const PacketSourceConfig& c, const KafkaMessageV1& m) {
     return arrow::Status::OK();
 }
 }  // namespace
+
+PacketSinkConfig ParsePacketSinkConfig(const rapidjson::Value& v) {
+    try {
+        Keys(v, {"encoding", "stream_id", "max_message_bytes", "queue_max_messages", "queue_max_bytes",
+                 "delivery_timeout_ms"});
+        Require(String(v, "encoding") == "flowsql_packet_v1");
+        PacketSinkConfig c;
+        c.stream_id = String(v, "stream_id");
+        Require(std::regex_match(c.stream_id, std::regex("[A-Za-z0-9_.-]{1,64}")));
+        auto bound = [&](const char* name, uint32_t low, uint32_t high, uint32_t& target) {
+            if (!v.HasMember(name)) return;
+            Require(v[name].IsUint() && v[name].GetUint() >= low && v[name].GetUint() <= high);
+            target = v[name].GetUint();
+        };
+        bound("max_message_bytes", 1024, 16777216, c.max_message_bytes);
+        bound("queue_max_messages", 1, 65536, c.queue_max_messages);
+        bound("queue_max_bytes", 1048576, 268435456, c.queue_max_bytes);
+        bound("delivery_timeout_ms", 100, 120000, c.delivery_timeout_ms);
+        Require(c.queue_max_bytes >= c.max_message_bytes);
+        return c;
+    } catch (const std::invalid_argument&) {
+        throw std::invalid_argument("INVALID_PACKET_SINK");
+    }
+}
+
+void PacketSinkCodec::Open(const CaptureSourceSetV2& sources, const std::shared_ptr<arrow::Schema>& schema) {
+    if (generation_ || !schema || !schema->Equals(*packet::PacketFamilySchema(), true) ||
+        ValidateCaptureSourceSetV2(sources) != CaptureDescriptionErrorV1::kNone || sources.inputs.size() > 32 ||
+        !sources.inputs[0].observation_domain_id || sources.limits.max_packets_per_batch > 4096 ||
+        sources.limits.max_bytes_per_batch > 16777216)
+        throw std::invalid_argument("INVALID_PACKET_CAPTURE");
+    const uint64_t maximum = config_.stream_id.size() + 56 + 32ull * sources.limits.max_packets_per_batch +
+                             sources.limits.max_bytes_per_batch + 28ull * sources.inputs.size();
+    if (maximum > config_.max_message_bytes) throw std::invalid_argument("PACKET_MESSAGE_BUDGET_INSUFFICIENT");
+    wire_.stream_id = config_.stream_id;
+    wire_.observation_domain_id = sources.inputs[0].observation_domain_id;
+    wire_.max_packets_per_batch = sources.limits.max_packets_per_batch;
+    wire_.max_bytes_per_batch = sources.limits.max_bytes_per_batch;
+    wire_.max_message_bytes = config_.max_message_bytes;
+    sources_ = sources;
+    generation_ = sources.inputs[0].generation;
+    for (const auto& input : sources.inputs) {
+        wire_.inputs.push_back({input.source_id, input.queue_id, input.source_name});
+        trackers_.emplace(input.source_id, CaptureProgressTrackerV1(input));
+    }
+    for (size_t i = 0; i < sources_.inputs.size(); ++i)
+        sources_.inputs[i].source_name = wire_.inputs[i].source_name.c_str();
+}
+arrow::Result<KafkaMessageV1> PacketSinkCodec::Encode(const CapturePollEventV2& event,
+                                                      const std::array<uint8_t, 16>& epoch, uint64_t sequence,
+                                                      const std::function<bool()>& interrupted) {
+    if (!generation_ || event.struct_size < sizeof(CapturePollEventV2) || event.contract_version != 2 ||
+        (event.block.kind != BlockPollEvent::kData && event.block.kind != BlockPollEvent::kTimeout) ||
+        event.block.err || (event.block.kind == BlockPollEvent::kTimeout && event.block.batch))
+        return Invalid();
+    PacketEnvelope envelope;
+    envelope.stream_epoch = epoch;
+    envelope.observation_domain_id = wire_.observation_domain_id;
+    envelope.capture_generation = generation_;
+    envelope.poll_sequence = sequence;
+    envelope.progress = event.progress;
+    uint64_t last = last_packet_sequence_;
+    if (event.block.kind == BlockPollEvent::kData) {
+        const auto& batch = event.block.batch;
+        if (!batch || batch->num_rows() <= 0 || uint64_t(batch->num_rows()) > wire_.max_packets_per_batch)
+            return Invalid();
+        ARROW_RETURN_NOT_OK(packet::ValidatePacketFamilyBatch(*batch));
+        const auto& raw = static_cast<const arrow::BinaryArray&>(*batch->column(6));
+        uint64_t bytes = 0;
+        for (int64_t i = 0; i < batch->num_rows(); ++i) {
+            if (interrupted && interrupted()) return arrow::Status::Cancelled("PACKET_ENCODING_INTERRUPTED");
+            PacketWireRecord record;
+            record.meta.timestamp_ns = static_cast<const arrow::Int64Array&>(*batch->column(0)).Value(i);
+            record.meta.captured_len = static_cast<const arrow::UInt32Array&>(*batch->column(1)).Value(i);
+            record.meta.wire_len = static_cast<const arrow::UInt32Array&>(*batch->column(2)).Value(i);
+            record.meta.link_type = static_cast<const arrow::UInt32Array&>(*batch->column(3)).Value(i);
+            record.meta.source_id = static_cast<const arrow::UInt32Array&>(*batch->column(4)).Value(i);
+            record.meta.sequence = static_cast<const arrow::UInt64Array&>(*batch->column(5)).Value(i);
+            auto view = raw.GetView(i);
+            bytes += view.size();
+            if (bytes > wire_.max_bytes_per_batch || view.size() != record.meta.captured_len ||
+                record.meta.sequence <= last)
+                return Invalid();
+            last = record.meta.sequence;
+            record.bytes.assign(view.data(), view.size());
+            envelope.packets.push_back(std::move(record));
+        }
+    }
+    // Empty timeouts are handled without publication by the writer.
+    auto encoded = EncodePacket(wire_, envelope);
+    if (!encoded.ok()) return encoded.status();
+    auto next = trackers_;
+    for (const auto& fact : event.progress) {
+        auto it = next.find(fact.source_id);
+        if (it == next.end() ||
+            it->second.Observe(fact, fact.packet_observed ? std::optional<int64_t>(fact.capture_time_ns) : std::nullopt)
+                    .error != CaptureProgressErrorV1::kNone)
+            return Invalid();
+    }
+    trackers_ = std::move(next);
+    last_packet_sequence_ = last;
+    return encoded;
+}
 
 PacketSourceConfig ParsePacketSourceConfig(const rapidjson::Value& v) {
     Keys(v, {"encoding", "stream_id", "observation_domain_id", "inputs", "offset_reset", "commit_policy",

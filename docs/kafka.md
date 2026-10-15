@@ -1,8 +1,8 @@
-# Kafka 连接、结构化/原始包接入与通道管理
+# Kafka 连接、结构化/原始包接入与发布
 
 FlowSQL 提供可复用的 Kafka 连接配置与具名通道管理。连接负责 broker、TLS/SASL 与凭证生命周期；通道引用连接，并指定 `source`、`sink` 或 `both`、Topic、消费组和数据类别。
 
-结构化 JSON source 可将外部日志、指标或业务记录转换为固定 Arrow Schema，供异步 SQL 分析使用；packet source 保留探针原始包和采集进度，供 NPM 实时分析。连接验证只证明认证和元数据访问；消费权限在实际任务中检查。结构化 sink 可将分析结果发布为逐行 JSON 信封；packet sink 尚未安装，返回 `KAFKA_DATA_ADAPTER_UNAVAILABLE`。source 只能用于 FROM、sink 只能用于 INTO，角色不符返回 `KAFKA_ROLE_MISMATCH`。
+结构化 JSON source 可将外部日志、指标或业务记录转换为固定 Arrow Schema，供异步 SQL 分析使用；packet source 保留探针原始包和采集进度，供 NPM 实时分析。结构化 sink 发布逐行 JSON 结果信封；packet sink 将网卡采集的原始包与同次采集事实发布到集中端。连接验证只证明认证和元数据访问；读写权限在实际任务中检查。source 只能用于 FROM、sink 只能用于 INTO，角色不符返回 `KAFKA_ROLE_MISMATCH`。
 
 ## 原生安装与启用
 
@@ -83,7 +83,7 @@ docker compose -f docker-compose.yml -f config/docker-compose-kafka.yml up -d
 打开“通道管理 → Kafka 通道”，可在“通道”和“连接配置”两个页签操作：
 
 1. 新建连接，填写名称、一个或多个 `host:port` 和安全协议，按机制填写字段。密码、私钥口令和 OAuth client_secret 支持输入新值或选择部署引用。
-2. 新建通道，选择连接、角色、单个 Topic 和数据类别。source/both 必须填写消费组；sink 不提交消费组。选择 structured 后可分别启用 source 字段映射与 sink 结果信封；both 两个方向独立配置。sink 需指定实体、Schema 版本、event/upsert、业务 key 与适用的 revision 列。通道创建时也能就地创建连接。
+2. 新建通道，选择连接、角色、单个 Topic 和数据类别。source/both 必须填写消费组；sink 不提交消费组。structured 可分别启用 source 字段映射与 sink 结果信封；结果 sink 需指定实体、Schema 版本、event/upsert、业务 key 与适用的 revision 列。packet 可分别启用原始包接入和发布，发布需填写 stream_id 与预算；网卡仍在 netadapter 通道中配置。both 两个方向独立保存。通道创建时也能就地创建连接。
 3. 点击“验证”检查已保存配置，或在表单中“验证草稿”。保存不要求网络可用，也不要求事先验证。验证预算为 1～30 秒；可取消，页面离开会请求取消。
 4. 查看独立状态：“配置已保存”、连接验证时间/阶段、每个方向的数据适配器状态。复制引用得到 `kafka.<name>`。
 5. 编辑/删除携带当前 revision。冲突返回 409 并保留草稿，刷新后重新编辑；系统不会自动覆盖他人的修改。活动任务或验证期间不能改删；连接被通道引用时不能删除。
@@ -117,7 +117,7 @@ docker compose -f docker-compose.yml -f config/docker-compose-kafka.yml up -d
 | --- | --- |
 | definitions/query | 实际版本、机制、字段条件、引用别名和方向数据能力。 |
 | connections/query / add / modify / remove | 连接 CRUD；query 支持 name、after、limit（1～100）；修改/删除要求 expected_revision。 |
-| channels/query / add / modify / remove | 通道 CRUD；structured source/sink、packet source 分别接受下文配置；packet sink 仅保留空方向对象。 |
+| channels/query / add / modify / remove | 通道 CRUD；structured source/sink、packet source/sink 分别接受下文配置。 |
 | tests/start / query / cancel | target 为 connection/channel；已保存目标带 name，可带 expected_revision；草稿使用 draft。query/cancel 使用 test_id。 |
 
 响应 code/stage 为脱敏固定值。HTTP 400 字段错误、404 未找到、409 冲突/引用/使用中、413 请求超限、429 验证并发、503 能力/Provider 不可用、500 持久化失败。认证、证书、超时和取消在验证终态中表达，不作为正常 EOF。
@@ -316,7 +316,7 @@ encoding、stream_id、observation_domain_id、inputs 必填。stream_id 匹配 
 | offset_reset | earliest；earliest/latest/error | 仅无有效已提交位点时生效。 |
 | commit_policy | after_success；after_success/none | 当前消息处理、事实及当次结果交付成功后提交 offset+1；none 不提交。 |
 
-创建后 `adapter_status.source=ready` 表示配置完整，可见 PacketFamily 的 `source_schema`；读 ACL 仍未验证。空方向配置为 configuration_required，运行前须补齐；both 独立保存两个方向，packet sink 仍不可执行。一个 source 在同一进程只允许一个活动 reader，期间修改/删除受租约保护；不同配置名不能让同组任务安全共享分析状态。
+创建后 `adapter_status.source=ready` 表示配置完整，可见 PacketFamily 的 `source_schema`；读 ACL 仍未验证。空方向配置为 configuration_required，运行前须补齐；both 独立保存两个方向，发布配置见下文。一个 source 在同一进程只允许一个活动 reader，期间修改/删除受租约保护；不同配置名不能让同组任务安全共享分析状态。
 
 Scheduler 进程须加载 Kafka、NPI、数据库和 BinAddonHost，并激活 NPM 插件，参见 [NPM 准备步骤](npm.md#运行准备与快速开始)。使用既有 async 任务 API 提交：
 
@@ -391,3 +391,82 @@ assert len(value) == 84
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 原生 | 1.1764 | 13927 | 54.40 | 1337020 | 1787530 | 64→0 | 0.1143 | 91240 | 483.5 / 671.0 | 0.0153 |
 | Docker | 1.1755 | 13938 | 54.44 | 1338020 | 1788870 | 64→0 | 0.1193 | 74896 | 471.5 / 676.1 | 0.0146 |
+
+## 网卡原始包 packet sink
+
+适用于探针采集、本地发布、集中 NPM 分析的部署。探针 Scheduler 加载 Kafka、NetAdapter 和 NPI 插件，先按 [网卡通道说明](netadapter.md#通道与生产-sql) 创建 `netadapter.edge_capture`。首版要求完整 Capture V2、Ethernet 和 PacketFamily Schema；网卡 backend、接口、snaplen、buffer_mib 继续在网卡通道配置。采集进程须能访问接口并具有所选 backend 的权限；AF_PACKET 需要 CAP_NET_RAW，配置接口或混杂模式还需相应网络管理权限。Docker 内采集的接口必须实际位于该容器可见的网络命名空间，普通桥接容器不会自动看到宿主物理接口。
+
+部署者预建单分区、`cleanup.policy=delete` 的专用 Topic，并保证同一 Topic/stream_id 只有一个活动发布者。packet sink 在打开时查询 Topic 配置，身份须有元数据和 `DESCRIBE_CONFIGS` 权限；随后实际发送还需 WRITE 权限。不会创建 Topic、改配置或 ACL；ready、连接验证通过均不代表 WRITE 已验证。分区固定为0，分区数或拓扑变化使任务失败；不按 flow、方向或输入队列拆分发布。
+
+准备连接 `delivery` 后，在 Web 的 packet 通道中启用发布，或向 `channels/add` 提交：
+
+```json
+{
+  "name":"packet_upload", "connection_name":"delivery", "role":"sink",
+  "topic":"probe_a_packets", "payload_kind":"packet",
+  "payload_options":{"sink":{
+    "encoding":"flowsql_packet_v1", "stream_id":"probe-a",
+    "max_message_bytes":2097152, "queue_max_messages":64,
+    "queue_max_bytes":8388608, "delivery_timeout_ms":10000
+  }}
+}
+```
+
+encoding 和 stream_id 必填；stream_id 遵循前述共享格式。消息上限默认2 MiB、范围1 KiB～16 MiB；队列条数默认64、范围1～65536；队列字节默认8 MiB、范围1～256 MiB且不少于消息上限；delivery_timeout_ms 默认10000、范围100～120000。条数、字节任一先满即等待；一次 Write 的校验、编码、排队、重试和 delivery 确认共用绝对预算，Finish 另有一次同值预算。未知、重复键和错误类型拒绝。空 sink 配置可保存但为 configuration_required；both 的 source/sink 分别保存，消费组只服务 source，同名 sink 在同一进程只允许一个活动 writer。
+
+通过 `/api/tasks/batch/execute` 启动：
+
+```json
+{
+  "sql_text":"SELECT * FROM netadapter.edge_capture INTO kafka.packet_upload",
+  "mode":"async"
+}
+```
+
+只接受这个 SELECT * 主链路；投影、WHERE、USING、WITH、多源/多目标和其他来源在打开网卡或发送前拒绝。同步执行返回 ASYNC_EXECUTION_REQUIRED。每次采集 poll 的全部原文、PacketMeta 与事实组成一条消息；零包但有事实也发送，无包无事实不发送。发送期间暂停下一次 poll，Write 返回后才归还当前批次；不以确认时刻补造 idle，也不执行 NPI Identify。较小的 Broker 消息限额使发送失败，不截包、不丢事实、不拆分 poll。
+
+### 发送端与接收端配对
+
+1. 启动发布后，使用 task_id 查询 `/api/tasks/result`，读取 `result.publication.binding`；内部 Scheduler 异步查询同一摘要位于 `managed_result.publication`。binding 包含 stream_id、stream_epoch、十进制字符串 observation_domain_id、capture_generation、inputs 和本次生效限额，不含包内容。
+2. 在集中端按前述 packet source 配置创建独立通道，Topic/stream_id 与发布端一致，observation_domain_id、inputs 的 source_id/queue_id/source_name 使用 binding 的实际值。source_name 供诊断，数字身份与观测域来自探针；不要用集中端本机接口名猜测。消费组按分析任务独立分配。
+3. 接收端 `max_packets_per_batch`、`max_bytes_per_batch`、`max_message_bytes` 分别不小于发送端 binding 的对应上限；同时保证 Broker 接受完整消息。发送端 Open 要求：
+
+```text
+UTF8(stream_id).bytes + 56 + 32 × max_packets_per_batch
+  + max_bytes_per_batch + 28 × inputs.count <= max_message_bytes
+```
+
+例如一个输入、最多256包/1048576原文字节、stream_id 为 probe-a 时，完整消息预算至少1056859字节，默认2097152可容纳。多个输入按实际数量计算；网卡源上限超过预算时在首包前失败，应调整受支持的采集配置或提高发送/接收/Broker预算。远端首次消费可使用 earliest 和新组，从保留数据建立 run；之后使用前述 Kafka packet source 的 NPM SQL。不要在 source 配置中填固定 epoch，reader 从首条有效消息建立边界。
+
+原生部署须持久化 Provider 数据库与原 master key；Docker 重启继续挂载原状态卷、原密钥和凭证，私有运行目录按前文配置。配置恢复后重新启动发布任务会产生新 epoch，poll_sequence 从1开始。跨进程没有发布者选主或分布式锁，部署方负责避免同流并发写入。
+
+### 交付、丢包与停止
+
+任务摘要的 messages/packets 各自包含 input、confirmed、not_sent、unknown。每个已返回 Write 满足 `input = confirmed + not_sent + unknown`；`rows_affected = packets.confirmed`。confirmed 必须收到 Broker delivery 成功回调；not_sent 表示校验失败或客户端未接受；unknown 表示客户端已接受但未获明确成功，包括取消或部分发送错误。迟到回调不改终态，已确认数据不会因后续失败撤回；零包事实消息只增加 messages。acks=all、idempotence 固定启用，业务层不重放未知消息或重建 producer 自动续发。
+
+`capture_counters` 按输入报告 received/delivered、source_dropped_packets、queue_dropped_packets 和 backpressure_events，并携带 generation/available_mask；不可获取或 generation 不匹配的计数为 null。binding 还给出队列和编码峰值，delivery_waits/delivery_wait_ns 表示逐次发送等待次数与总耗时。背压会暂停取包，网卡/内核仍可能丢包；未拉取的包不计入 writer input，unknown、序号缺口和 TCP 重传均不能冒充实测采集丢包。一个同步在途 poll、编码消息和客户端队列分别有界，这些 payload 预算不等于整个进程 RSS 上限。
+
+既有任务页面的“取消”和 `/api/tasks/cancel`（`{"task_id":"返回的ID"}`）对活动异步batch请求的是正常stop：停止新输入、等待当前发送和Finish，排空成功为stopped，失败为failed。需要区分立即cancel时，调用Scheduler的 `POST /scheduler/batch/stop`，请求 `{"runtime_task_id":"任务详情中的runtime_task_id","mode":"cancel"}`；mode=stop或省略为正常stop。立即cancel中断等待且不Finish，终态cancelled，已确认可见、在途可未知。错误阶段区分sink_resolve/open/encode/deliver/finish和source_capture，源故障不会被当成idle。探针stop、cancel或崩溃不向远端发送EOF，集中NPM须自行stop/cancel；不能根据Kafka暂时无消息宣布分析完成。
+
+新 epoch 会使旧接收 run 失败且不确认边界消息；after_success 同组重启可从有效边界建立新 run、空会话状态。需要跨历史段重算时按 source 的重放约束隔离 Topic/组，不拼接旧 session/revision。此能力不提供磁盘 outbox、断点续发、跨系统事务、Exactly-once 或端到端零丢包保证。
+
+### packet sink 验证与成本样本
+
+使用 [统一测试环境](testing.md) 的配置；真实原生/Docker矩阵各验证11种身份及 GSSAPI/OAuth更新后继续发送，独立消费者逐字节核对原文、元数据、事实和顺序，另验写ACL拒绝、缺Topic、Broker超限/断连、部分确认、取消和两个真实进程的持久配置/新epoch恢复：
+
+```bash
+tools/test.sh integration --filter '^test_kafka_packet_sink_(native|docker)$' --jobs 2
+tools/test.sh integration --filter '^test_kafka_packet_sink_(capture|e2e)$' --jobs 2
+tools/test.sh all --jobs 4
+```
+
+capture/e2e 在私有网络命名空间创建 veth，需要 CAP_SYS_ADMIN、CAP_NET_ADMIN、CAP_NET_RAW，以及受管测试 Broker；使用声明的共享锁，不修改宿主接口。缺依赖/权限为失败，不能计入通过。e2e 注入100个64字节帧、IPv4/IPv6交替、50 packet/s、AF_PACKET 16 MiB；本地和Kafka远端NPM对照同批帧，basic/session各族均为50包/3200字节，确认100、采集丢包0。探针源down必须进入source_capture失败。
+
+2026-10-16（Asia/Shanghai），Linux x86_64、Kafka 4.1.0、librdkafka 2.16.0、PLAINTEXT，一轮真实writer样本固定发送100条消息，每条一个4096字节包和一个输入事实，源描述含两个输入，固定分区0、逐条同步确认。计时覆盖100次Write及Finish，不含建连；原生/Docker并行运行，未固定CPU亲和性，峰值RSS包含已加载插件。完整payload包含key/value，不含Kafka协议开销；成本样本没有网卡采集，因此采集丢包不可用，不能据此比较部署位置性能或承诺生产容量。
+
+| 位置 | Write+Finish时长s | packet/s = message/s | 完整payload bytes/s | 确认p95 ms | CPU s（单核占比） | 峰值RSS KiB | 队列峰值 条/bytes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 原生 | 0.6948 | 143.93 | 607243 | 8.820 | 0.1008（14.51%） | 47632 | 1 / 4219 |
+| Docker | 0.7326 | 136.51 | 575925 | 8.484 | 0.1192（16.27%） | 46508 | 1 / 4219 |
+
+另有真实AF_PACKET加受控慢producer的过载验证：60000个1500字节帧突发、每消息延迟约150ms确认，实测确认80包、source_dropped_packets=59320，取消约42ms。该样本用于证明背压和采集丢包可观察，不代表真实Kafka吞吐；停止时仍在ring中的包与内核丢包、已交付包分别计数，不把差值填成丢包。日志、原样本和摘要只缓存在本地evidence目录，日常使用不依赖该缓存。

@@ -115,7 +115,7 @@ Json Plugin::DefinitionsJson() {
     aliases.AddMember("environments", envs, a);
     result.AddMember("credential_aliases", aliases, a);
     auto adapters = Parse(
-        R"({"structured":{"source":"available","sink":"available"},"packet":{"source":"available","sink":"not_installed"}})");
+        R"({"structured":{"source":"available","sink":"available"},"packet":{"source":"available","sink":"available"}})");
     result.AddMember("adapter_status", rapidjson::Value(adapters, a), a);
     // Documents own their allocator; moving a temporary Document's Value would leave dangling members.
     auto source = Parse(
@@ -124,6 +124,9 @@ Json Plugin::DefinitionsJson() {
     auto packet_source = Parse(
         R"({"encodings":["flowsql_packet_v1"],"max_inputs":32,"link_types":[1],"partitions":1,"offset_reset":["earliest","latest","error"],"commit_policy":["after_success","none"],"requires_async":true,"read_permission":"unverified"})");
     result.AddMember("packet_source", rapidjson::Value(packet_source, a), a);
+    auto packet_sink = Parse(
+        R"({"encodings":["flowsql_packet_v1"],"max_inputs":32,"link_types":[1],"partitions":1,"partition":0,"requires_async":true,"write_permission":"unverified"})");
+    result.AddMember("packet_sink", rapidjson::Value(packet_sink, a), a);
     auto sink = Parse(
         R"({"encodings":["json"],"record_kinds":["event","upsert"],"envelope_version":1,"max_key_fields":8,"types":["bool","int8","int16","int32","int64","uint8","uint16","uint32","uint64","float32","float64","utf8","binary","fixed_size_binary","timestamp"],"write_permission":"unverified"})");
     result.AddMember("structured_sink", rapidjson::Value(sink, a), a);

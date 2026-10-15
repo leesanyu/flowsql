@@ -196,3 +196,31 @@ test('Vue both form preserves source while editing sink and hides event revision
     assert.equal(saved[0].credential_bindings, undefined)
   } finally { page.app.unmount() }
 })
+
+
+test('packet sink round trip, direction, byte budgets and hidden structured fields', () => {
+  const sink = { encoding: 'flowsql_packet_v1', stream_id: 'probe-a', max_message_bytes: 2097152, queue_max_messages: 64, queue_max_bytes: 8388608, delivery_timeout_ms: 10000 }
+  const row = { name: 'packets', connection_name: 'auth', role: 'sink', topic: 'packets', payload_kind: 'packet', payload_options: { sink } }
+  const draft = channelDraft(row)
+  assert.deepEqual(buildChannel(draft, 9).payload_options, { sink })
+  assert.equal(buildChannel(draft, 9).expected_revision, 9)
+  draft.packet_sink.stream_id = 'changed'; assert.equal(sink.stream_id, 'probe-a')
+  draft.packet_sink.queue_max_bytes = 1048576; assert.throws(() => buildChannel(draft), /不少于/)
+  draft.packet_sink.queue_max_bytes = 8388608; draft.packet_sink.delivery_timeout_ms = 99; assert.throws(() => buildChannel(draft), /范围/)
+  draft.packet_sink.delivery_timeout_ms = 10000; draft.packet_sink.stream_id = ''; assert.throws(() => buildChannel(draft), /stream_id/)
+  draft.packet_sink.stream_id = 'probe-a'; draft.role = 'source'; draft.consumer_group = 'npm'; assert.equal(buildChannel(draft).payload_options, undefined)
+  draft.role = 'sink'; draft.payload_kind = 'structured'; assert.equal(buildChannel(draft).payload_options, undefined)
+})
+test('Vue packet both form edits sink independently, keeps revision and preserves conflict draft', async () => {
+  const source = { encoding: 'flowsql_packet_v1', stream_id: 'remote', observation_domain_id: '7', inputs: [{ source_id: 0, queue_id: 2, source_name: 'eth0' }] }
+  const sink = { encoding: 'flowsql_packet_v1', stream_id: 'local', max_message_bytes: 2097152, queue_max_messages: 64, queue_max_bytes: 8388608, delivery_timeout_ms: 10000 }
+  const row = { name: 'packets', revision: 12, connection_name: 'auth', role: 'both', topic: 'packets', consumer_group: 'npm', payload_kind: 'packet', payload_options: { source, sink }, adapter_status: { source: 'ready', sink: 'ready' } }
+  const saved = []; let conflict = true
+  const page = await mountPage({ kafkaDefinitions: async () => ({ data: definitions }), kafkaQuery: async (kind) => ({ data: { items: kind === 'channels' ? [row] : [{ name: 'auth' }] } }), kafkaSave: async (_kind, payload) => { saved.push(payload); if (conflict) throw { response: { status: 409 } } }, kafkaTestCancel: async () => {} })
+  try {
+    await page.click('编辑'); await page.change('发布 stream_id', 'edited'); await page.change('发布队列条数上限', 3); await page.click('保存通道')
+    assert.match(page.messages.at(-1), /草稿已保留/); assert.equal(saved[0].expected_revision, 12)
+    assert.equal(saved[0].payload_options.source.stream_id, 'remote'); assert.equal(saved[0].payload_options.sink.stream_id, 'edited')
+    conflict = false; await page.click('保存通道'); assert.equal(saved[1].payload_options.sink.queue_max_messages, 3)
+  } finally { page.app.unmount() }
+})

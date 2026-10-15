@@ -7,6 +7,7 @@
 #include <linux/if_packet.h>
 #include <net/if.h>
 #include <net/if_arp.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -65,6 +66,15 @@ class AfPacketSession final : public ICaptureBackendSessionV1 {
         if (ring.borrowed) return EBUSY;
         if (!ring.remaining) {
             if (!ring.UserBlock()) {
+                // Fail a device fault before publishing an empty/idle fact. Buffered blocks retain their order.
+                pollfd status{ring.fd, 0, 0};
+                if (poll(&status, 1, 0) < 0) return errno;
+                if (status.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                    int error = 0;
+                    socklen_t size = sizeof(error);
+                    if (getsockopt(ring.fd, SOL_SOCKET, SO_ERROR, &error, &size) != 0) return errno;
+                    return error ? error : ENODEV;
+                }
                 // The sampled time precedes the counter snapshot: later arrivals cannot invalidate this earlier
                 // boundary.
                 const auto now = RealtimeNs();

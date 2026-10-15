@@ -46,6 +46,7 @@ class Client final : public IKafkaClientSessionV1, public IKafkaConsumerSessionV
     std::atomic<int> packet_ownership_error_{0};
     std::chrono::steady_clock::time_point packet_metadata_at_{};
     int CheckPacketTopology(uint32_t timeout_ms);
+    int CheckPacketTopicPolicy(uint32_t timeout_ms);
     static void PacketRebalance(rd_kafka_t*, rd_kafka_resp_err_t, rd_kafka_topic_partition_list_t*, void*);
     std::filesystem::path temporary_;
     std::atomic<bool> cancelled_{false};

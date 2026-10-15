@@ -22,7 +22,12 @@ export const channelDraft = (row = {}) => ({
     inputs: (row.payload_kind === 'packet' ? row.payload_options?.source?.inputs : null)?.map((input) => ({ ...input })) || [{ source_id: 0, queue_id: 0, source_name: '' }],
     ...Object.fromEntries(Object.entries({ offset_reset: 'earliest', commit_policy: 'after_success', max_packets_per_batch: 256, max_bytes_per_batch: 1048576, max_message_bytes: 2097152, max_wait_ms: 100 }).map(([key, fallback]) => [key, row.payload_kind === 'packet' ? row.payload_options?.source?.[key] ?? fallback : fallback]))
   },
-  packet_sink: row.payload_kind === 'packet' && row.payload_options?.sink ? JSON.parse(JSON.stringify(row.payload_options.sink)) : undefined,
+  packet_sink_enabled: row.payload_kind === 'packet' && row.payload_options?.sink?.encoding === 'flowsql_packet_v1',
+  packet_sink_present: row.payload_kind === 'packet' && row.payload_options?.sink !== undefined,
+  packet_sink: {
+    stream_id: row.payload_kind === 'packet' ? row.payload_options?.sink?.stream_id || '' : '',
+    ...Object.fromEntries(Object.entries({ max_message_bytes: 2097152, queue_max_messages: 64, queue_max_bytes: 8388608, delivery_timeout_ms: 10000 }).map(([key, fallback]) => [key, row.payload_kind === 'packet' ? row.payload_options?.sink?.[key] ?? fallback : fallback]))
+  },
   sink_enabled: !!row.payload_options?.sink?.entity,
   sink: {
     entity: row.payload_options?.sink?.entity || 'result',
@@ -145,7 +150,16 @@ export const buildChannel = (draft, revision = 0) => {
     for (const [key, low, high] of limits) requireValue(Number.isInteger(source[key]) && source[key] >= low && source[key] <= high, `${key} 范围为 ${low}～${high}`)
     payload.payload_options = { source: { encoding: 'flowsql_packet_v1', stream_id: source.stream_id, observation_domain_id: source.observation_domain_id, inputs, offset_reset: source.offset_reset, commit_policy: source.commit_policy, ...Object.fromEntries(limits.map(([key]) => [key, source[key]])) } }
   }
-  if (draft.role !== 'source' && draft.payload_kind === 'packet' && draft.packet_sink !== undefined) payload.payload_options = { ...payload.payload_options, sink: JSON.parse(JSON.stringify(draft.packet_sink)) }
+  if (draft.role !== 'source' && draft.payload_kind === 'packet') {
+    if (draft.packet_sink_enabled) {
+      const sink = draft.packet_sink
+      requireValue(/^[A-Za-z0-9_.-]{1,64}$/.test(sink.stream_id), '发布 stream_id 需要 1～64 个字母、数字、点、下划线或短横线')
+      const limits = [['max_message_bytes', 1024, 16777216], ['queue_max_messages', 1, 65536], ['queue_max_bytes', 1048576, 268435456], ['delivery_timeout_ms', 100, 120000]]
+      for (const [key, low, high] of limits) requireValue(Number.isInteger(sink[key]) && sink[key] >= low && sink[key] <= high, `${key} 范围为 ${low}～${high}`)
+      requireValue(sink.queue_max_bytes >= sink.max_message_bytes, '队列字节必须不少于消息上限')
+      payload.payload_options = { ...payload.payload_options, sink: { encoding: 'flowsql_packet_v1', stream_id: sink.stream_id, ...Object.fromEntries(limits.map(([key]) => [key, sink[key]])) } }
+    } else if (draft.packet_sink_present) payload.payload_options = { ...payload.payload_options, sink: {} }
+  }
   if (revision) payload.expected_revision = revision
   return payload
 }

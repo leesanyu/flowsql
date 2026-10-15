@@ -23,6 +23,7 @@ add_executable(test_scheduler_mutation_guard
     ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_stream_executor.cpp
     ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_stream_shared_source.cpp
     ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_routes.cpp
+    ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_packet_sink.cpp
     ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_json_codec.cpp
     ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_stream_group.cpp
     ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_stream_group_request.cpp

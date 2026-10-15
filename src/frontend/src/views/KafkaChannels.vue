@@ -1,6 +1,6 @@
 <template>
   <div class="kafka-channels" v-loading="loading">
-    <el-alert title="结构化 source 可接入 SQL，sink 可通过 INTO kafka.通道 发布分析结果；连接验证仅检查认证和元数据，读写权限由实际任务验证。" type="info" :closable="false" />
+    <el-alert title="Kafka 支持结构化与原始包接入/发布；原始包发布使用异步 SELECT * FROM netadapter.通道 INTO kafka.通道。连接验证只检查认证和元数据，读写权限由实际任务验证。" type="info" :closable="false" />
     <div class="toolbar">
       <el-button type="primary" @click="openChannel()">新建 Kafka 通道</el-button>
       <el-button @click="openConnection()">新建连接配置</el-button>
@@ -104,7 +104,18 @@
             <el-form-item label="最大等待毫秒"><el-input-number v-model="channel.packet_source.max_wait_ms" :min="1" :max="1000" :precision="0" /></el-form-item>
           </template>
         </template>
-        <p v-if="channel.role !== 'source' && channel.payload_kind === 'packet'" class="hint">packet 发布适配器尚未安装；保存 both 通道时保留独立的接入配置。</p>
+        <template v-if="channel.role !== 'source' && channel.payload_kind === 'packet'">
+          <el-form-item label="原始包发布"><el-select v-model="channel.packet_sink_enabled"><el-option label="配置 flowsql_packet_v1 发布" :value="true" /><el-option label="暂不配置" :value="false" /></el-select></el-form-item>
+          <template v-if="channel.packet_sink_enabled">
+            <el-form-item label="发布 stream_id" required><el-input v-model.trim="channel.packet_sink.stream_id" /></el-form-item>
+            <el-form-item label="发布消息字节上限"><el-input-number v-model="channel.packet_sink.max_message_bytes" :min="1024" :max="16777216" :precision="0" /></el-form-item>
+            <el-form-item label="发布队列条数上限"><el-input-number v-model="channel.packet_sink.queue_max_messages" :min="1" :max="65536" :precision="0" /></el-form-item>
+            <el-form-item label="发布队列字节上限"><el-input-number v-model="channel.packet_sink.queue_max_bytes" :min="1048576" :max="268435456" :precision="0" /></el-form-item>
+            <el-form-item label="发布确认预算毫秒"><el-input-number v-model="channel.packet_sink.delivery_timeout_ms" :min="100" :max="120000" :precision="0" /></el-form-item>
+            <p class="hint">来源网卡在 netadapter 通道中配置。预建 delete 单分区 Topic，并保证同 Topic/stream_id 只有一个发布者；仅支持 SELECT *，不带 WHERE 或 USING。一个采集 poll 完整发送并等待确认，阻塞时暂停拉取，网卡仍可能丢包。</p>
+            <p class="hint">任务摘要提供观测域与输入映射，可用于接收端 packet source 配置。确认表示 broker 已确认消息，未知发送结果不会自动重放；采集丢包仅依据采集计数器。</p>
+          </template>
+        </template>
         <template v-if="channel.role !== 'sink' && channel.payload_kind === 'structured'">
           <el-form-item label="结构化接入"><el-select v-model="channel.source_enabled"><el-option label="配置 JSON 字段" :value="true" /><el-option label="暂不配置" :value="false" /></el-select></el-form-item>
           <template v-if="channel.source_enabled">

@@ -414,7 +414,9 @@ int Client::CheckPacketTopology(uint32_t timeout_ms) {
             result = EACCES;
             break;
         }
-        const auto rc = rd_kafka_metadata(client_, 0, topic, &metadata, 50);
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+        if (remaining <= 0) break;
+        const auto rc = rd_kafka_metadata(client_, 0, topic, &metadata, std::min<int64_t>(50, remaining));
         if (rc == RD_KAFKA_RESP_ERR__TIMED_OUT) continue;
         if (rc == RD_KAFKA_RESP_ERR__TRANSPORT || rc == RD_KAFKA_RESP_ERR__ALL_BROKERS_DOWN) {
             result = EHOSTUNREACH;
@@ -445,6 +447,42 @@ int Client::CheckPacketTopology(uint32_t timeout_ms) {
     rd_kafka_topic_destroy(topic);
     if (!result) packet_metadata_at_ = Clock::now();
     return result;
+}
+int Client::CheckPacketTopicPolicy(uint32_t timeout_ms) {
+    auto* resource = rd_kafka_ConfigResource_new(RD_KAFKA_RESOURCE_TOPIC, binding_.snapshot.topic.c_str());
+    auto* queue = rd_kafka_queue_new(client_);
+    auto* options = rd_kafka_AdminOptions_new(client_, RD_KAFKA_ADMIN_OP_DESCRIBECONFIGS);
+    char error[512];
+    rd_kafka_AdminOptions_set_request_timeout(options, timeout_ms, error, sizeof(error));
+    rd_kafka_DescribeConfigs(client_, &resource, 1, options, queue);
+    rd_kafka_AdminOptions_destroy(options);
+    rd_kafka_ConfigResource_destroy(resource);
+    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    int rc = ETIMEDOUT;
+    while (!cancelled_ && Clock::now() < deadline) {
+        auto* event = rd_kafka_queue_poll(queue, 10);
+        if (!event) continue;
+        rc = EPROTO;
+        if (!rd_kafka_event_error(event)) {
+            size_t count = 0;
+            auto** resources =
+                rd_kafka_DescribeConfigs_result_resources(rd_kafka_event_DescribeConfigs_result(event), &count);
+            if (count == 1 && !rd_kafka_ConfigResource_error(resources[0])) {
+                size_t n = 0;
+                auto** entries = rd_kafka_ConfigResource_configs(resources[0], &n);
+                for (size_t i = 0; i < n; ++i) {
+                    const char* value = rd_kafka_ConfigEntry_value(entries[i]);
+                    if (std::string(rd_kafka_ConfigEntry_name(entries[i])) == "cleanup.policy" && value &&
+                        std::string(value) == "delete")
+                        rc = 0;
+                }
+            }
+        }
+        rd_kafka_event_destroy(event);
+        break;
+    }
+    rd_kafka_queue_destroy(queue);
+    return cancelled_ ? ECANCELED : rc;
 }
 bool Client::Ticket(Clock::time_point deadline) {
     if (ccache_.empty() || Now() < ticket_expires_) return true;
@@ -653,6 +691,17 @@ int Client::Probe(uint32_t timeout_ms, std::string* output) {
             stage = error == RD_KAFKA_RESP_ERR__SSL ? "tls" : "sasl";
             code = "AUTHENTICATION_FAILED";
             break;
+        }
+    }
+    if (success && binding_.snapshot.payload_kind == "packet" && binding_.snapshot.usage == "sink") {
+        auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+        int rc = left > 0 ? CheckPacketTopology(left) : ETIMEDOUT;
+        left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+        if (!rc) rc = left > 0 ? CheckPacketTopicPolicy(left) : ETIMEDOUT;
+        if (rc) {
+            success = false;
+            stage = "sink_open";
+            code = "PACKET_TOPIC_CONTRACT_FAILED";
         }
     }
     if (cancelled_) {

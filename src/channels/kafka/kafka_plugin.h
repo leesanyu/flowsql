@@ -6,6 +6,7 @@
 #include <framework/interfaces/iblock_stream_channel_descriptor.h>
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_reader.h>
+#include <framework/interfaces/ipacket_sink.h>
 #include <framework/interfaces/iresult_sink.h>
 #include <framework/interfaces/irouter_handle.h>
 #include <memory>
@@ -21,6 +22,7 @@ class Plugin final : public IPlugin,
                      public IBlockStreamReaderFactoryV1,
                      public IBlockStreamChannelDescriptorV1,
                      public IResultSinkFactoryV1,
+                     public IPacketSinkFactoryV1,
                      public IFilterDomainResolverV1 {
  public:
     int Option(const char* options) override;
@@ -33,6 +35,7 @@ class Plugin final : public IPlugin,
     void EnumRoutes(std::function<void(const RouteItem&)> callback) override;
     ~Plugin() override { Stop(); }
     int CreateWriter(const ResultSinkContextV1&, std::unique_ptr<IResultSinkWriterV1>*) override;
+    int CreateWriter(const PacketSinkContextV1&, std::unique_ptr<IPacketSinkWriterV1>*) override;
     int DescribeChannel(const char* name, KafkaChannelDescriptionV1* description) override;
     Store& Definitions() { return store_; }
     const Deployment& Environment() const { return deployment_; }
@@ -80,7 +83,7 @@ class Plugin final : public IPlugin,
     bool stopping_ = false;
     size_t pending_ = 0;
     std::mutex readers_mutex_;
-    std::set<std::string> reader_names_;
+    std::set<std::string> reader_names_, writer_names_;
     std::map<std::string, std::unique_ptr<IBlockStreamChannel>> definitions_;
     std::map<IBlockStreamChannel*, std::unique_ptr<IBlockStreamChannel>> readers_;
 };

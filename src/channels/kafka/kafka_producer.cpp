@@ -2,10 +2,21 @@
 // Licensed under the MIT License.
 #include <cerrno>
 #include "kafka_client.h"
+#include "kafka_packet.h"
 #include "kafka_result_codec.h"
 namespace flowsql::channels::kafka {
 namespace {
 using Clock = std::chrono::steady_clock;
+SinkConfig Limits(const Binding& b) {
+    if (b.snapshot.payload_kind != "packet") return ParseSinkConfig(Parse(b.sink_options_json));
+    const auto p = ParsePacketSinkConfig(Parse(b.sink_options_json));
+    SinkConfig c;
+    c.max_message_bytes = p.max_message_bytes;
+    c.queue_max_messages = p.queue_max_messages;
+    c.queue_max_bytes = p.queue_max_bytes;
+    c.delivery_timeout_ms = p.delivery_timeout_ms;
+    return c;
+}
 struct Receipt {
     std::mutex mutex;
     uint64_t completed = 0, confirmed = 0;
@@ -32,7 +43,7 @@ void Set(rd_kafka_conf_t* c, const char* key, int64_t value) {
 }  // namespace
 void Client::ConfigureProducer(rd_kafka_conf_t* config) {
     if (binding_.snapshot.usage != "sink" || binding_.sink_options_json.empty()) return;
-    auto c = ParseSinkConfig(Parse(binding_.sink_options_json));
+    auto c = Limits(binding_);
     Set(config, "enable.idempotence", 1);
     Set(config, "acks", -1);
     // kbytes is a driver ceiling; Produce also enforces the exact payload byte ceiling.
@@ -51,7 +62,8 @@ int Client::Produce(const std::vector<KafkaProduceMessageV1>& messages, uint32_t
     std::lock_guard<std::mutex> operation(operation_mutex_);
     if (cancelled_) return ECANCELED;
     if (producer_failed_ || binding_.snapshot.usage != "sink" || binding_.sink_options_json.empty()) return EINVAL;
-    const auto c = ParseSinkConfig(Parse(binding_.sink_options_json));
+    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    const auto c = Limits(binding_);
     if (!timeout_ms || timeout_ms > c.delivery_timeout_ms || messages.size() > c.queue_max_messages) return EINVAL;
     size_t bytes = 0;
     for (const auto& m : messages) {
@@ -59,8 +71,16 @@ int Client::Produce(const std::vector<KafkaProduceMessageV1>& messages, uint32_t
         if (m.key.size() > 4096 || m.key.size() + m.value.size() > c.max_message_bytes || bytes > c.queue_max_bytes)
             return EMSGSIZE;
     }
+    if (binding_.snapshot.payload_kind == "packet") {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+        const int topology = remaining > 0 ? CheckPacketTopology(remaining) : ETIMEDOUT;
+        if (topology) {
+            producer_failed_ = true;
+            return topology;
+        }
+    }
     auto receipt = std::make_shared<Receipt>();
-    receipt->deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    receipt->deadline = deadline;
     uint64_t accepted = 0;
     int rc = 0;
     for (const auto& m : messages) {
@@ -75,11 +95,12 @@ int Client::Produce(const std::vector<KafkaProduceMessageV1>& messages, uint32_t
                 break;
             }
             auto tag = std::make_unique<std::shared_ptr<Receipt>>(receipt);
-            auto err =
-                rd_kafka_producev(client_, RD_KAFKA_V_TOPIC(binding_.snapshot.topic.c_str()),
-                                  RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY), RD_KAFKA_V_KEY(m.key.data(), m.key.size()),
-                                  RD_KAFKA_V_VALUE(const_cast<char*>(m.value.data()), m.value.size()),
-                                  RD_KAFKA_V_OPAQUE(tag.get()), RD_KAFKA_V_END);
+            auto err = rd_kafka_producev(
+                client_, RD_KAFKA_V_TOPIC(binding_.snapshot.topic.c_str()),
+                RD_KAFKA_V_PARTITION((binding_.snapshot.payload_kind == "packet" ? 0 : RD_KAFKA_PARTITION_UA)),
+                RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY), RD_KAFKA_V_KEY(m.key.data(), m.key.size()),
+                RD_KAFKA_V_VALUE(const_cast<char*>(m.value.data()), m.value.size()), RD_KAFKA_V_OPAQUE(tag.get()),
+                RD_KAFKA_V_END);
             if (!err) {
                 tag.release();
                 ++accepted;
