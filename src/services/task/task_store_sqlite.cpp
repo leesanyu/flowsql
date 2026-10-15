@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "task_store_sqlite.h"
 
@@ -53,6 +48,11 @@ static const char* kSchemaSql =
     "FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_task_sql_payloads_created_at ON task_sql_payloads(created_at);"
+    "CREATE TABLE IF NOT EXISTS task_result_summaries ("
+    "task_id TEXT PRIMARY KEY,"
+    "result_json TEXT NOT NULL,"
+    "FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE"
+    ");"
     "CREATE TABLE IF NOT EXISTS task_events ("
     "id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "task_id TEXT NOT NULL,"
@@ -160,6 +160,39 @@ int TaskStoreSqlite::Close() {
         db_ = nullptr;
     }
     return 0;
+}
+
+int TaskStoreSqlite::SaveResultSummary(const std::string& task_id, const std::string& result_json) {
+    std::lock_guard<std::mutex> lock(db_mu_);
+    if (!db_) return -1;
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "INSERT INTO task_result_summaries(task_id,result_json) VALUES(?1,?2) "
+        "ON CONFLICT(task_id) DO UPDATE SET result_json=excluded.result_json;";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, task_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, result_json.c_str(), static_cast<int>(result_json.size()), SQLITE_TRANSIENT);
+    const int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int TaskStoreSqlite::GetResultSummary(const std::string& task_id, std::string* result_json) {
+    std::lock_guard<std::mutex> lock(db_mu_);
+    if (!db_ || !result_json) return -1;
+    result_json->clear();
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "SELECT result_json FROM task_result_summaries WHERE task_id=?1;", -1, &stmt,
+                           nullptr) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(stmt, 1, task_id.c_str(), -1, SQLITE_TRANSIENT);
+    const int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        const auto* value = sqlite3_column_text(stmt, 0);
+        result_json->assign(reinterpret_cast<const char*>(value), sqlite3_column_bytes(stmt, 0));
+    }
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_ROW || rc == SQLITE_DONE ? 0 : -1;
 }
 
 int TaskStoreSqlite::WriteTaskEventNoLock(const std::string& task_id,

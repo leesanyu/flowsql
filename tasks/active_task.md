@@ -2,13 +2,14 @@
 
 WIP=0；当前无活动 Atomic Slice。
 
-## 最近完成：Kafka 结构化数据接入 (`kafka-log-source`)
+## 最近完成：分析结果 Kafka 发布 (`kafka-result-sink`)
 
-- 已依次实施、验收并勾选 T1→T2→T3→T4；规格归档至 tasks/archive/feat-kafka-log-source.md，Backlog 已完成。
-- 交付固定 JSON→Arrow Schema/字段类型/单位/null契约、认证复用消费、任务独占reader、成功处理后显式确认、Web配置与异步SQL接线。
-- 最终构建返回0；完整 all selected134/executed134/passed134/failed0/skipped0/not_executed0；原生/Docker结构化数据面各11身份、认证矩阵各21项与部署回归通过；前端37/37及build通过；格式/Diff检查通过。
-- 完整验收使用统一配置的运行时副本，仅更换独立测试项目名；旧同名数据库卷保持原样。源码/产物前后摘要一致，初始97路径中非本Feature摘要、HEAD与暂存区保持。
-- 完成证据 evidence/kafka-log-source/、evidence/test-environment/20261015T053828Z-540d2aa4/，均未入库；此前失败记录保留，不计入通过。
-- 确认只覆盖当前批次处理及当次输出投递；不承诺最终事务原子、有状态恢复或Exactly-once。用户说明 docs/kafka.md。
-- 跨任务观察：catalog/builtin卸载后同进程重载出现重复注册失败，未改该模块；脱敏复现 evidence/kafka-log-source/t4-catalog-reload-observation.log。
-- 无后续任务自动启动；未执行 git add、commit 或 push。
+- T1～T5 已全部验收并勾选；规格归档至 `tasks/archive/feat-kafka-result-sink.md`，Backlog 已标记完成。本轮 T5 在09:42～10:12 UTC时间盒内收口。
+- 交付 `INTO kafka.<name>` 的数据库查询、只读 DataFrame 快照与兼容算子结果发布，携带无损 JSON 信封、稳定 key/revision 和确认摘要；成功要求 delivery 回调全部确认。
+- 重启后已核验受管容器/卷标签并恢复原匹配凭证，保留账号和数据卷；统一运行时配置使用私有绝对引用，命令从规范 `flowSQL` 路径执行。两位置只读 doctor 各26项通过。
+- 当前完整构建退出0；无筛选 all（`20261015T095158Z-f3769946`）selected/executed/passed=140，failed/skipped/not_executed=0；源码/产物在执行前后和最终复核均一致。
+- 原生/Docker 真实认证各21项、source/sink各11种身份与部署恢复均通过；包含独立消费者、重执行重复、负向权限/认证/缺Topic/超限、部分发布、续期及真实受控断连。断连均保留confirmed=3/unknown=3。
+- 前端39/39与生产构建、重新构建的codec/writer/control ASan/UBSan/leak、11个新增C++文件clang-format及Diff检查通过。构建既有getcwd与前端bundle大小提示保留。
+- 本轮固定负载样本：1000行、128字节文本、单writer/分区、Write+Finish计时；native约13282条/秒、10.53MB/秒、CPU27.0%、峰值RSS55236KiB、取消2ms；Docker约13424条/秒、10.64MB/秒、CPU28.3%、峰值RSS55620KiB、取消3ms。未固定CPU亲和性，仅为本地短样本，不代表生产容量。
+- 完成证据 `evidence/kafka-result-sink/t5-final-acceptance.json`、`evidence/test-environment/20261015T095158Z-f3769946/`；旧失败/恢复日志和切片工作台快照均保留，证据未入库。用户说明 `docs/kafka.md`。
+- 本轮源码与两份packet规格及其他既有改动保持；不承诺Exactly-once、跨系统事务、NPM全部实体直接发布；未启动后续任务，未执行git add/commit/push。

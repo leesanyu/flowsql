@@ -1,6 +1,6 @@
 <template>
   <div class="kafka-channels" v-loading="loading">
-    <el-alert title="结构化 source 配置 JSON 字段后可用于异步 SQL；连接验证仅检查认证和元数据，数据读权限由实际任务验证。" type="info" :closable="false" />
+    <el-alert title="结构化 source 可接入 SQL，sink 可通过 INTO kafka.通道 发布分析结果；连接验证仅检查认证和元数据，读写权限由实际任务验证。" type="info" :closable="false" />
     <div class="toolbar">
       <el-button type="primary" @click="openChannel()">新建 Kafka 通道</el-button>
       <el-button @click="openConnection()">新建连接配置</el-button>
@@ -23,7 +23,7 @@
       </el-table-column>
       <el-table-column label="连接验证" min-width="210"><template #default="{ row }">{{ verificationLabel(row) }}</template></el-table-column>
       <el-table-column v-if="tab === 'channels'" label="数据能力" min-width="180">
-        <template #default="{ row }"><div v-for="(state, direction) in row.adapter_status" :key="direction">{{ direction }}：{{ ({ not_installed: '适配器未安装', configuration_required: '待配置字段', ready: '已就绪' })[state] || state }}</div></template>
+        <template #default="{ row }"><div v-for="(state, direction) in row.adapter_status" :key="direction">{{ direction }}：{{ ({ not_installed: '适配器未安装', configuration_required: '待配置', ready: '已就绪' })[state] || state }}</div></template>
       </el-table-column>
       <el-table-column label="操作" min-width="350">
         <template #default="{ row }">
@@ -101,6 +101,22 @@
             <el-form-item label="确认策略"><el-select v-model="channel.source.commit_policy"><el-option label="当前批次处理及结果投递成功后确认" value="after_success" /><el-option label="不提交位点" value="none" /></el-select></el-form-item>
             <el-form-item label="批次最多行数"><el-input-number v-model="channel.source.max_batch_rows" :min="1" :max="4096" /></el-form-item>
             <el-form-item label="单消息字节上限"><el-input-number v-model="channel.source.max_message_bytes" :min="1" :max="16777216" /></el-form-item>
+          </template>
+        </template>
+        <template v-if="channel.role !== 'source' && channel.payload_kind === 'structured'">
+          <el-form-item label="结果发布"><el-select v-model="channel.sink_enabled"><el-option label="配置 JSON 结果信封" :value="true" /><el-option label="暂不配置" :value="false" /></el-select></el-form-item>
+          <template v-if="channel.sink_enabled">
+            <el-form-item label="发布实体" required><el-input v-model.trim="channel.sink.entity" placeholder="如 alert_results" /></el-form-item>
+            <el-form-item label="Schema 版本" required><el-input-number v-model="channel.sink.schema_version" :min="1" :max="2147483647" :precision="0" /></el-form-item>
+            <el-form-item label="记录语义"><el-select v-model="channel.sink.record_kind"><el-option label="event 独立事件" value="event" /><el-option label="upsert 完整替换快照" value="upsert" /></el-select></el-form-item>
+            <el-form-item label="业务 key 列"><el-input v-model="channel.sink.key_fields" placeholder="按顺序逗号分隔，最多 8 列" /></el-form-item>
+            <el-form-item v-if="channel.sink.record_kind === 'upsert'" label="revision 列" required><el-input v-model.trim="channel.sink.revision_field" /></el-form-item>
+            <p class="hint">upsert 的 key 不含 revision；revision 必须由结果提供，接收方按 key/revision 处理重复或乱序。event 不填写 key 时，重执行会产生新的身份。每行一条 JSON，无结束消息。</p>
+            <el-form-item label="消息字节上限"><el-input-number v-model="channel.sink.max_message_bytes" :min="1024" :max="16777216" :precision="0" /></el-form-item>
+            <el-form-item label="队列条数上限"><el-input-number v-model="channel.sink.queue_max_messages" :min="1" :max="65536" :precision="0" /></el-form-item>
+            <el-form-item label="队列字节上限"><el-input-number v-model="channel.sink.queue_max_bytes" :min="1048576" :max="268435456" :precision="0" /></el-form-item>
+            <el-form-item label="确认预算毫秒"><el-input-number v-model="channel.sink.delivery_timeout_ms" :min="100" :max="120000" :precision="0" /></el-form-item>
+            <p class="hint">发布完成表示 broker 已确认全部消息。失败或取消可能已有部分发布，摘要保留确认、未发送和未知数量；不自动重放。</p>
           </template>
         </template>
       </el-form>

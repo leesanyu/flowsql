@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_TASK_TASK_STORE_SQLITE_H_
 #define _FLOWSQL_SERVICES_TASK_TASK_STORE_SQLITE_H_
@@ -82,6 +77,9 @@ class TaskStoreSqlite {
                         const std::string& status_filter,
                         std::vector<TaskRecord>* items,
                         int64_t* total);
+    // Internal opaque result summaries; keeps the public TaskRecord ABI unchanged.
+    int SaveResultSummary(const std::string& task_id, const std::string& result_json);
+    int GetResultSummary(const std::string& task_id, std::string* result_json);
     int DeleteTask(const std::string& task_id);
     int RunRetentionCleanup();
 

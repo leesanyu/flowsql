@@ -5,6 +5,7 @@
 #include <framework/interfaces/iblock_stream_channel_descriptor.h>
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_reader.h>
+#include <framework/interfaces/iresult_sink.h>
 #include <framework/interfaces/irouter_handle.h>
 #include <memory>
 #include <set>
@@ -17,7 +18,8 @@ class Plugin final : public IPlugin,
                      public IKafkaChannelCatalogV1,
                      public IBlockStreamFactory,
                      public IBlockStreamReaderFactoryV1,
-                     public IBlockStreamChannelDescriptorV1 {
+                     public IBlockStreamChannelDescriptorV1,
+                     public IResultSinkFactoryV1 {
  public:
     int Option(const char* options) override;
     int Load(IQuerier*) override;
@@ -28,6 +30,7 @@ class Plugin final : public IPlugin,
     void ReleaseSession(IKafkaClientSessionV1* session) override;
     void EnumRoutes(std::function<void(const RouteItem&)> callback) override;
     ~Plugin() override { Stop(); }
+    int CreateWriter(const ResultSinkContextV1&, std::unique_ptr<IResultSinkWriterV1>*) override;
     int DescribeChannel(const char* name, KafkaChannelDescriptionV1* description) override;
     Store& Definitions() { return store_; }
     const Deployment& Environment() const { return deployment_; }

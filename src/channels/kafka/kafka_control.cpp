@@ -115,13 +115,15 @@ Json Plugin::DefinitionsJson() {
     aliases.AddMember("environments", envs, a);
     result.AddMember("credential_aliases", aliases, a);
     auto adapters = Parse(
-        R"({"structured":{"source":"available","sink":"not_installed"},"packet":{"source":"not_installed","sink":"not_installed"}})");
+        R"({"structured":{"source":"available","sink":"available"},"packet":{"source":"not_installed","sink":"not_installed"}})");
     result.AddMember("adapter_status", rapidjson::Value(adapters, a), a);
-    result.AddMember(
-        "structured_source",
-        Parse(
-            R"({"encodings":["json"],"types":["bool","int64","uint64","float64","utf8"],"offset_reset":["earliest","latest","error"],"commit_policy":["after_success","none"],"requires_async":true})"),
-        a);
+    // Documents own their allocator; moving a temporary Document's Value would leave dangling members.
+    auto source = Parse(
+        R"({"encodings":["json"],"types":["bool","int64","uint64","float64","utf8"],"offset_reset":["earliest","latest","error"],"commit_policy":["after_success","none"],"requires_async":true})");
+    result.AddMember("structured_source", rapidjson::Value(source, a), a);
+    auto sink = Parse(
+        R"({"encodings":["json"],"record_kinds":["event","upsert"],"envelope_version":1,"max_key_fields":8,"types":["bool","int8","int16","int32","int64","uint8","uint16","uint32","uint64","float32","float64","utf8","binary","fixed_size_binary","timestamp"],"write_permission":"unverified"})");
+    result.AddMember("structured_sink", rapidjson::Value(sink, a), a);
     return result;
 }
 std::string Plugin::FilesStamp() const {
@@ -363,6 +365,7 @@ int Plugin::DescribeChannel(const char* name, KafkaChannelDescriptionV1* descrip
         description->role = Text(rows["items"][0], "role");
         description->revision = rows["items"][0]["revision"].GetUint64();
         description->source_adapter_available = Text(rows["items"][0]["adapter_status"], "source") == "ready";
+        description->sink_adapter_available = Text(rows["items"][0]["adapter_status"], "sink") == "ready";
         return 0;
     } catch (...) {
         return EIO;

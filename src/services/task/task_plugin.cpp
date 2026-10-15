@@ -31,6 +31,33 @@ namespace task {
 
 namespace {
 
+// Only the provider's non-secret publication report is persisted, never result data or SQL.
+int SavePublication(TaskStoreSqlite* store, const std::string& task_id, const rapidjson::Value& response,
+                    const char* member) {
+    if (!response.IsObject() || !response.HasMember(member) || !response[member].IsObject() ||
+        !response[member].HasMember("publication"))
+        return 0;
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    writer.StartObject();
+    writer.Key("publication");
+    response[member]["publication"].Accept(writer);
+    writer.EndObject();
+    return store ? store->SaveResultSummary(task_id, buffer.GetString()) : -1;
+}
+
+void WritePublication(TaskStoreSqlite* store, const std::string& task_id,
+                      rapidjson::Writer<rapidjson::StringBuffer>& writer) {
+    std::string result;
+    if (!store || store->GetResultSummary(task_id, &result) != 0 || result.empty()) return;
+    rapidjson::Document doc;
+    doc.Parse(result.c_str());
+    if (!doc.HasParseError() && doc.IsObject()) {
+        writer.Key("result");
+        doc.Accept(writer);
+    }
+}
+
 const char* TaskStatusToName(TaskStatus s) {
     switch (s) {
         case TaskStatus::kPending: return "pending";
@@ -848,9 +875,24 @@ int TaskPlugin::ExecuteOneTask(const std::string& task_id, std::string* execute_
                 std::string inferred = ExtractStageFromErrorMessage(err);
                 if (!inferred.empty()) err_stage = inferred;
             }
-            (void)WriteDiagnostic(task_id, static_cast<int>(i), sqls[i], duration_ms, source_rows, 0, operator_chain);
+            int64_t confirmed_rows = 0;
+            std::string target;
+            if (!d.HasParseError() && d.IsObject()) {
+                if (d.HasMember("rows_affected") && d["rows_affected"].IsInt64())
+                    confirmed_rows = d["rows_affected"].GetInt64();
+                if (d.HasMember("result_target") && d["result_target"].IsString())
+                    target = d["result_target"].GetString();
+                if (SavePublication(store_.get(), task_id, d, "result") != 0) {
+                    err_code = "RESULT_SUMMARY_STORE_FAILED";
+                    err_stage = "persist";
+                    err = "failed to persist publication summary";
+                }
+            }
+            (void)WriteDiagnostic(task_id, static_cast<int>(i), sqls[i], duration_ms, source_rows, confirmed_rows,
+                                  operator_chain);
             if (execute_rsp) *execute_rsp = rsp;
-            const int urc = UpdateStatus(task_id, TaskStatus::kFailed, err_code, err, err_stage, 0, 0, "");
+            const int urc =
+                UpdateStatus(task_id, TaskStatus::kFailed, err_code, err, err_stage, confirmed_rows, 0, target);
             CleanupIntermediateChannels(intermediate_channels);
             return urc;
         }
@@ -897,6 +939,11 @@ int TaskPlugin::ExecuteOneTask(const std::string& task_id, std::string* execute_
         cols = std::max<int64_t>(cols, derived_cols);
         (void)WriteDiagnostic(task_id, static_cast<int>(i), sqls[i], duration_ms, source_rows, rows, operator_chain);
 
+        if (SavePublication(store_.get(), task_id, d, "result") != 0) {
+            CleanupIntermediateChannels(intermediate_channels);
+            return UpdateStatus(task_id, TaskStatus::kFailed, "RESULT_SUMMARY_STORE_FAILED",
+                                "failed to persist publication summary", "persist", rows, cols, result_target);
+        }
         final_rows = rows;
         final_cols = cols;
         final_target = result_target;
@@ -933,6 +980,7 @@ int TaskPlugin::SyncBatchRuntimeTask(TaskRecord* rec) {
         return error::INTERNAL_ERROR;
     }
 
+    if (SavePublication(store_.get(), rec->task_id, runtime_doc, "managed_result") != 0) return error::INTERNAL_ERROR;
     const std::string runtime_status = runtime_doc["status"].GetString();
     const TaskStatus mapped = MapBatchRuntimeStatus(runtime_status);
     std::string runtime_error_code;
@@ -965,10 +1013,8 @@ int TaskPlugin::SyncBatchRuntimeTask(TaskRecord* rec) {
     if (mapped != rec->status) {
         should_update = true;
     }
-    if ((mapped == TaskStatus::kCompleted || mapped == TaskStatus::kFailed || mapped == TaskStatus::kTimeout) &&
-        (result_rows != rec->result_row_count ||
-         result_cols != rec->result_col_count ||
-         result_target != rec->result_target)) {
+    if ((IsTerminal(mapped)) && (result_rows != rec->result_row_count || result_cols != rec->result_col_count ||
+                                 result_target != rec->result_target)) {
         should_update = true;
     }
     if ((mapped == TaskStatus::kFailed || mapped == TaskStatus::kTimeout) &&
@@ -1194,9 +1240,14 @@ int32_t TaskPlugin::HandleBatchExecute(const std::string&, const std::string& re
     w.String(task_id.c_str());
     w.Key("status");
     w.String(StatusName(rec.status));
+    w.Key("rows_affected");
+    w.Int64(rec.result_row_count);
+    w.Key("result_target");
+    w.String(rec.result_target.c_str());
+    WritePublication(store_.get(), task_id, w);
+    w.Key("rows");
+    w.Int64(rec.result_row_count);
     if (rec.status == TaskStatus::kCompleted) {
-        w.Key("rows");
-        w.Int64(rec.result_row_count);
         w.Key("data");
         rapidjson::Document exec_doc;
         exec_doc.Parse(exec_rsp.c_str());
@@ -1467,6 +1518,9 @@ int32_t TaskPlugin::HandleDetail(const std::string&, const std::string& req, std
         rsp = BuildErrorWithCodeJson("invalid task sql payload", "TASK_SQL_PAYLOAD_INVALID");
         return error::INTERNAL_ERROR;
     }
+    WritePublication(store_.get(), rec.task_id, w);
+    w.Key("rows_affected");
+    w.Int64(rec.result_row_count);
     w.Key("sql_text");
     w.String(sql_text.c_str());
     w.Key("result_row_count");
@@ -1635,6 +1689,10 @@ int32_t TaskPlugin::HandleCancel(const std::string&, const std::string& req, std
             }
         }
 
+        if (SavePublication(store_.get(), task_id, stop_doc, "managed_result") != 0) {
+            rsp = BuildErrorJson("failed to persist publication summary");
+            return error::INTERNAL_ERROR;
+        }
         const TaskStatus mapped = MapBatchRuntimeStatus(runtime_status);
         if (mapped == TaskStatus::kStopped ||
             mapped == TaskStatus::kCancelled ||

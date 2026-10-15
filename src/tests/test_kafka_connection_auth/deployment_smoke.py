@@ -112,7 +112,9 @@ for generation in range(2):
             if generation == 0:
                 post("connections/add", connection)
                 post("channels/add", {"name": "events", "connection_name": "persisted", "role": "both",
-                                      "topic": "events", "consumer_group": "smoke", "payload_kind": "structured"})
+                                      "topic": "events", "consumer_group": "smoke", "payload_kind": "structured",
+                                      "payload_options": {"source": {"encoding":"json", "entity":"metric", "fields":[{"name":"value","path":"/v","type":"int64","nullable":False}]},
+                                                          "sink": {"encoding":"json", "entity":"alert", "schema_version":1, "record_kind":"upsert", "key_fields":["id"], "revision_field":"revision"}}})
                 test_id = post("tests/start", {"target": "channel", "name": "events", "timeout_ms": 1}, 202)["test_id"]
                 for _ in range(100):
                     if post("tests/query", {"test_id": test_id})["status"] != "running":
@@ -130,6 +132,10 @@ for generation in range(2):
             assert definitions["items"][0]["revision"] == generation + 1
             channels = post("channels/query", {"name": "events"})["items"]
             assert len(channels) == 1 and channels[0]["role"] == "both" and not channels[0]["in_use"]
+            assert channels[0]["payload_options"]["source"]["entity"] == "metric"
+            assert channels[0]["payload_options"]["sink"]["revision_field"] == "revision"
+            assert channels[0]["adapter_status"] == {"source":"ready", "sink":"ready"}
+            assert capabilities["adapter_status"]["structured"]["sink"] == "available"
         finally:
             if args.mode == "docker":
                 subprocess.run(["docker", "stop", "-t", "20", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)

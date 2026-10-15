@@ -132,3 +132,41 @@ test('Vue structured source form saves edited entity and preserves field units a
     assert.deepEqual(saved[0].payload_options.source, { ...source, entity: 'renamed', offset_reset: 'latest' })
   } finally { page.app.unmount() }
 })
+
+test('sink and both round trip independent configurations, limits, revision and hidden directions', () => {
+  const source = { encoding: 'json', entity: 'metrics', fields: [{ name: 'id', path: '/id', type: 'int64', nullable: false }] }
+  const sink = { encoding: 'json', entity: 'alert', schema_version: 2, record_kind: 'upsert', key_fields: ['tenant', 'id'], revision_field: 'revision', max_message_bytes: 4096, queue_max_messages: 17, queue_max_bytes: 1048576, delivery_timeout_ms: 1800 }
+  const row = { name: 'both', connection_name: 'auth', role: 'both', topic: 'events', consumer_group: 'test', payload_kind: 'structured', payload_options: { source, sink } }
+  const draft = channelDraft(row), payload = buildChannel(draft, 8)
+  assert.deepEqual(payload.payload_options.sink, sink)
+  assert.equal(payload.payload_options.source.entity, source.entity)
+  assert.equal(payload.expected_revision, 8)
+  draft.sink.key_fields = 'id, revision'; assert.throws(() => buildChannel(draft), /独立/)
+  draft.sink.key_fields = 'id, id'; assert.throws(() => buildChannel(draft), /重复/)
+  draft.sink.key_fields = 'id'; draft.sink.record_kind = 'event'
+  assert.equal(buildChannel(draft).payload_options.sink.revision_field, undefined)
+  draft.sink.queue_max_bytes = 512; assert.throws(() => buildChannel(draft), /队列/)
+  draft.sink.queue_max_bytes = 1048576; draft.role = 'source'
+  assert.equal(buildChannel(draft).payload_options.sink, undefined)
+  draft.role = 'sink'; assert.equal(buildChannel(draft).payload_options.source, undefined)
+  draft.sink_enabled = false; assert.equal(buildChannel(draft).payload_options, undefined)
+  assert.deepEqual(row.payload_options.sink, sink)
+})
+
+test('Vue both form preserves source while editing sink and hides event revision', async () => {
+  const source = { encoding: 'json', entity: 'metrics', fields: [{ name: 'id', path: '/id', type: 'int64', nullable: false }] }
+  const sink = { encoding: 'json', entity: 'alert', schema_version: 3, record_kind: 'upsert', key_fields: ['id'], revision_field: 'revision' }
+  const row = { name: 'both', revision: 9, connection_name: 'auth', role: 'both', topic: 'events', consumer_group: 'test', payload_kind: 'structured', payload_options: { source, sink }, adapter_status: { source: 'ready', sink: 'ready' } }
+  const saved = []
+  const page = await mountPage({ kafkaDefinitions: async () => ({ data: definitions }), kafkaQuery: async (kind) => ({ data: { items: kind === 'channels' ? [row] : [{ name: 'auth' }] } }), kafkaSave: async (_kind, payload) => { saved.push(payload) }, kafkaTestCancel: async () => {} })
+  try {
+    await page.click('编辑'); await page.change('发布实体', 'renamed'); await page.change('记录语义', 'event')
+    assert.ok(!find(page.root, (n) => n.props.field === 'revision 列'))
+    await page.click('保存通道')
+    assert.equal(saved[0].expected_revision, 9)
+    assert.equal(saved[0].payload_options.source.entity, 'metrics')
+    assert.equal(saved[0].payload_options.sink.entity, 'renamed')
+    assert.equal(saved[0].payload_options.sink.revision_field, undefined)
+    assert.equal(saved[0].credential_bindings, undefined)
+  } finally { page.app.unmount() }
+})

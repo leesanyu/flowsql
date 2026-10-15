@@ -3,6 +3,7 @@
 #pragma once
 
 #include <framework/interfaces/ikafka_consumer_session.h>
+#include <framework/interfaces/ikafka_producer_session.h>
 #include <librdkafka/rdkafka.h>
 #include <atomic>
 #include <condition_variable>
@@ -17,7 +18,7 @@ struct Deployment {
     std::map<std::string, std::string> files, environments;
     std::filesystem::path runtime_directory;
 };
-class Client final : public IKafkaClientSessionV1, public IKafkaConsumerSessionV1 {
+class Client final : public IKafkaClientSessionV1, public IKafkaConsumerSessionV1, public IKafkaProducerSessionV1 {
  public:
     Client(Binding binding, const Deployment& deployment);
     ~Client() override;
@@ -27,6 +28,9 @@ class Client final : public IKafkaClientSessionV1, public IKafkaConsumerSessionV
     int QueryInterface(const Guid&, void** capability) override;
     static Json Capabilities();
     const std::string& SourceOptions() const { return binding_.source_options_json; }
+    const std::string& SinkOptions() const { return binding_.sink_options_json; }
+    int Produce(const std::vector<KafkaProduceMessageV1>&, uint32_t, KafkaDeliveryV1*) override;
+    int Drain(uint32_t) override;
     int StartConsumer(const char* reset, uint32_t max_message_bytes) override;
     int PollMessage(uint32_t timeout_ms, KafkaMessageV1* message) override;
     int CommitOffsets(const std::vector<KafkaOffsetV1>& offsets, uint32_t timeout_ms) override;
@@ -52,6 +56,8 @@ class Client final : public IKafkaClientSessionV1, public IKafkaConsumerSessionV
     std::string File(const std::string& reference, size_t limit);
     std::string Secret(const std::string& reference);
     void Configure(rd_kafka_conf_t* configuration);
+    void ConfigureProducer(rd_kafka_conf_t* configuration);
+    bool producer_failed_ = false;
     bool Ticket(std::chrono::steady_clock::time_point deadline);
     static void OAuth(rd_kafka_t*, const char*, void* opaque);
     static void Error(rd_kafka_t*, int error, const char*, void* opaque);

@@ -463,6 +463,7 @@ void BlockTransformPipelineRunner::Cancel() {
     bool expected = false;
     if (!cancel_requested_.compare_exchange_strong(expected, true)) return;
 
+    if (config_.output_cancel) config_.output_cancel();
     try {
         if (config_.source) config_.source->Cancel();
     } catch (...) {
@@ -585,6 +586,9 @@ BlockTransformPipelineError BlockTransformPipelineRunner::Run(BlockTransformPipe
         return fail(BlockTransformPipelineError::kFilterOpenFailed,
                     "transform residual filter Open failed: " + stage_error);
     }
+
+    if (config_.output_open && config_.output_open(consumer_schema) != 0)
+        return fail(BlockTransformPipelineError::kOutputConsumerFailed, "result sink Open failed");
 
     auto deliver_outputs = [&](const std::vector<BlockTransformOutputV1>& outputs, std::string* delivery_error) {
         for (const auto& output : outputs) {

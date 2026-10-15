@@ -900,6 +900,10 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         return error::BAD_REQUEST;
     }
     if (source_resolved.has_stream_source) {
+        if (stmt.dest.rfind("kafka.", 0) == 0) {
+            rsp = BuildExecutionErrorJson("SINK_SOURCE_UNSUPPORTED", "SINK_SOURCE_UNSUPPORTED", "sink_resolve");
+            return error::BAD_REQUEST;
+        }
         return ExecuteStreamTask(stmt, rsp);
     }
 
@@ -961,6 +965,13 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                                           ErrorCodeId::kOpExecFail, ErrorStageId::kCapabilityCheck);
             return reader_rc == EEXIST ? error::CONFLICT : error::INTERNAL_ERROR;
         }
+    }
+    if (stmt.dest.rfind("kafka.", 0) == 0) {
+        if (input_channels.size() != 1) {
+            rsp = BuildExecutionErrorJson("SINK_SOURCE_UNSUPPORTED", "SINK_SOURCE_UNSUPPORTED", "sink_resolve");
+            return error::BAD_REQUEST;
+        }
+        return ExecuteResultSink(input_channels.front(), stmt, block_source_residual, rsp);
     }
     std::string input_database_category, input_database_name, input_database_relation;
     const bool database_block_candidate =

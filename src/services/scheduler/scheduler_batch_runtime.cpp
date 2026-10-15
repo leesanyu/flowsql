@@ -310,6 +310,8 @@ void SchedulerBatchRuntime::ExecuteTask(const std::shared_ptr<BatchRuntimeTask>&
             std::lock_guard<std::mutex> lock(mu_);
             task->snapshot.status =
                 task->control->cancel_requested.load() ? BatchRuntimeStatus::kCancelled : BatchRuntimeStatus::kFailed;
+            ParseExecuteResult(exec_rsp, &task->snapshot.result_row_count, &task->snapshot.result_col_count,
+                               &task->snapshot.result_target);
             task->snapshot.error_code = err_code;
             task->snapshot.error_message = err_message;
             task->snapshot.error_stage = err_stage;

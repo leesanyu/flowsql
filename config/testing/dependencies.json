@@ -238,6 +238,26 @@
       "resources": [
         "kafka_source_docker"
       ]
+    },
+    "test_kafka_sink_native": {
+      "services": [
+        "kafka"
+      ],
+      "role": "auth",
+      "location": "native",
+      "resources": [
+        "kafka_sink_native"
+      ]
+    },
+    "test_kafka_sink_docker": {
+      "services": [
+        "kafka"
+      ],
+      "role": "auth",
+      "location": "docker",
+      "resources": [
+        "kafka_sink_docker"
+      ]
     }
   }
 }

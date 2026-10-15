@@ -4,14 +4,10 @@ target_compile_options(test_kafka_structured PRIVATE -UNDEBUG -Wall -Wextra -Wer
 target_link_libraries(test_kafka_structured PRIVATE flowsql_kafka_store)
 set_target_properties(test_kafka_structured PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_kafka_structured COMMAND ${CMAKE_BINARY_DIR}/output/test_kafka_structured)
-add_executable(test_kafka_reader test_kafka_reader.cpp
-    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_client.cpp
-    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_reader.cpp
-    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_plugin.cpp
-    ${CMAKE_SOURCE_DIR}/channels/kafka/kafka_control.cpp)
+add_executable(test_kafka_reader test_kafka_reader.cpp)
 target_include_directories(test_kafka_reader PRIVATE ${CMAKE_SOURCE_DIR})
 target_compile_options(test_kafka_reader PRIVATE -UNDEBUG)
-target_link_libraries(test_kafka_reader PRIVATE flowsql_kafka_store FlowSQL::KafkaClient)
+target_link_libraries(test_kafka_reader PRIVATE flowsql_kafka_runtime)
 set_target_properties(test_kafka_reader PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_kafka_reader COMMAND ${CMAKE_BINARY_DIR}/output/test_kafka_reader)
 set_tests_properties(test_kafka_reader PROPERTIES TIMEOUT 90)
@@ -26,7 +22,7 @@ add_test(NAME test_kafka_execution COMMAND ${CMAKE_BINARY_DIR}/output/test_kafka
 add_executable(kafka_source_real kafka_source_real.cpp)
 target_include_directories(kafka_source_real PRIVATE ${CMAKE_SOURCE_DIR})
 target_compile_options(kafka_source_real PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-unused-parameter -Wno-type-limits)
-target_link_libraries(kafka_source_real PRIVATE flowsql_kafka_store FlowSQL::KafkaClient flowsql_common ${CMAKE_DL_LIBS})
+target_link_libraries(kafka_source_real PRIVATE flowsql_kafka_runtime flowsql_common ${CMAKE_DL_LIBS})
 add_dependencies(kafka_source_real flowsql_kafka flowsql_scheduler flowsql_builtin flowsql_catalog flowsql_task)
 set_target_properties(kafka_source_real PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)

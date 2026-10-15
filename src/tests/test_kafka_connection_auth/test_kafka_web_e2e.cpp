@@ -58,11 +58,19 @@ class Runtime {
         std::string web_options = "host=127.0.0.1;port=" + std::to_string(web_) +
                                   ";gateway=127.0.0.1:" + std::to_string(gateway) +
                                   ";db_path=:memory:;upload_dir=" + (root / "uploads").string();
-        const char* libraries[] = {"libflowsql_gateway.so", "libflowsql_router.so", "libflowsql_kafka.so",
-                                   "libflowsql_web.so", "libflowsql_scheduler.so"};
-        const char* config[] = {gateway_options.c_str(), router_options.c_str(), provider.c_str(), web_options.c_str(),
-                                "stream_workers=1;batch_workers=1"};
-        assert(loader_->Load(get_absolute_process_path(), libraries, config, 5) == 0);
+        const char* libraries[] = {"libflowsql_gateway.so", "libflowsql_router.so",    "libflowsql_kafka.so",
+                                   "libflowsql_web.so",     "libflowsql_scheduler.so", "libflowsql_builtin.so",
+                                   "libflowsql_catalog.so"};
+        const auto catalog_options =
+            "data_dir=" + (root / "frames").string() + ";operator_db_path=" + (root / "operators.db").string();
+        const char* config[] = {gateway_options.c_str(),
+                                router_options.c_str(),
+                                provider.c_str(),
+                                web_options.c_str(),
+                                "stream_workers=1;batch_workers=1",
+                                nullptr,
+                                catalog_options.c_str()};
+        assert(loader_->Load(get_absolute_process_path(), libraries, config, 7) == 0);
         assert(loader_->StartAll() == 0);
         bool ready = false;
         for (int i = 0; i < 300 && !ready; ++i) {

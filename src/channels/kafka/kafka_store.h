@@ -24,7 +24,7 @@ void String(rapidjson::Value& object, const char* key, const std::string& value,
 
 struct Binding {
     KafkaBindingSnapshotV1 snapshot;
-    std::string source_options_json;
+    std::string source_options_json, sink_options_json;
     Json connection;
     std::map<std::string, std::string> secrets;
     bool leased = false;

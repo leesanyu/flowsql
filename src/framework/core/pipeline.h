@@ -144,6 +144,9 @@ struct BlockTransformPipelineConfig {
     std::shared_ptr<const BoundFilterExpr> source_residual;
     std::shared_ptr<const BoundFilterExpr> transform_residual;
     std::function<int(const BlockTransformOutputV1&)> output_consumer;
+    // Optional independent result sink: validate even an empty output and wake in-flight delivery on cancel.
+    std::function<int(const std::shared_ptr<arrow::Schema>&)> output_open;
+    std::function<void()> output_cancel;
     // Injectable clocks for deterministic scheduling tests; empty functions use system clocks.
     std::function<int64_t()> monotonic_clock_ns;
     std::function<int64_t()> wall_clock_ns;

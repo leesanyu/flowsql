@@ -93,6 +93,7 @@ Client::Client(Binding binding, const Deployment& deployment) : binding_(std::mo
         std::unique_ptr<rd_kafka_conf_t, decltype(&rd_kafka_conf_destroy)>(rd_kafka_conf_new(), rd_kafka_conf_destroy);
     try {
         Configure(config.get());
+        ConfigureProducer(config.get());
         // rd_kafka_new consumes/desensitizes PEM keys. Freeze the consumer configuration first.
         if (binding_.snapshot.usage == "source") consumer_config_.reset(rd_kafka_conf_dup(config.get()));
         char error[512];
@@ -109,7 +110,11 @@ Client::Client(Binding binding, const Deployment& deployment) : binding_(std::mo
             }
         });
     } catch (...) {
-        if (client_) rd_kafka_destroy(client_);
+        if (client_) {
+            rd_kafka_purge(client_, RD_KAFKA_PURGE_F_QUEUE | RD_KAFKA_PURGE_F_INFLIGHT);
+            rd_kafka_poll(client_, 0);
+            rd_kafka_destroy(client_);
+        }
         if (!temporary_.empty()) std::filesystem::remove_all(temporary_);
         throw;
     }
@@ -201,7 +206,11 @@ Client::~Client() {
         rd_kafka_queue_destroy(queue);
         rd_kafka_destroy_flags(consumer_, RD_KAFKA_DESTROY_F_NO_CONSUMER_CLOSE);
     }
-    if (client_) rd_kafka_destroy(client_);
+    if (client_) {
+        rd_kafka_purge(client_, RD_KAFKA_PURGE_F_QUEUE | RD_KAFKA_PURGE_F_INFLIGHT);
+        rd_kafka_poll(client_, 0);
+        rd_kafka_destroy(client_);
+    }
     for (auto& [key, value] : binding_.secrets) OPENSSL_cleanse(value.data(), value.size());
     if (!temporary_.empty()) std::filesystem::remove_all(temporary_);
 }
@@ -214,6 +223,10 @@ int Client::QueryInterface(const Guid& iid, void** capability) {
     *capability = nullptr;
     if (std::memcmp(&iid, &IID_KAFKA_CONSUMER_SESSION_V1, sizeof(Guid)) == 0 && binding_.snapshot.usage == "source") {
         *capability = static_cast<IKafkaConsumerSessionV1*>(this);
+        return 0;
+    }
+    if (std::memcmp(&iid, &IID_KAFKA_PRODUCER_SESSION_V1, sizeof(Guid)) == 0 && binding_.snapshot.usage == "sink") {
+        *capability = static_cast<IKafkaProducerSessionV1*>(this);
         return 0;
     }
     return ENOTSUP;

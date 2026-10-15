@@ -3,6 +3,8 @@
 
 #include "scheduler_plugin.h"
 
+#include <arrow/io/api.h>
+#include <arrow/ipc/api.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -940,13 +942,15 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
     const BlockTransformManagedSinkBindingV1* managed_sink, const SqlStatement& stmt,
     const std::shared_ptr<const BoundFilterExpr>& source_residual, BlockExecutionTerminal* terminal,
     int64_t* rows_affected, std::string* managed_result_json, std::string* error,
-    std::shared_ptr<IDatabaseChannel> database_source, std::shared_ptr<IDataFrameChannel> dataframe_source) {
+    std::shared_ptr<IDatabaseChannel> database_source, std::shared_ptr<IDataFrameChannel> dataframe_source,
+    IResultSinkWriterV1* result_sink) {
     if (terminal) *terminal = BlockExecutionTerminal::kFailed;
     if (rows_affected) *rows_affected = 0;
     if (managed_result_json) managed_result_json->clear();
     if (error) error->clear();
     if ((!source && !database_source && !dataframe_source) || !provider || (provider.v1 && provider.v2) ||
-        (sink == nullptr) == (managed_sink == nullptr) || stmt.operators.size() != 1) {
+        (int(sink != nullptr) + int(managed_sink != nullptr) + int(result_sink != nullptr) != 1) ||
+        stmt.operators.size() != 1) {
         if (error) *error = "block transform pipeline requires one source, provider, operator, and sink";
         return EINVAL;
     }
@@ -1211,6 +1215,12 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
             return EINVAL;
         }
     }
+    if (result_sink && (dynamic_cast<IBlockTransformManagedSinkTaskV1*>(execution.get()) ||
+                        dynamic_cast<IBlockTransformModelOutputTaskV1*>(execution.get()) ||
+                        dynamic_cast<IBlockTransformResultOutputTaskV1*>(execution.get()))) {
+        if (error) *error = "SINK_OPERATOR_OUTPUT_UNSUPPORTED";
+        return ENOTSUP;
+    }
     auto* managed_task = dynamic_cast<IBlockTransformManagedSinkTaskV1*>(execution.get());
     auto* model_task = dynamic_cast<IBlockTransformModelOutputTaskV1*>(execution.get());
     const auto model_target = model_task ? model_task->ModelOutputTarget() : std::string{};
@@ -1367,9 +1377,33 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
         capture_reader ? dynamic_cast<IBlockTransformCaptureFactTaskV2*>(execution.get()) : nullptr;
     config.source_residual = source_residual;
     config.transform_residual = transform_filter_plan.residual_expression;
-    config.output_consumer = [appendable_sink, managed_sink,
+    if (result_sink) {
+        config.output_open = [result_sink, columns = stmt.columns](const std::shared_ptr<arrow::Schema>& schema) {
+            if (columns.empty()) return result_sink->Open(schema);
+            std::vector<std::shared_ptr<arrow::Field>> fields;
+            for (const auto& name : columns) {
+                int i = schema->GetFieldIndex(name);
+                if (i < 0) return EINVAL;
+                fields.push_back(schema->field(i));
+            }
+            return result_sink->Open(arrow::schema(fields, schema->metadata()));
+        };
+        config.output_cancel = [result_sink] { result_sink->Cancel(); };
+    }
+    config.output_consumer = [appendable_sink, managed_sink, result_sink,
                               columns = stmt.columns](const BlockTransformOutputV1& output) {
         if (!output.batch) return EINVAL;
+        if (result_sink) {
+            if (columns.empty()) return result_sink->Write(output.batch);
+            std::vector<int> indices;
+            for (const auto& name : columns) {
+                int i = output.batch->schema()->GetFieldIndex(name);
+                if (i < 0) return EINVAL;
+                indices.push_back(i);
+            }
+            auto selected = output.batch->SelectColumns(indices);
+            return selected.ok() ? result_sink->Write(*selected) : EINVAL;
+        }
         if (managed_sink) {
             if (!columns.empty()) {
                 std::vector<int> indices;
@@ -1853,6 +1887,328 @@ static std::shared_ptr<DataFrameChannel> ApplyDataFrameFilter(IDataFrameChannel*
     filtered->Open();
     filtered->Write(&data);
     return filtered;
+}
+
+namespace {
+std::string PublicationJson(const ResultSinkReportV1& r, const std::string& target) {
+    rapidjson::StringBuffer b;
+    rapidjson::Writer<rapidjson::StringBuffer> w(b);
+    w.StartObject();
+    auto text = [&](const char* key, const std::string& s) {
+        w.Key(key);
+        w.String(s.data(), s.size());
+    };
+    text("target", target);
+    text("publication_id", r.publication_id);
+    text("state", r.state);
+    text("code", r.code);
+    text("stage", r.stage);
+    w.Key("input_rows");
+    w.Uint64(r.input_rows);
+    w.Key("confirmed_rows");
+    w.Uint64(r.confirmed_rows);
+    w.Key("not_sent_rows");
+    w.Uint64(r.not_sent_rows);
+    w.Key("unknown_rows");
+    w.Uint64(r.unknown_rows);
+    w.Key("binding");
+    if (r.binding_json.empty()) {
+        w.StartObject();
+        w.EndObject();
+    } else
+        w.RawValue(r.binding_json.data(), r.binding_json.size(), rapidjson::kObjectType);
+    w.EndObject();
+    return b.GetString();
+}
+std::shared_ptr<arrow::RecordBatch> ProjectResult(const std::shared_ptr<arrow::RecordBatch>& b,
+                                                  const std::vector<std::string>& columns) {
+    if (!b || columns.empty()) return b;
+    std::vector<int> indices;
+    for (const auto& column : columns) {
+        int i = b->schema()->GetFieldIndex(column);
+        if (i < 0) return {};
+        indices.push_back(i);
+    }
+    auto result = b->SelectColumns(indices);
+    return result.ok() ? *result : nullptr;
+}
+}  // namespace
+int32_t SchedulerPlugin::ExecuteResultSink(IChannel* source, const SqlStatement& stmt,
+                                           const std::shared_ptr<const BoundFilterExpr>& residual, std::string& rsp) {
+    const auto control = SchedulerBatchRuntime::CurrentControl();
+    std::unique_ptr<IResultSinkWriterV1> writer;
+    ResultSinkReportV1 fallback;
+    fallback.state = "failed";
+    fallback.code = "SINK_RESOLVE_FAILED";
+    fallback.stage = "sink_resolve";
+    auto finish_response = [&](int rc, const char* status, const char* fallback_code = nullptr) {
+        auto report = writer ? writer->Report() : fallback;
+        if (rc && (report.code.empty() || report.code == "OK" || report.code == "CANCELLED") && fallback_code) {
+            report.code = fallback_code;
+            report.stage = "sink_deliver";
+        }
+        const auto publication = PublicationJson(report, stmt.dest);
+        if (control) control->Publish("{\"publication\":" + publication + "}");
+        rapidjson::StringBuffer b;
+        rapidjson::Writer<rapidjson::StringBuffer> w(b);
+        w.StartObject();
+        w.Key("status");
+        w.String(status);
+        w.Key("rows");
+        w.Uint64(report.confirmed_rows);
+        w.Key("rows_affected");
+        w.Uint64(report.confirmed_rows);
+        w.Key("result_row_count");
+        w.Uint64(report.confirmed_rows);
+        w.Key("result_target");
+        w.String(stmt.dest.c_str());
+        w.Key("result");
+        w.StartObject();
+        w.Key("publication");
+        w.RawValue(publication.data(), publication.size(), rapidjson::kObjectType);
+        w.EndObject();
+        if (rc) {
+            w.Key("error");
+            w.String(report.code.c_str());
+            w.Key("error_code");
+            w.String(report.code.c_str());
+            w.Key("error_stage");
+            w.String(report.stage.c_str());
+        }
+        w.EndObject();
+        rsp = b.GetString();
+        return rc ? error::INTERNAL_ERROR : error::OK;
+    };
+    auto* block = dynamic_cast<IBlockStreamChannel*>(source);
+    auto* database = dynamic_cast<IDatabaseChannel*>(source);
+    auto* dataframe = dynamic_cast<IDataFrameChannel*>(source);
+    if (!source || (!block && !database && !dataframe) || stmt.sources.size() != 1) {
+        fallback.code = "SINK_SOURCE_UNSUPPORTED";
+        return finish_response(ENOTSUP, "failed");
+    }
+    // A non-transform operator must explicitly support ordinary DataFrame output. Discovery precedes input reads.
+    BlockTransformProviderRef provider;
+    CppOperatorCapabilityLeaseV1 provider_lease;
+    std::vector<std::shared_ptr<IOperator>> holders;
+    std::vector<IOperator*> operators;
+    if (!stmt.operators.empty()) {
+        bool ambiguous = false;
+        int traverse = 0;
+        if (stmt.operators.size() == 1)
+            provider = FindBlockTransformOperator(stmt.operators[0].category, stmt.operators[0].name, &provider_lease,
+                                                  &ambiguous, &traverse);
+        if (ambiguous || traverse) {
+            fallback.code = "SINK_OPERATOR_OUTPUT_UNSUPPORTED";
+            return finish_response(ENOTSUP, "failed");
+        }
+        if (provider && !block) {
+            fallback.code = "SINK_OPERATOR_OUTPUT_UNSUPPORTED";
+            return finish_response(ENOTSUP, "failed");
+        }
+        if (!provider) {
+            if (std::any_of(stmt.stage_filters.begin(), stmt.stage_filters.end(),
+                            [](const StageFilterClause& filter) { return filter.after_stage > 0; })) {
+                fallback.code = "SINK_OPERATOR_FILTER_UNSUPPORTED";
+                return finish_response(ENOTSUP, "failed");
+            }
+            if (block) {
+                fallback.code = "SINK_OPERATOR_OUTPUT_UNSUPPORTED";
+                return finish_response(ENOTSUP, "failed");
+            }
+            for (auto& op : stmt.operators) {
+                auto holder = FindOperator(op.category, op.name);
+                if (!holder) {
+                    fallback.code = "SINK_OPERATOR_OUTPUT_UNSUPPORTED";
+                    return finish_response(ENOTSUP, "failed");
+                }
+                operators.push_back(holder.get());
+                holders.push_back(std::move(holder));
+            }
+            for (size_t i = 0; i < operators.size(); ++i) {
+                const auto& params =
+                    i < stmt.operator_with_params.size() ? stmt.operator_with_params[i] : stmt.with_params;
+                for (auto& [k, v] : params)
+                    if (operators[i]->Configure(k.c_str(), v.c_str())) {
+                        fallback.code = "SINK_OPERATOR_CONFIGURATION";
+                        return finish_response(EINVAL, "failed");
+                    }
+            }
+        }
+    }
+    int create = ENOTSUP;
+    if (querier_)
+        querier_->Traverse(IID_RESULT_SINK_FACTORY_V1, [&](void* p) {
+            create = static_cast<IResultSinkFactoryV1*>(p)->CreateWriter({1, stmt.dest, NextStreamTaskId()}, &writer);
+            return create == ENOTSUP ? 0 : -1;
+        });
+    if (create || !writer) return finish_response(create ? create : EIO, "failed");
+    struct WakeGuard {
+        std::shared_ptr<BlockTransformRunControl> c;
+        ~WakeGuard() {
+            if (c) c->BindWake({});
+        }
+    } wake{control};
+    auto bind_writer = [&](IBatchReader* reader = nullptr) {
+        if (control)
+            control->BindWake([control, p = writer.get(), reader] {
+                if (control->cancel_requested.load()) {
+                    p->Cancel();
+                    if (reader) reader->Cancel();
+                }
+            });
+    };
+    bind_writer();
+    int rc = 0;
+    bool stopped = false;
+    std::string upstream_error;
+    try {
+        if (provider) {
+            BlockExecutionTerminal terminal = BlockExecutionTerminal::kFailed;
+            int64_t rows = 0;
+            std::string summary;
+            rc = ExecuteSingleBlockTransformPipeline(block, provider, nullptr, nullptr, stmt, residual, &terminal,
+                                                     &rows, &summary, &upstream_error, {}, {}, writer.get());
+            stopped = terminal == BlockExecutionTerminal::kStopped;
+            if (terminal == BlockExecutionTerminal::kCancelled) {
+                writer->Cancel();
+                return finish_response(0, "cancelled");
+            }
+            if (terminal == BlockExecutionTerminal::kFailed && !rc) rc = EIO;
+            bind_writer();
+        } else if (block) {
+            auto schema = BlockSourceArrowSchema(source);
+            BlockFilterStage filter(residual);
+            std::shared_ptr<arrow::Schema> filtered;
+            if (filter.Open(schema, &filtered, &upstream_error) != FilterEvalError::kNone) rc = EINVAL;
+            auto empty = arrow::RecordBatch::MakeEmpty(filtered ? filtered : schema);
+            auto projected = empty.ok() ? ProjectResult(*empty, stmt.columns) : nullptr;
+            if (!rc) rc = projected ? writer->Open(projected->schema()) : EINVAL;
+            if (control)
+                control->BindWake([control, block, p = writer.get()] {
+                    if (control->cancel_requested.load()) p->Cancel();
+                    block->Cancel();
+                });
+            while (!rc) {
+                if (control && control->cancel_requested.load()) {
+                    writer->Cancel();
+                    return finish_response(0, "cancelled");
+                }
+                if (control && control->stop_requested.load()) {
+                    stopped = true;
+                    break;
+                }
+                auto event = block->PollBlock(100);
+                if (event.kind == BlockPollEvent::kTimeout) continue;
+                if (event.kind == BlockPollEvent::kEof) break;
+                if (event.kind == BlockPollEvent::kCancelled && control && control->stop_requested.load()) {
+                    stopped = true;
+                    break;
+                }
+                if (event.kind != BlockPollEvent::kData || !event.batch) {
+                    rc = EIO;
+                    break;
+                }
+                BlockTransformOutputV1 out;
+                if (filter.ProcessBlock(event.batch, 0, &out, &upstream_error) != FilterEvalError::kNone) rc = EINVAL;
+                auto selected = rc ? nullptr : ProjectResult(out.batch, stmt.columns);
+                if (!rc) rc = selected ? writer->Write(selected) : EINVAL;
+                if (!rc) rc = AcknowledgeProcessedBlock(block, event.batch);
+                int released = block->ReleaseBlock(event.batch);
+                if (!rc) rc = released;
+            }
+            bind_writer();
+        } else if (!operators.empty() || dataframe) {
+            DataFrame snapshot;
+            if (!operators.empty()) {
+                DataFrameChannel result("_temp", "publication");
+                result.Open();
+                std::vector<IChannel*> inputs{source};
+                int64_t rows = 0;
+                rc = ExecuteWithOperatorChain(Span<IChannel*>(inputs), &result, operators, ChannelType::kDataFrame,
+                                              stmt, &rows, &upstream_error);
+                if (!rc) rc = result.Read(&snapshot);
+            } else {
+                rc = dataframe->Read(&snapshot);
+                if (!rc && !stmt.where_clause.empty()) rc = snapshot.Filter(stmt.where_clause.c_str());
+            }
+            auto batch = rc ? nullptr : ProjectResult(snapshot.ToArrow(), stmt.columns);
+            if (!rc) rc = batch ? writer->Open(batch->schema()) : EINVAL;
+            if (!rc && !(control && control->stop_requested.load())) rc = writer->Write(batch);
+            stopped = control && control->stop_requested.load();
+        } else {
+            std::string category, name, relation;
+            if (!ParseDatabaseDestination(stmt.source, &category, &name, &relation) || relation.empty()) rc = EINVAL;
+            IBatchReader* raw = nullptr;
+            if (!rc) rc = database->CreateReader(BuildQuery(stmt.source, stmt).c_str(), &raw);
+            std::unique_ptr<IBatchReader, std::function<void(IBatchReader*)>> reader(raw, [](auto* p) {
+                if (p) {
+                    p->Close();
+                    p->Release();
+                }
+            });
+            if (!rc && !reader) rc = EIO;
+            if (!rc) {
+                bind_writer(reader.get());
+                const uint8_t* bytes = nullptr;
+                size_t size = 0;
+                rc = reader->GetSchema(&bytes, &size);
+                auto decode = [](const uint8_t* data, size_t n) {
+                    auto owned = arrow::Buffer::FromString(std::string(reinterpret_cast<const char*>(data), n));
+                    return arrow::ipc::RecordBatchStreamReader::Open(std::make_shared<arrow::io::BufferReader>(owned));
+                };
+                if (!rc) {
+                    auto schema = decode(bytes, size);
+                    rc = schema.ok() ? writer->Open((*schema)->schema()) : EINVAL;
+                }
+                while (!rc) {
+                    if (control && control->cancel_requested.load()) {
+                        writer->Cancel();
+                        rc = ECANCELED;
+                        break;
+                    }
+                    if (control && control->stop_requested.load()) {
+                        stopped = true;
+                        break;
+                    }
+                    int next = reader->Next(&bytes, &size);
+                    if (next == 1) break;
+                    if (next) {
+                        rc = EIO;
+                        break;
+                    }
+                    auto stream = decode(bytes, size);
+                    if (!stream.ok()) {
+                        rc = EINVAL;
+                        break;
+                    }
+                    while (!rc) {
+                        std::shared_ptr<arrow::RecordBatch> batch;
+                        if (!(*stream)->ReadNext(&batch).ok()) {
+                            rc = EINVAL;
+                            break;
+                        }
+                        if (!batch) break;
+                        rc = writer->Write(batch);
+                    }
+                }
+                bind_writer();
+            }
+        }
+        if (control && control->cancel_requested.load()) {
+            writer->Cancel();
+            return finish_response(0, "cancelled");
+        }
+        if (rc)
+            return finish_response(rc, "failed",
+                                   upstream_error == "SINK_OPERATOR_OUTPUT_UNSUPPORTED"
+                                       ? "SINK_OPERATOR_OUTPUT_UNSUPPORTED"
+                                       : "SINK_UPSTREAM_FAILED");
+        rc = writer->Finish();
+        return finish_response(rc, rc ? "failed" : (stopped ? "stopped" : "completed"));
+    } catch (...) {
+        writer->Cancel();
+        return finish_response(EIO, "failed", "SINK_UPSTREAM_FAILED");
+    }
 }
 
 // --- 无算子：纯数据搬运 ---

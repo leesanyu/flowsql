@@ -15,6 +15,7 @@
 #include <memory>
 #include <regex>
 #include <set>
+#include "kafka_result_codec.h"
 #include "kafka_structured.h"
 
 namespace flowsql::channels::kafka {
@@ -283,12 +284,15 @@ void Store::ValidateChannel(const rapidjson::Value& c) {
             Require(role == "both" || role == i->name.GetString(), "INVALID_PAYLOAD_DIRECTION");
             Require(i->value.IsObject(), "INVALID_PAYLOAD_OPTIONS");
             if (i->value.ObjectEmpty()) continue;
-            Require(kind == "structured" && std::string(i->name.GetString()) == "source",
-                    "KAFKA_DATA_ADAPTER_UNAVAILABLE");
+            Require(kind == "structured", "KAFKA_DATA_ADAPTER_UNAVAILABLE");
             try {
-                ParseStructuredConfig(i->value);
+                if (std::string(i->name.GetString()) == "source")
+                    ParseStructuredConfig(i->value);
+                else
+                    ParseSinkConfig(i->value);
             } catch (const std::invalid_argument&) {
-                throw Failure(400, "INVALID_STRUCTURED_SOURCE");
+                throw Failure(400, std::string(i->name.GetString()) == "source" ? "INVALID_STRUCTURED_SOURCE"
+                                                                                : "INVALID_STRUCTURED_SINK");
             }
         }
     }
@@ -403,12 +407,12 @@ Json Store::Public(Json definition, const std::string& kind) {
         for (auto direction : {"source", "sink"})
             if (role == "both" || role == direction) {
                 std::string state = "not_installed";
-                if (std::string(direction) == "source" && Text(definition, "payload_kind") == "structured") {
+                if (Text(definition, "payload_kind") == "structured") {
                     const bool configured = definition.HasMember("payload_options") &&
-                                            definition["payload_options"].HasMember("source") &&
-                                            !definition["payload_options"]["source"].ObjectEmpty();
+                                            definition["payload_options"].HasMember(direction) &&
+                                            !definition["payload_options"][direction].ObjectEmpty();
                     state = configured ? "ready" : "configuration_required";
-                    if (configured)
+                    if (configured && std::string(direction) == "source")
                         String(definition, "source_schema",
                                StructuredSchema(ParseStructuredConfig(definition["payload_options"]["source"]))
                                    ->ToString(true),
@@ -542,6 +546,8 @@ Binding Store::Acquire(const std::string& name, const std::string& usage) {
     s.payload_kind = Text(channel, "payload_kind");
     if (channel.HasMember("payload_options") && channel["payload_options"].HasMember("source"))
         binding.source_options_json = Encode(channel["payload_options"]["source"]);
+    if (channel.HasMember("payload_options") && channel["payload_options"].HasMember("sink"))
+        binding.sink_options_json = Encode(channel["payload_options"]["sink"]);
     s.usage = usage;
     ResolveSecrets(binding);
     binding.leased = true;

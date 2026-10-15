@@ -1471,7 +1471,26 @@ int32_t WebServer::HandleGetTaskResult(const std::string&, const std::string& re
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
     w.StartObject();
     w.Key("status"); w.String(status.c_str());
-    if (status == "failed") {
+    if (detail.HasMember("result") && detail["result"].IsObject()) {
+        w.Key("result");
+        detail["result"].Accept(w);
+    }
+    w.Key("rows_affected");
+    w.Int64(detail.HasMember("result_row_count") && detail["result_row_count"].IsInt64()
+                ? detail["result_row_count"].GetInt64()
+                : 0);
+    if (status != "completed") {
+        w.Key("rows");
+        w.Int64(detail.HasMember("result_row_count") && detail["result_row_count"].IsInt64()
+                    ? detail["result_row_count"].GetInt64()
+                    : 0);
+        w.Key("result_target");
+        if (detail.HasMember("result_target") && detail["result_target"].IsString())
+            w.String(detail["result_target"].GetString());
+        else
+            w.String("");
+    }
+    if (status == "failed" || status == "timeout") {
         w.Key("error");
         if (detail.HasMember("error_message") && detail["error_message"].IsString()) w.String(detail["error_message"].GetString());
         else w.String("execution failed");

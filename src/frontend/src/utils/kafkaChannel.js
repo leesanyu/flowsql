@@ -15,6 +15,18 @@ export const connectionDraft = (row = {}) => ({
 export const channelDraft = (row = {}) => ({
   name: row.name || '', connection_name: row.connection_name || '', role: row.role || 'source',
   topic: row.topic || '', consumer_group: row.consumer_group || '', payload_kind: row.payload_kind || 'structured',
+  sink_enabled: !!row.payload_options?.sink?.entity,
+  sink: {
+    entity: row.payload_options?.sink?.entity || 'result',
+    schema_version: row.payload_options?.sink?.schema_version ?? 1,
+    record_kind: row.payload_options?.sink?.record_kind || 'event',
+    key_fields: (row.payload_options?.sink?.key_fields || []).join(', '),
+    revision_field: row.payload_options?.sink?.revision_field || '',
+    max_message_bytes: row.payload_options?.sink?.max_message_bytes ?? 1048576,
+    queue_max_messages: row.payload_options?.sink?.queue_max_messages ?? 1024,
+    queue_max_bytes: row.payload_options?.sink?.queue_max_bytes ?? 8388608,
+    delivery_timeout_ms: row.payload_options?.sink?.delivery_timeout_ms ?? 10000
+  },
   source_enabled: !!row.payload_options?.source?.fields?.length,
   source: {
     entity: row.payload_options?.source?.entity || 'events',
@@ -88,6 +100,26 @@ export const buildChannel = (draft, revision = 0) => {
     requireValue(Number.isInteger(source.max_batch_rows) && source.max_batch_rows >= 1 && source.max_batch_rows <= 4096, '批次行数范围为 1～4096')
     requireValue(Number.isInteger(source.max_message_bytes) && source.max_message_bytes >= 1 && source.max_message_bytes <= 16777216, '单消息上限范围为 1～16777216 字节')
     payload.payload_options = { source: { encoding: 'json', entity: source.entity, fields, offset_reset: source.offset_reset, commit_policy: source.commit_policy, max_batch_rows: source.max_batch_rows, max_message_bytes: source.max_message_bytes } }
+  }
+  if (draft.role !== 'source' && draft.payload_kind === 'structured' && draft.sink_enabled) {
+    const sink = draft.sink
+    requireValue(/^[a-z][a-z0-9_]{0,63}$/.test(sink.entity), '发布实体须以小写字母开头，最多 64 个小写字母、数字或下划线')
+    requireValue(Number.isInteger(sink.schema_version) && sink.schema_version >= 1 && sink.schema_version <= 2147483647, 'Schema 版本范围为 1～2147483647')
+    requireValue(['event', 'upsert'].includes(sink.record_kind), '请选择 event 或 upsert')
+    const key_fields = sink.key_fields.split(',').map((field) => field.trim()).filter(Boolean)
+    requireValue(key_fields.length <= 8 && new Set(key_fields).size === key_fields.length, '结果 key 最多 8 列且不得重复')
+    const revision_field = sink.revision_field.trim()
+    if (sink.record_kind === 'upsert') requireValue(key_fields.length && revision_field && !key_fields.includes(revision_field), 'upsert 需要业务 key 和独立的 revision 列')
+    for (const [field, low, high, label] of [
+      ['max_message_bytes', 1024, 16777216, '消息字节'], ['queue_max_messages', 1, 65536, '队列条数'],
+      ['queue_max_bytes', 1048576, 268435456, '队列字节'], ['delivery_timeout_ms', 100, 120000, '确认预算毫秒']
+    ]) requireValue(Number.isInteger(sink[field]) && sink[field] >= low && sink[field] <= high, `${label}范围为 ${low}～${high}`)
+    requireValue(sink.queue_max_bytes >= sink.max_message_bytes, '队列字节必须不少于消息上限')
+    payload.payload_options = { ...payload.payload_options, sink: {
+      encoding: 'json', entity: sink.entity, schema_version: sink.schema_version, record_kind: sink.record_kind, key_fields,
+      ...(sink.record_kind === 'upsert' ? { revision_field } : {}),
+      ...Object.fromEntries(['max_message_bytes', 'queue_max_messages', 'queue_max_bytes', 'delivery_timeout_ms'].map((key) => [key, sink[key]]))
+    } }
   }
   if (revision) payload.expected_revision = revision
   return payload

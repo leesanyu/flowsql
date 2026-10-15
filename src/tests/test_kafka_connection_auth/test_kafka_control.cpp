@@ -32,7 +32,14 @@ int main() {
         assert(result == expected);
         return Parse(response);
     };
-    assert(call("definitions/query", "{}").HasMember("sasl_mechanisms"));
+    auto capabilities = call("definitions/query", "{}");
+    assert(capabilities.HasMember("sasl_mechanisms"));
+    assert(capabilities["adapter_status"]["structured"]["sink"] == "available");
+    assert(capabilities["adapter_status"]["packet"]["sink"] == "not_installed");
+    assert(capabilities["structured_sink"]["write_permission"] == "unverified");
+    assert(capabilities["structured_sink"]["types"].Size() == 15);
+    assert(capabilities["structured_source"]["requires_async"].GetBool());
+    assert(capabilities["structured_source"]["types"].Size() == 5);
     const std::string connection =
         R"({"name":"offline","bootstrap_servers":["localhost:1"],"security_protocol":"SASL_SSL","sasl_mechanism":"PLAIN","sasl":{"username":"tester"},"credential_bindings":{"password":{"operation":"replace","value":"never-print-this-secret"}}})";
     auto saved = call("connections/add", connection);
@@ -94,6 +101,25 @@ int main() {
     assert(call("connections/modify", Encode(update))["revision"].GetUint64() == 2);
     assert(Text(call("channels/query", "{}")["items"][0]["verification"], "status") == "unverified");
     call("connections/remove", R"({"name":"offline","expected_revision":2})", flowsql::error::CONFLICT);
+    auto both = Parse(
+        R"({"name":"events","expected_revision":1,"connection_name":"offline","role":"both","topic":"events","consumer_group":"test","payload_kind":"structured","payload_options":{"source":{"encoding":"json","entity":"metric","fields":[{"name":"value","path":"/v","type":"int64","nullable":false}]},"sink":{"encoding":"json","entity":"alert","schema_version":1,"record_kind":"upsert","key_fields":["id"],"revision_field":"revision"}}})");
+    auto configured = call("channels/modify", Encode(both));
+    assert(configured["revision"].GetUint64() == 2);
+    assert(configured["payload_options"]["source"]["entity"] == "metric");
+    assert(configured["payload_options"]["sink"]["entity"] == "alert");
+    assert(configured["adapter_status"]["source"] == "ready" && configured["adapter_status"]["sink"] == "ready");
+    assert(plugin.DescribeChannel("events", &description) == 0 && description.source_adapter_available &&
+           description.sink_adapter_available);
+    call("channels/modify", Encode(both), flowsql::error::CONFLICT);
+    auto sink_lease = plugin.Definitions().Acquire("events", "sink");
+    both["expected_revision"].SetUint64(2);
+    call("channels/modify", Encode(both), flowsql::error::CONFLICT);
+    assert(!sink_lease.sink_options_json.empty() && sink_lease.snapshot.channel_revision == 2);
+    plugin.Definitions().Release(sink_lease.snapshot);
+    auto back = call("channels/query", "{}");
+    assert(back["items"][0]["payload_options"]["sink"]["key_fields"][0] == "id");
+    assert(Encode(back).find("never-print") == std::string::npos);
+
     assert(plugin.Stop() == 0 && plugin.Unload() == 0);
     std::filesystem::remove_all(root);
     puts("PASS: control contracts, encrypted draft keep, leases, asynchronous cancellation and discovery");

@@ -36,6 +36,9 @@ void Set(rd_kafka_conf_t* conf, const char* key, const std::string& value) {
 // The fixture's plaintext admin identity owns only this run's derived Topics/groups.
 class Broker {
  public:
+    static void Delivery(rd_kafka_t*, const rd_kafka_message_t* message, void*) {
+        *static_cast<rd_kafka_resp_err_t*>(message->_private) = message->err;
+    }
     explicit Broker(const rapidjson::Value& plaintext) {
         auto* conf = rd_kafka_conf_new();
         servers_ = plaintext["connection"]["bootstrap_servers"][0].GetString();
@@ -43,6 +46,7 @@ class Broker {
         Set(conf, "log_level", "0");
         Set(conf, "message.timeout.ms", "5000");
         Set(conf, "allow.auto.create.topics", "false");
+        rd_kafka_conf_set_dr_msg_cb(conf, Delivery);
         char error[512];
         producer_ = rd_kafka_new(RD_KAFKA_PRODUCER, conf, error, sizeof(error));
         Check(producer_, "fixture_producer");
@@ -80,13 +84,21 @@ class Broker {
     }
     void Produce(const std::string& topic, int partition, const std::string& value, bool tombstone = false) {
         const char key[] = {'k', '\0', 'x'};
+        delivery_ = RD_KAFKA_RESP_ERR__IN_PROGRESS;
         Check(rd_kafka_producev(
                   producer_, RD_KAFKA_V_TOPIC(topic.c_str()), RD_KAFKA_V_PARTITION(partition),
                   RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
                   RD_KAFKA_V_VALUE(tombstone ? nullptr : const_cast<char*>(value.data()), tombstone ? 0 : value.size()),
-                  RD_KAFKA_V_KEY(key, sizeof(key)), RD_KAFKA_V_TIMESTAMP(1700000000000LL), RD_KAFKA_V_END) == 0,
+                  RD_KAFKA_V_KEY(key, sizeof(key)), RD_KAFKA_V_TIMESTAMP(1700000000000LL),
+                  RD_KAFKA_V_OPAQUE(&delivery_), RD_KAFKA_V_END) == 0,
               "fixture_produce");
-        Check(rd_kafka_flush(producer_, 6000) == 0, "fixture_delivery");
+        const int flush = rd_kafka_flush(producer_, 6000);
+        if (flush != 0 || delivery_ != RD_KAFKA_RESP_ERR_NO_ERROR) {
+            std::cerr << "fixture_delivery_error=" << rd_kafka_err2name(delivery_) << '\n';
+            rd_kafka_purge(producer_, RD_KAFKA_PURGE_F_QUEUE | RD_KAFKA_PURGE_F_INFLIGHT);
+            rd_kafka_poll(producer_, 0);
+            Check(false, "fixture_delivery");
+        }
     }
     int64_t Committed(const std::string& topic, const std::string& group, int partition) {
         auto* conf = rd_kafka_conf_new();
@@ -116,6 +128,7 @@ class Broker {
 
  private:
     rd_kafka_t* producer_ = nullptr;
+    rd_kafka_resp_err_t delivery_ = RD_KAFKA_RESP_ERR__IN_PROGRESS;
     std::string servers_;
     std::vector<std::string> topics_;
 };

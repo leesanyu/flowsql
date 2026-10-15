@@ -4,6 +4,7 @@
 #ifndef _FLOWSQL_SCHEDULER_SCHEDULER_PLUGIN_H_
 #define _FLOWSQL_SCHEDULER_SCHEDULER_PLUGIN_H_
 
+#include <framework/interfaces/iresult_sink.h>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -164,15 +165,16 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
                                       std::string* managed_result_json, std::string* error,
                                       std::shared_ptr<IDatabaseChannel> database_source = {},
                                       std::shared_ptr<IDataFrameChannel> dataframe_source = {});
-    int ExecuteSingleBlockTransformPipeline(IBlockStreamChannel* source, BlockTransformProviderRef provider,
-                                            IDataFrameChannel* sink,
-                                            const BlockTransformManagedSinkBindingV1* managed_sink,
-                                            const SqlStatement& stmt,
-                                            const std::shared_ptr<const BoundFilterExpr>& source_residual,
-                                            BlockExecutionTerminal* terminal, int64_t* rows_affected,
-                                            std::string* managed_result_json, std::string* error,
-                                            std::shared_ptr<IDatabaseChannel> database_source = {},
-                                            std::shared_ptr<IDataFrameChannel> dataframe_source = {});
+    int ExecuteSingleBlockTransformPipeline(
+        IBlockStreamChannel* source, BlockTransformProviderRef provider, IDataFrameChannel* sink,
+        const BlockTransformManagedSinkBindingV1* managed_sink, const SqlStatement& stmt,
+        const std::shared_ptr<const BoundFilterExpr>& source_residual, BlockExecutionTerminal* terminal,
+        int64_t* rows_affected, std::string* managed_result_json, std::string* error,
+        std::shared_ptr<IDatabaseChannel> database_source = {},
+        std::shared_ptr<IDataFrameChannel> dataframe_source = {}, IResultSinkWriterV1* result_sink = nullptr);
+
+    int32_t ExecuteResultSink(IChannel*, const SqlStatement&, const std::shared_ptr<const BoundFilterExpr>&,
+                              std::string&);
 
     // 执行路径
     int ExecuteTransfer(IChannel* source, IChannel* sink, const std::string& source_type, const std::string& sink_type,
