@@ -17,6 +17,7 @@
 #include "durable_store.h"
 #include "model_output.h"
 #include "poll_input.h"
+#include "result_batch.h"
 #include "result_codec.h"
 
 namespace flowsql::baseliner {
@@ -338,30 +339,30 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         std::vector<BlockTransformOutputV1> staged;
         if (Maintain(timestamp, &staged) != 0) return -EINVAL;
         if (engine_.ValidateBatch(observations) != 0) return Fail(engine_.LastError());
-        std::vector<BlockTransformOutputV1> next;
-        uint64_t bytes = 0;
+        const auto budget = config_.config.read.max_pending_bytes;
+        uint64_t retained = managed_ ? pending_bytes_ : result_bytes_;
+        for (const auto& output : staged) retained += arrow::util::TotalBufferSize(*output.batch);
+        if (retained > budget) return Fail("baseliner output budget exceeded");
+        ResultBatchEncoder encoder(config_, budget - retained);
+        std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
         for (const auto& observation : observations) {
             if (cancelled_) return -ECANCELED;
             EvaluationOutput evaluated;
             if (engine_.Submit(observation, &evaluated) != 0) return Fail(engine_.LastError());
-            evaluated.results.insert(evaluated.results.end(), std::make_move_iterator(evaluated.forecasts.begin()),
-                                     std::make_move_iterator(evaluated.forecasts.end()));
-            std::shared_ptr<arrow::RecordBatch> batch;
-            if (!evaluated.results.empty()) {
-                if (EncodeResults(config_, evaluated.results, config_.config.read.max_pending_bytes, &batch, &error_) !=
-                    0)
-                    return Fail(error_);
-                bytes += arrow::util::TotalBufferSize(*batch);
-                next.push_back({std::move(batch), timestamp});
-            }
-            if (evaluated.relation && !result_bound_) {
-                if (EncodeFusion(config_, observation, *evaluated.relation, config_.config.read.max_pending_bytes,
-                                 &batch, &error_) != 0)
-                    return Fail(error_);
-                bytes += arrow::util::TotalBufferSize(*batch);
-                next.push_back({std::move(batch), timestamp});
-            }
-            if (bytes > config_.config.read.max_pending_bytes) return Fail("baseliner output budget exceeded");
+            for (const auto& row : evaluated.results)
+                if (encoder.Append(row, &batches, &error_) != 0) return Fail(error_);
+            for (const auto& row : evaluated.forecasts)
+                if (encoder.Append(row, &batches, &error_) != 0) return Fail(error_);
+            if (evaluated.relation && !result_bound_ &&
+                encoder.AppendFusion(observation, *evaluated.relation, &batches, &error_) != 0)
+                return Fail(error_);
+        }
+        if (encoder.Flush(&batches, &error_) != 0) return Fail(error_);
+        std::vector<BlockTransformOutputV1> next;
+        uint64_t bytes = 0;
+        for (auto& batch : batches) {
+            bytes += arrow::util::TotalBufferSize(*batch);
+            next.push_back({std::move(batch), timestamp});
         }
         if (cancelled_) return -ECANCELED;
         if (managed_) {

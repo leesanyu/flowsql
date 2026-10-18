@@ -207,13 +207,19 @@ void ArrowPath() {
                 outputs.insert(outputs.end(), one.begin(), one.end());
             }
         Inspect(outputs);
-        assert(outputs.size() == 40);
-        for (size_t i = 0; i < outputs.size(); ++i) {
-            if (!whole)
-                reference.push_back(outputs[i].batch);
-            else
-                assert(reference[i]->Equals(*outputs[i].batch));
+        int64_t logical_rows = 0;
+        for (const auto& output : outputs) {
+            for (int64_t row = 0; row < output.batch->num_rows(); ++row) {
+                auto one = output.batch->Slice(row, 1);
+                if (!whole)
+                    reference.push_back(std::move(one));
+                else
+                    assert(reference.at(logical_rows)->Equals(*one));
+                ++logical_rows;
+            }
         }
+        assert(logical_rows == static_cast<int64_t>(reference.size()));
+        assert(logical_rows == 120);
         std::vector<BlockTransformOutputV1> tail;
         assert(task->Flush(&tail) == 0 && tail.empty());
         assert(task->Flush(&tail) != 0);

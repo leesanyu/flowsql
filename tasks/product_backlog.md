@@ -108,6 +108,7 @@
 
 | 状态 | Feature | 优先级 | 目标 | 归档规格 |
 | --- | --- | --- | --- | --- |
+| [x] | Baseliner 批量结果输出与性能验收 (`baseliner-output-throughput`) | P1 | 为使用 CSV/DataFrame 快照进行分钟级基线分析的用户，解决逐桶生成单行批次、逐条追加反复拼接已有结果造成的分钟级延迟；交付预算受控的批量结果输出，以真实 SQL 的批次数和同配置耗时证明收益，同时保持评估/预测数值、最终模型、取消/失败及既有持久化保证。 | [归档](archive/feat-baseliner-output-throughput.md) |
 | [x] | 通用基线检测 (`baseline`) | P1 | 提供 Value、Ratio、Relation 三类基线的 bootstrap、在线 rolling、可信度和风险融合能力。 | [归档](archive/feat-baseline.md) |
 | [x] | Baseline 插件检视修复 (`baseline-review-fixes`) | P1 | 为使用 Value、Ratio、Relation 进行历史预热和在线检测的调用方，修复观测顺序、训练兼容、检测口径及资源累积问题；交付一致的历史/在线处理、隔离的状态替换、完整状态释放与可选容量约束，以及纳入常规 CTest 的回归保证，保持既有公共接口和数据格式。 | [归档](archive/feat-baseline-review-fixes.md) |
 | [x] | Baseline 封装算子 (`baseline-operator`) | P1 | 让分析已落库 NPM 流量数据的用户，通过显式表/字段配置持续获得实际值、预期值、上下条带和偏离结果，并按配置产出未来预测；交付 explore.baseliner 的三类基线分析、独立结果表与模型/消费位置一致持久化，使结果可查询、源表保持原始事实且重启延续学习，同时提供有限容量与在线不活跃维护；字段映射可复用于普通业务表，探索性分析算子统一归属 explore 类别。 | [归档](archive/feat-baseline-operator.md) |

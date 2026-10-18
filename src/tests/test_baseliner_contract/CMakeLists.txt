@@ -149,3 +149,27 @@ target_compile_options(test_baseliner_contract_cost PRIVATE -UNDEBUG -Wall -Wext
 set_target_properties(test_baseliner_contract_cost PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_baseliner_contract_cost COMMAND $<TARGET_FILE:test_baseliner_contract_cost>)
 set_tests_properties(test_baseliner_contract_cost PROPERTIES LABELS "baseliner;cost;contract-safety" TIMEOUT 90)
+
+# Local .so/Arrow fixtures only: no external database, Kafka, Docker, or capture permission.
+add_executable(test_baseliner_output_batching test_baseliner_output_batching.cpp)
+target_link_libraries(test_baseliner_output_batching PRIVATE flowsql_baseliner_contract flowsql_baseline flowsql_common)
+target_compile_options(test_baseliner_output_batching PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-unused-parameter -Wno-pessimizing-move)
+add_dependencies(test_baseliner_output_batching flowsql_baseliner)
+set_target_properties(test_baseliner_output_batching PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_baseliner_output_batching COMMAND $<TARGET_FILE:test_baseliner_output_batching>)
+set_tests_properties(test_baseliner_output_batching PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output LABELS "baseliner;batching" TIMEOUT 90)
+# Keep each independent assertion group within the same timeout under Sanitizers as well.
+foreach(group paging budget analysis failure)
+    add_test(NAME test_baseliner_output_batching_${group} COMMAND $<TARGET_FILE:test_baseliner_output_batching> --${group})
+    set_tests_properties(test_baseliner_output_batching_${group} PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output LABELS "baseliner;batching" TIMEOUT 90)
+endforeach()
+
+add_executable(test_baseliner_output_cost test_baseliner_output_cost.cpp)
+target_link_libraries(test_baseliner_output_cost PRIVATE flowsql_baseliner_contract flowsql_baseline flowsql_common)
+target_compile_options(test_baseliner_output_cost PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-unused-parameter -Wno-type-limits -Wno-pessimizing-move)
+target_compile_definitions(test_baseliner_output_cost PRIVATE FLOWSQL_BASELINER_CSV="${CMAKE_SOURCE_DIR}/tests/data/csv/link_data_2_month.csv")
+add_dependencies(test_baseliner_output_cost flowsql_baseliner flowsql_catalog flowsql_scheduler flowsql_builtin)
+set_target_properties(test_baseliner_output_cost PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+# Large repeated performance runs are explicit; CTest checks the same real Scheduler path on a small prefix.
+add_test(NAME test_baseliner_output_cost COMMAND $<TARGET_FILE:test_baseliner_output_cost> --sql 32)
+set_tests_properties(test_baseliner_output_cost PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output LABELS "baseliner;cost;production" TIMEOUT 90 RESOURCE_LOCK baseliner_output_cost)
