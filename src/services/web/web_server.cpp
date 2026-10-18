@@ -192,11 +192,12 @@ enum class PcapMultipartPart {
     kFile,
 };
 
-int32_t ProxyPostJson(const std::string& host, int port, const std::string& path, const std::string& req, std::string* rsp) {
+int32_t ProxyPostJson(const std::string& host, int port, const std::string& path, const std::string& req,
+                      std::string* rsp, int read_timeout_seconds = 10) {
     if (!rsp) return error::INTERNAL_ERROR;
     httplib::Client client(host, port);
     client.set_connection_timeout(5);
-    client.set_read_timeout(10);
+    client.set_read_timeout(read_timeout_seconds);
     auto result = client.Post(path.c_str(), req, "application/json");
     if (!result) {
         *rsp = R"({"error":"service unreachable"})";
@@ -1419,7 +1420,7 @@ int32_t WebServer::HandleGetTasks(const std::string&, const std::string& req, st
 }
 
 int32_t WebServer::HandleBatchExecuteTask(const std::string&, const std::string& req, std::string& rsp) {
-    return ProxyPostJson(scheduler_host_, scheduler_port_, "/tasks/batch/execute", req, &rsp);
+    return ProxyPostJson(scheduler_host_, scheduler_port_, "/tasks/batch/execute", req, &rsp, 30);
 }
 
 int32_t WebServer::HandleSqlClassifyTask(const std::string&, const std::string& req, std::string& rsp) {

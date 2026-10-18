@@ -2,6 +2,77 @@
 
 WIP=0；2026-10-18 Asia/Shanghai。
 
+## 最近完成：Web 同步任务等待 30 秒 / 本地提交 Atomic Slice
+
+- 业务意图/授权：用户明确要求“提交代码”，将已验收的Web同步执行30秒等待及本会话诊断、主构建记录形成可审查的本地提交。
+- Non-Goals：不修改业务源码或启动脚本，不重跑源码未变化的编译/行为测试，不重启服务或重复SQL，不提交构建产物、evidence、私有配置，不推送。
+- 允许文件：本轮仅编辑tasks/active_task.md；精确暂存src/services/web/web_server.cpp、tasks/active_task.md两个文件。现有任务正文逐字保留，基线在evidence/web-sync-timeout-30s/commit/，不入库。
+- 已核查/契约：HEAD=5939c06，暂存区空；源码及主库SHA与主构建和5/5行为验收记录一致，既有定向CTest 1/1与前端构建/15文件同步成功；修改行clang-format及git diff --check通过。
+- 步骤/验收：复核本次两文件diff和原验收；精确git add后核对暂存路径及blob、git diff --cached --check；本地git commit；核验父提交、提交树与两文件摘要、空index及工作区。Git元数据受限时按标准审批处理，不绕过拒绝。
+- 依赖/位置：仓库根目录，本机Git/Python/clang-format，无外部服务或网络依赖；仅Git索引/提交所需权限。源码/主库/原工作台正文摘要保持。
+- 时间盒：23:54–00:04 Asia/Shanghai，10分钟；停止：本地提交与后置审计成功后WIP=0；若权限拒绝则记录实际状态并停止，不扩大修改范围。
+
+### 本地提交验收记录
+
+- 源码/主库与既有成功编译及5/5行为记录一致，新增行clang-format、工作区/暂存diff检查通过；既有定向CTest 1/1、前端构建和15文件同步证据已复核，本轮没有修改源码或重跑无变化的测试。
+- 普通git add被只读Git元数据限制拒绝；标准审批已允许精确暂存两个文件。暂存路径及blob与允许清单、当前文件一致，原工作台正文逐字保留，无构建产物、evidence或私有配置。
+- 本记录随本次本地提交落库，提交号见Git历史；仅提交上述两个文件，不推送。提交树/父提交、空index及工作区的后置核验写入evidence/web-sync-timeout-30s/commit/，不入库。
+
+## 最近完成：启动前端构建 uv_cwd 诊断 / Atomic Slice 1
+
+- 业务意图：用户执行start.sh --build-frontend时npm在process.cwd报ENOENT；核实构建环境并从有效绝对目录完成前端构建和静态同步，使用户可继续启动服务。
+- 已核查事实：start.sh直接从调用者工作目录执行npm run build --prefix；该参数不代替npm启动时读取process.cwd。当前根目录Node 25.6.1/npm 11.9.0读取cwd及脚本列表均成功；flowSQL/flowsql为同一目录inode，未复现用户终端的失效cwd状态。
+- Non-Goals：不改start.sh、Node/npm版本、业务源码或公共契约，不安装依赖、不删移目录，不停止/启动服务、不重复业务SQL，不提交推送。用户终端的实际失效目录无法从本执行进程直接验证，不将推断写成已复现。
+- 允许文件：tasks/active_task.md；生成产物仅src/frontend/dist/、build/output/static/，本地证据仅evidence/start-frontend-cwd/。保留既有Web源码/主库、HEAD/index及原工作台正文。
+- 契约与验收：在/mnt/d/working/flowSQL/src/frontend运行npm run build，退出0后用cmake -E copy_directory同步到build/output/static，核验dist/index.html引用的本地资源存在且与目标文件SHA一致；bash -n start.sh、git diff --check与范围/摘要审计。无需修改接口或新增测试。
+- 依赖/执行位置：本机Node/npm/Vite与既有node_modules，已核实的绝对工作目录；无外部服务、网络下载、数据库或Kafka依赖。
+- 时间盒：23:28–23:38 Asia/Shanghai，10分钟；停止：构建/同步及审计完成后WIP=0，提供用户终端重新进入目录的恢复命令，不自动运行完整start.sh。
+
+### 诊断与构建完成证据
+
+- 状态：已完成，WIP=0。用户堆栈停在npm配置构造的process.cwd；已核对当前安装的@npmcli/config/lib/index.js第79行默认参数确实读取process.cwd，尚未进入Vite。用户终端的具体目录为何失效未直接复现，不推断为目录已删除或Node版本问题。
+- 从绝对目录/mnt/d/working/flowSQL/src/frontend执行npm run build退出0：Node v25.6.1/npm 11.9.0/Vite 7.3.1，1,532模块，构建34.41秒；仅有既存的大chunk体积提示，不是本次ENOENT失败。日志evidence/start-frontend-cwd/frontend-build.log。
+- 使用cmake -E copy_directory同步src/frontend/dist到build/output/static退出0，未移除目标目录；15个生成文件SHA逐个一致，index.html引用的3个本地资源均存在且摘要一致。明细build-audit.json，不入库。
+- start.sh语法检查、范围/diff及HEAD/index/原工作台审计通过；启动脚本、既有Web源码与主库摘要保持。本轮未运行完整start.sh、未启动/停止服务或重复业务SQL。恢复命令为先cd /再cd /mnt/d/working/flowSQL，随后./start.sh；如需再次构建可保留--build-frontend。
+
+## 最近完成：Web 同步任务等待 30 秒 / Atomic Slice 2（主构建产物更新）
+
+- 授权/业务意图：用户反馈重启仍失败并要求核实编译；将已验收源码真正编译到默认启动加载的build/output/libflowsql_web.so，使下次启动加载30秒版本。
+- 已核查事实：主Web库修改时间仍为2026-10-15，摘要2c9e291c；仅隔离库为2026-10-18/7037bc83。最新任务59实际11,043ms成功，仍超过旧Web的10秒等待；本机Web健康接口正常。
+- Non-Goals：不改业务代码、算法、公共契约或超时值，不重复用户SQL、不停止服务/当前测试、不改数据，不提交推送。
+- 允许文件：tasks/active_task.md；输出仅主CMake flowsql_web target相关产物及evidence/web-sync-timeout-30s/main-build/证据，保持现有web_server.cpp改动不再编辑。
+- 契约/验收：cmake --build build --target flowsql_web -j2；确认主库摘要/时间变化，链接本次主产物的真实Web路由模拟12秒成功/32秒响应30秒超时等5项；git diff --check、范围及HEAD/index/原工作台正文保持。运行服务是否加载新版独立核验，不能把磁盘编译等同于已加载。
+- 依赖/位置：仓库根目录、既有CMake缓存和第三方、本机动态端口模拟上游，无业务数据库/Kafka依赖；只读访问健康接口和任务元数据。若进程视图不可用如实报告，不绕过审批。
+- 时间盒：23:17–23:37 Asia/Shanghai，20分钟；停止：主库编译/行为核验及后置审计通过后WIP=0，明确当前服务是否已重载；不扩展修改或主动停止正在运行的测试。
+
+### 主构建验收证据
+
+- 状态：已完成，23:21关闭，WIP=0；本轮未再修改业务源码。
+- cmake --build build --target flowsql_web -j2退出0，实际重新编译web_server.cpp并链接主库；build/output/libflowsql_web.so修改时间为2026-10-18 23:17:30 +08:00，SHA256由2c9e291c变为30f38590c2c42644f2551da39da3867f9940e5b17a85170f1541813031fece13。
+- 独立探针通过RAII动态加载上述主库、枚举真实Web路由并连接本机随机端口模拟上游；5项选中/执行/通过，失败/跳过0：同步12秒响应在12,004ms成功、32秒响应在30,013ms超时、控制接口在10,010ms超时，异步提交及503错误透传均通过。
+- 普通沙箱首次探针因不允许监听导致绑定断言失败（退出134）；按标准审批获准本机监听后重跑退出0，未改变断言或等待门槛。主构建及主库行为日志、摘要和审计位于evidence/web-sync-timeout-30s/main-build/，不入库。
+- HEAD/index、既有Web源码及原工作台正文保持，git diff --check及两文件范围检查通过。未重复业务SQL、重启服务、停止当前测试、提交或推送；上述探针不代表运行服务已加载新库或业务SQL端到端复测。
+- 宿主进程只读核验被自动审批拒绝，理由为审批执行环境禁止提权；普通进程视图不可见主服务，因此当前服务装载版本未验证。健康接口先前返回ok，但不能据此确认版本；需在此次主库编译完成后重新启动服务才会加载新库。
+
+## 最近完成：Web 同步任务等待 30 秒 / Atomic Slice 1
+
+- 业务意图/授权：用户明确要求“将 WEB 同步任务的超时时间上调到 30 s”；修复同步执行超过10秒而页面误报service unreachable、后台仍成功的现象。
+- 已核查事实：Web ProxyPostJson读取超时10秒，任务执行接口复用该函数；任务58/56分别completed/57,761行，诊断耗时10,370ms/11,286ms，超过Web等待窗口。
+- Non-Goals：不改Baseliner、Task/Gateway/前端、任务执行超时或错误协议；不重复业务SQL，不重启服务，不覆盖正在运行测试使用的build/output产物，不提交推送。
+- 允许文件：tasks/active_task.md、src/services/web/web_server.cpp；证据仅evidence/web-sync-timeout-30s/，隔离产物仅build/web-sync-timeout-30s/，均不入库。
+- 契约：/tasks/batch/execute的Web代理读取等待为30秒，其余ProxyPostJson调用保持10秒，连接等待5秒不变；成功/失败响应和任务状态不变。
+- 实现/验收：内部代理增加默认10秒的参数，任务执行调用显式30秒；cmake -B build/web-sync-timeout-30s src；cmake --build build/web-sync-timeout-30s --target flowsql_web test_pcap_upload_contract -j2；隔离Web路由+动态端口模拟12秒成功、32秒响应触发30秒超时、控制接口仍10秒、错误透传；ctest --test-dir build/web-sync-timeout-30s -R '^test_pcap_upload_contract$' --output-on-failure；本轮修改行格式、git diff --check及范围/SHA审计。
+- 依赖/位置：仓库根目录，本机CMake/C++17、已有第三方共享缓存和httplib/SQLite；模拟上游绑定127.0.0.1随机端口、内存数据库，无业务服务/数据库/Kafka依赖。按标准审批开放本机监听，不修改系统配置；不干扰正在运行的用户测试。
+- 时间盒：22:01–22:21 Asia/Shanghai，20分钟。停止：编译与定向行为验收通过后WIP=0，记录运行服务尚未重启；失败在本切片修复，到期保留明确证据。前项Docker/Kafka剩余改动已由当前HEAD 5939c06提交，工作区起始干净，原工作台正文逐字保留。
+
+### 完成证据
+
+- 状态：已完成，WIP=0；代码仅改Web内部代理的等待参数及任务执行调用，未改响应协议、其他接口等待或任务执行策略。
+- 隔离CMake配置、flowsql_web与test_pcap_upload_contract均构建通过；ctest定向1选中/执行/通过、0失败/跳过，使用同一运行时测试保护。
+- 真实Web handler+模拟上游：旧版12秒响应在10,009ms超时；新版12秒响应在12,002ms成功，32秒响应在30,030ms超时，控制接口仍10,006ms超时；异步提交及上游503错误透传通过，总计5/5。
+- 本轮修改行clang-format、git diff --check与两文件范围审计通过；HEAD/index和原工作台正文保持，主build/output/libflowsql_web.so摘要保持。源码、隔离产物、计时原始日志及审计保存在evidence/web-sync-timeout-30s/，不入库。
+- 本机监听测试的权限等待超出原时间盒，仅在已冻结验收检查点收口，未扩大修改或测试范围。未覆盖主产物、重启服务、重复业务SQL、提交或推送；正在运行的服务仍需之后重建/加载新版Web插件才会生效。
+
 ## 最近完成：Docker 发布修复与 Kafka 手测指导 / 本地提交 Atomic Slice
 
 - 授权/业务意图：用户明确要求“提交代码”；将本会话已完成的 Docker 修复、对应回归和 Kafka 手测帮助文档形成可审查的本地提交。
