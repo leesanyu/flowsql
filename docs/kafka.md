@@ -4,6 +4,109 @@ FlowSQL 提供可复用的 Kafka 连接配置与具名通道管理。连接负�
 
 结构化 JSON source 可将外部日志、指标或业务记录转换为固定 Arrow Schema，供异步 SQL 分析使用；packet source 保留探针原始包和采集进度，供 NPM 实时分析。结构化 sink 发布逐行 JSON 结果信封；packet sink 将网卡采集的原始包与同次采集事实发布到集中端。连接验证只证明认证和元数据访问；读写权限在实际任务中检查。source 只能用于 FROM、sink 只能用于 INTO，角色不符返回 `KAFKA_ROLE_MISMATCH`。
 
+## Docker 手动测试环境
+
+仓库提供独立的单节点 Kafka 4.1.0 KRaft 环境，适合手测结构化 source 和结果 sink。需要 Docker Engine、
+Docker Compose v2；`seed` 另需 Python 3。镜像固定版本与摘要，首次启动按需拉取，不需要宿主机安装 Kafka 或 Java。
+这是本地开发用的 PLAINTEXT 环境，无账号密码，宿主端口只绑定回环地址。它与自动化认证矩阵及数据库容器独立。
+
+在仓库根目录执行（脚本也支持从其他工作目录调用）：
+
+```bash
+./tools/kafka-manual.sh up
+./tools/kafka-manual.sh status
+./tools/kafka-manual.sh seed
+./tools/kafka-manual.sh read source 3
+```
+
+`up` 等待 broker 可访问后幂等创建两个单分区 Topic，broker 禁止自动创建 Topic；它不会自动启动 FlowSQL 或保存通道。
+`seed` 每次追加三条记录，host 为 api-1/api-2/api-3、value 为 1024.0/2048.0/4096.0、time 为当前 Unix 毫秒整数。
+`read` 从分区 0 的最早保留记录读取，不提交消费位点；省略条数则持续等待，Ctrl-C 退出。
+指定条数时空闲等待预算为 15 秒，消息不足会非零退出。
+
+| FlowSQL 运行方式 | bootstrap_servers | 连接条件 |
+| --- | --- | --- |
+| 原生 `./start.sh`、single/multi 或直接进程 | `127.0.0.1:19092` | 与 Docker 发布端口位于同一开发主机 |
+| Docker FlowSQL | `manual-kafka:9092` | Scheduler 容器加入 `flowsql-kafka-manual` 网络 |
+
+broker 分别向这两类客户端返回对应的可达地址。现有 Docker FlowSQL 可在 broker 启动后执行
+`docker network connect flowsql-kafka-manual <scheduler容器名>`；新建容器使用 `--network flowsql-kafka-manual`。
+重新创建 Scheduler 容器后需重新加入网络。这套 broker Compose 位于
+`config/docker-compose-kafka-manual.yml`，由 `tools/kafka-manual.sh` 管理。
+
+启动 FlowSQL 后，在 Web 的 Kafka 管理页保存以下连接和通道；也可以用下面的 API 请求。原生默认 Web 地址为
+`http://127.0.0.1:8081`；端口自定义时调整 `API`。Docker FlowSQL 将连接中的地址换为 `manual-kafka:9092`。
+定义会保存到 FlowSQL 自身的 Kafka 状态目录，与 broker 数据卷各自持久化；同名定义已存在时直接复用或在 Web 编辑。
+
+```bash
+API=http://127.0.0.1:8081
+curl --fail-with-body -sS "$API/api/channels/kafka/connections/add" \
+  -H 'Content-Type: application/json' -d '{
+    "name":"manual","bootstrap_servers":["127.0.0.1:19092"],"security_protocol":"PLAINTEXT"
+  }'
+
+curl --fail-with-body -sS "$API/api/channels/kafka/channels/add" \
+  -H 'Content-Type: application/json' -d '{
+    "name":"manual_source","connection_name":"manual","role":"source",
+    "topic":"flowsql.manual.source","consumer_group":"flowsql_manual",
+    "payload_kind":"structured","payload_options":{"source":{
+      "encoding":"json","entity":"metrics","offset_reset":"earliest",
+      "commit_policy":"after_success","max_batch_rows":3,
+      "fields":[
+        {"name":"host","path":"/host","type":"utf8","nullable":false},
+        {"name":"time_ms","path":"/time","type":"int64","nullable":false,"unit":"unix_ms"},
+        {"name":"value","path":"/value","type":"float64","nullable":false}
+      ]
+    }}
+  }'
+
+curl --fail-with-body -sS "$API/api/channels/kafka/channels/add" \
+  -H 'Content-Type: application/json' -d '{
+    "name":"manual_sink","connection_name":"manual","role":"sink",
+    "topic":"flowsql.manual.sink","payload_kind":"structured",
+    "payload_options":{"sink":{
+      "encoding":"json","entity":"metrics","schema_version":1,"record_kind":"event"
+    }}
+  }'
+```
+
+在 Web 提交下面的 SQL 并选择异步执行，或者调用任务 API：
+
+```sql
+SELECT host, time_ms, value FROM kafka.manual_source WHERE value > 0 INTO kafka.manual_sink;
+```
+
+```bash
+curl --fail-with-body -sS "$API/api/tasks/batch/execute" \
+  -H 'Content-Type: application/json' -d '{
+    "sql_text":"SELECT host, time_ms, value FROM kafka.manual_source WHERE value > 0 INTO kafka.manual_sink",
+    "mode":"async"
+  }'
+./tools/kafka-manual.sh read sink 3
+```
+
+第一次执行将处理 `seed` 写入的三条记录。sink 每条输出一个 JSON 信封，`data.host` 为对应 api 名称、
+`data.value` 为数值，`data.time_ms` 按 int64 无损编码为十进制字符串，信封还携带 Schema 和 task_id。
+任务持续运行等待后续数据；再次执行 `seed` 可继续验证，也可从 stdin 写入自己的合法 JSON：
+
+```bash
+printf '%s\n' '{"host":"manual-1","time":1800000000000,"value":42.0}' | ./tools/kafka-manual.sh produce
+./tools/kafka-manual.sh read sink  # 从头查看并持续等待；Ctrl-C 退出查看
+```
+
+在 Web 任务页停止任务；Kafka source 没有 EOF，数据暂时读完不会自动结束。同组的成功位点会保留，
+重新提交 SQL 不会重放已确认记录。需要从头复测时创建不同消费组的 source，或使用 `commit_policy=none`；
+重复 `up` 不清空数据或重置位点。sink 的查看命令从头读，可能看到之前各轮留下的信封，可用 task_id 区分。
+
+```bash
+./tools/kafka-manual.sh logs
+./tools/kafka-manual.sh down  # 停止 broker，保留容器、网络和持久卷
+./tools/kafka-manual.sh up    # 恢复，复用数据和消费位点
+```
+
+数据卷为 `flowsql-kafka-manual_kafka-data`，容器按 `unless-stopped` 策略重启。首次拉取失败、端口占用、
+broker 启动失败会非零退出；先用 `status` / `logs` 核查。手测入口不删除数据卷，不操作其他 Docker 项目。
+
 ## 原生安装与启用
 
 当前验收平台为 Ubuntu 24.04、Linux x86_64。固定客户端为 librdkafka 2.16.0，采用私有 PIC 静态链接；OpenSSL、libcurl、Cyrus SASL 与 MIT Kerberos 使用系统共享库。开发依赖和共享缓存由 `thirdparts/librdkafka/` 管理。
@@ -19,7 +122,43 @@ cmake --build build -j4
 
 运行环境需要 `libssl3t64`、`libcurl4t64`、`libsasl2-2`、`libsasl2-modules-gssapi-mit`、`libgssapi-krb5-2`、`libkrb5-3`、`krb5-user`、`ca-certificates`、`zlib1g`、`liblz4-1`、`libzstd1`，以及已有插件的运行包。检查共享库不能替代 SASL 插件、票据工具和实际认证检查。
 
-从 `build/output` 运行时，先准备部署方自己的密钥与目录：
+### 默认启动与持久化
+
+`./start.sh`、原生 `deploy-single.yaml` / `deploy-multi.yaml` 和基础 Docker Compose 均默认加载 Kafka 插件。
+无需先准备 Provider 配置或密钥；首次启动自动初始化，之后复用。broker 尚未配置或离线不影响打开管理页、
+保存连接及通道；连接验证和实际读写仍单独检查网络与认证。
+
+原生默认状态根目录按以下顺序确定，与当前工作目录、构建目录无关：
+
+1. `FLOWSQL_KAFKA_STATE_DIR` 指定的绝对路径。
+2. 已设置 `XDG_STATE_HOME` 时使用 `$XDG_STATE_HOME/flowsql/kafka`。
+3. 否则使用 `$HOME/.local/state/flowsql/kafka`。
+
+根目录内固定保存：
+
+| 文件 | 用途 |
+| --- | --- |
+| `config/kafka/provider.json` | Provider 配置，记录数据库、密钥和运行目录的绝对路径；只在首次缺失时创建。 |
+| `secrets/kafka-master.key` | 首次随机生成的 32 字节二进制主密钥，后续启动不替换。 |
+| `meta/kafka.db` | 已保存的连接、通道及加密凭证。 |
+| `runtime/kafka/` | 私有认证会话临时文件。 |
+
+例如在同一个终端指定 `export FLOWSQL_KAFKA_STATE_DIR=/srv/flowsql/kafka` 后，各原生入口均使用该位置。
+目录需由运行用户拥有且支持 Linux 私有权限，默认目录为 `0700`、密钥及配置为 `0600`；WSL 应使用 Linux
+文件系统，不能把始终呈现宽松权限的 Windows 挂载目录作为秘密存储。不同实例使用不同的状态根目录；
+同一默认状态目录只允许一个 Provider 进程持有，避免不同启动方式同时修改同一数据库。
+
+请将配置、数据库和原密钥一起持久化、备份。已有数据库缺少配置或密钥、密钥损坏或不匹配时明确启动失败，
+不会重新生成替代密钥或切换到空数据库。清理 `build/` 不会删除默认状态。需要额外证书或秘密别名时，修改
+已生成配置中的 `files` / `environments` 并重启，原文件不会在下次启动时被覆盖。
+
+直接以插件参数启动时使用 `libflowsql_kafka.so:{}`；JSON 空对象明确选择默认部署，避免接收进程级的端口参数。
+未提供任何插件参数也使用默认部署。已有显式配置的部署继续使用 `config_file=/absolute/path/provider.json`，
+或完整 JSON 参数；显式配置缺失或无效时直接失败，不回退到默认状态。
+
+### 显式部署配置
+
+需要自行管理密钥、路径或只读挂载时，仍可使用以下方式。从 `build/output` 运行时，先准备部署方自己的密钥与目录：
 
 ```bash
 mkdir -p meta secrets runtime/kafka config/kafka
@@ -59,24 +198,27 @@ Provider 配置文件示例：
   option: "config_file=config/kafka/provider.json"
 ```
 
-`config/deploy-single.yaml` 和 `config/deploy-multi.yaml` 提供注释入口；准备文件后启用。所有插件按 Option、Load、Start 三个批次加载。`config_file=` 也可用于命令行插件参数，避免 JSON 中的逗号被插件列表分隔器拆开。主密钥或数据库无法加载时启动失败；单个 broker 离线不会阻止合法定义保存。
+原生模板已使用 `option: '{}'` 启用默认部署；采用显式配置时将其替换为上述 `config_file=`。
+所有插件按 Option、Load、Start 三个批次加载。`config_file=` 也可用于命令行插件参数，避免 JSON 中的逗号被插件列表分隔器拆开。主密钥或数据库无法加载时启动失败；单个 broker 离线不会阻止合法定义保存。
 
 ## Docker 挂载
 
 仓库 Dockerfile 安装相同的认证运行组件，并携带 `share/kafka/dependencies.json`、`build-info.json` 与 `LICENSES.txt`；源码、开发包和缓存留在构建环境。构建前完成原生全量编译和前端构建。
 
-```bash
-docker build -t flowsql:latest .
-mkdir -p secrets
-chmod 700 secrets
-openssl rand -out secrets/kafka-master.key 32
-chmod 600 secrets/kafka-master.key
-cp config/kafka/provider.docker.example.json config/kafka/provider.json
-cp config/kafka/deploy-scheduler.example.yaml config/kafka/deploy-scheduler.yaml
-docker compose -f docker-compose.yml -f config/docker-compose-kafka.yml up -d
-```
+基础 `docker compose up -d` 已启用 Kafka 管理，无需 Kafka 专用覆盖文件。Scheduler 使用
+`FLOWSQL_KAFKA_STATE_DIR=/opt/flowsql/kafka-state`，将整个状态根目录保存在 `kafka-state` 命名卷中，
+重建容器后配置、密钥和通道定义继续复用。镜像不包含部署密钥。直接 `docker run` 时同样需把
+`/opt/flowsql/kafka-state` 挂到持久卷；显式选择其他根目录时同步调整挂载。
 
-该覆盖文件保留现有 Scheduler 插件集合，并增加 Kafka Provider。实际部署按已有配置调整示例，保留已有通道/插件。`config/kafka` 与 `secrets` 只读挂载；`kafka-state` 持久卷保存数据库；`kafka-runtime` 为私有票据的临时目录。修改 Provider 的 `files`、`environments` 映射后重启 Scheduler。映射的文件必须为普通文件，拒绝符号链接；秘密文件限 64 KiB、证书/keytab 限 1 MiB。keytab、证书和密码文件由部署方挂载到 `secrets`；生产 Kafka、KDC 和身份服务由部署方提供。
+需要自行提供只读 Provider 配置及密钥时，可参考
+[`provider.docker.example.json`](../config/kafka/provider.docker.example.json) 和
+[`deploy-scheduler.example.yaml`](../config/kafka/deploy-scheduler.example.yaml) 定制部署：
+将 Scheduler 的 `--config` 指向实际挂载的部署配置，保留所需插件，并让 Kafka 插件的 `config_file=`
+指向只读 Provider 配置。Provider 中的数据库目录挂持久卷，配置、密钥及证书目录只读挂载，
+运行目录使用权限为 `0700` 的私有目录。示例路径须与实际挂载一致；显式配置和密钥由部署方准备，插件不会覆盖它们。
+
+修改 Provider 的 `files`、`environments` 映射后重启 Scheduler。映射的文件必须为普通文件，拒绝符号链接；
+秘密文件限 64 KiB、证书/keytab 限 1 MiB。keytab、证书和密码文件由部署方挂载；生产 Kafka、KDC 和身份服务由部署方提供。
 
 ## Web 操作
 

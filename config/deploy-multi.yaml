@@ -41,9 +41,9 @@ services:
       - name: libflowsql_flow_labeling.so
         option: "eal_memory_mib=512"
       - libflowsql_baseline.so
-      # Kafka is opt-in: prepare the 32-byte master key and provider.json first (docs/kafka.md).
-      # - name: libflowsql_kafka.so
-      #   option: "config_file=config/kafka/provider.json"
+      # Uses the same persistent config/key as single-process startup (docs/kafka.md).
+      - name: libflowsql_kafka.so
+        option: '{}'
       - libflowsql_scheduler.so
       - libflowsql_bridge.so
       - libflowsql_builtin.so

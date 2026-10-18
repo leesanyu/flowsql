@@ -23,6 +23,7 @@ constexpr const char* kRouterPlugin = "libflowsql_router.so";
 constexpr const char* kNpiPlugin = "libflowsql_npi.so:{\"ldfile\":\"/opt/flowsql/config/protocols.yml\"}";
 constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
 constexpr const char* kConfigChannelPlugin = "libflowsql_config_channel.so";
+constexpr const char* kKafkaPlugin = "libflowsql_kafka.so";
 constexpr const char* kFlowLabelingPlugin = "libflowsql_flow_labeling.so";
 constexpr const char* kFlowLabelingOption = "eal_memory_mib=512";
 constexpr const char* kNpmBasicPlugin = "libflowsql_npm_basic.so";
@@ -155,6 +156,9 @@ bool TestDockerfile() {
                   "Dockerfile must install the NPI protocol definition at the runtime config path") &&
          ok;
     ok = Contains(dockerfile, "COPY build/output/lib*.so", "Dockerfile must copy built plugin libraries") && ok;
+    ok = Contains(dockerfile, "ENV FLOWSQL_KAFKA_STATE_DIR=\"/opt/flowsql/kafka-state\"",
+                  "Direct Docker startup must use the persistent Kafka state path") &&
+         ok;
     ok = Contains(dockerfile, "COPY config/docker/flowsql.yml     ./config/flowsql.yml",
                   "Docker image must seed a Docker-specific writable database configuration") &&
          ok;
@@ -194,6 +198,13 @@ bool TestCompose() {
                 "Compose must share Python IPC files and uploaded operators") &&
          ok;
     if (!gateway.IsMap() || !web.IsMap() || !scheduler.IsMap() || !pyworker.IsMap()) return false;
+    ok = Expect(root["volumes"] && root["volumes"]["kafka-state"].IsDefined() &&
+                    HasVolume(scheduler, "kafka-state:/opt/flowsql/kafka-state"),
+                "Compose must persist Kafka config, master key and database together") &&
+         ok;
+    ok = Expect(scheduler["environment"]["FLOWSQL_KAFKA_STATE_DIR"].as<std::string>("") == "/opt/flowsql/kafka-state",
+                "Compose Kafka state must be independent of the service working directory") &&
+         ok;
 
     const YAML::Node gateway_command = gateway["command"];
     const YAML::Node web_command = web["command"];
@@ -204,6 +215,9 @@ bool TestCompose() {
     const std::string web_option = PluginOption(web_plugins, kWebPlugin);
     const std::string router_option = PluginOption(web_plugins, kRouterPlugin);
     const std::string scheduler_plugins = CommandArgument(scheduler_command, "--plugins");
+    ok = Expect(PluginOption(scheduler_plugins, kKafkaPlugin) == "{}",
+                "Compose Scheduler must enable the shared default Kafka deployment") &&
+         ok;
     const std::string task_option = PluginOption(scheduler_plugins, kTaskPlugin);
     const std::string scheduler_router_option = PluginOption(scheduler_plugins, kRouterPlugin);
     const std::string scheduler_option = PluginOption(scheduler_plugins, kSchedulerPlugin);

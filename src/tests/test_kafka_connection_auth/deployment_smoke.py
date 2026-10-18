@@ -5,8 +5,10 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -15,6 +17,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=["native", "docker"], required=True)
 parser.add_argument("--client-image", default="flowsql:kafka-auth")
 parser.add_argument("--output")
+parser.add_argument("--default-deployment", action="store_true")
+parser.add_argument("--entrypoint", choices=["config", "role", "multi", "start"], default="config")
 args = parser.parse_args()
 repo = pathlib.Path(__file__).resolve().parents[3]
 root = pathlib.Path(args.output) if args.output else pathlib.Path("/tmp") / ("flowsql-kafka-deployment-" + str(time.time_ns()))
@@ -23,9 +27,11 @@ for directory in [root, root / "config", root / "state", root / "secrets", root 
     directory.mkdir(parents=True, exist_ok=True)
 os.chmod(root / "runtime", 0o700)
 os.chmod(root / "secrets", 0o700)
-master = os.urandom(32)
-(root / "secrets/master.key").write_bytes(master)
-os.chmod(root / "secrets/master.key", 0o600)
+master = None
+if not args.default_deployment:
+    master = os.urandom(32)
+    (root / "secrets/master.key").write_bytes(master)
+    os.chmod(root / "secrets/master.key", 0o600)
 ports = []
 while len(ports) < 3:
     with socket.socket() as endpoint:
@@ -37,24 +43,58 @@ gateway, router, web = ports
 base = root if args.mode == "native" else pathlib.Path("/opt/flowsql/kafka-smoke")
 provider = {"db_path": str(base / "state/kafka.db"), "master_key_file": str(base / "secrets/master.key"),
             "runtime_directory": str(base / "runtime"), "files": {}, "environments": {}}
-(root / "config/provider.json").write_text(json.dumps(provider))
+if not args.default_deployment:
+    (root / "config/provider.json").write_text(json.dumps(provider))
 plugins = [
     {"name": "libflowsql_gateway.so", "option": f"host=127.0.0.1;port={gateway}"},
     {"name": "libflowsql_router.so", "option": f"host=127.0.0.1;port={router};gateway=127.0.0.1:{gateway}"},
-    {"name": "libflowsql_kafka.so", "option": "config_file=" + str(base / "config/provider.json")},
+    {"name": "libflowsql_kafka.so", "option": "{}" if args.default_deployment else "config_file=" + str(base / "config/provider.json")},
     {"name": "libflowsql_web.so", "option": f"host={'0.0.0.0' if args.mode == 'docker' else '127.0.0.1'};port={web};gateway=127.0.0.1:{gateway};db_path=:memory:;upload_dir=/tmp/kafka-smoke"},
 ]
 # JSON is a YAML subset; this uses the same mapped plugin options as the deployment examples.
-(root / "config/deploy.yaml").write_text(json.dumps({"services": [{"name": "kafka-smoke", "plugins": plugins}]}))
+services = [{"name": "kafka-smoke", "plugins": plugins}]
+if args.entrypoint == "multi":
+    services = [{"name": "gateway", "plugins": [plugins[0]]},
+                {"name": "scheduler", "plugins": plugins[1:3]},
+                {"name": "web", "plugins": [plugins[3]]}]
+(root / "config/deploy.yaml").write_text(json.dumps({"services": services}))
 name = "flowsql-kafka-deployment-" + str(os.getpid())
 command = [str(repo / "build/output/flowsql"), "--config", str(root / "config/deploy.yaml")]
+environment = os.environ.copy()
+environment["FLOWSQL_KAFKA_STATE_DIR"] = str(root / "default-state")
+working_directory = repo / "build/output"
+if args.entrypoint == "role":
+    specification = ",".join(p["name"] + ":" + p["option"] for p in plugins)
+    command = [str(repo / "build/output/flowsql"), "--role", "kafka-smoke", "--plugins", specification]
+elif args.entrypoint == "start":
+    assert args.mode == "native" and args.default_deployment
+    # Run the repository shell unchanged, with an isolated staged runtime and random ports.
+    staged = root / "launcher/build/output"
+    (staged / "config").mkdir(parents=True)
+    (staged / "flowsql").symlink_to(repo / "build/output/flowsql")
+    shutil.copyfile(root / "config/deploy.yaml", staged / "config/deploy-single.yaml")
+    launcher = root / "launcher/start.sh"
+    shutil.copyfile(repo / "start.sh", launcher)
+    command = ["bash", str(launcher)]
+    environment["LD_LIBRARY_PATH"] = str(repo / "build/output") + ":" + environment.get("LD_LIBRARY_PATH", "")
+    working_directory = root
 if args.mode == "docker":
+    assert args.entrypoint in ("config", "role", "multi")
     command = ["docker", "run", "--rm", "--name", name, "--label", "flowsql.test.deployment=true", "-v", str(repo) + ":" + str(repo) + ":ro", "-v", str(repo / "build/output") + ":/opt/flowsql/bin:ro"]
-    for folder in ["config", "secrets", "state"]:
+    for folder in (["config"] if args.default_deployment else ["config", "secrets", "state"]):
         mount = str(root / folder) + ":" + str(base / folder)
         command += ["-v", mount + (":ro" if folder != "state" else "")]
-    command += ["--tmpfs", str(base / "runtime") + ":mode=0700", args.client_image,
-                "flowsql", "--config", str(base / "config/deploy.yaml")]
+    if args.default_deployment:
+        (root / "default-state").mkdir(exist_ok=True)
+        command += ["-e", "FLOWSQL_KAFKA_STATE_DIR=" + str(base / "default-state"),
+                    "-v", str(root / "default-state") + ":" + str(base / "default-state")]
+    else:
+        command += ["--tmpfs", str(base / "runtime") + ":mode=0700"]
+    container_command = ["flowsql", "--config", str(base / "config/deploy.yaml")]
+    if args.entrypoint == "role":
+        specification = ",".join(p["name"] + ":" + p["option"] for p in plugins)
+        container_command = ["flowsql", "--role", "kafka-smoke", "--plugins", specification]
+    command += [args.client_image] + container_command
 
 
 def post(operation, body=None, status=200):
@@ -90,7 +130,7 @@ test_id = None
 for generation in range(2):
     log_path = root / f"run-{generation}.log"
     with log_path.open("w") as log:
-        process = subprocess.Popen(command, cwd=repo / "build/output", stdout=log, stderr=log)
+        process = subprocess.Popen(command, cwd=working_directory, env=environment, stdout=log, stderr=log)
         try:
             for attempt in range(200):
                 assert process.poll() is None, "runtime exited; inspect " + str(log_path)
@@ -102,13 +142,24 @@ for generation in range(2):
             else:
                 raise AssertionError("runtime did not become ready; inspect " + str(log_path))
             assert capabilities["client_version"] == "2.16.0"
-            if args.mode == "docker":
+            if args.mode == "docker" and not args.default_deployment:
                 inspection = json.loads(subprocess.check_output(["docker", "inspect", name]))[0]
                 mounts = {m["Destination"]: m for m in inspection["Mounts"]}
                 assert not mounts[str(base / "secrets")]["RW"] and not mounts[str(base / "config")]["RW"]
                 assert mounts[str(base / "state")]["RW"]
                 subprocess.run(["docker", "exec", name, "python3", "-c",
                                 "import os; assert os.stat('/opt/flowsql/kafka-smoke/runtime').st_mode & 0o777 == 0o700"], check=True)
+            if args.default_deployment:
+                state = root / "default-state"
+                key_path = state / "secrets/kafka-master.key"
+                generated = key_path.read_bytes()
+                assert len(generated) == 32 and key_path.stat().st_mode & 0o777 == 0o600
+                assert (state / "runtime/kafka").stat().st_mode & 0o777 == 0o700
+                if master is None:
+                    master = generated
+                assert generated == master
+                generated_config = json.loads((state / "config/kafka/provider.json").read_text())
+                assert generated_config["db_path"] == str(base / "default-state/meta/kafka.db")
             if generation == 0:
                 post("connections/add", connection)
                 post("channels/add", {"name": "events", "connection_name": "persisted", "role": "both",
@@ -158,9 +209,17 @@ for generation in range(2):
                 process.terminate()
             process.wait(timeout=30)
         assert secret not in log_path.read_text()
-    assert (root / "secrets/master.key").read_bytes() == master
-    assert secret.encode() not in (root / "state/kafka.db").read_bytes()
-    print(f"PASS {args.mode} generation {generation}: config_file, persisted CRUD, encrypted secret, released leases", flush=True)
-if args.mode == "docker":
+    key_path = root / ("default-state/secrets/kafka-master.key" if args.default_deployment else "secrets/master.key")
+    db_path = root / ("default-state/meta/kafka.db" if args.default_deployment else "state/kafka.db")
+    assert key_path.read_bytes() == master
+    assert secret.encode() not in db_path.read_bytes()
+    print(f"PASS {args.mode} {args.entrypoint} default={args.default_deployment} generation {generation}: persisted CRUD, encrypted secret, released leases", flush=True)
+if args.mode == "docker" and not args.default_deployment:
     print("PASS: readonly config/secret mounts, persistent state mount and private tmpfs")
 print("PASS: restart retains definitions and clears verification; evidence", root)
+if not args.default_deployment:
+    # The registered deployment test covers defaults as well as explicit readonly deployment.
+    for entrypoint in (["config", "role", "multi", "start"] if args.mode == "native" else ["config", "role", "multi"]):
+        subprocess.run([sys.executable, __file__, "--mode", args.mode, "--client-image", args.client_image,
+                        "--output", str(root / ("default-" + entrypoint)), "--default-deployment",
+                        "--entrypoint", entrypoint], check=True)

@@ -40,6 +40,7 @@ COPY src/plugins/npi/conf/protocols.yml ./config/protocols.yml
 ENV PATH="/opt/flowsql/venv/bin:/opt/flowsql/bin:${PATH}"
 ENV PYTHONPATH="/opt/flowsql/python"
 ENV LD_LIBRARY_PATH="/opt/flowsql/bin:/opt/flowsql/venv/lib/python3.12/site-packages/pyarrow"
+ENV FLOWSQL_KAFKA_STATE_DIR="/opt/flowsql/kafka-state"
 
 # 默认工作目录（插件和配置文件相对路径基准）
 WORKDIR /opt/flowsql/bin

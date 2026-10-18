@@ -33,7 +33,7 @@ class Plugin final : public IPlugin,
     int OpenSession(const char* name, const char* usage, IKafkaClientSessionV1** session, std::string* error) override;
     void ReleaseSession(IKafkaClientSessionV1* session) override;
     void EnumRoutes(std::function<void(const RouteItem&)> callback) override;
-    ~Plugin() override { Stop(); }
+    ~Plugin() override { Unload(); }
     int CreateWriter(const ResultSinkContextV1&, std::unique_ptr<IResultSinkWriterV1>*) override;
     int CreateWriter(const PacketSinkContextV1&, std::unique_ptr<IPacketSinkWriterV1>*) override;
     int DescribeChannel(const char* name, KafkaChannelDescriptionV1* description) override;
@@ -74,6 +74,7 @@ class Plugin final : public IPlugin,
     bool tests_stopping_ = false;
     Json capabilities_;
     Json options_;
+    int default_lock_ = -1;
     Store store_;
     Deployment deployment_;
     IQuerier* querier_ = nullptr;

@@ -17,6 +17,7 @@ constexpr const char* kUploadRoot = "./uploads";
 constexpr const char* kNpiPlugin = "libflowsql_npi.so";
 constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
 constexpr const char* kConfigChannelPlugin = "libflowsql_config_channel.so";
+constexpr const char* kKafkaPlugin = "libflowsql_kafka.so";
 constexpr const char* kFlowLabelingPlugin = "libflowsql_flow_labeling.so";
 constexpr const char* kFlowLabelingOption = "eal_memory_mib=512";
 constexpr const char* kNpmBasicPlugin = "libflowsql_npm_basic.so";
@@ -56,6 +57,10 @@ std::string PluginOption(const std::string& plugin) {
 
 bool ExpectSchedulerRuntime(const flowsql::gateway::ServiceConfig& service, const std::string& deployment) {
     bool ok = true;
+    const std::string* kafka = FindPlugin(service, kKafkaPlugin);
+    ok = Expect(kafka && PluginOption(*kafka) == "{}",
+                deployment + " must enable the shared default Kafka deployment") &&
+         ok;
     const std::string* npi = FindPlugin(service, kNpiPlugin);
     ok = Expect(npi != nullptr, deployment + " Scheduler process must load NPI") && ok;
     if (npi) {
@@ -235,6 +240,9 @@ bool TestStartScriptRuntimeLayout() {
          ok;
     ok = Expect(std::filesystem::is_regular_file(runtime_root / kConfigChannelPlugin),
                 "start.sh runtime must contain the Config Channel provider") &&
+         ok;
+    ok = Expect(std::filesystem::is_regular_file(runtime_root / kKafkaPlugin),
+                "start.sh runtime must contain the Kafka provider") &&
          ok;
 #if FLOWSQL_FLOW_LABELING_BUILT
     ok = Expect(std::filesystem::is_regular_file(runtime_root / kFlowLabelingPlugin),

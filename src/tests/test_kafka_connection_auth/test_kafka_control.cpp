@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #include <channels/kafka/kafka_plugin.h>
 #include <common/error_code.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <cassert>
 #include <filesystem>
@@ -9,7 +10,118 @@
 #include <map>
 #include <thread>
 using namespace flowsql::channels::kafka;
+namespace {
+std::string Read(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input), {}};
+}
+void TestDefaultDeployment() {
+    const char* previous = getenv("FLOWSQL_KAFKA_STATE_DIR");
+    const std::string saved = previous ? previous : "";
+    const auto cwd = std::filesystem::current_path();
+    const auto root = std::filesystem::temp_directory_path() / ("kafka-default-" + std::to_string(getpid()));
+    const auto state = root / "state";
+    std::filesystem::create_directories(root / "first");
+    std::filesystem::create_directories(root / "second");
+    assert(setenv("FLOWSQL_KAFKA_STATE_DIR", state.c_str(), 1) == 0);
+    std::filesystem::current_path(root / "first");
+    {
+        Plugin plugin;
+        assert(plugin.Option(nullptr) == 0 && plugin.Load(nullptr) == 0);
+        plugin.Definitions().Mutate(
+            "connections", "add",
+            Parse(
+                R"({"name":"persisted","bootstrap_servers":["localhost:1"],"security_protocol":"SASL_PLAINTEXT","sasl_mechanism":"PLAIN","sasl":{"username":"test"},"credential_bindings":{"password":{"operation":"replace","value":"bootstrap-secret"}}})"));
+        // Two startup modes must not concurrently own the same default database.
+        Plugin competing;
+        assert(competing.Option(nullptr) != 0);
+    }
+    const auto key_path = state / "secrets/kafka-master.key";
+    const auto config_path = state / "config/kafka/provider.json";
+    const auto key = Read(key_path), configuration = Read(config_path);
+    assert(key.size() == 32);
+    for (const auto& path : {state, state / "secrets", state / "runtime/kafka"}) {
+        struct stat info {};
+        assert(stat(path.c_str(), &info) == 0 && (info.st_mode & 0777) == 0700);
+    }
+    struct stat info {};
+    assert(stat(key_path.c_str(), &info) == 0 && (info.st_mode & 0777) == 0600);
+    std::filesystem::current_path(root / "second");
+    {
+        Plugin restored;
+        assert(restored.Option("{}") == 0 && restored.Load(nullptr) == 0);
+        auto binding = restored.Definitions().AcquireConnection("persisted");
+        assert(binding.secrets.at("password") == "bootstrap-secret");
+        restored.Definitions().Release(binding.snapshot);
+    }
+    assert(Read(key_path) == key && Read(config_path) == configuration);
+    // Existing state never silently receives a replacement key or default configuration.
+    std::filesystem::rename(key_path, key_path.string() + ".saved");
+    {
+        Plugin missing;
+        assert(missing.Option(nullptr) != 0 && !std::filesystem::exists(key_path));
+    }
+    std::filesystem::rename(key_path.string() + ".saved", key_path);
+    std::ofstream(key_path, std::ios::binary).write("broken", 6);
+    {
+        Plugin broken;
+        assert(broken.Option(nullptr) != 0 && Read(key_path) == "broken");
+    }
+    std::ofstream(key_path, std::ios::binary).write(key.data(), key.size());
+    {
+        const std::string wrong_key(32, 'x');
+        std::ofstream(key_path, std::ios::binary).write(wrong_key.data(), wrong_key.size());
+        Plugin mismatched;
+        assert(mismatched.Option(nullptr) == 0 && mismatched.Load(nullptr) != 0);
+        assert(Read(key_path) == wrong_key);
+    }
+    std::ofstream(key_path, std::ios::binary).write(key.data(), key.size());
+    std::filesystem::rename(config_path, config_path.string() + ".saved");
+    {
+        Plugin missing;
+        assert(missing.Option(nullptr) != 0 && !std::filesystem::exists(config_path));
+    }
+    std::filesystem::rename(config_path.string() + ".saved", config_path);
+    std::ofstream(config_path) << "{invalid";
+    {
+        Plugin broken;
+        assert(broken.Option(nullptr) != 0 && Read(config_path) == "{invalid");
+    }
+    std::ofstream(config_path) << configuration;
+    assert(setenv("FLOWSQL_KAFKA_STATE_DIR", "relative/path", 1) == 0);
+    {
+        Plugin relative;
+        assert(relative.Option(nullptr) != 0);
+    }
+    // Explicit deployment remains strict and must never fall back to generated defaults.
+    {
+        Plugin explicit_config;
+        assert(explicit_config.Option("config_file=/missing/flowsql-provider.json") != 0);
+    }
+    const char* previous_xdg = getenv("XDG_STATE_HOME");
+    const std::string saved_xdg = previous_xdg ? previous_xdg : "";
+    assert(unsetenv("FLOWSQL_KAFKA_STATE_DIR") == 0);
+    assert(setenv("XDG_STATE_HOME", (root / "xdg").c_str(), 1) == 0);
+    {
+        Plugin xdg;
+        assert(xdg.Option("") == 0 && xdg.Load(nullptr) == 0);
+        const auto other_key = Read(root / "xdg/flowsql/kafka/secrets/kafka-master.key");
+        assert(other_key.size() == 32 && other_key != key);
+    }
+    if (previous_xdg)
+        assert(setenv("XDG_STATE_HOME", saved_xdg.c_str(), 1) == 0);
+    else
+        assert(unsetenv("XDG_STATE_HOME") == 0);
+    if (previous)
+        assert(setenv("FLOWSQL_KAFKA_STATE_DIR", saved.c_str(), 1) == 0);
+    else
+        assert(unsetenv("FLOWSQL_KAFKA_STATE_DIR") == 0);
+    std::filesystem::current_path(cwd);
+    std::filesystem::remove_all(root);
+}
+}  // namespace
 int main() {
+    TestDefaultDeployment();
     auto root = std::filesystem::temp_directory_path() / ("kafka-control-" + std::to_string(getpid()));
     std::filesystem::create_directory(root);
     std::ofstream(root / "key", std::ios::binary).write("12345678901234567890123456789012", 32);

@@ -61,7 +61,7 @@ services:
       - --role
       - scheduler
       - --plugins
-      - 'libflowsql_router.so:host=scheduler;port=18803;gateway=gateway:18800,libflowsql_task.so:db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db,libflowsql_npi.so:{"ldfile":"/opt/flowsql/config/protocols.yml"},libflowsql_pcapfile.so:db_path=/opt/flowsql/uploads/.meta/pcapfile.db,libflowsql_config_channel.so:db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db,libflowsql_builtin.so,libflowsql_flow_labeling.so:eal_memory_mib=512,libflowsql_scheduler.so:host=0.0.0.0;port=18803,libflowsql_bridge.so:worker_host=pyworker;worker_port=18900,libflowsql_catalog.so:data_dir=/opt/flowsql/uploads/dataframes;operator_db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db,libflowsql_binaddon.so:operator_db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db;upload_dir=/opt/flowsql/uploads/binaddon,libflowsql_database.so:config_file=/opt/flowsql/config/flowsql.yml,libflowsql_stream.so:config_file=/opt/flowsql/config/flowsql.yml;db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db'
+      - 'libflowsql_router.so:host=scheduler;port=18803;gateway=gateway:18800,libflowsql_task.so:db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db,libflowsql_npi.so:{"ldfile":"/opt/flowsql/config/protocols.yml"},libflowsql_pcapfile.so:db_path=/opt/flowsql/uploads/.meta/pcapfile.db,libflowsql_config_channel.so:db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db,libflowsql_kafka.so:{},libflowsql_builtin.so,libflowsql_flow_labeling.so:eal_memory_mib=512,libflowsql_scheduler.so:host=0.0.0.0;port=18803,libflowsql_bridge.so:worker_host=pyworker;worker_port=18900,libflowsql_catalog.so:data_dir=/opt/flowsql/uploads/dataframes;operator_db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db,libflowsql_binaddon.so:operator_db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db;upload_dir=/opt/flowsql/uploads/binaddon,libflowsql_database.so:config_file=/opt/flowsql/config/flowsql.yml,libflowsql_stream.so:config_file=/opt/flowsql/config/flowsql.yml;db_path=/opt/flowsql/uploads/.meta/flowsql_meta.db'
     expose:
       - "18803"
     volumes:
@@ -69,9 +69,11 @@ services:
       - pcap-uploads:/opt/flowsql/uploads
       - python-ipc:/tmp
       - python-operators:/opt/flowsql/bin/operators
+      - kafka-state:/opt/flowsql/kafka-state
     ipc: service:pyworker
     environment:
       FLOWSQL_GATEWAY_ADDR: gateway:18800
+      FLOWSQL_KAFKA_STATE_DIR: /opt/flowsql/kafka-state
     networks:
       - flowsql-net
     depends_on:
@@ -110,6 +112,7 @@ services:
 
 volumes:
   flowsql-config:
+  kafka-state:
   python-ipc:
   python-operators:
   pcap-uploads:

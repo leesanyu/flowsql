@@ -1,16 +1,123 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 #include "kafka_plugin.h"
+#include <fcntl.h>
 #include <openssl/crypto.h>
+#include <openssl/rand.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 
 namespace flowsql::channels::kafka {
+namespace {
+void CheckDeployment(bool condition, const char* code) {
+    if (!condition) throw std::runtime_error(code);
+}
+struct Descriptor {
+    int value;
+    ~Descriptor() {
+        if (value >= 0) close(value);
+    }
+};
+void PrivateDirectory(const std::filesystem::path& path) {
+    std::filesystem::create_directories(path);
+    struct stat info {};
+    CheckDeployment(lstat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode) && info.st_uid == geteuid(),
+                    "DEFAULT_STATE_DIRECTORY_INVALID");
+    CheckDeployment(chmod(path.c_str(), 0700) == 0 && stat(path.c_str(), &info) == 0 && (info.st_mode & 0777) == 0700,
+                    "DEFAULT_STATE_REQUIRES_PRIVATE_FILESYSTEM");
+}
+void PrivateFile(const std::filesystem::path& path, const std::string& value) {
+    Descriptor file{open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600)};
+    CheckDeployment(file.value >= 0, "DEFAULT_FILE_CREATE_FAILED");
+    size_t offset = 0;
+    while (offset < value.size()) {
+        const auto written = write(file.value, value.data() + offset, value.size() - offset);
+        if (written < 0 && errno == EINTR) continue;
+        CheckDeployment(written > 0, "DEFAULT_FILE_WRITE_FAILED");
+        offset += static_cast<size_t>(written);
+    }
+    CheckDeployment(fsync(file.value) == 0, "DEFAULT_FILE_SYNC_FAILED");
+}
+std::string ReadPrivateFile(const std::filesystem::path& path) {
+    struct stat info {};
+    CheckDeployment(lstat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode) && info.st_uid == geteuid() &&
+                        (info.st_mode & 0077) == 0,
+                    "DEFAULT_FILE_MISSING_OR_NOT_PRIVATE");
+    std::ifstream file(path, std::ios::binary);
+    CheckDeployment(file.good(), "DEFAULT_FILE_UNREADABLE");
+    return {std::istreambuf_iterator<char>(file), {}};
+}
+std::string DefaultConfiguration(int* owner) {
+    std::filesystem::path root;
+    const auto environment = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value ? std::string(value) : std::string();
+    };
+    if (auto configured = environment("FLOWSQL_KAFKA_STATE_DIR"); !configured.empty())
+        root = configured;
+    else if (auto state = environment("XDG_STATE_HOME"); !state.empty())
+        root = std::filesystem::path(state) / "flowsql/kafka";
+    else {
+        const auto home = environment("HOME");
+        CheckDeployment(!home.empty(), "DEFAULT_STATE_HOME_MISSING");
+        root = std::filesystem::path(home) / ".local/state/flowsql/kafka";
+    }
+    CheckDeployment(root.is_absolute(), "DEFAULT_STATE_PATH_MUST_BE_ABSOLUTE");
+    PrivateDirectory(root);
+    Descriptor lock{open((root / ".owner.lock").c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600)};
+    CheckDeployment(lock.value >= 0 && flock(lock.value, LOCK_EX | LOCK_NB) == 0, "DEFAULT_STATE_ALREADY_IN_USE");
+    for (const auto* directory : {"config", "config/kafka", "secrets", "meta", "runtime", "runtime/kafka"})
+        PrivateDirectory(root / directory);
+    const auto configuration = root / "config/kafka/provider.json";
+    const auto key_path = root / "secrets/kafka-master.key";
+    const auto db_path = root / "meta/kafka.db";
+    if (!std::filesystem::exists(configuration)) {
+        CheckDeployment(!std::filesystem::exists(db_path), "DEFAULT_CONFIG_MISSING_FOR_EXISTING_DATABASE");
+        auto options = Parse("{}");
+        auto& allocator = options.GetAllocator();
+        String(options, "db_path", db_path.string(), allocator);
+        String(options, "master_key_file", key_path.string(), allocator);
+        String(options, "runtime_directory", (root / "runtime/kafka").string(), allocator);
+        options.AddMember("files", rapidjson::Value(rapidjson::kObjectType), allocator);
+        options.AddMember("environments", rapidjson::Value(rapidjson::kObjectType), allocator);
+        PrivateFile(configuration, Encode(options) + "\n");
+    }
+    const auto content = ReadPrivateFile(configuration);
+    auto options = Parse(content);
+    for (const char* field : {"db_path", "master_key_file", "runtime_directory"})
+        CheckDeployment(std::filesystem::path(Text(options, field)).is_absolute(),
+                        "DEFAULT_CONFIG_PATH_MUST_BE_ABSOLUTE");
+    const auto configured_key = std::filesystem::path(Text(options, "master_key_file"));
+    if (!std::filesystem::exists(configured_key)) {
+        CheckDeployment(configured_key == key_path && Text(options, "db_path") == db_path.string() &&
+                            !std::filesystem::exists(db_path),
+                        "MASTER_KEY_MISSING_FOR_EXISTING_DEPLOYMENT");
+        std::string key(32, '\0');
+        CheckDeployment(RAND_bytes(reinterpret_cast<unsigned char*>(key.data()), key.size()) == 1,
+                        "MASTER_KEY_GENERATION_FAILED");
+        PrivateFile(key_path, key);
+        OPENSSL_cleanse(key.data(), key.size());
+    }
+    CheckDeployment(ReadPrivateFile(configured_key).size() == 32, "MASTER_KEY_MUST_BE_32_BYTES");
+    PrivateDirectory(Text(options, "runtime_directory"));
+    *owner = lock.value;
+    lock.value = -1;
+    return content;
+}
+}  // namespace
 int Plugin::Option(const char* options) {
     try {
+        if (default_lock_ >= 0) return EALREADY;
         std::string configuration = options ? options : "";
+        if (configuration.empty() || configuration == "{}") configuration = DefaultConfiguration(&default_lock_);
         constexpr const char* file_prefix = "config_file=";
         if (configuration.rfind(file_prefix, 0) == 0) {
             std::ifstream file(configuration.substr(std::strlen(file_prefix)), std::ios::binary);
@@ -39,7 +146,10 @@ int Plugin::Option(const char* options) {
                 }
             }
         return 0;
-    } catch (...) {
+    } catch (const std::exception& failure) {
+        std::fprintf(stderr, "Kafka deployment configuration failed: %s\n", failure.what());
+        if (default_lock_ >= 0) close(default_lock_);
+        default_lock_ = -1;
         return EINVAL;
     }
 }
@@ -81,6 +191,8 @@ int Plugin::Stop() {
 int Plugin::Unload() {
     if (Stop() != 0) return EBUSY;
     store_.Close();
+    if (default_lock_ >= 0) close(default_lock_);
+    default_lock_ = -1;
     return 0;
 }
 int Plugin::OpenSession(const char* name, const char* usage, IKafkaClientSessionV1** session, std::string* error) {
