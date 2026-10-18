@@ -18,6 +18,18 @@ if(FLOWSQL_PFRING_INCLUDE_DIR AND FLOWSQL_PFRING_LIBRARY)
     target_compile_definitions(flowsql_capture_pfring PRIVATE FLOWSQL_HAVE_PFRING=1)
     target_include_directories(flowsql_capture_pfring PRIVATE ${FLOWSQL_PFRING_INCLUDE_DIR})
     target_link_libraries(flowsql_capture_pfring ${FLOWSQL_PFRING_LIBRARY})
+    # Ship the optional shared runtime beside the provider, without requiring PF_RING for stub builds.
+    get_filename_component(pfring_runtime "${FLOWSQL_PFRING_LIBRARY}" REALPATH)
+    get_filename_component(pfring_runtime_name "${pfring_runtime}" NAME)
+    if(pfring_runtime_name MATCHES "\\.so(\\.|$)")
+        add_custom_target(flowsql_pfring_runtime
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/output"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${pfring_runtime}" "${CMAKE_BINARY_DIR}/output/${pfring_runtime_name}"
+            BYPRODUCTS "${CMAKE_BINARY_DIR}/output/${pfring_runtime_name}"
+            VERBATIM)
+        add_dependencies(flowsql_capture_pfring flowsql_pfring_runtime)
+    endif()
 else()
     message(STATUS "PF_RING Classic library unavailable; provider reports unavailable without fallback")
 endif()

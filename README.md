@@ -61,7 +61,8 @@ docker compose -f config/docker-compose-postgres.yml up -d
 ```
 
 原生连接 `127.0.0.1:19092`，PLAINTEXT，无账号密码；提供固定 source/sink Topic 和持久数据卷。
-连接/通道配置、SQL、查看 sink 输出及 Docker 客户端地址见 [Kafka 手动测试环境](docs/kafka.md#docker-手动测试环境)。
+按页面逐项填写连接/source/sink、运行异步 SQL、检查输出和重复测试，见
+[Kafka 手动测试完整指导](docs/kafka.md#docker-手动测试环境)；其中有可复制的 API 命令和常见问题处理。
 `./tools/kafka-manual.sh down` 停止环境并保留数据。
 
 ### 环境要求

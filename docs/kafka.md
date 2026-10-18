@@ -6,37 +6,341 @@ FlowSQL 提供可复用的 Kafka 连接配置与具名通道管理。连接负�
 
 ## Docker 手动测试环境
 
-仓库提供独立的单节点 Kafka 4.1.0 KRaft 环境，适合手测结构化 source 和结果 sink。需要 Docker Engine、
-Docker Compose v2；`seed` 另需 Python 3。镜像固定版本与摘要，首次启动按需拉取，不需要宿主机安装 Kafka 或 Java。
-这是本地开发用的 PLAINTEXT 环境，无账号密码，宿主端口只绑定回环地址。它与自动化认证矩阵及数据库容器独立。
+本节是从首次启动到重复测试的操作教程，适用于 **WSL/Linux 中用 `./start.sh` 启动 FlowSQL，
+用 Docker 运行 Kafka** 的开发环境。先按 Web 步骤完成一次 source → SQL → sink，再按需要使用等价 API。
 
-在仓库根目录执行（脚本也支持从其他工作目录调用）：
+阅读入口：[启动环境](#manual-start) · [连接配置](#manual-connection) · [source 表单](#manual-source) ·
+[sink 表单](#manual-sink) · [执行 SQL](#manual-sql) · [供数与结果](#manual-data) ·
+[重复测试](#manual-replay) · [停止与恢复](#manual-stop) · [常见问题](#manual-faq) · [API 操作](#manual-api)。
 
-```bash
-./tools/kafka-manual.sh up
-./tools/kafka-manual.sh status
-./tools/kafka-manual.sh seed
-./tools/kafka-manual.sh read source 3
+```mermaid
+flowchart LR
+    P[seed 或 produce 发送 JSON] --> T1[Topic: flowsql.manual.source]
+    T1 --> S[FlowSQL 通道: kafka.manual_source]
+    S --> Q[异步 SQL 选择和过滤]
+    Q --> K[FlowSQL 通道: kafka.manual_sink]
+    K --> T2[Topic: flowsql.manual.sink]
+    T2 --> R[read sink 查看 JSON 结果信封]
 ```
 
-`up` 等待 broker 可访问后幂等创建两个单分区 Topic，broker 禁止自动创建 Topic；它不会自动启动 FlowSQL 或保存通道。
-`seed` 每次追加三条记录，host 为 api-1/api-2/api-3、value 为 1024.0/2048.0/4096.0、time 为当前 Unix 毫秒整数。
-`read` 从分区 0 的最早保留记录读取，不提交消费位点；省略条数则持续等待，Ctrl-C 退出。
-指定条数时空闲等待预算为 15 秒，消息不足会非零退出。
+先记住以下四类名称，它们各自承担不同的职责：
+
+| 对象 | 本教程使用的值 | 用途 |
+| --- | --- | --- |
+| 连接配置名称 | `manual` | 保存地址和认证配置，两个通道共用。 |
+| FlowSQL 通道名称 | `manual_source` / `manual_sink` | SQL 分别引用 `kafka.manual_source` / `kafka.manual_sink`。 |
+| Kafka Topic | `flowsql.manual.source` / `flowsql.manual.sink` | broker 中实际存放输入消息和输出消息的位置，由脚本创建。 |
+| Kafka 消费组 | `flowsql_manual` | 保存 source 的消费进度，首次消费时建立，无需提前创建；sink 不填。 |
+
+如果你已经创建了名为 `manual` 的 source 通道，可以继续使用，将下文 SQL 中的
+`FROM kafka.manual_source` 换成 `FROM kafka.manual`。连接配置和通道同名允许；编辑已有通道时名称只读，
+不必为了改名删除重建。本文后续统一使用 `manual_source`。
+
+<a id="manual-start"></a>
+
+### 1. 启动 Kafka 与 FlowSQL
+
+需要 Docker Engine、Docker Compose v2、Python 3，以及已经编译好的 FlowSQL。打开 WSL/Linux 终端，
+进入仓库根目录；本机路径为 `/mnt/d/working/flowSQL`，大小写须一致。以下脚本用 Bash 执行，不直接粘贴到 PowerShell。
+
+终端 A 启动 FlowSQL；如果服务已经运行，复用现有进程即可：
+
+```bash
+cd /mnt/d/working/flowSQL
+./start.sh
+```
+
+保持终端 A 运行，在浏览器打开 `http://localhost:8081`。如果缺少构建产物，先按
+[README 编译步骤](../README.md#编译) 完成构建。默认 Kafka 配置和主密钥首次自动生成，通常不需手工准备。
+
+终端 B 启动 Kafka 并检查状态：
+
+```bash
+cd /mnt/d/working/flowSQL
+./tools/kafka-manual.sh up
+./tools/kafka-manual.sh status
+```
+
+预期容器 `flowsql-kafka-manual-manual-kafka-1` 为 `healthy`，输出中存在
+`flowsql.manual.source` 和 `flowsql.manual.sink`，两者都是单分区、单副本。
+`up` 可以重复执行，等待 broker 就绪并幂等创建 Topic；它不会自动启动 FlowSQL，也不会代你保存连接和通道。
+
+此环境使用官方 Kafka 4.1.0 KRaft 单节点，镜像固定版本与摘要，首次按需拉取，不需宿主机安装 Kafka 或 Java。
+PLAINTEXT 无账号密码，宿主端口只绑定回环地址；数据位于独立 Docker 卷，适合本地手测。
 
 | FlowSQL 运行方式 | bootstrap_servers | 连接条件 |
 | --- | --- | --- |
 | 原生 `./start.sh`、single/multi 或直接进程 | `127.0.0.1:19092` | 与 Docker 发布端口位于同一开发主机 |
 | Docker FlowSQL | `manual-kafka:9092` | Scheduler 容器加入 `flowsql-kafka-manual` 网络 |
 
-broker 分别向这两类客户端返回对应的可达地址。现有 Docker FlowSQL 可在 broker 启动后执行
-`docker network connect flowsql-kafka-manual <scheduler容器名>`；新建容器使用 `--network flowsql-kafka-manual`。
-重新创建 Scheduler 容器后需重新加入网络。这套 broker Compose 位于
-`config/docker-compose-kafka-manual.yml`，由 `tools/kafka-manual.sh` 管理。
+本文原生流程使用 `127.0.0.1:19092`。若 FlowSQL 也在 Docker 中，broker 启动后对实际 Scheduler 容器执行
+`docker network connect flowsql-kafka-manual 容器名`，连接地址改为 `manual-kafka:9092`；新建容器可使用
+`--network flowsql-kafka-manual`。重新创建 Scheduler 容器后需重新加入网络。
+broker Compose 为 [`config/docker-compose-kafka-manual.yml`](../config/docker-compose-kafka-manual.yml)。
 
-启动 FlowSQL 后，在 Web 的 Kafka 管理页保存以下连接和通道；也可以用下面的 API 请求。原生默认 Web 地址为
-`http://127.0.0.1:8081`；端口自定义时调整 `API`。Docker FlowSQL 将连接中的地址换为 `manual-kafka:9092`。
-定义会保存到 FlowSQL 自身的 Kafka 状态目录，与 broker 数据卷各自持久化；同名定义已存在时直接复用或在 Web 编辑。
+<a id="manual-connection"></a>
+
+### 2. 在 Web 创建连接配置 manual
+
+进入“通道管理 → Kafka 通道”，点击“新建连接配置”，按下表填写：
+
+| 页面字段 | 填写值 |
+| --- | --- |
+| 名称 | `manual` |
+| Bootstrap servers | `127.0.0.1:19092`，不加 `http://`。 |
+| 安全协议 | `PLAINTEXT` |
+
+PLAINTEXT 不填写用户名、密码、TLS 或 SASL 配置。点击“验证草稿”检查连接，随后点击“保存连接”。
+如果已经保存过 `manual`，在“连接配置”页签核对并复用，不要反复点击新建。
+
+“连接验证通过”表示网络、认证和元数据检查成功；实际读取和写入由后面的 SQL 验证。
+在“新建 Kafka 通道”中也可以点击“就地新建连接”，效果相同。
+
+<a id="manual-source"></a>
+
+### 3. 配置 source：读取 JSON 样例
+
+点击“新建 Kafka 通道”，逐项填写输入通道：
+
+| 页面字段 | 填写值 |
+| --- | --- |
+| 通道名称 | `manual_source` |
+| 连接配置 | 在下拉列表中选中已经保存的 `manual`。 |
+| 角色 | `source` |
+| Topic | `flowsql.manual.source` |
+| 消费组 | `flowsql_manual` |
+| 数据类别 | `结构化数据` |
+| 结构化接入 | **`配置 JSON 字段`**，不能保留“暂不配置”。 |
+| 实体名称 | `metrics` |
+
+连接配置下拉框支持搜索，输入 `manual` 后仍需选中对应选项；输入框中显示的搜索文字不代表连接已保存。
+如果已有通道显示 source“待配置”，直接点击“编辑”补齐 JSON 字段。
+
+展开“配置 JSON 字段”后，页面默认带一个 `message` 字段。将它改成下面的第一行 `host`，
+再点击两次“新增字段”，按顺序配置全部三行；不要额外保留 `/message`，样例中没有这个字段。
+
+| 页面中的输出列名 | JSON 路径 | 字段类型 | 允许空值 | 单位 |
+| --- | --- | --- | --- | --- |
+| `host` | `/host` | `utf8` | `必须存在且非 null` | 留空 |
+| `time_ms` | `/time` | `int64` | `必须存在且非 null` | `unix_ms` |
+| `value` | `/value` | `float64` | `必须存在且非 null` | 留空 |
+
+这里 `/time` 是原始 JSON 中的字段，`time_ms` 是 SQL 使用的输出列名。路径必须带 `/`，时间值必须是整数，
+不能填写日期字符串。三条样例的格式类似下面这样，实际 `seed` 使用发送时的 Unix 毫秒时间：
+
+```json
+{"host":"api-1","time":1800000000000,"value":1024.0}
+```
+
+继续填写 source 参数：
+
+| 页面字段 | 填写值 | 作用 |
+| --- | --- | --- |
+| 无有效位点 | `从最早开始` | 该组没有有效已提交位点时，从最早保留的消息开始。 |
+| 确认策略 | `当前批次处理及结果投递成功后确认` | 当前输出成功后确认进度。 |
+| 批次最多行数 | `3` | 每批最多三行，便于观察本次样例。 |
+| 单消息字节上限 | `1048576` | 单条消息最多 1 MiB。 |
+
+点击“验证草稿”，再点击“保存通道”。列表中的“数据能力”预期显示 **source：已就绪**。
+验证 Topic 存在不会消费消息；保存成功但显示“待配置”，仍需要补齐上述字段才能用于 SQL。
+
+<a id="manual-sink"></a>
+
+### 4. 配置 sink：发布 SQL 结果
+
+再次点击“新建 Kafka 通道”，本次创建输出端：
+
+| 页面字段 | 填写值 |
+| --- | --- |
+| 通道名称 | `manual_sink` |
+| 连接配置 | `manual` |
+| 角色 | `sink` |
+| Topic | `flowsql.manual.sink` |
+| 数据类别 | `结构化数据` |
+| 结果发布 | **`配置 JSON 结果信封`** |
+| 发布实体 | `metrics` |
+| Schema 版本 | `1` |
+| 记录语义 | `event 独立事件` |
+| 业务 key 列 | 留空 |
+| 消息字节上限 | `1048576` |
+| 队列条数上限 | `1024` |
+| 队列字节上限 | `8388608` |
+| 确认预算毫秒 | `10000` |
+
+sink 不显示消费组，也不需要 JSON 路径映射；它按照 SQL 选出的列生成结果信封。
+本教程的样例没有业务 revision，选择 event 即可。点击“验证草稿”和“保存通道”，预期显示 **sink：已就绪**。
+
+至此，连接配置列表中有 `manual`，通道列表中有 `manual_source` 和 `manual_sink`，两者分别使用不同 Topic。
+
+<a id="manual-sql"></a>
+
+### 5. 在 SQL 工作台启动任务
+
+进入左侧“SQL 工作台”，粘贴下面的 SQL：
+
+```sql
+SELECT host, time_ms, value
+FROM kafka.manual_source
+WHERE value > 0
+INTO kafka.manual_sink;
+```
+
+选择“异步”，点击一次“执行”，记下返回的任务 ID。任务进入 running 后，会持续等待 source 消息。
+没有新消息时保持 running 是正常现象；不要因此反复点击执行。Kafka source 没有 EOF，读完当前消息不会自行完成。
+
+该 SQL 读取三列、保留 value 大于 0 的记录，然后发布到 sink。它的结果在 Kafka 中，
+不是自动生成一个可在网页展开的数据表；下一步用 `read sink` 检查。
+第一次使用新消费组时，也可能立即处理 source Topic 中已有的历史样例。
+
+<a id="manual-data"></a>
+
+### 6. 发送数据并确认 source 与 sink
+
+先在终端 C 进入仓库并持续查看 sink：
+
+```bash
+cd /mnt/d/working/flowSQL
+./tools/kafka-manual.sh read sink
+```
+
+此命令先打印 sink 中已有的消息，然后等待新消息。让终端 C 保持运行，在终端 B 发送样例：
+
+```bash
+./tools/kafka-manual.sh seed
+```
+
+每次 seed 追加三条，host 依次为 `api-1`、`api-2`、`api-3`，value 分别为 1024.0、2048.0、4096.0，
+time 为本次发送时的整数毫秒。SQL 已运行且 source 配置正确时，终端 C 应出现对应的三个新增信封。
+
+若要把这轮与旧结果清楚地区分，可以追加一条带自定义标记的数据，替换 host 中的后缀：
+
+```bash
+printf '%s\n' '{"host":"manual-check-001","time":1800000000000,"value":42.0}' | ./tools/kafka-manual.sh produce
+```
+
+在终端 C 新输出中查找 `data.host` 为 `manual-check-001` 的记录。下方仅摘出完整信封中用于观察的字段，
+实际消息还包含 publication_id、Schema、Schema 指纹和记录身份等信息：
+
+```json
+{
+  "envelope_version": 1,
+  "entity": "metrics",
+  "record_kind": "event",
+  "task_id": "本次运行的任务标识",
+  "data": {"host":"manual-check-001","time_ms":"1800000000000","value":42.0}
+}
+```
+
+`time_ms` 作为 int64 在信封中编码为十进制字符串，这是无损编码。value 保持 JSON 数值。
+信封 task_id 是写入端使用的运行时标识，可能与工作台返回的公共任务 ID 不同；可用于区分不同运行的结果。
+`data.host` 的自定义标记是判断这轮新增消息最直观的方法。
+
+以下命令适合只查看少量已有消息：
+
+```bash
+./tools/kafka-manual.sh read source 3
+./tools/kafka-manual.sh read sink 3
+```
+
+它们读取的是分区 0 最早保留的三条消息，**不是最近三条**，也不证明它们来自刚启动的任务。
+省略条数会继续等待，Ctrl-C 退出查看；指定条数时空闲等待预算为 15 秒，数量不足非零退出。
+查看命令不提交 source 消费组的位点，Ctrl-C 结束查看也不会停止 SQL 任务。
+
+<a id="manual-replay"></a>
+
+### 7. 重复测试、续读与从头重放
+
+| 你想做什么 | 操作 | 预期行为 |
+| --- | --- | --- |
+| 任务仍在运行，继续供数 | 再执行 `seed` 或 `produce`。 | 同一个 SQL 处理新增消息，sink 继续追加。 |
+| 停止后继续测试 | 同一个 source 再执行原 SQL，然后发送新消息。 | `flowsql_manual` 从上次成功确认的位置续读。 |
+| 重新处理历史消息 | 停止原任务，编辑 source，把消费组改成未用过的名称，例如 `flowsql_manual_replay_001`，保留“从最早开始”，再运行 SQL。 | 新组从当前仍被保留的最早消息开始；旧 sink 输出保留，并新增重放结果。 |
+| 多轮都从头分析且不保留新进度 | 使用专用的新消费组，并将“确认策略”设为“不提交位点”。 | 本轮不提交新位点；下次仍依据这个组原来已有的位点或无位点策略打开。 |
+
+“从最早开始”只在没有有效已提交位点时生效，不能覆盖同一组已经提交的进度。
+把确认策略改成“不提交位点”也不会删除该组的旧位点；要从头读，应配合一个从未使用的新组。
+不要在同一个手测组中同时运行多个消费任务，否则可能分担消息或发生重平衡，影响观察。
+
+连接或通道显示“使用中”时先停止占用任务或等待连接验证结束，再编辑。重放可能产生重复结果，
+输入位点与输出没有端到端 Exactly-once 事务保证；本教程不通过清空 Topic 或重置卷来重复测试。
+
+<a id="manual-stop"></a>
+
+### 8. 停止任务与恢复环境
+
+按以下顺序结束本轮操作：
+
+1. 在“SQL 工作台”的任务列表中找到本次任务，点击当前页面的“**取消**”按钮，等待进入
+   stopped、cancelled、completed、failed 或 timeout 等终态。该按钮会按任务类型调用对应停止/取消操作。
+2. 点击“查看结果”检查任务状态和错误。当前页面展示基本结果；完整发布计数通过下方查询命令读取
+   `result.publication`。正常收尾时 `confirmed_rows` 应与本任务实际发布条数一致，包含本次处理的历史消息；
+   `not_sent_rows`、`unknown_rows` 为 0。若失败或数量不符，先核对错误和部分投递情况，再决定是否重放。
+3. 在终端 C 按 Ctrl-C 退出 sink 查看。
+4. 需要停止 broker 时，在终端 B 执行 `down`。需要停止本轮自行启动的 FlowSQL 时，在终端 A 按 Ctrl-C。
+
+在终端 B 查询已结束任务的完整结果，替换为工作台返回的公共任务 ID：
+
+```bash
+TASK_ID='替换成工作台中的任务 ID'
+curl --fail-with-body -sS http://127.0.0.1:8081/api/tasks/result \
+  -H 'Content-Type: application/json' -d "{\"task_id\":\"$TASK_ID\"}"
+```
+
+运行中的公共结果摘要可能尚未更新，不能仅凭当时 rows=0 判断消息没有发出；以实际 sink 消息和终态报告核对。
+例如本任务只处理了三条 seed 样例和一条自定义标记时，`confirmed_rows` 应为 4。
+完成核对后停止或恢复 broker：
+
+```bash
+./tools/kafka-manual.sh down
+# 下次恢复 broker
+./tools/kafka-manual.sh up
+./tools/kafka-manual.sh status
+```
+
+`down` 停止 broker 并保留容器、网络与持久卷。`up` 恢复后复用仍保留的 Topic 消息和消费位点，
+不会自动清空数据；消息仍受 Kafka 保留策略约束。FlowSQL 的连接/通道定义则保存在自身的 Kafka 状态目录，
+重启后复用，但正在运行的 SQL 不会因 broker 恢复而自动重新提交。
+broker 数据卷为 `flowsql-kafka-manual_kafka-data`，容器重启策略为 `unless-stopped`。
+
+<a id="manual-faq"></a>
+
+### 9. 常见问题与命令速查
+
+| 现象 | 检查与处理 |
+| --- | --- |
+| Kafka 管理服务暂不可用 | 先看 FlowSQL 启动日志，确认运行的是已构建的新版本且加载了 Kafka 插件；broker 离线本身不会阻止管理页打开。原生重启服务后重试，Docker 需使用包含该插件的新镜像。 |
+| 连接验证失败 | 执行 `status` / `logs`；原生用 `127.0.0.1:19092`，容器内用同网络的 `manual-kafka:9092`，协议为 PLAINTEXT。 |
+| source“待配置” | 把“结构化接入”设为“配置 JSON 字段”，替换默认 message 字段，保存后确认 source“已就绪”。 |
+| sink“待配置” | 把“结果发布”设为“配置 JSON 结果信封”，补齐发布实体、版本和 event 语义。 |
+| 名称或字段校验失败 | 连接/通道名称以小写字母开头，最多 64 个小写字母、数字、下划线或短横线；在列表中选中已保存的连接；检查字段名和 JSON 路径。 |
+| Topic 不存在 | 执行 `up`，再用 `status` 核对 Topic；必须精确填写 `flowsql.manual.source` 或 `flowsql.manual.sink`，broker 禁止自动建 Topic。 |
+| SQL 一直 running | source 持续等待是正常现象；查看 sink 并追加带标记的新消息，结束时用任务列表“取消”。 |
+| source 有消息但没有新输出 | 检查任务错误、source/sink“已就绪”、SQL 通道名称、WHERE 条件和已提交位点；同组可能已经读过，先追加标记消息。 |
+| SQL 提示需要异步 | 在 SQL 工作台选择“异步”，通过 API 则传 `mode: "async"`。 |
+| read sink 一直显示旧内容 | 它从最早消息开始；保持持续查看，再发送唯一 host 标记，观察新增信封。 |
+| 再次运行 SQL 没有重放 | 同组从成功位点续读，按上一节换新消费组；不要删除数据卷。 |
+| 无法编辑/删除，显示使用中 | 停止占用该通道的任务，等待验证结束，再刷新列表。 |
+| 任务失败或 Web 请求超时 | 先查看任务列表、状态和启动日志，核对是否已有部分结果；确认后再重试，避免重复提交和重复发布。 |
+| read 指定条数后非零退出 | 该 Topic 在等待预算内不足所需条数，或 broker 不可达；查看命令输出并核对实际条数。 |
+
+| 命令 | 用途 |
+| --- | --- |
+| `./tools/kafka-manual.sh up` | 启动/恢复 broker，幂等准备 Topic。 |
+| `./tools/kafka-manual.sh status` | 查看容器和 source/sink Topic。 |
+| `./tools/kafka-manual.sh seed` | 追加三条固定字段的样例，time 随发送时间变化。 |
+| `./tools/kafka-manual.sh produce` | 从标准输入逐行发送 JSON；交互输入按 Ctrl-D 结束。 |
+| `./tools/kafka-manual.sh read source 3` | 从头查看 source 的三条已有消息。 |
+| `./tools/kafka-manual.sh read sink` | 从头查看并持续等待 sink 消息，Ctrl-C 退出。 |
+| `./tools/kafka-manual.sh logs` | 查看最近 100 行 broker 日志。 |
+| `./tools/kafka-manual.sh down` | 停止 broker，保留数据。 |
+| `./tools/kafka-manual.sh help` | 查看脚本帮助。 |
+
+<a id="manual-api"></a>
+
+### 10. 等价 API 操作
+
+本节可替代 Web 创建和提交步骤。**二选一即可**，不要在 Web 保存同名配置后重复执行 add；
+已有定义可在 Web 复用或编辑。假定端口为默认 8081，且服务使用原生方式运行：
 
 ```bash
 API=http://127.0.0.1:8081
@@ -51,7 +355,7 @@ curl --fail-with-body -sS "$API/api/channels/kafka/channels/add" \
     "topic":"flowsql.manual.source","consumer_group":"flowsql_manual",
     "payload_kind":"structured","payload_options":{"source":{
       "encoding":"json","entity":"metrics","offset_reset":"earliest",
-      "commit_policy":"after_success","max_batch_rows":3,
+      "commit_policy":"after_success","max_batch_rows":3,"max_message_bytes":1048576,
       "fields":[
         {"name":"host","path":"/host","type":"utf8","nullable":false},
         {"name":"time_ms","path":"/time","type":"int64","nullable":false,"unit":"unix_ms"},
@@ -65,47 +369,35 @@ curl --fail-with-body -sS "$API/api/channels/kafka/channels/add" \
     "name":"manual_sink","connection_name":"manual","role":"sink",
     "topic":"flowsql.manual.sink","payload_kind":"structured",
     "payload_options":{"sink":{
-      "encoding":"json","entity":"metrics","schema_version":1,"record_kind":"event"
+      "encoding":"json","entity":"metrics","schema_version":1,"record_kind":"event",
+      "key_fields":[],"max_message_bytes":1048576,"queue_max_messages":1024,
+      "queue_max_bytes":8388608,"delivery_timeout_ms":10000
     }}
   }'
-```
 
-在 Web 提交下面的 SQL 并选择异步执行，或者调用任务 API：
-
-```sql
-SELECT host, time_ms, value FROM kafka.manual_source WHERE value > 0 INTO kafka.manual_sink;
-```
-
-```bash
 curl --fail-with-body -sS "$API/api/tasks/batch/execute" \
   -H 'Content-Type: application/json' -d '{
     "sql_text":"SELECT host, time_ms, value FROM kafka.manual_source WHERE value > 0 INTO kafka.manual_sink",
     "mode":"async"
   }'
-./tools/kafka-manual.sh read sink 3
 ```
 
-第一次执行将处理 `seed` 写入的三条记录。sink 每条输出一个 JSON 信封，`data.host` 为对应 api 名称、
-`data.value` 为数值，`data.time_ms` 按 int64 无损编码为十进制字符串，信封还携带 Schema 和 task_id。
-任务持续运行等待后续数据；再次执行 `seed` 可继续验证，也可从 stdin 写入自己的合法 JSON：
+前三个请求保存连接和两个通道，第四个请求提交任务。成功提交会返回 task_id，不代表任务已处理完数据。
+按第 6 节发送消息并查看 sink。然后在同一终端中记录返回的公共任务 ID，再查询、停止和查询最终报告：
 
 ```bash
-printf '%s\n' '{"host":"manual-1","time":1800000000000,"value":42.0}' | ./tools/kafka-manual.sh produce
-./tools/kafka-manual.sh read sink  # 从头查看并持续等待；Ctrl-C 退出查看
+TASK_ID='替换成提交返回的 task_id'
+curl --fail-with-body -sS "$API/api/tasks/result" \
+  -H 'Content-Type: application/json' -d "{\"task_id\":\"$TASK_ID\"}"
+curl --fail-with-body -sS "$API/api/tasks/cancel" \
+  -H 'Content-Type: application/json' -d "{\"task_id\":\"$TASK_ID\"}"
+curl --fail-with-body -sS "$API/api/tasks/result" \
+  -H 'Content-Type: application/json' -d "{\"task_id\":\"$TASK_ID\"}"
 ```
 
-在 Web 任务页停止任务；Kafka source 没有 EOF，数据暂时读完不会自动结束。同组的成功位点会保留，
-重新提交 SQL 不会重放已确认记录。需要从头复测时创建不同消费组的 source，或使用 `commit_policy=none`；
-重复 `up` 不清空数据或重置位点。sink 的查看命令从头读，可能看到之前各轮留下的信封，可用 task_id 区分。
-
-```bash
-./tools/kafka-manual.sh logs
-./tools/kafka-manual.sh down  # 停止 broker，保留容器、网络和持久卷
-./tools/kafka-manual.sh up    # 恢复，复用数据和消费位点
-```
-
-数据卷为 `flowsql-kafka-manual_kafka-data`，容器按 `unless-stopped` 策略重启。首次拉取失败、端口占用、
-broker 启动失败会非零退出；先用 `status` / `logs` 核查。手测入口不删除数据卷，不操作其他 Docker 项目。
+本教程通过 batch/execute 异步提交，停止使用 tasks/cancel。停止后如果仍返回 running/stopping，稍后再次查询，
+直到终态再核对 `result.publication`。不要用原始 SQL 或信封里的运行时标识代替公共 task_id。
+若使用 Docker FlowSQL，连接请求中的 bootstrap_servers 改为 `manual-kafka:9092` 并保证网络已连接。
 
 ## 原生安装与启用
 

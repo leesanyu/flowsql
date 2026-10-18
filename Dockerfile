@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     librte-acl24 \
     librte-eal24 \
+    libpcap0.8t64 libxdp1 libbpf1 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -28,7 +29,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 
 # 复制构建产物
 COPY build/output/flowsql          ./bin/flowsql
-COPY build/output/lib*.so          ./bin/
+COPY build/output/lib*.so*         ./bin/
 COPY .thirdparts_installed/yaml-cpp/lib/libyaml-cpp.so.0.9.0 ./bin/libyaml-cpp.so.0.9
 COPY build/output/static/          ./bin/static/
 COPY config/                       ./config/
@@ -36,6 +37,9 @@ COPY build/output/share/kafka/ ./share/kafka/
 COPY config/kafka/provider.example.json ./config/kafka/provider.example.json
 COPY config/docker/flowsql.yml     ./config/flowsql.yml
 COPY src/plugins/npi/conf/protocols.yml ./config/protocols.yml
+
+# Versioned optional runtimes (PF_RING) are staged with the native build.
+RUN ldconfig /opt/flowsql/bin
 
 ENV PATH="/opt/flowsql/venv/bin:/opt/flowsql/bin:${PATH}"
 ENV PYTHONPATH="/opt/flowsql/python"

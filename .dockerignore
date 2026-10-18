@@ -6,7 +6,7 @@ build/*
 !build/output/
 build/output/*
 !build/output/flowsql
-!build/output/lib*.so
+!build/output/lib*.so*
 !build/output/static/
 !build/output/static/**
 !build/output/static/index.html
@@ -22,6 +22,7 @@ build/output/*
 !config/
 config/*
 !config/docker/
+config/docker/*
 !config/docker/flowsql.yml
 !src/
 src/*
@@ -41,4 +42,7 @@ src/plugins/npi/*
 !build/output/share/kafka/
 !build/output/share/kafka/**
 !config/kafka/
+config/kafka/*
 !config/kafka/provider.example.json
+!config/kafka/provider.docker.example.json
+!config/kafka/deploy-scheduler.example.yaml

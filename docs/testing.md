@@ -21,7 +21,15 @@ tools/test.sh integration --location native --filter '^test_mysql$'
 
 `--filter` 使用正则表达式；相关 CTest setup fixture 自动纳入选中清单。带筛选的通过只代表该清单，完整 Feature 验收使用不带筛选的 `all`。直接 `ctest --test-dir build --output-on-failure` 同样执行运行时 guard、fixture 和资源锁，不允许缺依赖后返回成功。
 
-首次运行需要 Docker CLI/Compose 和 socket 访问权限，以及当前构建产物。数据库镜像按 `config/testing/environment.json` 的固定摘要准备；运行镜像和身份夹具镜像使用配置声明的不可变镜像身份。当前工作区已有固定运行镜像，可通过以下命令为其他工作区准备运行依赖，然后将 inspect 返回的不可变 ID 写入自己的配置副本（runtime/harness）。
+本地 `test_docker_build_context` 使用 Docker SDK 7.1.0 的真实上下文打包器，检查镜像输入和私有 Kafka
+配置的过滤规则。执行该单测只需 Python 依赖 `docker==7.1.0`，无需 Docker Engine、broker、数据库或
+真实凭证；夹具在独立临时目录中创建占位文件。缺少 SDK 时测试失败，不跳过，可在开发 Python 环境中安装：
+
+```bash
+python3 -m pip install docker==7.1.0
+```
+
+集成测试首次运行需要 Docker CLI/Compose 和 socket 访问权限，以及当前构建产物。数据库镜像按 `config/testing/environment.json` 的固定摘要准备；运行镜像和身份夹具镜像使用配置声明的不可变镜像身份。当前工作区已有固定运行镜像，可通过以下命令为其他工作区准备运行依赖，然后将 inspect 返回的不可变 ID 写入自己的配置副本（runtime/harness）。
 
 ```bash
 docker build -t flowsql:test-runtime .

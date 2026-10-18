@@ -40,6 +40,25 @@ AF_XDP 通过 pkg-config 查找 libxdp/libbpf。缺库的 provider 明确返回�
 PF_RING 还需对应运行内核的模块；AF_XDP 需要可创建 BPF/XSK 的权限，使用 SKB/COPY 模式，
 发现并打开全部 RX 队列，拒绝已有 XDP owner 的接口。
 
+### Docker 部署
+
+基础 `docker-compose.yml` 的 Scheduler 已加载 NetAdapter 管理插件和三个后端 provider，通道定义保存在
+`pcap-uploads` 卷的 `.meta/netadapter.db`，重建容器后继续复用。镜像提供 libpcap、libxdp、libbpf；
+若本机编译启用了 PF_RING，共享运行库会随 `build/output` 自动准备并进入镜像，镜像构建时生成 SONAME
+链接。没有安装 PF_RING 构建依赖时，provider 仍明确报告不可用，不会切换后端。
+
+默认 Compose 使用桥接网络，通道中的网卡名称必须是在 **Scheduler 容器内**可见的接口。可以先查看：
+
+```bash
+docker compose exec scheduler python3 -c 'import socket; print(socket.if_nameindex())'
+```
+
+采集容器接口可先选择 AF_PACKET。它需要 `NET_RAW`；涉及网络管理的操作还需要 `NET_ADMIN`，可按部署
+平台使用 Compose 叠加文件授予 Scheduler 所需 capability。采集宿主机物理网卡时，须先由部署方配置
+相应网络命名空间或设备接入，让目标网卡在容器内可见；不能直接把宿主网卡名称填入默认桥接容器。
+PF_RING 还要求宿主内核加载对应模块；AF_XDP 要求内核、capability 和 seccomp 策略允许 BPF/XSK 操作。
+用户态运行库和插件能加载不代表已完成真实收包验证，应在目标 Linux 环境单独执行后文的 smoke。
+
 PF_RING 的真实 smoke 接受两个接收接口和对应的两个发送 peer，实际注入并核对各输入的标记帧、
 48 字节截断/64 字节 wire length、时间戳、可用计数、借用归还、Cancel 和 provider 租约。
 在已加载 `pf_ring` 的 Linux 环境可执行以下隔离命令；缺模块、未收包均非零失败。

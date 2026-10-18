@@ -2,6 +2,26 @@
 
 WIP=0；2026-10-18 Asia/Shanghai。
 
+## 最近完成：Docker 发布修复与 Kafka 手测指导 / 本地提交 Atomic Slice
+
+- 授权/业务意图：用户明确要求“提交代码”；将本会话已完成的 Docker 修复、对应回归和 Kafka 手测帮助文档形成可审查的本地提交。
+- Non-Goals：不改业务代码或公共契约，不重跑无变化的完整回归，不推送或发布镜像，不操作已有容器/卷，不提交 evidence、秘密及其他 Feature 内容。
+- 允许文件：本轮仅编辑 tasks/active_task.md；精确暂存 .dockerignore、Dockerfile、docker-compose.yml、README.md、docs/kafka.md、docs/netadapter.md、docs/testing.md、src/channels/netadapter/CMakeLists.txt、src/tests/test_framework/CMakeLists.txt、src/tests/test_framework/test_docker_deploy_config.cpp、src/tests/test_framework/test_docker_build_context.py、tasks/active_task.md，共 12 路径。
+- 初始状态/契约：HEAD=d9c1298，暂存区为空；当前 12 路径均属于本会话，工作台现有 Baseliner 已提交正文逐字保留。Kafka 文档摘要与已验收结果一致；基线及审计缓存于 evidence/docker-release-commit/，不入 Git。
+- 步骤：复核本次 diff/原验收证据；执行部署配置与上下文定向检查、三套 Compose 解析、格式及文档静态检查；精确暂存并核对路径/blob；本地提交后核对提交树、空暂存区和工作区。
+- 验收命令：tools/test.sh unit --filter '^(test_native_deploy_config|test_docker_deploy_config|test_docker_build_context)$' --jobs 2；三套 docker compose config --quiet；clang-format --dry-run --Werror src/tests/test_framework/test_docker_deploy_config.cpp；文档 JSON/Bash/链接与前端配置往返校验；git diff --check、git diff --cached --check、git show --stat/--name-only、git diff --cached --quiet，暂存 blob 与当前文件精确相等。
+- 依赖/执行位置：仓库根目录的 Git、Python3/Docker SDK 7.1.0、Node、Bash、clang-format、Compose CLI 及现有构建产物；所选本地契约测试不访问 Engine、broker、数据库或真实网卡。完整新镜像 build/run 和真实收包仍属此前未验证项，不以本轮检查替代。
+- 时间盒：21:52–22:12 Asia/Shanghai，20 分钟；用户再次明确要求“直接提交”，当前权限规则已更新，沿用原 12 路径和验收边界继续。停止条件：本地提交及后置审计通过后 WIP=0；若 Git 元数据权限拒绝，按标准审批机制处理，不绕过权限限制。
+
+### 本地提交检查
+
+- 本轮定向回归选中/执行/通过 3，失败/跳过/未执行 0；summary 为 evidence/test-environment/20261018T134535Z-5a9bceb4/summary.json。三套 Compose 解析、C++ 格式和 diff 检查通过。
+- Kafka 指导复核通过：32 个代码块、9 个 JSON 和 15 个 Bash 示例、22 个本地链接/锚点、42 个 UI 标签及连接/source/sink 配置往返与异步 SQL。README/文档与原验收摘要相同，原工作台记录逐字保留。
+- 前轮权限记录：普通 git add 无法创建 .git/index.lock（Read-only file system），标准提权被旧审批策略拒绝，未改变 HEAD/index；当前按更新后的标准权限机制继续，不绕过拒绝。
+- 本地提交验收：更新后的标准权限机制已批准 Git 元数据写入；HEAD、空暂存区、11 个已验收文件及原工作台正文均与基线一致后，精确暂存上述 12 路径。本记录随本次本地提交落库，提交号见 Git 日志；不推送。
+- 完成出口：暂存路径/blob、diff 及提交后树/index/工作区审计缓存在 evidence/docker-release-commit/，不入库；保留所有原工作台正文，本切片关闭后 WIP=0。
+- 沿用原修复的构建和 10/10 定向回归记录；本次没有修改程序或重跑完整回归。完整新镜像 build/run、跨容器业务链路和真实收包仍未验证，不能据此宣称已通过 Docker 运行验收。
+
 ## 最近完成：baseliner-output-throughput / 本地提交 Atomic Slice
 
 - 授权/业务意图：用户明确要求“直接提交”；将已完成验收的Baseliner批量输出Feature形成一次可审查的本地提交。
@@ -247,7 +267,80 @@ WIP=0；2026-10-18 Asia/Shanghai。
 - 范围：本轮仅修改工作台、Backlog 和新增规格；原 Docker/文档等无关文件摘要、原工作台历史与暂存区保持，git diff --check 通过；未编译、运行 SQL/CTest、改程序或提交/推送。
 - 本地证据：evidence/baseliner-output-throughput/ 的 planning-baseline.json、planning-validation.json、verify_planning.py、bounded-review.json 与 diagnosis/ 原始诊断缓存；均被 Git 忽略。完成本轮后停止，不自动开始 T1。
 
-## 最近完成：移除未使用的 Kafka Compose 覆盖入口 / Atomic Slice 1
+## 最近完成：Docker 发布与运行修复 / Atomic Slice 1
+
+- 关联：用户已确认修复上一轮 Docker 审计的四项问题；交付默认部署的功能插件、运行依赖和私有配置打包隔离保证。
+- 业务意图：使用 Docker Compose 的用户能使用与原生相同的 Baseline 与 NetAdapter 框架能力，所启用采集插件不因缺少用户态运行库加载失败，实际 Kafka Provider 配置不能混入发布镜像。
+- Non-Goals：不修改公共 ABI、Kafka 认证/读写语义和用户通道，不实现宿主机网卡自动透传/内核安装，不使用 privileged，不操作已有容器/卷/网络，不提交/推送或发布镜像。
+- 冻结契约：Scheduler 默认加载 Baseline、NetAdapter 与三种采集 provider；NetAdapter 元数据放 /opt/flowsql/uploads/.meta/netadapter.db。PF_RING 动态运行库仅在构建启用时随 output 产物交付；镜像安装 libpcap/libxdp/libbpf 并生成 SONAME 链接。config/kafka 仅携带三个安全示例，实际 provider.json、私有子目录和密钥不进入上下文；不改动此前 README.md 和 docs/kafka.md。
+- 允许修改文件：tasks/active_task.md、Dockerfile、.dockerignore、docker-compose.yml、src/channels/netadapter/CMakeLists.txt、src/tests/test_framework/CMakeLists.txt、src/tests/test_framework/test_docker_deploy_config.cpp、src/tests/test_framework/test_docker_build_context.py（新增）、docs/netadapter.md、docs/testing.md。本地证据仅写 evidence/docker-release-fix/。
+- 文件数说明：同一部署修复必须同步构建产物、镜像、插件清单、回归注册及使用/依赖说明；不按实现文件拆成独立 Feature，不混入其他改动。
+- 初始范围：HEAD=6c34ba4；既有 README.md、docs/kafka.md、工作台修改且暂存区为空；摘要及工作台历史缓存见 evidence/docker-release-fix/baseline.json。
+- 实现步骤：先增加插件/依赖/真实上下文打包回归并确认失败；补部署与运行库分发；更新 Docker 采集边界/测试依赖说明；运行定向构建及标准回归，核对 ELF/SONAME、Compose 和未改文件摘要。
+- 验收命令：cmake -B build src；cmake --build build --target test_docker_deploy_config test_native_deploy_config -j4；tools/test.sh unit --filter '^(test_docker_deploy_config|test_docker_build_context|test_native_deploy_config)$' --jobs 2；三套 docker compose config --quiet；clang-format --dry-run --Werror（本轮 C++）；本地无秘密上下文 tar、PF_RING staging/ldconfig/ELF 检查；git diff --check。按构建影响运行既有 NetAdapter/backend 与 Baseline 本地回归。
+- 测试依赖：本机 CMake、C++17、Python3、Docker SDK 7.1.0（本地上下文打包，无 Engine）、Compose CLI、现有 DPDK/PF_RING/libxdp/libbpf 构建依赖；纯回归不依赖 broker/数据库/采集权限。所有新增夹具在独立临时目录，不读写真实凭证/业务资源。真实镜像验收依赖 Engine；本轮再次预检 socket permission denied，不绕过权限或将未运行项记为通过。
+- 时间盒：17:02–17:32 Asia/Shanghai，30 分钟。
+- 停止条件：四项修复及对应可运行回归闭环后更新工作台停止；真实 Docker build/run 受环境阻断时保留证据与未验证项；时间盒到期按实际检查点收口，不扩大文件或自动进入下一切片。
+
+### 本轮修复证据与边界
+
+- 状态：代码修复和可运行定向验收已完成，17:13 前收口；真实新镜像 build/完整 Compose 运行仍被 Engine socket 权限阻断，不作为发布运行已验收。
+- 修复：Scheduler 补 Baseline、NetAdapter 与三 provider，网卡通道数据库放入持久卷；PF_RING 动态库在启用时随 build/output 准备，Docker 支持版本化库并由 ldconfig 建 SONAME 链接；libpcap/libxdp/libbpf 运行包齐备；Kafka/Docker 配置目录精确白名单，排除实际配置和私有目录。
+- 红灯证明：新增两个回归先于修复执行，选中/执行 2、失败 2，跳过/未执行 0；20261018T090307Z-9f09c57a，复现插件/库缺失、私有文件被包含和版本化库被排除。
+- 构建/绿灯：cmake 配置及九个定向 targets 编译退出 0；标准 unit 选中/执行/通过 10，失败/跳过/未执行 0，源码/产物摘要稳定；summary 为 evidence/test-environment/20261018T090950Z-85baf858/summary.json。包含部署/上下文、NetAdapter 三后端及 Baseline/Baseliner 本地回归。
+- 静态/本地运行库：三套 Compose 解析、COPY 输入、PF_RING 安装源/构建产物摘要、本地隔离目录 ldconfig 链接和 dlopen 检查均通过；未调用采集 API，不将其当作容器或真实收包验证。C++ 格式、Python/文档 Bash 语法和 git diff --check 通过。
+- 未验证：新镜像构建、完整服务启动、跨容器认证/SQL/Kafka 读写、重建恢复及真实采集；未跑全量 all。Engine 预检错误保存在 evidence/docker-release-fix/docker-engine.txt；没有绕过权限或操作原有资源。
+- 范围：本轮十个允许文件；README.md、docs/kafka.md 与基线相同，既有工作台历史正文保留，暂存区为空；未提交/推送。证据 verify.py、verification.json、红绿灯日志及 report.md 均在被 Git 忽略的 evidence/docker-release-fix/。
+
+## 前项完成：Docker 发布与运行核查 / Atomic Slice 1
+
+- 关联：用户要求检查 Docker 方式发布和运行是否仍有问题；本轮为当前部署入口的审计，不实施未经确认的修复。
+- 业务意图：确认当前镜像打包、基础/数据库叠加 Compose、Kafka 配置持久化和容器连接条件是否可支持发布运行，给出可复核的问题及验证边界。
+- Non-Goals：不改 Dockerfile、Compose、配置或程序；不修改用户通道/任务，不提交/推送或发布镜像，不重置已有容器/卷/网络，不绕过 Docker socket 的权限限制。
+- 冻结契约：保留原有 README.md、docs/kafka.md 与工作台历史；只更新工作台和本地证据。配置解析通过不等于真实镜像运行通过，历史 Docker 验收不得算作本轮执行。
+- 允许修改文件：tasks/active_task.md；本地记录与审计脚本仅写 evidence/docker-release-audit/，构建/测试缓存按现有工具生成，不入 Git。
+- 初始范围：HEAD=6c34ba4，既有 README.md、docs/kafka.md、tasks/active_task.md 修改，暂存区为空；摘要及原工作台缓存到 evidence/docker-release-audit/。
+- 实现步骤：核对 Dockerfile/.dockerignore 打包闭包、Compose 启动/依赖/卷/网络及文档；检查当前 ELF 动态依赖和 Python Worker 路径；运行部署配置 target/定向回归；可访问 Engine 时以隔离项目验证，否则准确记录未执行项；审查本轮范围并输出最小修复方案。
+- 验收命令：docker compose config --quiet（基础、数据库叠加、手测）；Dockerfile COPY/context 与插件/运行库审计；cmake --build build --target test_native_deploy_config test_docker_deploy_config -j4；tools/test.sh unit --filter '^(test_native_deploy_config|test_docker_deploy_config)$' --jobs 2；Docker Engine/version 预检、可用时隔离 build/run；git diff --check 及初始摘要核对。
+- 测试依赖：本机 Python3、Bash、CMake、Node（如需前端产物核验）、Docker Compose CLI；本地配置契约不依赖数据库或 Kafka。真实镜像/容器验证依赖当前用户可访问 Docker Engine，当前 socket 返回 permission denied；不重复已被自动审批拒绝的提权方式。
+- 时间盒：16:40–17:10 Asia/Shanghai，30 分钟。
+- 停止条件：本轮核查和可运行检查完成，问题证据/影响/最小方案及未验证项齐全后 WIP=0；发现缺陷不自行扩大允许文件，真实运行受权限阻断则保留明确错误证据。
+
+### 本轮核查证据与边界
+
+- 状态：本轮静态核查与可执行定向回归已完成；真实镜像构建与容器运行验收被 Docker socket permission denied 阻塞，未伪记通过；发现的问题等待用户确认修复方案，不扩大允许文件。
+- 确认缺口：默认 Docker Scheduler 未加载 Baseline 服务、NetAdapter 与 capture provider；当前 PF_RING/AF_XDP 产物需要的 libpfring.so.8、libxdp.so.1、libbpf.so.1 未纳入镜像运行依赖；.dockerignore 重新包含整个 config/kafka/，本地显式 provider.json 也可进入上下文。当前无真实配置/密钥泄漏证据。
+- 构建与回归：两个部署配置 targets 编译退出 0；标准入口 unit 选中/执行/通过均 2，失败/跳过/未执行均 0，summary 为 evidence/test-environment/20261018T084318Z-8541d455/summary.json。这是本机配置契约测试，不是容器运行验证。
+- 静态检查：基础、数据库叠加、手测三套 Compose 解析均退出 0；COPY 当前输入、声明插件文件、Arrow ABI、Kafka 持久状态卷、Python IPC/挂载及叠加 pyworker 依赖均通过；Docker SDK 本地打包器使用无秘密占位夹具复现 provider.json 进入构建上下文。
+- 未验证：新发布镜像 build、完整 Compose 启动、业务链路、跨容器认证/读写和重建恢复；不引用历史最小 Docker smoke 充当本轮完整发布验收。
+- 范围：仅工作台和被 Git 忽略的 evidence/docker-release-audit/ 有本轮修改；原 README.md、docs/kafka.md 摘要和暂存区保持；未修改程序/部署配置，未操作现有容器/卷/用户通道，未提交或推送。
+- 本地证据：audit.py、audit.json、report.md、elf.json、apt-dependencies.txt、context-probe.json、docker-engine.txt 和初始摘要；问题影响、最小修复及验收建议均写入 report.md。修复需按 AGENTS.md 第 6 节先确认后开新切片。
+
+## 前项完成：Kafka 手动测试用户指导 / Atomic Slice 1
+
+- 关联：既有 Kafka source/sink 与手动测试部署的使用说明补全；用户明确要求详细指导和帮助文档。
+- 业务意图：使用 ./start.sh 的用户能够按真实 Web 字段完成连接、source/sink 配置，发送样例、异步运行 SQL、辨认输出和重复测试。
+- Non-Goals：不修改页面、插件、脚本或配置，不自动改用户连接/通道/任务，不发送消息或重置消费位点，不新建重复能力文档，不提交或推送。
+- 冻结契约：唯一说明 docs/kafka.md 的手测章节保留既有入口锚点，按当前 KafkaChannels.vue / Tasks.vue 的实际标签及字段契约组织步骤；连接 manual、通道 manual_source/manual_sink、Topic flowsql.manual.source/flowsql.manual.sink、消费组 flowsql_manual，说明截图中通道名 manual 的 SQL 差异。
+- 允许修改文件：tasks/active_task.md、docs/kafka.md、README.md；本地验证记录写 evidence/kafka-user-guide/。
+- 初始范围：工作区和暂存区均干净，HEAD 为 6c34ba4；初始摘要见 evidence/kafka-user-guide/baseline.json。
+- 实现步骤：核对 UI 与运行命令；编写逐项表单、字段映射、双端 SQL、结果与重测/停机说明；保留等价 API；检查示例、链接、命令语法与改动范围。
+- 验收命令：文档代码块 JSON 解析、所有 bash 代码块 bash -n、相对文件链接与章节锚点检查；使用当前前端 buildConnection/buildChannel 对文档配置做断言；核对 UI 标签及任务停止 API；git diff --check、范围/暂存区检查。
+- 测试依赖：本机 Python3、Node.js、Bash，静态读取当前源码/脚本/Compose；无 broker/数据库或其他外部依赖，不执行文档中的部署和写入命令。纯文档不编译 C++，不运行无关回归。
+- 时间盒：14:22–14:47 Asia/Shanghai，25 分钟。
+- 停止条件：帮助文档覆盖从首次启动到重测/退出及常见错误，示例与实际契约一致且静态验证通过后更新 WIP=0 并停止。
+
+### 本轮完成证据
+
+- 状态：已完成；沿用 docs/kafka.md 补全十步手测教程及导航，README 指向同一使用入口；本轮只修改三个允许文件，暂存区保持为空，未提交或推送。
+- 内容：原生 FlowSQL + Docker Kafka 启动、Web 连接及 source/sink 逐字段配置、默认 message 字段替换、异步 SQL、供数与新增信封辨认、消费组续读与新组重放、取消任务与持久化恢复、错误排查及等价 API。
+- 页面核对：42 个实际标签与当前组件一致；停止按钮为“取消”。当前结果弹窗不展示完整 publication，教程以实际公共任务 ID 查询 result.publication，不用信封中的运行时 ID；说明历史消息、int64 字符串及 read 从头读取的含义。
+- 静态验收：32 个代码块围栏平衡；9 个 JSON 代码块、4 个静态 API 请求体及 1 个 stdin JSON 可解析；15 个 Bash 代码块及手测脚本 bash -n 均通过；22 处本地链接/锚点有效，原 README 手测锚点保留。
+- 契约验收：文档连接/source/sink 三个配置经当前前端 buildConnection/buildChannel 往返与原配置一致；Web 与 API 的 SQL 一致且为 async；Topic、端口、网络、脚本命令、消费位点与结果计数说明均与当前实现核对。
+- 范围审计：既有“原生安装与启用”及其后章节逐字保持；git diff --check 通过。本轮不启动/停止服务、不提交 SQL、不生产/消费消息，不声称重新运行 C++ 构建、Kafka 端到端或全量回归。
+- 本地证据：evidence/kafka-user-guide/ 的 HEAD 基线、文档配置、verify.py 与 validation.json；均由 Git 忽略，不入库。
+
+## 前项完成：移除未使用的 Kafka Compose 覆盖入口 / Atomic Slice 1
 
 - 关联：Kafka 默认部署与手动测试部署配套清理；用户已授权全面核查后删除未使用文件。
 - 业务意图：消除旧客户端覆盖文件与手测 broker 配置的命名混淆，默认原生、Docker 和手测入口继续使用现有配置。

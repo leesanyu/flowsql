@@ -126,6 +126,7 @@ target_compile_definitions(test_docker_deploy_config PRIVATE
 )
 target_compile_options(test_docker_deploy_config PRIVATE -UNDEBUG)
 add_dependencies(test_docker_deploy_config
+    flowsql
     flowsql_gateway
     flowsql_web
     flowsql_router
@@ -139,7 +140,22 @@ add_dependencies(test_docker_deploy_config
     flowsql_npm_basic
     flowsql_pcapfile
     flowsql_config_channel
+    flowsql_task
+    flowsql_stream
+    flowsql_baseline
+    flowsql_netadapter
+    flowsql_capture_af_packet
+    flowsql_capture_pfring
+    flowsql_capture_af_xdp
 )
+if(FLOWSQL_PFRING_INCLUDE_DIR AND FLOWSQL_PFRING_LIBRARY)
+    get_filename_component(pfring_runtime "${FLOWSQL_PFRING_LIBRARY}" REALPATH)
+    get_filename_component(pfring_runtime_name "${pfring_runtime}" NAME)
+    if(pfring_runtime_name MATCHES "\\.so(\\.|$)")
+        target_compile_definitions(test_docker_deploy_config PRIVATE
+            FLOWSQL_PFRING_RUNTIME_FILENAME="${pfring_runtime_name}")
+    endif()
+endif()
 if(TARGET flowsql_flow_labeling)
     add_dependencies(test_docker_deploy_config flowsql_flow_labeling)
     target_compile_definitions(test_docker_deploy_config PRIVATE FLOWSQL_FLOW_LABELING_BUILT=1)
@@ -150,3 +166,5 @@ set_target_properties(test_docker_deploy_config PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
 add_test(NAME test_docker_deploy_config COMMAND ${CMAKE_BINARY_DIR}/output/test_docker_deploy_config)
+add_test(NAME test_docker_build_context COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_docker_build_context.py)

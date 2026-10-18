@@ -22,6 +22,8 @@ constexpr const char* kWebPlugin = "libflowsql_web.so";
 constexpr const char* kRouterPlugin = "libflowsql_router.so";
 constexpr const char* kNpiPlugin = "libflowsql_npi.so:{\"ldfile\":\"/opt/flowsql/config/protocols.yml\"}";
 constexpr const char* kPcapFilePlugin = "libflowsql_pcapfile.so";
+constexpr const char* kNetAdapterPlugin = "libflowsql_netadapter.so";
+constexpr const char* kBaselinePlugin = "libflowsql_baseline.so";
 constexpr const char* kConfigChannelPlugin = "libflowsql_config_channel.so";
 constexpr const char* kKafkaPlugin = "libflowsql_kafka.so";
 constexpr const char* kFlowLabelingPlugin = "libflowsql_flow_labeling.so";
@@ -145,6 +147,9 @@ bool TestDockerfile() {
     ok = Contains(dockerfile, "librte-acl24", "Docker runtime must install the system DPDK ACL library") && ok;
     ok = Contains(dockerfile, "librte-eal24", "Docker runtime must install the system DPDK EAL library") && ok;
     ok = Contains(dockerfile, "libpq5", "Docker runtime must install the PostgreSQL client library") && ok;
+    ok = Contains(dockerfile, "libpcap0.8t64", "PF_RING runtime must include libpcap") && ok;
+    ok = Contains(dockerfile, "libxdp1", "AF_XDP runtime must include libxdp") && ok;
+    ok = Contains(dockerfile, "libbpf1", "AF_XDP runtime must include libbpf") && ok;
     ok = Contains(dockerfile, "python3 -m venv", "Docker Python dependencies must use a virtual environment") && ok;
     ok = Contains(dockerfile, "pyarrow==22.0.0", "Docker Arrow runtime must match the built C++ ABI") && ok;
     ok = Contains(dockerfile, "-r ./python/requirements.txt", "Docker Worker must install all declared dependencies") &&
@@ -155,7 +160,18 @@ bool TestDockerfile() {
     ok = Contains(dockerfile, "COPY src/plugins/npi/conf/protocols.yml ./config/protocols.yml",
                   "Dockerfile must install the NPI protocol definition at the runtime config path") &&
          ok;
-    ok = Contains(dockerfile, "COPY build/output/lib*.so", "Dockerfile must copy built plugin libraries") && ok;
+    ok = Contains(dockerfile, "COPY build/output/lib*.so*",
+                  "Dockerfile must copy plugins and versioned runtime libraries") &&
+         ok;
+    ok = Contains(dockerfile, "RUN ldconfig /opt/flowsql/bin",
+                  "Docker must create SONAME links for runtime libraries") &&
+         ok;
+#ifdef FLOWSQL_PFRING_RUNTIME_FILENAME
+    ok = Expect(std::filesystem::is_regular_file(std::filesystem::path(FLOWSQL_BUILD_OUTPUT_PATH) /
+                                                 FLOWSQL_PFRING_RUNTIME_FILENAME),
+                "The enabled PF_RING backend must stage its runtime library for Docker") &&
+         ok;
+#endif
     ok = Contains(dockerfile, "ENV FLOWSQL_KAFKA_STATE_DIR=\"/opt/flowsql/kafka-state\"",
                   "Direct Docker startup must use the persistent Kafka state path") &&
          ok;
@@ -293,6 +309,19 @@ bool TestCompose() {
     ok = Expect(HasVolume(scheduler, kCaptureMount), "Scheduler must mount pcap-uploads at the shared absolute path") &&
          ok;
     ok = Contains(scheduler_plugins, kNpiPlugin, "Scheduler must load NPI with the absolute protocol path") && ok;
+    ok = Expect(!PluginSpec(scheduler_plugins, kBaselinePlugin).empty(),
+                "Scheduler must load the Baseline services required by baseliner") &&
+         ok;
+    ok = Expect(PluginOption(scheduler_plugins, kNetAdapterPlugin) ==
+                    R"({"db_path":"/opt/flowsql/uploads/.meta/netadapter.db"})",
+                "Scheduler must load NetAdapter with metadata in the persistent capture volume") &&
+         ok;
+    for (const auto* provider :
+         {"libflowsql_capture_af_packet.so", "libflowsql_capture_pfring.so", "libflowsql_capture_af_xdp.so"}) {
+        ok = Expect(!PluginSpec(scheduler_plugins, provider).empty(),
+                    std::string("Scheduler must load the capture provider: ") + provider) &&
+             ok;
+    }
     ok = Expect(!PluginSpec(scheduler_plugins, kPcapFilePlugin).empty(), "Scheduler must load the pcapfile provider") &&
          ok;
     ok = Expect(!PluginSpec(scheduler_plugins, kConfigChannelPlugin).empty(),
