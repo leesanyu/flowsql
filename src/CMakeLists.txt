@@ -1,8 +1,20 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.28)
 
-project(flowsql)
+# Prepare compilers and system development packages before project() probes them.
+set(FLOWSQL_FLOW_LABELING "ON" CACHE STRING "Build the DPDK flow-labeling plugin: AUTO, ON, or OFF")
+set_property(CACHE FLOWSQL_FLOW_LABELING PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${FLOWSQL_FLOW_LABELING}" FLOWSQL_FLOW_LABELING_MODE)
+if(NOT FLOWSQL_FLOW_LABELING_MODE MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR "FLOWSQL_FLOW_LABELING must be AUTO, ON, or OFF")
+endif()
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/system_dependencies.cmake)
+flowsql_prepare_system_dependencies()
+
+project(flowsql LANGUAGES C CXX)
 include(CTest)
-include(${CMAKE_SOURCE_DIR}/tests/test_environment/register.cmake)
+if(BUILD_TESTING)
+    include(${CMAKE_SOURCE_DIR}/tests/test_environment/register.cmake)
+endif()
 
 # 设置编译参数
 set(CMAKE_CXX_STANDARD 17)
@@ -39,15 +51,9 @@ set(THIRDPARTS_DIR ${CMAKE_SOURCE_DIR}/../thirdparts)
 
 # 子项目
 include(${CMAKE_SOURCE_DIR}/subjects.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/product_runtime.cmake)
+flowsql_prepare_product_runtime()
 add_thirdparts()
-
-set(FLOWSQL_FLOW_LABELING "AUTO" CACHE STRING "Build the DPDK flow-labeling plugin: AUTO, ON, or OFF")
-set_property(CACHE FLOWSQL_FLOW_LABELING PROPERTY STRINGS AUTO ON OFF)
-string(TOUPPER "${FLOWSQL_FLOW_LABELING}" FLOWSQL_FLOW_LABELING_MODE)
-if(NOT FLOWSQL_FLOW_LABELING_MODE MATCHES "^(AUTO|ON|OFF)$")
-    message(FATAL_ERROR
-        "FLOWSQL_FLOW_LABELING must be AUTO, ON, or OFF (got '${FLOWSQL_FLOW_LABELING}')")
-endif()
 
 set(FLOWSQL_FLOW_LABELING_AVAILABLE OFF)
 if(FLOWSQL_FLOW_LABELING_MODE STREQUAL "OFF")
@@ -78,7 +84,7 @@ endif()
 
 # 添加外部子项目
 add_subdirectory(${CMAKE_SOURCE_DIR}/plugins/npi ${CMAKE_BINARY_DIR}/npi_plugin)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_npi ${CMAKE_BINARY_DIR}/test_npi)
+
 add_subdirectory(${CMAKE_SOURCE_DIR}/plugins/baseline ${CMAKE_BINARY_DIR}/baseline_plugin)
 
 # Block-stream channel providers
@@ -90,51 +96,29 @@ if(FLOWSQL_FLOW_LABELING_AVAILABLE)
     add_subdirectory(${CMAKE_SOURCE_DIR}/plugins/flow_labeling ${CMAKE_BINARY_DIR}/flow_labeling_plugin)
 endif()
 add_subdirectory(${CMAKE_SOURCE_DIR}/operators ${CMAKE_BINARY_DIR}/operators)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_netadapter ${CMAKE_BINARY_DIR}/test_netadapter)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_packet_contract ${CMAKE_BINARY_DIR}/test_packet_contract)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_npm_basic ${CMAKE_BINARY_DIR}/test_npm_basic)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_pcapfile_import ${CMAKE_BINARY_DIR}/test_pcapfile_import)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_framework ${CMAKE_BINARY_DIR}/test_framework)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_config_channel ${CMAKE_BINARY_DIR}/test_config_channel)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_connection_auth ${CMAKE_BINARY_DIR}/test_kafka_connection_auth)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_log_source ${CMAKE_BINARY_DIR}/test_kafka_log_source)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_result_sink ${CMAKE_BINARY_DIR}/test_kafka_result_sink)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_packet_source ${CMAKE_BINARY_DIR}/test_kafka_packet_source)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_packet_sink ${CMAKE_BINARY_DIR}/test_kafka_packet_sink)
-if(FLOWSQL_FLOW_LABELING_AVAILABLE)
-    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_flow_labeling ${CMAKE_BINARY_DIR}/test_flow_labeling)
-endif()
 
 # Stage 2: C++ ↔ Python 桥接
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/bridge ${CMAKE_BINARY_DIR}/bridge)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_bridge ${CMAKE_BINARY_DIR}/test_bridge)
 
 # Stage 2: Web 管理系统
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/web ${CMAKE_BINARY_DIR}/web)
 
 # Stage 2: Scheduler 调度服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/scheduler ${CMAKE_BINARY_DIR}/scheduler)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_scheduler_e2e ${CMAKE_BINARY_DIR}/test_scheduler_e2e)
 
 # Stage 3: Database 数据库通道服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/database ${CMAKE_BINARY_DIR}/database)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_database ${CMAKE_BINARY_DIR}/test_database)
 
 # Stage 12: Stream 流式通道服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/stream ${CMAKE_BINARY_DIR}/stream)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_stream ${CMAKE_BINARY_DIR}/test_stream)
 
 # Stage 8: Catalog 目录服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/builtin ${CMAKE_BINARY_DIR}/builtin)
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/catalog ${CMAKE_BINARY_DIR}/catalog)
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/binaddon ${CMAKE_BINARY_DIR}/binaddon)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_builtin ${CMAKE_BINARY_DIR}/test_builtin)
 
 # Stage 9: Task 异步任务服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/task ${CMAKE_BINARY_DIR}/task)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_task ${CMAKE_BINARY_DIR}/test_task)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_baseline ${CMAKE_BINARY_DIR}/test_baseline)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_baseliner_contract ${CMAKE_BINARY_DIR}/test_baseliner_contract)
 
 # Stage 3: Gateway 服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/gateway ${CMAKE_BINARY_DIR}/gateway)
@@ -142,11 +126,34 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/services/gateway ${CMAKE_BINARY_DIR}/gatewa
 # Stage 3: Router Agency 插件
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/router ${CMAKE_BINARY_DIR}/router)
 
-# Stage 3: Router 测试
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_router ${CMAKE_BINARY_DIR}/test_router)
-add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_environment ${CMAKE_BINARY_DIR}/test_environment)
-
 # 通用入口（flowsql 可执行文件）
 add_subdirectory(${CMAKE_SOURCE_DIR}/app ${CMAKE_BINARY_DIR}/app)
 
-flowsql_finalize_environment("${CMAKE_SOURCE_DIR}")
+if(BUILD_TESTING)
+    if(FLOWSQL_FLOW_LABELING_AVAILABLE)
+        add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_flow_labeling ${CMAKE_BINARY_DIR}/test_flow_labeling)
+    endif()
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_npi ${CMAKE_BINARY_DIR}/test_npi)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_netadapter ${CMAKE_BINARY_DIR}/test_netadapter)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_packet_contract ${CMAKE_BINARY_DIR}/test_packet_contract)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_npm_basic ${CMAKE_BINARY_DIR}/test_npm_basic)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_pcapfile_import ${CMAKE_BINARY_DIR}/test_pcapfile_import)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_framework ${CMAKE_BINARY_DIR}/test_framework)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_config_channel ${CMAKE_BINARY_DIR}/test_config_channel)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_connection_auth ${CMAKE_BINARY_DIR}/test_kafka_connection_auth)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_log_source ${CMAKE_BINARY_DIR}/test_kafka_log_source)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_result_sink ${CMAKE_BINARY_DIR}/test_kafka_result_sink)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_packet_source ${CMAKE_BINARY_DIR}/test_kafka_packet_source)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_kafka_packet_sink ${CMAKE_BINARY_DIR}/test_kafka_packet_sink)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_bridge ${CMAKE_BINARY_DIR}/test_bridge)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_scheduler_e2e ${CMAKE_BINARY_DIR}/test_scheduler_e2e)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_database ${CMAKE_BINARY_DIR}/test_database)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_stream ${CMAKE_BINARY_DIR}/test_stream)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_builtin ${CMAKE_BINARY_DIR}/test_builtin)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_task ${CMAKE_BINARY_DIR}/test_task)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_baseline ${CMAKE_BINARY_DIR}/test_baseline)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_baseliner_contract ${CMAKE_BINARY_DIR}/test_baseliner_contract)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_router ${CMAKE_BINARY_DIR}/test_router)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_environment ${CMAKE_BINARY_DIR}/test_environment)
+    flowsql_finalize_environment("${CMAKE_SOURCE_DIR}")
+endif()

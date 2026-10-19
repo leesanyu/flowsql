@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+runtime_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export PYTHONPATH="$runtime_dir/python${PYTHONPATH:+:$PYTHONPATH}"
+exec "@FLOWSQL_WORKER_PYTHON@" -m flowsql.worker "$@"

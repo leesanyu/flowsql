@@ -16,15 +16,28 @@ set_target_properties(flowsql_web PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
 
-# 构建后自动将前端 dist 同步到 output/static/
-set(FRONTEND_DIST ${CMAKE_SOURCE_DIR}/frontend/dist)
-add_custom_command(TARGET flowsql_web POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E remove_directory
-        ${CMAKE_BINARY_DIR}/output/static
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        ${CMAKE_BINARY_DIR}/output/static
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${FRONTEND_DIST}
-        ${CMAKE_BINARY_DIR}/output/static
-    COMMENT "同步前端构建产物到 output/static/"
-)
+# Build the frontend from the lockfile, including frontend-only incremental edits.
+set(frontend ${CMAKE_SOURCE_DIR}/frontend)
+file(GLOB_RECURSE frontend_sources CONFIGURE_DEPENDS
+    ${frontend}/src/* ${frontend}/public/*)
+set(npm_stamp ${CMAKE_CURRENT_BINARY_DIR}/npm-ci.stamp)
+add_custom_command(OUTPUT ${npm_stamp}
+    COMMAND ${CMAKE_COMMAND} -E env "PATH=${FLOWSQL_NODE_BIN}:$ENV{PATH}"
+        ${FLOWSQL_NPM_EXECUTABLE} ci --no-audit --no-fund --fetch-retries=1 --fetch-timeout=30000
+        --cache ${THIRDPARTS_PREFIX_DIR}/npm-cache
+    COMMAND ${CMAKE_COMMAND} -E touch ${npm_stamp}
+    DEPENDS ${frontend}/package.json ${frontend}/package-lock.json
+    WORKING_DIRECTORY ${frontend}
+    COMMENT "Installing locked frontend dependencies"
+    VERBATIM)
+set(frontend_stamp ${CMAKE_CURRENT_BINARY_DIR}/frontend.stamp)
+add_custom_command(OUTPUT ${frontend_stamp} ${CMAKE_BINARY_DIR}/output/static/index.html
+    COMMAND ${CMAKE_COMMAND} -E env "PATH=${FLOWSQL_NODE_BIN}:$ENV{PATH}"
+        ${FLOWSQL_NPM_EXECUTABLE} run build -- --outDir ${CMAKE_BINARY_DIR}/output/static --emptyOutDir
+    COMMAND ${CMAKE_COMMAND} -E touch ${frontend_stamp}
+    DEPENDS ${npm_stamp} ${frontend_sources} ${frontend}/index.html ${frontend}/vite.config.js
+    WORKING_DIRECTORY ${frontend}
+    COMMENT "Building frontend into output/static"
+    VERBATIM)
+add_custom_target(flowsql_frontend DEPENDS ${frontend_stamp} ${CMAKE_BINARY_DIR}/output/static/index.html)
+add_dependencies(flowsql_web flowsql_frontend)

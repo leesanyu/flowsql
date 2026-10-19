@@ -9,7 +9,9 @@ else()
     ExternalProject_Add(glog
         PREFIX ${THIRDPARTS_PREFIX_DIR}/glog
         URL "https://github.com/google/glog/archive/v0.4.0.tar.gz"
-        CMAKE_ARGS -DWITH_GFLAGS=0 -DCMAKE_INSTALL_PREFIX:PATH=${_glog_install}
+        URL_HASH SHA256=f28359aeba12f30d73d9e4711ef356dc842886968112162bc73002645139c39c
+        CMAKE_ARGS ${FLOWSQL_LEGACY_CMAKE_ARGS} -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            -DWITH_GFLAGS=0 -DCMAKE_INSTALL_PREFIX:PATH=${_glog_install}
     )
 endif()
 

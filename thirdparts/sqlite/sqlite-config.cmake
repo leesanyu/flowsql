@@ -11,6 +11,7 @@ else()
     ExternalProject_Add(sqlite
         PREFIX ${THIRDPARTS_PREFIX_DIR}/sqlite
         URL "https://www.sqlite.org/2024/sqlite-amalgamation-3450100.zip"
+        URL_HASH SHA256=5592243caf28b2cdef41e6ab58d25d653dfc53deded8450eb66072c929f030c4
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ${CMAKE_C_COMPILER} -c -O2 -fPIC -DSQLITE_THREADSAFE=1
             <SOURCE_DIR>/sqlite3.c -o <BINARY_DIR>/sqlite3.o

@@ -8,6 +8,7 @@ else()
     ExternalProject_Add(yaml-cpp
         PREFIX ${THIRDPARTS_PREFIX_DIR}/yaml-cpp
         URL "https://github.com/jbeder/yaml-cpp/archive/yaml-cpp-0.9.0.tar.gz"
+        URL_HASH SHA256=25cb043240f828a8c51beb830569634bc7ac603978e0f69d6b63558dadefd49a
         CMAKE_ARGS -DYAML_BUILD_SHARED_LIBS=1 -DCMAKE_INSTALL_PREFIX:PATH=${_yamlcpp_install}
     )
 endif()

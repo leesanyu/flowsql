@@ -8,6 +8,8 @@ Flow Labeling 是 Scheduler 进程内的通用会话流标签能力。它用固�
 本文区分四个容易混淆的量：插件是否被构建、Scheduler 是否装载插件、进程级 DPDK EAL 内存，以及每个任务的
 matcher 预算。任何 benchmark 数字都必须连同机器、DPDK 版本、规则布局和命令保存，不能当作规则数公式。
 
+系统依赖由 CMake 检查并按需安装，权限、开关与完整构建步骤见 [从源码构建](building.md)。
+
 ## 1. 系统依赖与构建三态
 
 Flow Labeling 的真实实现依赖系统 DPDK 开发包。Ubuntu/Debian 构建环境至少需要：
@@ -27,8 +29,8 @@ test -f /usr/include/dpdk/rte_acl.h
 
 | 值 | 配置结果 |
 | --- | --- |
-| `AUTO` | 默认值；找到 `libdpdk.pc` 时构建真实插件，否则跳过插件 |
-| `ON` | 必须找到 PkgConfig 和 `libdpdk.pc`，缺依赖时 CMake 配置失败 |
+| `AUTO` | 显式选择；自动安装开启时准备 DPDK；关闭安装时，找到 `libdpdk.pc` 则构建，否则跳过插件 |
+| `ON` | 默认值；必须找到 PkgConfig 和 `libdpdk.pc`，缺依赖时 CMake 配置失败 |
 | `OFF` | 明确不构建插件 |
 
 需要 Flow Labeling 时使用确定性的 `ON` 构建：

@@ -55,7 +55,10 @@ target_compile_definitions(packet_sink_e2e PRIVATE
     PACKET_NPI_CONFIG="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml"
     PACKET_NPM_LIBRARY="$<TARGET_FILE:flowsql_npm_basic>")
 target_link_libraries(packet_sink_e2e PRIVATE flowsql_kafka_runtime flowsql_common ${CMAKE_DL_LIBS})
-add_dependencies(packet_sink_e2e flowsql_database flowsql_builtin flowsql_catalog flowsql_npi flowsql_scheduler flowsql_binaddon flowsql_task flowsql_npm_basic flowsql_flow_labeling flowsql_kafka flowsql_netadapter flowsql_capture_af_packet)
+add_dependencies(packet_sink_e2e flowsql_database flowsql_builtin flowsql_catalog flowsql_npi flowsql_scheduler flowsql_binaddon flowsql_task flowsql_npm_basic flowsql_kafka flowsql_netadapter flowsql_capture_af_packet)
+if(FLOWSQL_FLOW_LABELING_AVAILABLE)
+    add_dependencies(packet_sink_e2e flowsql_flow_labeling)
+endif()
 set_target_properties(packet_sink_e2e PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 # CAP_SYS_ADMIN, CAP_NET_ADMIN and CAP_NET_RAW are required; missing permissions fail explicitly.
 add_test(NAME test_kafka_packet_sink_e2e COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/real_capture.py)

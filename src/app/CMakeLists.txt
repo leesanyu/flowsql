@@ -21,6 +21,12 @@ if(NOT EXISTS "${DESTINATION}")
     configure_file("${SOURCE}" "${DESTINATION}" COPYONLY)
 endif()
 ]=])
+configure_file(${CMAKE_SOURCE_DIR}/cmake/flowsql-worker.in
+    ${CMAKE_BINARY_DIR}/output/flowsql-worker @ONLY)
+file(CHMOD ${CMAKE_BINARY_DIR}/output/flowsql-worker
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+configure_file(${CMAKE_SOURCE_DIR}/cmake/stage_runtime.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/stage_runtime.cmake @ONLY)
 add_custom_target(flowsql_runtime_config
     COMMAND ${CMAKE_COMMAND} -E make_directory
         ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}
@@ -28,12 +34,7 @@ add_custom_target(flowsql_runtime_config
         "-DSOURCE=${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/flowsql.yml"
         "-DDESTINATION=${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/flowsql.yml"
         -P ${FLOWSQL_RUNTIME_CONFIG_INITIALIZER}
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/deploy-single.yaml
-        ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/deploy-single.yaml
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/deploy-multi.yaml
-        ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/deploy-multi.yaml
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/stage_runtime.cmake
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${FLOWSQL_NPI_PROTOCOLS_SOURCE}
         ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/protocols.yml

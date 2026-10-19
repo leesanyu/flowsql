@@ -79,7 +79,7 @@ docker compose -f config/docker-compose-postgres.yml up -d
 
 ### 环境要求
 
-- CMake 3.12+，支持 C++17 及当前第三方依赖的编译器，Linux
+- CMake 3.28+；自动安装系统依赖支持 Ubuntu 24.04（Linux x86_64）
 - Python 3.10+（Python 算子运行时；当前源码使用 `X | None` 类型注解）
 - Node.js 20.19+（20.x）或 22.12+、npm（构建当前 Vite 7 前端时需要）
 
@@ -89,32 +89,24 @@ docker compose -f config/docker-compose-postgres.yml up -d
   - 用途：Baseline 插件的业务时区换算
   - 对应 CMake 依赖：`find_package(ICU REQUIRED COMPONENTS uc i18n)`
 - DPDK 开发库与 pkg-config：Flow Labeling 的构建依赖，DNS/HTTP/1/TLS 模块需要可用的标签 provider。
-  默认 `FLOWSQL_FLOW_LABELING=AUTO`，缺依赖时跳过插件；标准部署配置包含该插件，按
-  [Flow Labeling 指引](docs/flow-labeling.md)准备依赖，并用 `-DFLOWSQL_FLOW_LABELING=ON` 明确检查。
+  默认 `FLOWSQL_FLOW_LABELING=ON`，CMake 检查并安装缺失的 `libdpdk-dev`；
+  显式 AUTO/OFF 的行为及所选采集后端的限制见 [构建说明](docs/building.md)。
 - PF_RING Classic、libxdp/libbpf：所选采集后端的可选依赖，缺少时该 provider 明确报告不可用；
   AF_PACKET 不依赖这些可选库。内核、设备与权限要求见 [NetAdapter 说明](docs/netadapter.md#构建与插件)。
 
-安装 Python Worker 与算子运行依赖：
-
-```bash
-python3 -m pip install -r src/python/requirements.txt -e src/python/ --break-system-packages
-```
-
 ### 编译
 
-首次完整构建先生成前端 `dist`，供 Web 插件构建步骤同步：
+在仓库根目录执行标准入口。CMake 会检查并安装缺少的 Ubuntu 系统构建包，准备兼容的 Python Worker / PyArrow 22.0.0 环境，并将前端构建纳入普通构建：
 
 ```bash
-npm install --prefix src/frontend
-npm run build --prefix src/frontend
-```
-
-随后从仓库根目录配置并编译 C++：
-
-```bash
-cmake -B build src -DFLOWSQL_FLOW_LABELING=ON
+cmake -B build src
 cmake --build build -j$(nproc)
 ```
+
+首次构建需要网络，系统包安装需要 root 或可用的非交互 sudo；依赖已满足时不运行 apt。
+若依赖由外部管理，配置时添加 `-DFLOWSQL_INSTALL_SYSTEM_DEPS=OFF`，仅检查、不安装系统包。
+前端产物直接生成到 `build/output/static`，无需预先手动生成 `src/frontend/dist`。
+详细包清单、Python/Node 缓存、构建开关及首次构建边界见 [从源码构建](docs/building.md)。
 
 ### 运行
 
@@ -134,7 +126,7 @@ Kafka 管理默认启用，首次启动自动准备持久配置与主密钥，�
 
 ```bash
 cd build/output
-LD_LIBRARY_PATH=. ./flowsql --config ../../config/deploy-multi.yaml
+LD_LIBRARY_PATH=. ./flowsql --config config/deploy-multi.yaml
 ```
 
 启动后浏览器访问 `http://127.0.0.1:8081` 进入管理界面。
@@ -148,12 +140,10 @@ LD_LIBRARY_PATH=. ./flowsql --config ../../config/deploy-multi.yaml
 
 在**构建机器的仓库根目录**，先生成前端和 C++ 产物，再制作镜像。Dockerfile 会直接复制 `build/output` 和
 `.thirdparts_installed/yaml-cpp` 的产物，不会在镜像内编译 C++。Compose 固定加载 Flow Labeling 插件，
-因此这里用 `FLOWSQL_FLOW_LABELING=ON`，使缺少 DPDK 构建依赖时配置直接失败：
+默认构建会准备 DPDK；关闭自动安装时，缺少该依赖将使配置失败：
 
 ```bash
-npm install --prefix src/frontend
-npm run build --prefix src/frontend
-cmake -B build src -DFLOWSQL_FLOW_LABELING=ON
+cmake -B build src
 cmake --build build -j$(nproc)
 docker build -t flowsql:latest .
 ```
@@ -283,8 +273,8 @@ npm run build --prefix src/frontend
 cmake -E copy_directory src/frontend/dist build/output/static
 ```
 
-`flowsql_web` 重新链接时也会同步已有 `dist`。仅修改 Vue/JS 后，普通 C++ 增量构建可能不会触发该步骤，
-此时使用上述显式重建入口。
+普通 CMake 构建会根据前端源文件依赖更新 `build/output/static`；也可运行
+`cmake --build build --target flowsql_frontend` 只更新前端。上述手动入口仍可用于单独调试前端。
 
 ### 测试
 

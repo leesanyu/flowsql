@@ -25,3 +25,7 @@ add_test(NAME test_environment_cleanup COMMAND ${Python3_EXECUTABLE} ${CMAKE_CUR
 
 add_test(NAME test_environment_failures COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/../tools/test_environment/acceptance.py)
 set_tests_properties(test_environment_failures PROPERTIES TIMEOUT 240 WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+
+add_test(NAME test_product_build COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_product_build.py)
+set_tests_properties(test_product_build PROPERTIES TIMEOUT 120)

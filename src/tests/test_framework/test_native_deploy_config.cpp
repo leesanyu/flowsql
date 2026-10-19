@@ -185,7 +185,15 @@ bool ExpectMatchingAsset(const std::filesystem::path& source, const std::filesys
     bool ok = Expect(std::filesystem::is_regular_file(source), "source " + name + " must exist");
     ok = Expect(std::filesystem::is_regular_file(output), "flowsql build must stage output/config/" + name) && ok;
     if (!ok) return false;
-    return Expect(ReadFile(source) == ReadFile(output), "staged " + name + " must match its source exactly");
+    std::string expected = ReadFile(source);
+    if (source.extension() == ".yaml") {
+        const std::string original = "python3 -m flowsql.worker";
+        const size_t position = expected.find(original);
+        if (!Expect(position != std::string::npos, name + " must declare the Python Worker")) return false;
+        expected.replace(position, original.size(), "./flowsql-worker");
+    }
+    return Expect(expected == ReadFile(output),
+                  "staged " + name + " must preserve the source with the managed Worker command");
 }
 
 bool TestRuntimeAssets() {
@@ -234,6 +242,12 @@ bool TestStartScriptRuntimeLayout() {
          ok;
     ok = Expect(std::filesystem::is_regular_file(runtime_root / "config/protocols.yml"),
                 "start.sh runtime must contain the staged NPI protocol definition") &&
+         ok;
+    ok = Expect(std::filesystem::is_regular_file(runtime_root / "flowsql-worker"),
+                "runtime must contain the managed Python Worker launcher") &&
+         ok;
+    ok = Expect(std::filesystem::is_regular_file(runtime_root / "python/flowsql/worker.py"),
+                "runtime must contain the Python Worker package") &&
          ok;
     ok = Expect(std::filesystem::is_regular_file(runtime_root / kNpmBasicPlugin),
                 "start.sh runtime must contain the npm.basic provider") &&

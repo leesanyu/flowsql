@@ -28,7 +28,10 @@ target_compile_definitions(test_kafka_packet_npm PRIVATE
     PACKET_NPM_LIBRARY="$<TARGET_FILE:flowsql_npm_basic>"
     PACKET_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data/packets")
 target_link_libraries(test_kafka_packet_npm PRIVATE flowsql_kafka_runtime flowsql_common ${CMAKE_DL_LIBS})
-add_dependencies(test_kafka_packet_npm flowsql_database flowsql_builtin flowsql_catalog flowsql_npi flowsql_scheduler flowsql_binaddon flowsql_task flowsql_npm_basic flowsql_flow_labeling)
+add_dependencies(test_kafka_packet_npm flowsql_database flowsql_builtin flowsql_catalog flowsql_npi flowsql_scheduler flowsql_binaddon flowsql_task flowsql_npm_basic)
+if(FLOWSQL_FLOW_LABELING_AVAILABLE)
+    add_dependencies(test_kafka_packet_npm flowsql_flow_labeling)
+endif()
 set_target_properties(test_kafka_packet_npm PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_kafka_packet_npm COMMAND $<TARGET_FILE:test_kafka_packet_npm>)
 set_tests_properties(test_kafka_packet_npm PROPERTIES TIMEOUT 180)
@@ -39,7 +42,10 @@ target_compile_definitions(kafka_packet_real PRIVATE
     PACKET_NPI_CONFIG="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml"
     PACKET_NPM_LIBRARY="$<TARGET_FILE:flowsql_npm_basic>")
 target_link_libraries(kafka_packet_real PRIVATE flowsql_kafka_runtime flowsql_common ${CMAKE_DL_LIBS})
-add_dependencies(kafka_packet_real flowsql_database flowsql_builtin flowsql_catalog flowsql_npi flowsql_scheduler flowsql_binaddon flowsql_task flowsql_npm_basic flowsql_flow_labeling flowsql_kafka)
+add_dependencies(kafka_packet_real flowsql_database flowsql_builtin flowsql_catalog flowsql_npi flowsql_scheduler flowsql_binaddon flowsql_task flowsql_npm_basic flowsql_kafka)
+if(FLOWSQL_FLOW_LABELING_AVAILABLE)
+    add_dependencies(kafka_packet_real flowsql_flow_labeling)
+endif()
 set_target_properties(kafka_packet_real PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 foreach(location native docker)
     add_test(NAME test_kafka_packet_${location} COMMAND ${Python3_EXECUTABLE}

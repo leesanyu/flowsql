@@ -19,6 +19,7 @@ Makefile
 *.cmake
 !CMakeLists.txt
 !subjects.cmake
+!src/cmake/*.cmake
 !thirdparts/**/*.cmake
 
 # Compiled Object files

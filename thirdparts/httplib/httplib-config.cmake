@@ -11,6 +11,7 @@ else()
     ExternalProject_Add(httplib
         PREFIX ${THIRDPARTS_PREFIX_DIR}/httplib
         URL "https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.3.tar.gz"
+        URL_HASH SHA256=a0567bcd6c3fe5cef1b329b96245119047f876b49e06cc129a36a7a8dffe173e
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
         INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${_httplib_install}/include

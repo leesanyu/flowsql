@@ -9,7 +9,12 @@ else()
     ExternalProject_Add(gflags
         PREFIX ${THIRDPARTS_PREFIX_DIR}/gflags
         URL "https://github.com/gflags/gflags/archive/v2.3.0.tar.gz"
-        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${_gflags_install}
+        URL_HASH SHA256=f619a51371f41c0ad6837b2a98af9d4643b3371015d873887f7e8d3237320b2f
+        CMAKE_ARGS
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            ${FLOWSQL_LEGACY_CMAKE_ARGS}
+            -DREGISTER_INSTALL_PREFIX=OFF
+            -DCMAKE_INSTALL_PREFIX:PATH=${_gflags_install}
     )
 endif()
 

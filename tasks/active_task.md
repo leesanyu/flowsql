@@ -2,6 +2,53 @@
 
 WIP=0；2026-10-19 Asia/Shanghai。
 
+## 当前：产品构建修复 / 本地提交
+
+- 业务意图/授权：用户明确要求“剩下的我手动验证吧，你先提交代码”，将已实现并通过构建、定向回归和隔离启动检查的修复形成可审查的本地提交；全新系统实际依赖安装与完整外部集成回归交由用户手动验收，仍标注未验证。
+- Non-Goals：不修改产品源码、构建配置和用户文档，不重新准备系统或外部测试环境，不推送，不纳入 evidence、构建产物、依赖缓存或私有配置。
+- 允许编辑：tasks/active_task.md；精确暂存下列 28 个本轮路径：.gitignore；README.md；docs/building.md；docs/flow-labeling.md；src/CMakeLists.txt；src/app/CMakeLists.txt；src/cmake/flowsql-worker.in；src/cmake/product_runtime.cmake；src/cmake/stage_runtime.cmake.in；src/cmake/system_dependencies.cmake；src/python/requirements.txt；src/python/setup.py；src/services/web/CMakeLists.txt；src/subjects.cmake；src/tests/test_environment/CMakeLists.txt；src/tests/test_environment/test_product_build.py；src/tests/test_framework/test_native_deploy_config.cpp；src/tests/test_kafka_packet_sink/CMakeLists.txt；src/tests/test_kafka_packet_source/CMakeLists.txt；thirdparts/arrow/arrow-config.cmake；thirdparts/eigen/eigen-config.cmake；thirdparts/gflags/gflags-config.cmake；thirdparts/glog/glog-config.cmake；thirdparts/httplib/httplib-config.cmake；thirdparts/hyperscan/hyperscan-config.cmake；thirdparts/sqlite/sqlite-config.cmake；thirdparts/yaml-cpp/yaml-config.cmake；tasks/active_task.md。
+- 契约与步骤：核对 HEAD、空暂存区与 28 文件 SHA256，审查当前 diff；仅增加本工作台提交记录，保留既有正文；格式/diff 与验收记录复核后精确暂存，核对 staged blob 与工作区逐字一致，创建本地提交，再检查父节点、提交树、index 和工作区。
+- 验收命令：git diff --check；clang-format --dry-run --Werror src/tests/test_framework/test_native_deploy_config.cpp；本地 Python 核对构建/回归/启动报告及源码摘要；git diff --cached --check；git show --stat/--name-only；git status --short；不重跑未变化的构建或业务回归。
+- 依赖/位置：仓库根目录，本机 Git、Python3、clang-format 和已有验收报告；无外部服务或网络需求。Git 元数据写入按正式权限审批，不绕过限制。
+- 时间盒：16:11–16:26 Asia/Shanghai，15 分钟。停止条件：本地提交及后置审计成功后 WIP=0；若失败，保留明确错误证据并停止。证据仅写 evidence/product-build-fix/commit/，不入库。
+
+### 本地提交记录
+
+- 当前 28 路径与已验收范围一致，除本工作台追加记录外，所有文件 SHA256 保持；本工作台既有正文保持。用户接手全新系统依赖安装、默认启动与完整外部集成回归，不将这些未执行项计为通过。
+- 复核完整产品构建退出 0、定向 unit 4/4、隔离 HTTP 烟测 5/5、完整插件启动及进程/端口清理证据；本次未重跑无变化的构建或业务回归。修改的 C++ 文件 clang-format 和本轮 diff 检查通过。
+- 本记录随本次本地提交入库，WIP=0；仅提交允许的 28 路径，不推送。精确暂存 blob、提交父节点/文件树和空 index/工作区的后置审计写入 evidence/product-build-fix/commit/，不提交日志、产物、依赖缓存或私有配置；提交号见 Git 历史。
+
+
+## 当前：全新环境产品构建修复 / Atomic Slice 1
+
+- 关联：用户确认修复构建审计问题，并要求 CMake 检查、安装 DPDK 等系统第三方依赖；维护修复，不另立产品 Feature。
+- 业务意图：Ubuntu 24.04 的新源码环境执行标准 CMake 入口，能够准备缺失构建依赖、生成前端和可启动 Worker 的 C++ 产品；缺依赖/权限/网络时明确失败。
+- Non-Goals：不扩展采集后端或业务功能，不修改数据库/认证契约，不操作已有容器、卷、系统网络和用户数据，不提交或推送。
+- 构建契约：CMake>=3.28；FLOWSQL_INSTALL_SYSTEM_DEPS 默认 ON，Ubuntu apt 安装缺失包，关闭后只检查并报错；无 root 时使用非交互 sudo，无权限直接报错。默认 FLOWSQL_FLOW_LABELING=ON；AUTO/OFF 可显式选择，测试目录受 BUILD_TESTING 约束，测试对可选插件的构建依赖按可用性添加。Python 3.10+，Arrow 与 Worker 统一为 PyArrow 22.0.0，优先复用兼容解释器，否则建立共享私有 venv。前端使用 lockfile npm ci 和文件依赖；Node 不兼容时安装官方固定版本到共享缓存，不更改系统仓库。默认构建包括 C++、静态资源、Worker 启动文件与默认配置。
+- 主链路：CMake 系统依赖检查/安装 → Python/Node 依赖准备 → 第三方与 C++/前端构建 → staged 配置启动 Worker；测试关闭及 Flow Labeling 缺失时配置图独立成立。
+- 允许修改文件：tasks/active_task.md；.gitignore（允许纳入新增 CMake 源码模块）；src/CMakeLists.txt；src/subjects.cmake；src/cmake/system_dependencies.cmake；src/cmake/product_runtime.cmake；src/cmake/flowsql-worker.in；src/cmake/stage_runtime.cmake.in；src/services/web/CMakeLists.txt；src/app/CMakeLists.txt；src/tests/test_kafka_packet_source/CMakeLists.txt；src/tests/test_kafka_packet_sink/CMakeLists.txt；src/tests/test_environment/CMakeLists.txt；src/tests/test_environment/test_product_build.py；src/tests/test_framework/test_native_deploy_config.cpp（验证生成的 Worker 命令和资产）；thirdparts/eigen/eigen-config.cmake；thirdparts/httplib/httplib-config.cmake；thirdparts/sqlite/sqlite-config.cmake（固定源码校验以复用下载缓存）；thirdparts/arrow/arrow-config.cmake；thirdparts/gflags/gflags-config.cmake；thirdparts/glog/glog-config.cmake；thirdparts/hyperscan/hyperscan-config.cmake；thirdparts/yaml-cpp/yaml-config.cmake；src/python/requirements.txt；src/python/setup.py；README.md；docs/building.md；docs/flow-labeling.md（同步构建默认值）；Dockerfile（仅保持 Arrow/运行资产一致）。
+- 文件数说明：一个标准构建契约跨依赖、三个语言运行环境和测试图，需要同步这些入口；无关代码不动。
+- 验收命令：python3 src/tests/test_environment/test_product_build.py；cmake -B build src；cmake --build build -j4；隔离配置 BUILD_TESTING=OFF、FLOWSQL_FLOW_LABELING=OFF 与模拟缺少 DPDK；干净源码/缓存构建检查点；staged Worker 与默认配置烟测；tools/test.sh unit --filter '^(test_product_build|test_native_deploy_config|test_docker_deploy_config|test_environment_config)$'；git diff --check。
+- 测试依赖：本机 Ubuntu 24.04、CMake、编译器、Python/Node；apt/PyPI/npm/官方依赖下载需要网络，缺失系统包安装需要 root/非交互 sudo；隔离构建只操作本轮目录，测试不要求外部数据库或 broker。完整 CTest/全量回归仅在环境就绪后执行，未执行不计通过。
+- 时间盒：原轮 14:56–15:26；构建续行 15:29–15:59；启动烟测续行 15:38–15:58 Asia/Shanghai，20 分钟，沿用同一任务和切片。
+- 本轮授权与范围：用户已再次明确确认执行已准备的隔离启动烟测，允许临时目录、随机本机端口、临时 Kafka 状态及本轮进程组启停；核验首页、Web/Worker 健康接口、Gateway 转发、通道列表及完整插件启动。不运行 apt，不修改系统包、系统配置或已有服务。复用 /tmp/flowsql-product-cold-pwb5yqtm 的已验收产物，保留此前失败证据；未发现真实阻塞前不再修改产品源码。
+- 停止条件：本切片交付与所选检查通过后停止；到期保留可复核检查点或明确错误，不扩文件、不自动开始下一切片。证据写 evidence/product-build-fix/，不入库。
+
+### 当前检查点（2026-10-19 15:43 Asia/Shanghai）
+
+- 状态：本轮获批的隔离启动烟测已完成，WIP=0；代码与文档修复、隔离前端/完整产品构建和启动检查点均通过。全新系统实际依赖安装与全量业务回归尚未完成，不标记整体 DoD 完成，不提交或推送；本切片在当前验收边界停止。
+- 交付：CMake 3.28、Ubuntu 系统包按需检查安装（含 DPDK）、真实 BUILD_TESTING 闸门、可选插件依赖修正；PyArrow 22.0.0 与私有 Python 环境、前端 npm/Node 构建依赖、Worker 启动器与运行资产；第三方源码 SHA256、PIC 和 gflags 本地安装；README 定位保持，docs/building.md 为统一构建说明。
+- 定向验收：系统包逻辑 7/7；统一 unit 选中=执行=通过=4、失败=跳过=未执行=0，summary 为 evidence/test-environment/20261019T071659Z-8b06c333/summary.json；首轮 3/4 的旧资产断言失败已保留，不冒充通过。
+- 配置矩阵：BUILD_TESTING=OFF 下 Labeling=ON/OFF 均配置成功且 CTest=0；Labeling=OFF 的测试图及 AUTO 模拟缺 DPDK 均生成成功。本机恢复 FLOWSQL_INSTALL_SYSTEM_DEPS=ON，依赖满足、不运行 apt，配置退出 0。
+- 编译边界：独立源码快照初始无已编译缓存、无 dist，复用下载归档和主机系统库/PyArrow。用户确认后前端 npm ci/Vite 成功，全部所选产品目标构建退出 0，包括 flowsql_web；配置为 BUILD_TESTING=OFF、Labeling=ON、系统安装=OFF、Kafka 离线=ON。主程序及 24 个共享库 ldd 无缺失依赖，15 个静态文件、Worker 包/启动器和部署配置检查通过。不是完全无预装依赖的新 OS 实测。
+- 增量验收：临时快照前端源码时间戳变化触发静态资源重建，npm 不重复安装、Web 库不重新链接且摘要保持；再次无变化构建跳过重建，两次退出 0。
+- 启动验收：用户再次明确确认后，经标准审批执行完整单进程模板的隔离启动；5 项 HTTP 检查选中=执行=通过=5、失败=跳过=未执行=0，包括静态首页逐字一致、Web/Worker 健康、Gateway 转发和 Web 通道列表。全部插件完成启动，DPDK EAL 初始化成功，无子进程重启。本轮进程已停止，4 个临时端口均已关闭。产品源码未改，首轮烟测端口配置遗漏的失败记录保留，不计通过。
+- 资源隔离：临时配置同步所有连接端口并显式设置 Web 数据库路径；既有 Bridge 启动会清理 /tmp、/dev/shm 的 flowsql_*，因此重跑采用 bwrap 私有临时挂载和只读主机根目录，保护非目标资源；该清理所有权问题只记录到 evidence/product-build-fix/verification.md，留待 Bridge 生命周期维护，不扩大本轮产品改动。
+- 环境限制：此前 npm/esbuild 沙箱失败在获批执行中不再复现，原失败证据保留；本轮不运行 apt。all 仍因 Docker 预检 execution_denied 未执行完整回归。启动烟测先前被拒绝的授权现已由用户确认补足并成功执行。此前 ASGI 超时不计通过，本轮真实 Worker HTTP 已通过；未验收优雅停机行为。
+- 剩余边界：真实缺包新环境的 apt/PyPI/Node 安装及其默认启动尚未验收，全量回归依赖实际环境就绪；本轮只完成已授权的构建与隔离启动检查点，不自动开展后续环境维护。
+- 证据：evidence/product-build-fix/verification.md、cold-build.json、product-only-matrix.json、各命令日志与 scope.json；均不入库。
+
+
 ## 本地提交：README 与 Backlog 文档
 
 - 业务意图/授权：用户明确要求“提交代码”，将本轮 README 能力刷新、原定位保留及 Backlog 分类/降优先级形成一个可审查的本地提交。
