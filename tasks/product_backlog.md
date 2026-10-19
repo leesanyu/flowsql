@@ -8,33 +8,14 @@
 
 - [FlowSQL 产品需求池](#flowsql-产品需求池)
   - [目录](#目录)
-  - [当前工作集](#当前工作集)
   - [已完成能力](#已完成能力)
     - [框架、插件与服务](#框架插件与服务)
     - [任务、通道与 Web 管理](#任务通道与-web-管理)
     - [流量采集与报文处理](#流量采集与报文处理)
     - [NPM 分析与结果管理](#npm-分析与结果管理)
     - [基线分析与预测](#基线分析与预测)
-
----
-
-## 当前工作集
-
-仅保留待办或进行中的 Feature；已完成条目按能力归入下方分类。
-
-| 状态 | Feature | 优先级 | 目标 | 规格 |
-| --- | --- | --- | --- | --- |
-| [x] | 测试环境可重复执行与预防约束 (`test-environment`) | P1 | 面向本地开发、WSL/Docker 及后续任务的数据库与 Kafka 回归，预防连接/认证配置分散、依赖准备遗漏、网络路径不确定和环境失败误计通过；交付统一运行时配置、数据库/Kafka 及必要身份服务的隔离夹具、执行前真实连接认证与依赖预检、一致的测试入口和新测试接入规则，使新终端及重复执行无需手工拼接配置，所需依赖不可用时有界失败并准确归因，完整验收可证明全部必需用例实际执行，并区分 Kafka 元数据验证与实际读写权限。 | [归档](archive/feat-test-environment.md) |
-| [x] | Kafka 连接与认证 (`kafka-connection-auth`) | P1 | 让接入不同安全策略 Kafka 集群的部署者和通道用户，在 Web 中创建和管理可复用连接配置及具名 source/sink/both 通道，获得可验证、可诊断且可持续运行的认证接入能力，并明确配置保存、连接验证与数据读写能力的不同状态；覆盖 PLAINTEXT、SSL、SASL_PLAINTEXT、SASL_SSL，交付 TLS 服务端与双向认证、主机名校验及 PLAIN、SCRAM-SHA-256/512、GSSAPI、OAUTHBEARER，包含凭证引用、脱敏与适用的更新/续期、构建能力检查和分阶段错误诊断，供四类数据通道复用；不管理集群、账号或 ACL，不将普通配置通道用于保密资源，不承诺未经适配和验收的云厂商专用认证。 | [规格](archive/feat-kafka-connection-auth.md) |
-| [x] | Kafka 结构化数据接入 (`kafka-log-source`) | P1 | 让使用外部日志、指标或业务记录的分析用户，通过 Kafka 将结构化消息转换为分析算子可消费的数据批次；依赖 kafka-connection-auth，交付具名数据 source 与明确的实体 Schema，固定字段映射、类型、单位、时间和空值语义，保留 Topic、分区和位点等消息元数据，并明确消费确认、重放及非法消息处理边界；不自动识别任意格式、实现各产品专用日志解析器或从日志恢复原始包，编码支持范围在规格中冻结。 | [规格](archive/feat-kafka-log-source.md) |
-| [x] | 分析结果 Kafka 发布 (`kafka-result-sink`) | P1 | 让需要向 SIEM、告警系统或其他订阅者交付分析结果的用户，将数据库查询、DataFrame 或可对接的算子输出形成的标准结果批次发布到 Kafka；依赖 kafka-connection-auth，交付可由 SQL INTO 使用的结果 sink，携带实体与 Schema 版本、结果身份和适用的 revision，区分新增事件与更新记录，并明确有界发送、确认、重复、停止排空及失败语义；不包含 NPM 全部启用实体的直接持续发布接线，不承诺跨 Kafka、外部存储和算子状态的端到端 Exactly-once。 | [归档](archive/feat-kafka-result-sink.md) |
-| [x] | Kafka 原始包接入与 NPM 分析 (`kafka-packet-source`) | P2 | 让通过 Kafka 汇聚远端探针流量的 NPM 用户，消费原始包并由现有 NPM 产生会话、协议和性能事实；依赖 kafka-connection-auth，交付具名 packet source，保留原始包与必要采集元数据，明确消费位点、重放、分区顺序、时间进度及重启后的分析连续性边界；不以五元组或统计指标替代原始包，不承诺透明迁移有状态会话或跨崩溃延续同一分析状态及端到端 Exactly-once。 | [归档](archive/feat-kafka-packet-source.md) |
-| [x] | 原始包 Kafka 发布 (`kafka-packet-sink`) | P2 | 让需要将网卡采集数据送往集中分析端的分布式采集部署，通过 Kafka 发布原始包与必要采集元数据；依赖 kafka-connection-auth，交付可由 SQL INTO 使用的 packet sink、与 packet source 一致的版本化消息契约和有界批量写出，明确分区路由、发送确认、背压、发送失败及采集丢包的可观察行为；不包含探针部署管理或磁盘缓冲，不以 Kafka 持久化承诺采集端零丢包。 | [规格](archive/feat-kafka-packet-sink.md) |
-| [ ] | NPM 快速网卡采集通道 (`npm-af-xdp-native-zerocopy`) | P2 | 让具备 native XDP 与网卡零拷贝支持的 Linux 部署获得独立的快速直接采集入口，复用公共 packet、身份、生命周期与安全进度契约，并可验证驱动/队列能力、UMEM 回收和真实收包性能；通道名称待定（候选 netdirect），不以名称承诺固定速度。 | 待创建 |
-| [ ] | NPM DPDK 运行环境与设备管理 (`npm-dpdk-runtime`) | P2 | 提供 DPDK EAL、hugepage、PCI/VFIO、NUMA、核心绑定、设备发现、能力探测和启动诊断；不包含 NPM 分析和跨进程数据面。 | 待创建 |
-| [ ] | NPM 用户态高吞吐采集通道 (`npm-dpdk-capture`) | P2 | 让已配置 DPDK 运行环境的采集部署通过独立通道取得单进程持续收包能力，复用公共采集契约并可验证端口/队列范围、缓冲回收、时间戳及背压/丢包统计；通道名称待定（候选 netengine），不强制以 Linux 网卡名选择设备，不包含 Primary/Secondary。 | 待创建 |
-| [ ] | NPM DPDK 跨进程零拷贝接入 (`npm-dpdk-cross-process`) | P2 | 实现 DPDK Primary/Secondary、共享 mempool/ring、mbuf 所有权回收、Scheduler/NPM 服务接入以及重启清理语义。 | 待创建 |
-| [ ] | 流式历史补算 (`stream-recompute`) | P2 | 对已落地存储按时间窗口或条件执行可幂等的批处理补算，不在流式数据面实现回放。 | [规格](specs/feat-stream-recompute.md) |
+    - [Kafka 接入与发布](#kafka-接入与发布)
+  - [长远规划](#长远规划)
 
 ---
 
@@ -52,6 +33,7 @@
 | [x] | C++ 算子插件 (`cpp-operators`) | P1 | 支持 C++ 算子插件独立编译、动态激活、去激活和安全卸载。 | [归档](archive/feat-cpp-operators.md) |
 | [x] | C++ 算子源码目录归位 (`operator-source-layout`) | P1 | 建立独立的 C++ 业务算子源码根目录，将 `npm_basic` 与通用能力插件分离，同时保持内置算子和运行时契约不变。 | [归档](archive/feat-operator-source-layout.md) |
 | [x] | 数据库平台 (`database-platform`) | P0 | 提供数据库插件、驱动、连接池、多数据库读写和 SQL 过滤闭环。 | [归档](archive/feat-database-platform.md) |
+| [x] | 测试环境可重复执行与预防约束 (`test-environment`) | P1 | 面向本地开发、WSL/Docker 及后续任务的数据库与 Kafka 回归，预防连接/认证配置分散、依赖准备遗漏、网络路径不确定和环境失败误计通过；交付统一运行时配置、数据库/Kafka 及必要身份服务的隔离夹具、执行前真实连接认证与依赖预检、一致的测试入口和新测试接入规则，使新终端及重复执行无需手工拼接配置，所需依赖不可用时有界失败并准确归因，完整验收可证明全部必需用例实际执行，并区分 Kafka 元数据验证与实际读写权限。 | [归档](archive/feat-test-environment.md) |
 
 ### 任务、通道与 Web 管理
 
@@ -115,6 +97,30 @@
 | [x] | Baseliner 单表与 DataFrame 分析及输出 (`baseliner-single-source`) | P1 | 让测试指定数据库表和上传 CSV 的离线分析用户，直接通过三段数据库或 DataFrame 来源执行基线任务，在 WITH 内配置少量指标并指定模型参数出口，通过单一 INTO 指定评估/预测结果出口；交付可分别查询的最终模型与一致的分析结果，减少重复配置并保持源数据、有限快照、原持续发布进度及托管恢复保证。 | [归档](archive/feat-baseliner-single-source.md) |
 | [x] | Baseline/Baseliner 生命周期与评估契约修复 (`baseliner-contract-safety`) | P1 | 为通过 Scheduler 加载并调度 Baseline 分析的用户，修复停机清理与活动任务冲突、取消与输出会话交接冲突，以及冷启动依赖诊断文本的问题；交付先排空任务再释放插件状态、在途取消结束后再关闭会话、通过插件显式状态输出有效评估结果的保证。 | [归档](archive/feat-baseliner-contract-safety.md) |
 
+### Kafka 接入与发布
+
+| 状态 | Feature | 优先级 | 目标 | 归档规格 |
+| --- | --- | --- | --- | --- |
+| [x] | Kafka 连接与认证 (`kafka-connection-auth`) | P1 | 让接入不同安全策略 Kafka 集群的部署者和通道用户，在 Web 中创建和管理可复用连接配置及具名 source/sink/both 通道，获得可验证、可诊断且可持续运行的认证接入能力，并明确配置保存、连接验证与数据读写能力的不同状态；覆盖 PLAINTEXT、SSL、SASL_PLAINTEXT、SASL_SSL，交付 TLS 服务端与双向认证、主机名校验及 PLAIN、SCRAM-SHA-256/512、GSSAPI、OAUTHBEARER，包含凭证引用、脱敏与适用的更新/续期、构建能力检查和分阶段错误诊断，供四类数据通道复用；不管理集群、账号或 ACL，不将普通配置通道用于保密资源，不承诺未经适配和验收的云厂商专用认证。 | [归档](archive/feat-kafka-connection-auth.md) |
+| [x] | Kafka 结构化数据接入 (`kafka-log-source`) | P1 | 让使用外部日志、指标或业务记录的分析用户，通过 Kafka 将结构化消息转换为分析算子可消费的数据批次；依赖 kafka-connection-auth，交付具名数据 source 与明确的实体 Schema，固定字段映射、类型、单位、时间和空值语义，保留 Topic、分区和位点等消息元数据，并明确消费确认、重放及非法消息处理边界；不自动识别任意格式、实现各产品专用日志解析器或从日志恢复原始包，编码支持范围在规格中冻结。 | [归档](archive/feat-kafka-log-source.md) |
+| [x] | 分析结果 Kafka 发布 (`kafka-result-sink`) | P1 | 让需要向 SIEM、告警系统或其他订阅者交付分析结果的用户，将数据库查询、DataFrame 或可对接的算子输出形成的标准结果批次发布到 Kafka；依赖 kafka-connection-auth，交付可由 SQL INTO 使用的结果 sink，携带实体与 Schema 版本、结果身份和适用的 revision，区分新增事件与更新记录，并明确有界发送、确认、重复、停止排空及失败语义；不包含 NPM 全部启用实体的直接持续发布接线，不承诺跨 Kafka、外部存储和算子状态的端到端 Exactly-once。 | [归档](archive/feat-kafka-result-sink.md) |
+| [x] | Kafka 原始包接入与 NPM 分析 (`kafka-packet-source`) | P2 | 让通过 Kafka 汇聚远端探针流量的 NPM 用户，消费原始包并由现有 NPM 产生会话、协议和性能事实；依赖 kafka-connection-auth，交付具名 packet source，保留原始包与必要采集元数据，明确消费位点、重放、分区顺序、时间进度及重启后的分析连续性边界；不以五元组或统计指标替代原始包，不承诺透明迁移有状态会话或跨崩溃延续同一分析状态及端到端 Exactly-once。 | [归档](archive/feat-kafka-packet-source.md) |
+| [x] | 原始包 Kafka 发布 (`kafka-packet-sink`) | P2 | 让需要将网卡采集数据送往集中分析端的分布式采集部署，通过 Kafka 发布原始包与必要采集元数据；依赖 kafka-connection-auth，交付可由 SQL INTO 使用的 packet sink、与 packet source 一致的版本化消息契约和有界批量写出，明确分区路由、发送确认、背压、发送失败及采集丢包的可观察行为；不包含探针部署管理或磁盘缓冲，不以 Kafka 持久化承诺采集端零丢包。 | [归档](archive/feat-kafka-packet-sink.md) |
+
 ---
 
-优先级约定：P0 为核心能力，P1 为重要能力，P2 为增强能力，P3 为可选能力。
+## 长远规划
+
+以下五项 Feature 短期内不规划实施，统一降为 P3；保留待办状态及已有规格，后续按实际需求重新评估。
+
+| 状态 | Feature | 优先级 | 目标 | 规格 |
+| --- | --- | --- | --- | --- |
+| [ ] | NPM 快速网卡采集通道 (`npm-af-xdp-native-zerocopy`) | P3 | 让具备 native XDP 与网卡零拷贝支持的 Linux 部署获得独立的快速直接采集入口，复用公共 packet、身份、生命周期与安全进度契约，并可验证驱动/队列能力、UMEM 回收和真实收包性能；通道名称待定（候选 netdirect），不以名称承诺固定速度。 | 待创建 |
+| [ ] | NPM DPDK 运行环境与设备管理 (`npm-dpdk-runtime`) | P3 | 提供 DPDK EAL、hugepage、PCI/VFIO、NUMA、核心绑定、设备发现、能力探测和启动诊断；不包含 NPM 分析和跨进程数据面。 | 待创建 |
+| [ ] | NPM 用户态高吞吐采集通道 (`npm-dpdk-capture`) | P3 | 让已配置 DPDK 运行环境的采集部署通过独立通道取得单进程持续收包能力，复用公共采集契约并可验证端口/队列范围、缓冲回收、时间戳及背压/丢包统计；通道名称待定（候选 netengine），不强制以 Linux 网卡名选择设备，不包含 Primary/Secondary。 | 待创建 |
+| [ ] | NPM DPDK 跨进程零拷贝接入 (`npm-dpdk-cross-process`) | P3 | 实现 DPDK Primary/Secondary、共享 mempool/ring、mbuf 所有权回收、Scheduler/NPM 服务接入以及重启清理语义。 | 待创建 |
+| [ ] | 流式历史补算 (`stream-recompute`) | P3 | 对已落地存储按时间窗口或条件执行可幂等的批处理补算，不在流式数据面实现回放。 | [规格](specs/feat-stream-recompute.md) |
+
+---
+
+优先级约定：P0 为核心能力，P1 为重要能力，P2 为增强能力，P3 为可选或长远规划能力，不代表近期排期。

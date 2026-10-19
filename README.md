@@ -4,9 +4,16 @@
 
 ## 项目简介
 
-FlowSQL 是一个全栈式实时数据处理与分析平台，通过扩展的 SQL 语法提供从数据采集、流式处理到结果探索的完整能力。用户无需深入了解底层执行细节，只需使用熟悉的 SQL 语句即可构建面向实时与离线场景的数据任务。
+FlowSQL 通过扩展 SQL 统一数据接入、算子处理和结果输出。当前支持 DataFrame、四类数据库、PCAP/PCAPNG、
+Linux 网卡与 Kafka 数据通道，提供 `npm.basic` 网络会话和协议分析，以及 `explore.baseliner` 时间序列基线评估与预测。
+用户可在 Web 控制台管理通道、算子与任务，将离线分析和持续采集结果写入数据库或发布到 Kafka。
 
 平台采用 Gateway + RouterAgency 插件架构：所有 C++ 服务共享同一个框架程序（加载不同 .so），业务插件通过 IRouterHandle 声明路由，RouterAgencyPlugin 统一收集并向 Gateway 注册，Python Worker 作为独立 FastAPI 进程运行。控制面统一走 HTTP + URI 路由，数据面通过共享内存 / Arrow IPC 实现零拷贝传输。
+
+常用入口：[快速开始](#快速开始) · [SQL 与阶段过滤](#sql-过滤能力) ·
+[实时网卡采集](#netadapter-实时网卡采集) · [Kafka 接入与发布](#kafka-接入与发布) ·
+[NPM 分析](#npmbasic-网络会话与协议分析) · [基线分析](#explorebaseliner-基线分析) ·
+[任务能力与入口](#sql-任务能力矩阵当前) · [测试](#测试) · [文档索引](#文档)
 
 ## 核心特性
 
@@ -17,17 +24,22 @@ FlowSQL 是一个全栈式实时数据处理与分析平台，通过扩展的 SQ
 - **SQL 驱动**：扩展 SQL 语法统一数据采集、分析、探索操作
 - **流批双模式统一**：Batch 与 Stream 均采用 SQL 驱动、统一任务管理与统一插件体系
 - **三类算子统一管理**：内置算子（builtin）+ Python 算子 + C++ 插件算子统一走 `/api/operators/*`
-- **网络会话与协议分析**：PCAP/PCAPNG 文件通道、阶段过滤，以及 `npm.basic` 的 Basic 周期统计、Session 性能分析、DNS/HTTP/1/TLS/ICMP 分析与可选流量标签
-- **NPM 结果存储与查询**：SQLite、MySQL、PostgreSQL、ClickHouse 托管多实体结果，按运行实例查询历史、最新快照和终态
+- **离线与网卡采集**：PCAP/PCAPNG 上传、持久化通道与离线过滤；NetAdapter 在同一观测域采集多张网卡，支持 AF_PACKET、PF_RING Classic、AF_XDP copy/generic-SKB
+- **网络会话与协议分析**：`npm.basic` 统一 Basic 周期统计、Session 性能分析、DNS/HTTP/1/TLS/ICMP 分析与可选流量标签，离线和实时来源共用会话与周期语义
+- **NPM 分族结果存储与查询**：IPv4/IPv6 独立实体与物理表，SQLite、MySQL、PostgreSQL、ClickHouse 托管全部启用实体，按运行查询 history/latest/final；ClickHouse 使用 ArrowStream 列式批量写入
 - **配置资源版本化**：JSON/YAML/XML 配置通道持久化，消费者通过精确 revision 冻结任务配置
 - **在线基线检测**：Baseline 插件通过 `IBaselineService` 提供 `Optional Bootstrap`、在线 rolling、基线 band、maturity / score trust 和 Relation fusion 能力
-- **SQL 基线分析**：`explore.baseliner` 分析已落库数据或 DataFrame，支持 Value/Ratio/Relation 评估、未来预测和独立的最终模型参数输出
-- **Kafka 接入与发布**：[JSON source、网卡原始包发布与集中 NPM 分析、位点确认与重放、结果 sink 的无损信封，以及连接/通道 Web 管理和 TLS/SASL 部署](docs/kafka.md)
+- **SQL 基线分析**：`explore.baseliner` 分析数据库或 DataFrame/CSV 快照，支持 Value/Ratio/Relation 评估、未来预测、预算受控的批量结果和独立模型参数输出；托管数据库出口支持模型、消费位置与结果联合恢复
+- **Kafka 接入与发布**：结构化 JSON source、分析结果 JSON sink、原始包 packet source/sink 四类通道，支持 TLS/mTLS、SASL 认证、成功处理后位点确认、重放与可观察交付状态，详见 [Kafka 使用说明](docs/kafka.md)
 - **Web 管理**：Vue.js 前端 + REST API，支持通道/算子/任务管理
+- **可重复测试环境**：统一运行时配置、隔离数据库/Kafka 夹具、实际执行位置的认证预检，以及选中/执行/通过/失败/跳过/未执行清单
 
 ## 快速开始
 
 ### 开发依赖服务
+
+以下是手动开发用的可选服务示例；首次部署需在 Web 中创建对应数据库通道，不预置数据库连接。
+自动化回归通过[统一测试入口](#测试)准备隔离资源，使用 `config/testing/environment.json` 中的运行时配置。
 
 **MySQL**
 
@@ -67,8 +79,8 @@ docker compose -f config/docker-compose-postgres.yml up -d
 
 ### 环境要求
 
-- CMake 3.12+，C++17 编译器（GCC 7+），Linux
-- Python 3.8+（Python 算子运行时）
+- CMake 3.12+，支持 C++17 及当前第三方依赖的编译器，Linux
+- Python 3.10+（Python 算子运行时；当前源码使用 `X | None` 类型注解）
 - Node.js 20.19+（20.x）或 22.12+、npm（构建当前 Vite 7 前端时需要）
 
 ### 系统编译依赖
@@ -76,9 +88,16 @@ docker compose -f config/docker-compose-postgres.yml up -d
 - `libicu-dev`（或提供 `libicuuc` / `libicui18n` 的等价开发包）
   - 用途：Baseline 插件的业务时区换算
   - 对应 CMake 依赖：`find_package(ICU REQUIRED COMPONENTS uc i18n)`
+- DPDK 开发库与 pkg-config：Flow Labeling 的构建依赖，DNS/HTTP/1/TLS 模块需要可用的标签 provider。
+  默认 `FLOWSQL_FLOW_LABELING=AUTO`，缺依赖时跳过插件；标准部署配置包含该插件，按
+  [Flow Labeling 指引](docs/flow-labeling.md)准备依赖，并用 `-DFLOWSQL_FLOW_LABELING=ON` 明确检查。
+- PF_RING Classic、libxdp/libbpf：所选采集后端的可选依赖，缺少时该 provider 明确报告不可用；
+  AF_PACKET 不依赖这些可选库。内核、设备与权限要求见 [NetAdapter 说明](docs/netadapter.md#构建与插件)。
+
+安装 Python Worker 与算子运行依赖：
 
 ```bash
-pip3 install -e src/python/ --break-system-packages
+python3 -m pip install -r src/python/requirements.txt -e src/python/ --break-system-packages
 ```
 
 ### 编译
@@ -93,7 +112,7 @@ npm run build --prefix src/frontend
 随后从仓库根目录配置并编译 C++：
 
 ```bash
-cmake -B build src
+cmake -B build src -DFLOWSQL_FLOW_LABELING=ON
 cmake --build build -j$(nproc)
 ```
 
@@ -269,39 +288,31 @@ cmake -E copy_directory src/frontend/dist build/output/static
 
 ### 测试
 
-在仓库根目录运行已注册的回归测试；完整 CTest 包含 NPM 数据库集成测试，需先启动上述三种数据库服务：
+完成构建后，在仓库根目录使用统一测试入口。测试配置只有一个来源
+[`config/testing/environment.json`](config/testing/environment.json)，每套用例的依赖、执行位置与资源锁由
+[`config/testing/dependencies.json`](config/testing/dependencies.json)声明。
 
 ```bash
-ctest --test-dir build --output-on-failure
+# 本地用例，不启动数据库、Kafka 或 Docker 服务
+tools/test.sh unit
+# 只读检查已有依赖的配置、连接与认证
+tools/test.sh doctor
+# 按声明准备隔离资源并执行集成测试
+tools/test.sh integration --jobs 4
+# 完整验收：不加筛选，核对全部实际执行清单
+tools/test.sh all --jobs 4
+# 仅核对 NPM 配置、SQLite 托管结果与 Scheduler 链路
+tools/test.sh unit --filter '^(test_npm_basic|test_npm_result_sqlite|test_scheduler_e2e)$'
 ```
 
-仅验证 NPM 配置、结果存储和 Scheduler 链路时：
+集成测试默认运行在 Docker 网络；原生调试显式使用 `--location native`，从实际位置重新预检。
+切换配置使用 `--config /absolute/path/environment.json` 或 `FLOWSQL_TEST_CONFIG`，无需重新编译。
+首次集成执行所需的固定镜像、身份服务和本机依赖见 [统一测试环境说明](docs/testing.md)。
+`doctor` 的 Kafka 检查只验证认证和元数据，读写权限由数据面测试独立验证。
 
-```bash
-cmake --build build --target test_npm_basic test_npm_result_sqlite test_npm_result_backends test_scheduler_e2e -j8
-ctest --test-dir build -R '^(test_npm_basic|test_npm_result_sqlite|test_npm_result_backends|test_scheduler_e2e)$' --output-on-failure
-```
-
-其他专项测试可从构建输出目录直接运行：
-
-```bash
-cd build/output
-./test_framework && ./test_bridge
-./test_sqlite
-./test_connection_pool
-export FLOWSQL_SECRET_KEY="your-32-byte-secret-key-here!!"
-./test_database_manager
-./test_mysql        # 需运行中的 MySQL
-./test_postgres     # 需运行中的 PostgreSQL
-./test_clickhouse   # 需运行中的 ClickHouse
-./test_router       # 路由表单元测试
-./test_builtin      # Catalog/BinAddon/算子管理链路
-./test_stream       # 流式通道与运行时
-./test_scheduler_e2e # SQL、NPM 托管结果、算子生命周期和 Stream DAG 回归
-./test_baseline     # Baseline 插件 B1-B7 集成路径
-./test_baseline_rolling_feature_batch # Baseline B8 批量特征缓存
-./test_baseline_batch_prediction_perf # Baseline 批量预测等价与性能
-```
+直接运行 `ctest --test-dir build --output-on-failure` 也会执行同一 guard、fixture 与资源锁。
+缺依赖、认证失败、环境跳过或必需用例未执行均不能计为通过；带筛选的结果仅代表选中清单。
+脱敏日志与 `summary.json` 写入 `evidence/test-environment/<run_id>/`，本地证据不入库。
 
 ## 架构
 
@@ -342,10 +353,13 @@ IPlugin（生命周期）
 │   ├── IDataFrameChannel（批处理）
 │   ├── IDatabaseChannel（数据库 Reader/Writer 工厂）
 │   ├── IStreamChannel（流式）
-│   └── IBlockStreamChannel（批次数据流，如 pcapfile）
+│   └── IBlockStreamChannel（批次数据流，如 pcapfile、netadapter、kafka）
+├── ICaptureBlockStreamReaderV2（原始包与同次采集进度、身份、计数）
+├── IBlockStreamAcknowledgementV1（处理及当次投递成功后显式确认）
 ├── IOperator（数据算子：Work(in, out)）
 ├── IBlockTransformOperatorV1/V2（创建任务私有的批次变换会话）
 ├── IConfigChannelRegistryV1（精确版本的配置快照）
+├── IKafkaConnectionServiceV1（连接、通道与验证控制面）
 ├── IFlowLabelingProviderV1（会话主标签匹配能力）
 └── IBaselineService（进程内在线基线能力，不直接暴露 HTTP 路由）
 ```
@@ -548,7 +562,70 @@ INTO dataframe.dns_pair
 pcapfile 过滤只做链路层/网络层/传输层 Layer 解码，不执行应用协议识别；不支持 payload 内容、正则、BPF/
 tcpdump 语法，也不代表 TCP stream、重组、会话或客户端/服务端方向分析。
 
-### npm.basic 网络会话与协议分析
+## NetAdapter 实时网卡采集
+
+`netadapter.<name>` 从同一观测域中的一张或多张 Ethernet 网卡持续采集。Web「通道管理 → Stream 通道 →
+新增网卡采集通道」可创建具名 source，选择 `af_packet`、`pfring_classic` 或 `af_xdp_copy_skb`，
+配置接口、混杂模式、截断长度和全通道缓冲预算。配置保存不打开设备，真实接口、驱动和权限在任务启动时检查。
+
+默认原生部署与 Docker Scheduler 已加载 NetAdapter 及三个后端 provider；后端能否实际收包仍取决于
+对应构建依赖、内核与权限。AF_PACKET 需要原始套接字权限，PF_RING Classic 需要匹配内核模块，
+AF_XDP 当前使用 copy/generic-SKB。Docker 中填写 Scheduler 容器可见的网卡名。
+
+先创建 `netadapter.edge_mirror` 和可写的 `sqlite.npm` 数据库通道，并激活 `npm.basic`，再以
+`POST /api/tasks/batch/execute`、`mode='async'` 执行：
+
+```sql
+SELECT * FROM netadapter.edge_mirror
+WHERE wire_len >= 64 AND (transport_protocol = 6 OR transport_protocol = 17)
+USING npm.basic
+WITH features='basic,session', output_interval_ns=15000000000
+INTO sqlite.npm
+```
+
+源观测域、输入身份和安全时间进度由 reader 提供；积压或未知进度会延后周期关闭，不能以轮询超时
+替代完整性证据。采集统计可查看逐输入吞吐、丢包、背压与可用性；未知计数为 NULL。
+使用中的通道须先停止任务、释放 reader 和 owner 后才能修改或删除。
+
+AF_PACKET、PF_RING Classic、AF_XDP copy/generic-SKB 已有隔离真实收包和持续 SQL 验收记录；
+记录的负载、环境与限制见 [NetAdapter 使用与联验](docs/netadapter.md)。目标网卡的生产容量需在实际环境测量。
+native zero-copy、DPDK 采集与 DPDK 跨进程接入属于[长远规划](tasks/product_backlog.md#长远规划)。
+
+## Kafka 接入与发布
+
+在 Web 的 Kafka 管理中先创建连接，再创建具名 `source`、`sink` 或 `both` 通道。
+连接支持 PLAINTEXT、SSL、SASL_PLAINTEXT、SASL_SSL，以及 mTLS、PLAIN、SCRAM-SHA-256/512、
+GSSAPI、OAUTHBEARER；配置保存、连接验证和数据读写授权分别判断。
+
+| 通道能力 | 数据契约 | SQL 主链路 |
+| --- | --- | --- |
+| 结构化 source | UTF-8 JSON 对象、显式字段/类型/单位映射，保留 Topic、分区、位点等元数据 | `FROM kafka.metrics ... INTO dataframe.metric_samples` |
+| 结果 sink | 带实体、Schema 版本、业务身份和可选 revision 的 JSON 信封 | `FROM dataframe.alert_results INTO kafka.alerts` |
+| 原始包 source | `flowsql_packet_v1`，保留原始包、采集身份与同次进度 | `FROM kafka.remote_packets USING npm.basic ... INTO mysql.npm` |
+| 原始包 sink | 网卡采集批次与事实封装为 `flowsql_packet_v1` | `SELECT * FROM netadapter.edge_capture INTO kafka.packet_upload` |
+
+通道、Topic、消费组与目标数据库需按 [Kafka 使用说明](docs/kafka.md)准备。
+所有 Kafka source 都是持续来源，使用异步 Batch 入口；有限 DataFrame 或数据库查询发布到结果 sink 可同步或异步执行。
+例如，已配置字段 `value` 的 JSON source 可执行：
+
+```json
+{
+  "sql_text": "SELECT * FROM kafka.metrics WHERE value > 0 INTO dataframe.metric_samples",
+  "mode": "async"
+}
+```
+
+原始包的发送和集中分析分别在采集端、接收端运行，不能按结构化 JSON 配置代替 packet 通道。
+packet sink 首版只接受表中 `SELECT *` 直连主链路；接收配置的观测域、输入身份与限额须匹配发送端 binding。
+NPM 全部实体或 Baseliner 双出口结果先保存到数据库/DataFrame，再用独立 SQL 发布到结果 sink。
+
+`after_success` 仅在当前批次处理及当次输出投递成功后提交位点，释放批次或取消不提交。
+位点确认与后续算子 Flush、最终结果落盘分别完成，不能据此推断整个任务的输出已持久化。
+结果发布区分 `confirmed`、`not_sent`、`unknown`，以实际 Broker 确认计数。
+重放可能重复，同组重启建立新的分析 run 和空会话状态；不提供跨 Kafka、算子状态和外部存储的 Exactly-once。
+配置、手动 Docker 环境、认证、重放与故障解释见 [Kafka 完整说明](docs/kafka.md)。
+
+## npm.basic 网络会话与协议分析
 
 `npm.basic` 消费固定 Packet RecordBatch，对端点完整的 TCP/UDP 进行双向会话归属、基础计数和有限 payload
 采样识别；Basic 默认每 30 秒输出会话的双向包数/字节增量及累计总量，支持离线 PCAP 与持续采集共用统计语义。
@@ -562,8 +639,8 @@ Basic、Session、DNS、HTTP/1、TLS、ICMP 结果模块。不能区分隧道上
 [Flow Labeling 构建、部署、规则配置与容量指引](docs/flow-labeling.md)。该文档说明 DPDK 依赖、CMake 三态、
 Scheduler EAL option、Config Channel 精确快照、`labeling_memory_mib` 连续任务预算及可复核 benchmark。
 
-运行前需要在 Scheduler **同一进程**加载 NPI、pcapfile 和已激活的 `npm.basic` 算子。
-原生部署配置已包含 NPI、pcapfile 与 BinAddonHost；通过 Web「算子管理 → C++ 插件」上传并激活构建产物
+运行前需要在 Scheduler **同一进程**加载 NPI、所用输入通道插件和已激活的 `npm.basic` 算子。
+原生部署配置已包含 NPI、pcapfile、NetAdapter、Kafka 与 BinAddonHost；通过 Web「算子管理 → C++ 插件」上传并激活构建产物
 `build/output/libflowsql_npm_basic.so`。更新算子后也需使运行中的插件使用新版本。
 NPI 的 JSON option 必须包含指向可读协议词典的 `ldfile`，例如原生运行目录中的
 `{"ldfile":"./config/protocols.yml"}`，Docker 中为 `/opt/flowsql/config/protocols.yml`。
@@ -579,7 +656,7 @@ WITH observing='basic_ipv4'
 INTO dataframe.basic_metrics
 ```
 
-#### 模块选择与前台结果
+### 模块选择与前台结果
 
 | 参数 | 默认值 | 含义 |
 | --- | --- | --- |
@@ -606,7 +683,7 @@ INTO dataframe.session_metrics
 使用 `parameters` 时，不能同时提供旧的顶层调优参数（如 `run_mode`、`max_active_sessions`），
 但 `features`、`observing`、`input_namespace`、`source_domains` 可照常使用。
 
-#### Basic 周期统计
+### Basic 周期统计
 
 `periodic_snapshot` 是 `result_mode` 的取值。周期配置可直接写在顶层 `WITH`，或放入
 `parameters.core`；两种配置形式不能混用共享调优参数。
@@ -676,7 +753,7 @@ INTO dataframe.flow_final
 此时 Basic 仍使用相同 Schema，八个周期字段均为 NULL，`wire_bytes_total` 等累计字段有效。
 完整时间与统计契约见 [NPM TCP/UDP 会话周期统计](tasks/archive/feat-npm-basic-periodic-stats.md)。
 
-#### DNS 事务分析
+### DNS 事务分析
 
 DNS 是显式启用的独立实体 `dns_transaction`，支持 UDP datagram 和共享 TCP 字节流。先按
 [Flow Labeling 指引](docs/flow-labeling.md)部署可用的 provider 和 `FlowLabelingSet`，使目标 DNS 会话的
@@ -713,7 +790,7 @@ INTO dataframe.dns_final
 同一实体还有 `npm_dns_transaction_ipv4_history_v1` 和 `npm_dns_transaction_ipv4_latest_v1`。每次运行的
 `__npm_run_id` 相互隔离；查询时按本次响应的关系名和运行 ID 过滤。
 
-#### HTTP/1 事务分析
+### HTTP/1 事务分析
 
 HTTP/1 仅处理明文 TCP 流。先按 [Flow Labeling 指引](docs/flow-labeling.md)提供可用的 provider 和精确配置快照，
 确保目标会话的主标签命中 `primary_label_ids`。下面的快照引用和标签 ID 是示例，需替换为当前环境中的值。
@@ -747,7 +824,7 @@ Schema 固定为 v1；同一实体还有 `npm_http1_transaction_ipv4_history_v1`
 `max_pending_per_session` 默认 128，`max_header_bytes` 默认 65536，达到 pending 或任务预算限额会使任务失败。
 HTTP/2、HTTP/3、HTTPS、CONNECT 隧道及 WebSocket 帧不在此实体的分析范围内。
 
-#### ICMP 控制消息分析
+### ICMP 控制消息分析
 
 ICMP/ICMPv6 使用独立 control packet 路径，无须启用 `labeling` 或共享 TCP 流。
 回显仅关联捕获点可见的完整请求与反向应答；差错消息独立成行，引用五元组只能
@@ -771,7 +848,7 @@ INTO dataframe.icmp_events
 `npm_icmp_event_ipv4_history_v1`、`npm_icmp_event_ipv4_latest_v1` 和
 `npm_icmp_event_ipv4_final_v1`，按 `__npm_run_id` 查询。
 
-#### TLS 握手分析
+### TLS 握手分析
 
 TLS 仅分析 TCP 初始握手中捕获点可见的明文事实。离线捕获需包含 TCP SYN，且首条 TLS record 从方向偏移 0
 开始；中途流、STARTTLS 和代理隧道内 TLS 不会被扫描重同步。先按 [Flow Labeling 指引](docs/flow-labeling.md)
@@ -810,7 +887,7 @@ INTO dataframe.tls_final
 `input_namespace` 和 `source_domains` 均为选填。SQL 省略 `input_namespace` 时默认使用 `FROM` 的通道名，
 例如 `pcapfile.capture`；显式指定非空值可覆盖默认名称。不同 namespace 或观测域的相同五元组不会合并。
 
-#### source_domains：采集来源到观测域的映射语法
+### source_domains：采集来源到观测域的映射语法
 
 观测域表示一组可以一起统计会话的采集来源。`source_id` 是输入报文的采集来源编号，
 `observation_domain_id` 是用户指定的观测域编号；同一 namespace 下，来源映射到同一观测域时，
@@ -852,7 +929,7 @@ WITH source_domains='0:7;1:7;2:8',
 INTO mysql.flowsql-mysql
 ```
 
-#### 结果、过滤与运行边界
+### 结果、过滤与运行边界
 
 PCAP 默认使用 `run_mode='offline'`；两类来源均默认使用 `result_mode='periodic_snapshot'`。
 共享配置和模块配置见 [NPM 配置说明](docs/npm.md#共享与模块参数)，当前默认值与 Basic
@@ -881,7 +958,7 @@ Basic/Session 的 `flowsql.schema_version` 恒为 1；`primary_label_id` 未启�
 完整的正常 EOF 结果。普通 DataFrame 输出可在 `USING npm.basic ... WITH ...` 后使用结果阶段过滤，
 例如 `WHERE protocol = 'HTTP'`；放在 `USING` 前的 source-stage 过滤会改变所有模块的输入与统计。
 
-#### 多实体结果存储与查询
+### 多实体结果存储与查询
 
 `npm.basic` 已支持 SQLite、MySQL、PostgreSQL、ClickHouse 的托管多实体结果存储。先创建可写的数据库通道，
 再使用两段式目标 `<数据库类型>.<通道名>`。例如 `mysql.flowsql-mysql` 中，`flowsql-mysql` 是 FlowSQL
@@ -941,7 +1018,7 @@ WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.session_latest
 ```
 
-- 使用响应返回的关系名；Basic 固定使用 `_v1`，含标签列的 Session 使用 `_v2`。`latest` 按每个运行分别取最新 revision，
+- 使用响应返回的关系名；当前所有分族实体固定使用 Schema v1，启用标签也不改变版本或表名。`latest` 按每个运行分别取最新 revision，
   因此需要用 `__npm_run_id` 选择本次运行。
 - 三种关系都包含 `__npm_run_id`、`__npm_task_id`、`__npm_run_status`。失败前已提交的数据可能保留为
   `incomplete`，可据此排查；`metadata_status='unknown'` 表示运行状态落库结果无法确认。
@@ -950,7 +1027,7 @@ INTO dataframe.session_latest
 - 每条分析 SQL 只有一个目标；需要 DataFrame 时使用上述查询另行物化。三段式目标
   `INTO mysql.flowsql-mysql.some_table` 是普通单表目标，当前 NPM 托管路径不接受它。
 
-#### 结果保留期
+### 结果保留期
 
 省略保留策略时结果不会自动过期。托管目标可设置 `parameters.core.result.retention_days`，取值为整数
 `1..3650`，仅对本次运行生效；例如保留 30 天：
@@ -969,19 +1046,24 @@ INTO mysql.flowsql-mysql
 没有新任务时，物理回收可以延后。`writing` 运行不自动删除。非托管 DataFrame 目标不接受保留期配置。
 详细用法见 [NPM 结果保存与查询](docs/npm.md#保存所有实体并查询)。
 
-#### 生产实时边界
+### 生产实时边界
 
-采集 reader 契约、框架时间驱动与 `npm.basic` 的生产实时接线已经交付。PCAP 和假采集 reader 的 SQL 联验
-覆盖共用周期统计、安全水位、空闲/积压、背压以及 EOF/Stop/Cancel；真实网卡后端与联验仍待
-[Linux 采集后端规划](tasks/product_backlog.md)实施。
+采集 reader 契约、框架时间驱动、NetAdapter 三类后端与 `npm.basic` 的生产实时接线已经交付，
+也支持通过 Kafka packet source 汇聚远端探针原始包。离线、真实网卡与远端来源共用周期统计和安全进度规则；
+网卡联验范围见 [NetAdapter 说明](docs/netadapter.md#t5完成证据与已验证运行范围)，
+Kafka 的进度、重放与新 run 边界见 [packet source 说明](docs/kafka.md#进度失败和重启)。
 
 持续采集任务使用已有异步 Batch 入口（`POST /api/tasks/batch/execute`，`mode='async'`）和单个
 两段式托管数据库目标，例如 `INTO sqlite.npm`；数据库通道需预先创建。无 INTO 或 DataFrame 目标会在
 启动前被拒绝。运行期间，使用提交响应的 `runtime_task_id` 查询 Scheduler 的
 `POST /scheduler/batch/status`，可从 `managed_result` 取得 `run_id` 和结果关系名，再查询已写入的 history。
 普通同步查询不会持续推送周期结果。正常 Stop 排空最后批次与终态，Cancel 只保留已交付前缀并异常回收。
+任务页“取消”和 `POST /api/tasks/cancel` 对活动异步 Batch 请求正常 Stop；需要立即 Cancel 时，调用
+`POST /scheduler/batch/stop`，传入 `runtime_task_id` 与 `mode='cancel'`。
+Web 识别连续采集源时自动选择异步；API 显式指定 `mode='sync'` 时在任务创建前返回
+`ASYNC_EXECUTION_REQUIRED`。这里的连续 packet 来源使用 Batch 执行入口，与下文 `IStreamChannel` 的 Stream API 分别调度。
 
-#### 基础引擎性能基线
+### 基础引擎性能基线
 
 ```bash
 cmake -B build src
@@ -1075,6 +1157,11 @@ INTO dataframe.predictions
 未来预测没有实际值，保留预测发布时间和模型依据。最终模型参数不代表所有历史评估所使用的模型。
 来源保持原始内容，结果与模型写入独立目标；目标不能覆盖来源，模型和结果也不能使用同一目标。
 
+结果按有界批次编码和输出，缓冲受 `read_policy.max_pending_bytes` 约束；有限 DataFrame 结果在正常完成后登记。
+响应的 `result.results_output` 与可选 `result.model_output` 分别报告出口状态和确认写入行数；
+跨数据库或不同 DataFrame 的两个出口可能有不同提交结果，任务失败时仍需分别检查。
+具体状态、恢复边界和批量输出测量见 [Baseliner 使用说明](docs/baseliner.md#发布结果与检查出口状态)及其[性能说明](docs/baseliner.md#性能说明)。
+
 ### 已落库 NPM 与持续分析
 
 先用 `npm.basic` 将数据写入数据库，再通过完整配置指定结果表、字段映射、run 范围和指标。
@@ -1125,14 +1212,20 @@ Baseliner 在 SQLite、MySQL、PostgreSQL 上创建并确保 `(task_key, publish
 
 ## SQL 任务能力矩阵（当前）
 
-| 任务类型 | SQL 数量 | 当前支持 | 提交入口 | 关键约束 | 未来规划 |
-|---|---|---|---|---|---|
-| Batch | 单 SQL | ✅ 支持 | `POST /api/tasks/batch/execute`（内部：`/tasks/batch/execute`） | 可 `mode=sync/async`；使用 `sql_text` 入参；若 SQL 被判定为 stream，将拒绝并提示使用 stream API | 持续支持 |
-| Batch | 多 SQL | ✅ 支持（顺序执行） | `POST /api/tasks/batch/execute`（`sql_text`） | 多 SQL 必须用分号 `;` 切分；不允许混入 stream SQL | 持续支持 |
-| Stream | 单 SQL | ✅ 支持 | `POST /api/tasks/stream/execute`（内部：`/tasks/stream/execute`） | 仅异步；`execution_kind=single`；必须是 stream SQL；必须包含 `USING` 流式算子 | 持续支持 |
-| Stream | 多 SQL | ✅ 支持（Group DAG） | `POST /api/tasks/stream/execute`（`execution_kind=group` + `group_mode=dag` + `sql_text`） | 仅异步；多 SQL 必须用分号 `;` 切分；至少 2 条；纯 stream 编排可直接执行 | 持续支持 |
-| Mixed（batch+stream） | 多 SQL | ✅ 支持（Hybrid DAG） | `POST /api/tasks/stream/execute`（`execution_kind=group` + `group_mode=dag` + `sql_text`） | 仅异步；多 SQL 必须用分号 `;` 切分；每条 SQL 内部不得混用 stream 与非 stream source | 持续增强 |
-| Stream | 同源跨任务并发消费 | ✅ 支持（late join） | `POST /api/tasks/stream/execute`（多任务并行提交） | 新任务从加入时刻开始消费，不补历史；同源共享要求 `WHERE` 签名一致 | 持续支持 |
+| 任务类型 | SQL 数量 | 当前支持 | 提交入口 | 关键约束 |
+|---|---|---|---|---|
+| Batch（有限输入） | 单 SQL | ✅ 支持 | `POST /api/tasks/batch/execute`（内部：`/tasks/batch/execute`） | 可 `mode=sync/async`；使用 `sql_text` 入参；若 SQL 被判定为 stream，将拒绝并提示使用 stream API |
+| Batch（连续采集） | 单 SQL | ✅ 支持 | `POST /api/tasks/batch/execute`（`mode=async`） | NetAdapter、Kafka 等持续 block source 仅异步；`npm.basic` 要求两段数据库托管目标 |
+| Batch | 多 SQL | ✅ 支持（顺序执行） | `POST /api/tasks/batch/execute`（`sql_text`） | 多 SQL 必须用分号 `;` 切分；不允许混入 stream SQL |
+| Stream | 单 SQL | ✅ 支持 | `POST /api/tasks/stream/execute`（内部：`/tasks/stream/execute`） | 仅异步；`execution_kind=single`；必须是 stream SQL；必须包含 `USING` 流式算子 |
+| Stream | 多 SQL | ✅ 支持（Group DAG） | `POST /api/tasks/stream/execute`（`execution_kind=group` + `group_mode=dag` + `sql_text`） | 仅异步；多 SQL 必须用分号 `;` 切分；至少 2 条；纯 stream 编排可直接执行 |
+| Mixed（batch+stream） | 多 SQL | ✅ 支持（Hybrid DAG） | `POST /api/tasks/stream/execute`（`execution_kind=group` + `group_mode=dag` + `sql_text`） | 仅异步；多 SQL 必须用分号 `;` 切分；每条 SQL 内部不得混用 stream 与非 stream source |
+| Stream | 同源跨任务并发消费 | ✅ 支持（late join） | `POST /api/tasks/stream/execute`（多任务并行提交） | 新任务从加入时刻开始消费，不补历史；同源共享要求 `WHERE` 签名一致 |
+
+Batch API 默认 `mode='async'`。有限任务可显式选择同步，Web 对执行请求的上游读取等待为 30 秒；
+任务执行超时由 `timeout_s` 独立控制。耗时分析建议异步提交，取得 `task_id` 后通过
+`POST /api/tasks/result` 或任务页面查询。若同步请求显示 `service unreachable`，先检查任务列表和结果，
+确认原任务状态后再决定是否重试，避免重复执行。
 
 说明：
 - Stream 当前仅支持异步执行。
@@ -1157,6 +1250,7 @@ SQL 任务类型由 Source 通道类型决定（看 `FROM`，不看 `INTO`）：
 - `USING` 本身不决定任务类型，但 `stream` 执行入口要求包含流式算子。
 - 任务类型与执行入口必须匹配：`stream` 走 `/api/tasks/stream/execute`，`batch` 走 `/api/tasks/batch/execute`。
 - `pcapfile.* USING npm.basic` 是离线批任务，使用 batch 入口；内部按 Packet RecordBatch 处理不等于实时采集。
+- `netadapter.*`、`kafka.*` 持续 block source 也走 batch 入口，并要求 `mode='async'`；持续运行由来源能力声明。
 
 示例：
 
@@ -1292,7 +1386,8 @@ flowSQL/
 ├── config/
 │   ├── deploy-single.yaml  # 单进程部署配置（开发调试）
 │   ├── deploy-multi.yaml   # 多进程部署配置（生产）
-│   └── flowsql.yml         # 数据库通道持久化配置
+│   ├── testing/            # 统一运行时测试配置与依赖清单
+│   └── flowsql.yml         # 数据库/Stream 通道持久化配置
 ├── src/
 │   ├── app/                # 主程序入口
 │   ├── common/             # 公共头文件（define.h、loader.hpp、error_code.h）
@@ -1311,9 +1406,12 @@ flowSQL/
 │   │   └── bridge/         # BridgePlugin（C++ ↔ Python 桥接）
 │   ├── channels/
 │   │   ├── pcapfile/       # PCAP/PCAPNG 离线输入与阶段过滤
+│   │   ├── netadapter/     # 多网卡采集及 AF_PACKET/PF_RING/AF_XDP provider
+│   │   ├── kafka/          # 连接认证、结构化/原始包 source 与 sink
 │   │   └── config/         # 不可变 revision 的配置资源通道
 │   ├── operators/
-│   │   └── npm_basic/      # NPM 会话与协议分析及结果存储
+│   │   ├── npm_basic/      # NPM 会话与协议分析及分族结果存储
+│   │   └── baseliner/      # 数据库/DataFrame 基线评估、预测及模型输出
 │   ├── plugins/
 │   │   ├── baseline/       # Baseline 插件（在线基线、bootstrap、relation rolling/fusion）
 │   │   ├── flow_labeling/  # 基于 DPDK ACL 的会话主标签能力
@@ -1323,6 +1421,7 @@ flowSQL/
 │   └── tests/
 ├── docs/                   # 用户功能与使用说明、架构概览
 ├── evidence/               # 本地性能与验收证据缓存（Git 忽略）
+├── tools/                  # 统一测试入口、测试环境与 Kafka 手动环境工具
 ├── samples/                # 开发者样例工程（如 C++ 算子插件）
 └── tasks/                  # Backlog、Feature 规格、即时工作台与归档
 ```
@@ -1332,6 +1431,7 @@ flowSQL/
 - [项目愿景](docs/vision.md)
 - [架构设计](docs/framework.md)
 - [NetAdapter 采集与隔离真实联验](docs/netadapter.md)
+- [Kafka 连接认证、JSON/原始包通道与手动测试](docs/kafka.md)
 - [Flow Labeling 构建与配置](docs/flow-labeling.md)
 - [NPM 网络会话与协议分析：配置、结果与性能](docs/npm.md)
 - [NPM 共享与模块参数](docs/npm.md#共享与模块参数)
@@ -1342,10 +1442,9 @@ flowSQL/
 - [Baseline 插件说明](src/plugins/baseline/README.md)
 - [Baseliner 基线分析：输入输出、恢复与性能](docs/baseliner.md)
 - [C++ 算子插件 Sample](samples/cpp_operator/README.md)
-- [产品需求与当前进度](tasks/product_backlog.md)
+- [统一测试环境与验收入口](docs/testing.md)
+- [已完成能力与长远规划](tasks/product_backlog.md)
 
 ## 许可证
 
 MIT License
-
-开发与验收使用 [统一测试环境说明](docs/testing.md)：`tools/test.sh unit|doctor|integration|all`，数据库/Kafka 依赖与真实覆盖按运行时配置统一管理。

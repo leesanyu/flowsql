@@ -1,6 +1,53 @@
 # 即时工作台
 
-WIP=0；2026-10-18 Asia/Shanghai。
+WIP=0；2026-10-19 Asia/Shanghai。
+
+## 本地提交：README 与 Backlog 文档
+
+- 业务意图/授权：用户明确要求“提交代码”，将本轮 README 能力刷新、原定位保留及 Backlog 分类/降优先级形成一个可审查的本地提交。
+- Non-Goals：不修改业务源码、README/Backlog 正文或其他配置，不重跑编译、CTest 或外部服务，不提交 evidence、构建产物或私有配置，不推送。
+- 允许文件：本轮仅编辑 `tasks/active_task.md`；精确暂存 `README.md`、`tasks/product_backlog.md`、`tasks/active_task.md`。提交前快照与审计仅放入忽略的 `evidence/readme-backlog-refresh/commit/`。
+- 已核查/契约：HEAD=`4e25796`，暂存区为空；既有文档通过静态验收，README 原定位已恢复；本轮保留两个目标文档字节及原工作台记录。
+- 步骤/验收：复核最终 diff，运行本轮静态核查与 `git diff --check`；精确 git add 后审计路径、暂存 blob 与工作区文件一致、`git diff --cached --check`；创建本地提交；核验提交父节点、文件范围、空 index 与工作区。
+- 依赖/执行位置：仓库根目录，本机 Git/Python，无外部服务、网络或秘密依赖；Git 元数据写入如受限，使用标准权限审批，不绕过限制。
+- 时间盒：13:35–13:45 Asia/Shanghai，10 分钟；提交及后置审计成功后 WIP=0 并停止；若权限拒绝，记录真实状态并停止。
+
+### 提交验收记录
+
+- 文档复验通过：59 个 Feature 唯一且状态/目标保持，54 项已完成、5 项 P3 长远规划；122 个链接/锚点、4 段 JSON、7 处参数 JSON、20 段 Shell 语法和 13 组源码/配置引用通过，`git diff --check` 通过。
+- README 保留“基于 SQL 的实时数据处理与分析共创平台”原定位；README/Backlog 的提交前摘要与用户确认的最终内容一致，既有工作台正文保持。纯文档变更未运行 CMake/CTest。
+- 本记录随本次本地提交落库，WIP=0；只提交允许的三个文档文件，不推送。暂存路径/blob、提交父节点/文件树及空 index/工作区的核验结果写入 `evidence/readme-backlog-refresh/commit/`，不入库；提交号见 Git 历史。
+
+## 最近完成：README 原有定位恢复 / Atomic Slice 2
+
+- 业务意图/授权：按用户明确要求，将 README 定位恢复为“基于 SQL 的实时数据处理与分析共创平台”，保留其他已完成文档更新。
+- Non-Goals：不调整项目简介、能力说明、Backlog、源码或配置，不编译、不运行测试服务，不提交或推送。
+- 允许文件：`README.md`、`tasks/active_task.md`；本地核对快照和结果仅放入忽略的 `evidence/readme-backlog-refresh/`。
+- 契约与步骤：README 仅替换第三行定位文字；逐字核对其余正文与修改前快照一致，并核对 Backlog 摘要不变。
+- 验收命令：Python 单行差异/原定位/Backlog 摘要核对、`git diff --check`、`git diff --name-only`；文档单行修订无对应 CMake target。
+- 依赖/位置：仓库根目录，本机 Python3/Git；无外部服务、凭证、网络或额外权限。
+- 时间盒：13:24–13:34 Asia/Shanghai，10 分钟；验收通过即 WIP=0 并停止。
+- 完成证据：已恢复原定位，Python 逐字核对确认 README 仅第三行变化，其余正文及 Backlog 保持；`git diff --check` 通过，WIP=0。核对结果位于本地 `evidence/readme-backlog-refresh/position-verification.json`，不入库；未编译、提交或推送。
+
+## 最近完成：README 能力刷新与 Backlog 分类整理 / Atomic Slice 1
+
+- 关联 Feature Task：无；用户直接授权的文档维护，不创建新 Feature 或实施长远需求。
+- 业务意图：使 README 的现有能力、使用入口和运行边界与当前代码一致；将已完成 Feature 按能力分类归位，将五项未完成需求降为 P3 并移入“长远规划”，明确短期不排期。
+- Non-Goals：不修改源码、公共接口、部署/测试配置、其他用户文档或规格；不实现待办能力，不重新测量性能，不运行外部服务，不提交或推送。
+- 允许文件：`README.md`、`tasks/product_backlog.md`、`tasks/active_task.md`；本地核查脚本、原文快照和验证结果仅写入忽略的 `evidence/readme-backlog-refresh/`。
+- 已核查/文档契约：工作区与暂存区干净，原工作台 WIP=0；逐项复核 Backlog 当前工作集为六项已完成、五项未完成。保留所有 Feature 标识、目标和既有完成状态；五项未完成仅从 P2 降至 P3；本轮移动的已归档链接统一标注“归档”。README 能力与入口以当前源码、部署配置及用户文档交叉核对，不将历史验收或性能样本描述为本轮执行。
+- 实施步骤：核对 README 与当前代码/文档；更新能力概览、示例与测试入口；移动 Backlog 条目并更新导航；运行文档静态核查、审查本轮 diff；记录结果并关闭工作台。
+- 验收命令：`python3 evidence/readme-backlog-refresh/verify.py`（本轮链接/锚点、Feature 唯一性/分类/优先级、关键源码契约核对）、`git diff --check`、`git diff --name-only`；仅文档修改，无对应 CMake target，不运行 CMake/CTest。
+- 依赖/执行位置：仓库根目录；本机 Python3、Git 和现有源码/Markdown；无外部服务、凭证、网络或额外权限依赖。
+- 时间盒：12:58–13:28 Asia/Shanghai，30 分钟；停止条件：三文件范围内文档验收通过即 WIP=0 并停止；到期时记录可验证检查点或明确错误，不扩大范围。
+
+### 完成证据
+
+- 状态：已完成，WIP=0；本轮仅文档维护，不进入任何长远需求的实施。
+- README 已按当前源码、部署配置及用户说明刷新：NetAdapter 三后端、Kafka 四类数据通道、IPv4/IPv6 分族 Schema v1、ClickHouse 列式写入、Baseliner 批量结果与出口状态、连续来源异步 Batch、正常 Stop/立即 Cancel、Web 30 秒等待及统一测试入口；补齐 Python 3.10+、requirements 和标准部署的 Flow Labeling 构建要求，补全导航及项目目录。
+- Backlog 的六项已完成 Feature 已归位：测试环境进入“框架、插件与服务”，Kafka 连接与四类数据通道进入新增“Kafka 接入与发布”。总计 59 项保持唯一，54 项已完成归入六类，五项未完成移入“长远规划”，由 P2 降为 P3 并明确短期不排期；原标识、目标、状态与规格地址保持。
+- `python3 evidence/readme-backlog-refresh/verify.py` 退出 0：122 个本地链接/锚点、4 段 JSON、7 处内嵌参数 JSON、20 段 Shell 语法和 13 组关键源码/配置引用通过；既有基础引擎 benchmark 正文及原工作台记录逐字保持。详情见本地 `verification.json`，不入库。
+- 本轮 diff 审查及 `git diff --check` 通过，修改范围仅允许的三个 Markdown 文件；未运行 CMake/CTest、外部服务或性能复测，未暂存、提交或推送。原文快照、静态核查脚本及审计仅留在忽略的 `evidence/readme-backlog-refresh/`。
 
 ## 最近完成：Web 同步任务等待 30 秒 / 本地提交 Atomic Slice
 
