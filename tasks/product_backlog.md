@@ -8,6 +8,7 @@
 
 - [FlowSQL 产品需求池](#flowsql-产品需求池)
   - [目录](#目录)
+  - [待办 Feature](#待办-feature)
   - [已完成能力](#已完成能力)
     - [框架、插件与服务](#框架插件与服务)
     - [任务、通道与 Web 管理](#任务通道与-web-管理)
@@ -16,6 +17,12 @@
     - [基线分析与预测](#基线分析与预测)
     - [Kafka 接入与发布](#kafka-接入与发布)
   - [长远规划](#长远规划)
+
+---
+
+## 待办 Feature
+
+当前无近期待办 Feature；长远规划见文末。
 
 ---
 
@@ -28,6 +35,7 @@
 | 状态 | Feature | 优先级 | 目标 | 归档规格 |
 | --- | --- | --- | --- | --- |
 | [x] | C++ 框架核心 (`framework-core`) | P0 | 提供插件式进程框架、统一数据接口和批处理 Pipeline。 | [归档](archive/feat-framework-core.md) |
+| [x] | 产品版本与构建信息 (`product-version`) | P1 | 让构建、交付和故障排查人员能够准确识别正在使用的产品版本与源码身份，统一 Web、命令行和交付产物的版本展示与查询，并在发布前核对版本、源码与打包产物一致，避免旧产物被误标为新版本。 | [归档](archive/feat-product-version.md) |
 | [x] | 路由与服务对等化 (`routing-services`) | P1 | 统一插件路由、错误映射和跨进程服务调用边界。 | [归档](archive/feat-routing-services.md) |
 | [x] | 通道与算子目录 (`operator-catalog`) | P1 | 建立通道、算子元信息和激活状态的统一目录与唯一真相。 | [归档](archive/feat-operator-catalog.md) |
 | [x] | C++ 算子插件 (`cpp-operators`) | P1 | 支持 C++ 算子插件独立编译、动态激活、去激活和安全卸载。 | [归档](archive/feat-cpp-operators.md) |

@@ -169,6 +169,8 @@ void RouterAgencyPlugin::HttpThread() {
 }
 
 void RouterAgencyPlugin::Dispatch(const httplib::Request& req, httplib::Response& res) {
+    if (req.method == "GET" && req.path == "/api/version") res.set_header("Cache-Control", "no-store");
+
     // CORS 统一处理
     res.set_header("Access-Control-Allow-Origin", "*");
 

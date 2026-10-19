@@ -29,3 +29,16 @@ set_tests_properties(test_environment_failures PROPERTIES TIMEOUT 240 WORKING_DI
 add_test(NAME test_product_build COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_product_build.py)
 set_tests_properties(test_product_build PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_product_version COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_product_version.py)
+set_tests_properties(test_product_version PROPERTIES TIMEOUT 120)
+add_test(NAME test_product_version_runtime COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_product_version_runtime.py ${CMAKE_BINARY_DIR}/output)
+set_tests_properties(test_product_version_runtime PROPERTIES TIMEOUT 60)
+add_test(NAME test_product_release COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_product_release.py)
+set_tests_properties(test_product_release PROPERTIES TIMEOUT 120)
+add_test(NAME test_product_version_frontend COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_product_version_frontend.py)
+set_tests_properties(test_product_version_frontend PROPERTIES TIMEOUT 180)

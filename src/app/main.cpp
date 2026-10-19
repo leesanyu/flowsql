@@ -20,6 +20,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <common/product_version.h>
 #include <common/loader.hpp>
 
 // 仅 Guardian 模式需要解析 YAML 配置
@@ -333,6 +334,12 @@ static int RunGuardian(const std::string& config_path) {
 // ============================================================
 
 int main(int argc, char* argv[]) {
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--version") == 0) {
+            printf("%s", ProductVersionText().c_str());
+            return 0;
+        }
+    }
     Args args = ParseArgs(argc, argv);
 
     if (!args.config.empty()) {

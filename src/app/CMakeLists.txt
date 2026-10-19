@@ -47,7 +47,8 @@ add_custom_target(flowsql_runtime_config
     COMMENT "Initializing channel config and syncing runtime assets to output/config"
     VERBATIM
 )
-add_dependencies(flowsql flowsql_runtime_config)
+add_dependencies(flowsql_runtime_config flowsql_version)
+add_dependencies(flowsql flowsql_runtime_config flowsql_version)
 
 # 构建后将 web/static 复制到 output/static（前端静态文件）
 # flowsql_web 目标已负责同步静态资源；这里避免并发 copy_directory 造成竞态失败。

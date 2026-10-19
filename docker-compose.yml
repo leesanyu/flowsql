@@ -6,7 +6,7 @@ services:
 
   # ---- Gateway：统一入口，路由转发 ----
   gateway:
-    image: flowsql:latest
+    image: ${FLOWSQL_IMAGE:-flowsql:latest}
     command:
       - flowsql
       - --role
@@ -31,7 +31,7 @@ services:
 
   # ---- Web：前端静态资源 + 管理 API ----
   web:
-    image: flowsql:latest
+    image: ${FLOWSQL_IMAGE:-flowsql:latest}
     command:
       - flowsql
       - --role
@@ -55,7 +55,7 @@ services:
 
   # ---- Scheduler：SQL 执行 + 通道管理 + 算子 ----
   scheduler:
-    image: flowsql:latest
+    image: ${FLOWSQL_IMAGE:-flowsql:latest}
     command:
       - flowsql
       - --role
@@ -85,7 +85,7 @@ services:
 
   # ---- Python Worker：Python 算子执行 ----
   pyworker:
-    image: flowsql:latest
+    image: ${FLOWSQL_IMAGE:-flowsql:latest}
     command: >
       python3 -m flowsql.worker --host pyworker --port 18900
     environment:

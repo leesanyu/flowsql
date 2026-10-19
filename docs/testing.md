@@ -4,14 +4,14 @@
 
 ```bash
 cmake -B build src
-cmake --build build -j4
+cmake --build build -j2
 
 # 本地注册用例，不启动数据库、Kafka 或 Docker
 tools/test.sh unit
 # 按需准备与执行全部数据库及 Kafka 真实矩阵/部署回归
-tools/test.sh integration --jobs 4
+tools/test.sh integration --jobs 1
 # 全部注册用例，包括环境 fixture、普通 Kafka、两种真实矩阵/结构化接入及部署回归
-tools/test.sh all --jobs 4
+tools/test.sh all --jobs 1
 # 只读检查已有服务；首次准备前会明确报告不可用
 tools/test.sh doctor
 # 原生调试；Docker 默认可达不代表 WSL 发布端口也可达
@@ -20,6 +20,9 @@ tools/test.sh integration --location native --filter '^test_mysql$'
 ```
 
 `--filter` 使用正则表达式；相关 CTest setup fixture 自动纳入选中清单。带筛选的通过只代表该清单，完整 Feature 验收使用不带筛选的 `all`。直接 `ctest --test-dir build --output-on-failure` 同样执行运行时 guard、fixture 和资源锁，不允许缺依赖后返回成功。
+
+以上示例使用保守并行度，适合资源有限的开发环境。编译、镜像构建和完整回归依次执行，避免同时占用内存；
+确认资源余量后可自行提高 `-j` 或 `--jobs`。验收运行期间保持源码与产物不变，重新编译后应重新验收。
 
 本地 `test_docker_build_context` 使用 Docker SDK 7.1.0 的真实上下文打包器，检查镜像输入和私有 Kafka
 配置的过滤规则。执行该单测只需 Python 依赖 `docker==7.1.0`，无需 Docker Engine、broker、数据库或
@@ -32,7 +35,7 @@ python3 -m pip install docker==7.1.0
 集成测试首次运行需要 Docker CLI/Compose 和 socket 访问权限，以及当前构建产物。数据库镜像按 `config/testing/environment.json` 的固定摘要准备；运行镜像和身份夹具镜像使用配置声明的不可变镜像身份。当前工作区已有固定运行镜像，可通过以下命令为其他工作区准备运行依赖，然后将 inspect 返回的不可变 ID 写入自己的配置副本（runtime/harness）。
 
 ```bash
-docker build -t flowsql:test-runtime .
+python3 tools/release.py image --tag flowsql:test-runtime
 docker build --build-arg CLIENT_IMAGE=flowsql:test-runtime \
   -f src/tests/test_kafka_connection_auth/Dockerfile.auth-harness \
   -t flowsql:test-harness .
@@ -78,3 +81,18 @@ tools/test.sh cleanup --project flowsql_test --apply
 新增依赖测试时，在同一 Atomic Slice 中完成四件事：声明 dependencies.json 的服务/角色/位置/锁；接入 `tests/common/test_environment.h` 的参数/Options 或 Kafka 受管 manifest；用标准 `add_test(NAME ... COMMAND ...)` 注册；验证正常执行和至少一个必要依赖失效路径。共享 fixture 在 CTest 运行时从清单派生，CMake 不读取 MYSQL/PG/CH 密码或临时 Baseliner options。每轮临时文件用 `WorkspacePath`，不引用旧任务的 `/tmp` 目录。完整说明及约束见 [AGENTS.md](../AGENTS.md) 4.4。
 
 Kafka 结构化数据面单独注册 `test_kafka_source_native/docker`，复用同一受管身份 manifest，从真实执行位置预检后在独立 Topic/组中发布与消费。`test_kafka_source_environment` 验证缺失配置必须非零。选中用例及位置由 dependencies.json 声明，不需要手工凭证或第二份连接配置。
+
+## 产品版本回归
+
+`test_product_version` 使用临时 Git/CMake 工程验证解析、PEP 440、dirty/未知、无变化及增量编译，并核对 Worker 源码分发包。
+`test_product_release` 使用隔离 Git 和产物夹具验证发布通过与拒绝路径，不修改产品仓库标签。
+`test_product_version_runtime` 查询实际 `build/output` 的 CLI 和 Web 两个 HTTP 监听入口，使用临时状态、动态本地端口及自身子进程，退出时回收。
+`test_product_version_frontend` 需要已安装的本地 Node/npm/Vite，在临时复制树执行独立构建、真实 Vue 渲染及 dev 版本刷新，验证每个压缩 JS 块的身份；不执行 npm 安装，不连接后端。
+以上用例按无外部服务测试注册，不使用数据库/Kafka 凭证；HTTP/Vite 需要本地监听权限。
+
+```bash
+./tools/test.sh unit --filter '^test_product_(version|version_runtime|version_frontend|release)$'
+```
+
+真实镜像验收需 Docker Engine 权限及通过身份校验的完整构建；使用专用本地镜像和容器，不挂载业务卷，检查 CLI、Worker、Web、静态版本与 OCI 标签。
+这些定向检查不能替代不带筛选的 `./tools/test.sh all`。版本规则和发布操作见[版本说明](versioning.md)。

@@ -65,7 +65,7 @@ cd build/output
 LD_LIBRARY_PATH=. ./flowsql --config config/deploy-multi.yaml
 ```
 
-`flowsql.yml` 仍仅在目标不存在时初始化，不覆盖已有用户通道配置。原生构建产物会引用构建主机的共享依赖缓存或 Python 环境；跨机器发布使用 README 中的 Docker 镜像流程。Dockerfile 打包预构建产物，宿主机的标准构建需要先完成。
+`flowsql.yml` 仍仅在目标不存在时初始化，不覆盖已有用户通道配置。原生构建产物会引用构建主机的共享依赖缓存或 Python 环境；跨机器发布使用 README 中的 Docker 镜像流程。Dockerfile 打包预构建产物，宿主机的标准构建需要先完成；使用 `python3 tools/release.py image --tag flowsql:latest` 核对实际版本并制作镜像，详见[版本与发布说明](versioning.md)。
 
 ## 验证
 

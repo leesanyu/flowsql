@@ -1,5 +1,12 @@
 """FlowSQL Python Worker — FastAPI 应用（Gateway 架构版）"""
 
+import sys
+
+if '--version' in sys.argv[1:]:
+    from .product_info import version_text
+    print(version_text(), end='')
+    raise SystemExit(0)
+
 import asyncio
 import os
 import threading

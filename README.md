@@ -145,7 +145,7 @@ LD_LIBRARY_PATH=. ./flowsql --config config/deploy-multi.yaml
 ```bash
 cmake -B build src
 cmake --build build -j$(nproc)
-docker build -t flowsql:latest .
+python3 tools/release.py image --tag flowsql:latest
 ```
 
 在同一台机器部署基础服务：
@@ -172,20 +172,22 @@ docker compose -f docker-compose.yml -f docker-compose.databases.yml ps
 无需额外生成密钥或加入 Kafka 覆盖文件。Kafka broker 由部署方提供。
 
 **通过镜像仓库跨机器发布**：将镜像推送到镜像仓库，并把所用的 Compose 文件复制到部署机器；使用数据库叠加文件时还需复制 ClickHouse XML 文件。
-两份 Compose 文件目前都引用 `flowsql:latest`，所以拉取带版本号的镜像后需在部署机器标记为该名称：
+产品服务统一使用 `FLOWSQL_IMAGE` 选择镜像，默认 `flowsql:latest`；部署具体版本时直接指定完整镜像名：
+发布前先按[版本说明](docs/versioning.md)完成对应版本的提交、构建验收和标签校验。以下以 `0.1.0` 为例：
 
 ```bash
 # 构建机器：将地址与版本号替换为实际值
-docker tag flowsql:latest registry.example.com/flowsql:1.0.0
-docker push registry.example.com/flowsql:1.0.0
+python3 tools/release.py verify --version 0.1.0
+python3 tools/release.py image --tag registry.example.com/flowsql:0.1.0
+docker push registry.example.com/flowsql:0.1.0
 
 # 部署机器
-docker pull registry.example.com/flowsql:1.0.0
-docker tag registry.example.com/flowsql:1.0.0 flowsql:latest
-docker compose -f docker-compose.yml -f docker-compose.databases.yml up -d
+docker pull registry.example.com/flowsql:0.1.0
+FLOWSQL_IMAGE=registry.example.com/flowsql:0.1.0 \
+  docker compose -f docker-compose.yml -f docker-compose.databases.yml up -d
 ```
 
-**通过镜像文件跨机器交付（无需镜像仓库）**：在构建机器完成上述 `docker build` 后，使用 `docker save`
+**通过镜像文件跨机器交付（无需镜像仓库）**：在构建机器完成上述本地镜像构建后，使用 `docker save`
 保存镜像及 `flowsql:latest` 标签，并将部署配置一起打包：
 
 ```bash
@@ -1432,6 +1434,7 @@ flowSQL/
 - [Baseline 插件说明](src/plugins/baseline/README.md)
 - [Baseliner 基线分析：输入输出、恢复与性能](docs/baseliner.md)
 - [C++ 算子插件 Sample](samples/cpp_operator/README.md)
+- [产品版本、构建信息与发布校验](docs/versioning.md)
 - [统一测试环境与验收入口](docs/testing.md)
 - [已完成能力与长远规划](tasks/product_backlog.md)
 

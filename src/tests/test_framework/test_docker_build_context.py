@@ -56,6 +56,12 @@ class DockerBuildContextTest(unittest.TestCase):
         assets = {
             "Dockerfile",
             "build/output/flowsql",
+            "build/output/build-info.json",
+            "build/output/python/flowsql/worker.py",
+            "build/output/python/flowsql/_build_info.json",
+            "build/output/static/build-info.json",
+            "tools/product_version.py",
+            "tools/release.py",
             "build/output/libflowsql_capture_pfring.so",
             "build/output/libpfring.so.8.8.0",
             "build/output/static/index.html",
@@ -63,12 +69,16 @@ class DockerBuildContextTest(unittest.TestCase):
             "build/output/share/kafka/dependencies.json",
             "config/docker/flowsql.yml",
             "src/python/requirements.txt",
-            "src/python/flowsql/worker.py",
             "src/plugins/npi/conf/protocols.yml",
             ".thirdparts_installed/yaml-cpp/lib/libyaml-cpp.so.0.9.0",
         }
         members = self.package(assets)
         self.assertTrue(assets <= members, f"missing image inputs: {assets - members}")
+
+    def test_unbuilt_worker_source_is_excluded(self):
+        members = self.package({"src/python/flowsql/worker.py", "build/output/python/flowsql/worker.py"})
+        self.assertNotIn("src/python/flowsql/worker.py", members)
+        self.assertIn("build/output/python/flowsql/worker.py", members)
 
 
 if __name__ == "__main__":

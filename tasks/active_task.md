@@ -1,6 +1,166 @@
 # 即时工作台
 
-WIP=0；2026-10-19 Asia/Shanghai。
+WIP=0；2026-10-19 Asia/Shanghai。产品版本 Feature 的聚焦验收和提交审查均已完成；本轮按用户明确授权仅作本地提交，全量验证暂缓。
+
+## 当前：产品版本与构建信息 / 提交收口 Atomic Slice
+
+- 关联 Feature：product-version，T1～T5 已按用户确认的聚焦边界验收完成，规格已归档。
+- 业务意图与授权：用户明确要求“提交代码”；核对本 Feature 的精确改动、复用已完成验收证据，创建一次可审查的本地提交。
+- Non-Goals：不修改产品实现，不重跑全量/专项或重建镜像，不推送、不打产品标签、不发布、不部署；不提交本地证据、构建产物、私密配置或无关改动。
+- 允许修改文件：仅 tasks/active_task.md，记录本轮提交边界与审查结果。
+- 允许提交文件（38 个）：VERSION、.dockerignore、Dockerfile、docker-compose.yml、README.md；docs/building.md、docs/testing.md、docs/versioning.md；src/CMakeLists.txt、src/app/CMakeLists.txt、src/app/main.cpp、src/cmake/product_version.cmake、src/cmake/stage_runtime.cmake.in、src/common/product_version.h；src/frontend/src/App.vue、src/frontend/src/components/Sidebar.vue、src/frontend/src/productVersion.js、src/frontend/vite.config.js、src/frontend/test/productVersion.test.mjs；src/python/flowsql/__init__.py、src/python/flowsql/worker.py、src/python/flowsql/product_info.py、src/python/setup.py；src/services/router/router_agency_plugin.cpp、src/services/web/CMakeLists.txt、src/services/web/web_server.cpp、src/services/web/web_server.h；src/tests/test_environment/CMakeLists.txt、src/tests/test_environment/test_product_release.py、src/tests/test_environment/test_product_version.py、src/tests/test_environment/test_product_version_frontend.py、src/tests/test_environment/test_product_version_runtime.py、src/tests/test_framework/test_docker_build_context.py；tasks/active_task.md、tasks/product_backlog.md、tasks/archive/feat-product-version.md；tools/product_version.py、tools/release.py。
+- 验收命令与依赖：本机 Git/Python 和既有 evidence/product-version/focused/ 验收记录；检查源码摘要未变化、git diff --check、精确文件暂存、git diff --cached --check、暂存范围和内容审查；git commit 后检查 git status --short 与 git show --stat。不访问 Docker、数据库、Kafka 或网络。
+- 时间盒：2026-10-19 23:16–23:31 Asia/Shanghai，15 分钟。停止条件：本地提交成功且提交范围核对通过即 WIP=0 并停止；失败如实记录，不扩大为重新验收或发版。
+
+### 提交审查结果
+
+- 精确核对本 Feature 的 38 个文件，初始暂存区为空，无无关改动混入；仅工作台增加本轮记录，产品源码未修改。
+- 重新核对既有验收的 956 个源码文件摘要，全部未变化；复用五套版本专项 5/5 与聚焦镜像检查 4/4 的通过记录，失败/跳过/未执行均为 0，不重跑测试或镜像构建。
+- git diff --check、README 原定位及本轮 C++ 版权检查通过；规格 T1～T5、归档与 Backlog 完成状态保持。evidence/、构建产物和私密配置不纳入提交。
+- 提交边界：仅本地 commit；不 push、不创建产品 Git 标签、不发布或部署。现有二进制继续保留验收时内嵌身份，下次正常构建才刷新到新提交。
+
+## 前一切片：产品版本与构建信息 / T5 / 聚焦验收 Atomic Slice 4
+
+- 授权与意图：用户要求以聚焦当前 Feature 验收边界为原则完成必要验证；本轮补齐镜像版本传递的直接缺口，完成 Feature 收口，不恢复全产品回归。
+- Non-Goals：不验证 Ubuntu/Worker 三方依赖安装，不下载依赖、不修复仓库网络，不执行数据库/Kafka/业务矩阵或 all；不修改产品功能、凭证、现有容器/卷，不提交/推送/打产品标签。
+- 允许文件：tasks/active_task.md；tasks/specs/feat-product-version.md；tasks/archive/feat-product-version.md（全部聚焦验收通过后仅移动规格文件）；tasks/product_backlog.md。此前产品代码及文档 diff 保留，不新增源码修改。测试脚本/报告和快照仅 evidence/product-version/focused/，不入库。
+- 冻结验收边界：保留五个已通过且源码相同的专项测试；验证原生实际产物一致性；镜像使用固定本地 runtime ID 复用依赖，从生产 Dockerfile 的“复制构建产物”段开始原样执行全部后续指令，仅替换前置依赖阶段。实际复制完整产物、执行版本校验、查询 CLI/Web/Worker/静态及 OCI 标签；错误 version/revision 两组必须失败，正确输入成功。此路径证明本 Feature 打包契约，不声称从空白 Ubuntu 构建成功。
+- 执行顺序与命令：只读核对既有源码/产物摘要和固定运行镜像；生成可复核的生产指令尾段夹具；docker build --pull=false（临时磁盘上下文、仅本 Feature 标签）；256 MiB/1 CPU 容器串行运行版本 smoke；负向 build 复用层、禁止网络下载；git diff --check、C++ 新增行格式、文档/Backlog 状态与链接检查。通过后勾选 T5、文件归档、WIP=0 即停。
+- 依赖/位置：本机 Python/Docker SDK、Docker Engine 已有固定镜像 sha256:8985d167def8e281d7dc513d0ca3fc698d430603db1796783af2a57c20dbec50、现有 build/output 与 .dockerignore；无数据库/Kafka/秘密配置需求。只使用本轮创建的专用容器和标签，结束删除自身容器，不删除目录或业务资源。
+- 时间盒：2026-10-19 23:04–23:24 Asia/Shanghai，20 分钟。停止条件：聚焦清单全部执行并通过且零跳过/未执行后收口；失败保留具体证据，在原边界内核查，不扩大为基础镜像/业务验收。全量回归按用户指示暂缓，原失败/中断记录保留。
+
+### 聚焦验收完成
+
+- 状态：已完成；版本机制 T1～T5 达到用户确认的聚焦边界，规格文件归档，Backlog 按框架/服务分类标为完成；WIP=0，停止，不进入其他任务，不提交或推送。
+- 原生与专项：五个相关套件的既有执行均通过（5/5、零失败/跳过/未执行）；本轮比对原验收的 956 个源码和 195 个原生产物摘要均未变化，五套结果继续适用，没有重复编译或重跑已通过套件。标准完整构建与前端、CLI/HTTP、发布拒绝、Compose 的既有证据保留。
+- 镜像缺口：固定本地依赖镜像 + 生产 Dockerfile 原样打包尾段，构建网络关闭；正确版本构建和实际容器查询通过，错误 version/revision 均导致非零构建。镜像内 C++/Worker/Python -S、Web 两入口/no-store/健康、前端静态记录和 OCI 标签一致，主程序/Web 库摘要与主产物相同。新增 4/4、零失败/跳过/未执行；均串行、容器 256 MiB，运行 1 CPU，Web 单次内存采样 4.3 MiB。
+- 夹具纠正：首次复用基镜像自带旧前端文件被真实校验拒绝，日志保留；只清除新测试镜像内的缓存产品文件后复跑通过，不修改产品代码、断言或宿主资源。
+- 交付边界：本地专用测试镜像 flowsql:product-version-test（sha256:b070091f18d0b18b5c1fe2750e6000a8fa82b2d4c56fc427dc90facb81b811cb），未推送/部署；未复测空白 Ubuntu 第三方安装，全产品 all 和数据库/Kafka 业务矩阵不在本次验收。原失败/中断不计为通过。证据 evidence/product-version/focused/，由 Git 忽略。
+
+## 前一切片：产品版本与构建信息 / T5 / 验证证据核查 Atomic Slice 3
+
+- 业务意图：按用户“检查版本号验证是否完成，全量先不做”的要求核对专项执行记录、当前源码与实际产物，明确已验证范围。
+- Non-Goals：不运行全量回归、镜像构建或数据库/Kafka 矩阵；不重新编译、不修改产品源码、断言或部署资源，不提交/推送/打标签。
+- 允许文件：tasks/active_task.md；tasks/specs/feat-product-version.md（只补充核查证据和未验证边界）；核查报告写 evidence/product-version/t5/，不入库。
+- 验收：核对既有 summary/CTest 日志中五个版本相关套件全部通过；比对相关源码摘要；python3 -B tools/release.py artifacts；实际 C++ 和 Python -S Worker --version；git diff --check。
+- 依赖/位置：仓库根目录、现有 build/output、本机标准库与既有证据；无需网络、Docker、数据库、Kafka、凭证或监听权限。串行执行轻量产物核对，不重复已通过的测试。
+- 时间盒：本次核查 10 分钟。停止条件：形成版本专项验证结论并记录实际镜像运行未验证、全量暂不执行；不将未完成项标成通过，不自动归档整个 Feature。
+
+### 核查完成证据
+
+- 已核对既有执行记录：test_product_version、test_product_version_runtime、test_product_version_frontend、test_product_release、test_docker_build_context 五个相关套件均已实际执行并通过，专项范围 5/5，零失败/跳过/未执行；这是从既有 run 20261019T125337Z-a45f0551 提取的专项结论，不将该次整体失败的 all 说成通过，也未重复执行这些测试。
+- 当前 27 个相关源码/测试/构建文件与通过测试时的摘要相同；本次实际产物一致性复查通过，C++ CLI 与 Python -S Worker 的实际输出一致：version=0.1.0、revision=e55c1ec55bc866e6fa59f16223a5cfe003feb08b、dirty=true。dirty=true 与当前未提交工作区一致。
+- 标准完整构建、前端实际渲染与 dev 刷新、Worker 源码包、发布拒绝、Docker 上下文和 Compose 镜像选择已有通过证据；本次未重新构建、未启动 HTTP/外部服务、未执行全量回归或 Docker 构建。
+- 结论：版本机制专项验证已完成并通过；真实镜像构建/运行仍未完成，完整产品回归按用户要求暂缓，T5 保持未勾选、Feature 不归档。报告：evidence/product-version/t5/version-verification-audit.json，未入库。核查完成后停止，不恢复重型验证。
+
+## 前一切片：产品版本与构建信息 / T5 / Atomic Slice 2
+
+- 最新执行约束（覆盖下述原执行顺序）：用户指出版本 Feature 的镜像/全量验证面过大；已停止本轮 all，不再重试镜像构建或开展数据库/Kafka 真实矩阵。验证收敛到版本来源/增量、CLI/HTTP/前端展示、实际产物身份、发布拒绝和 Docker 配置契约；原专项通过证据保留，不为收口重复执行。真实镜像构建受 Ubuntu HTTP 502 阻断，运行验收未执行；未完成项不计为通过，T5 暂不勾选或归档。下一步仅复检验收边界和现有证据，不自动恢复重型验证。
+- 本轮检查点：进行中且版本专项检查点通过；单并发 all（20261019T132900Z-7a15b5d7）在 61 项通过后主动中断，属于不完整执行，不作为全量通过证据。前述镜像重试与业务矩阵超出版本机制必要验证范围，已停止；不修改断言来消除既有失败。
+- 授权与约束：用户要求持续实施直至完成，并明确硬件有限、减少验证内存；本轮严格串行，不并行运行镜像构建、完整回归或编译。
+- 业务意图：在有限资源上完成真实镜像与完整回归，保留所有失败/中断记录，用最后完整执行结果收口 T5。
+- Non-Goals：不发版、不提交/推送/打产品标签、不改变断言或缩减必需验收，不重置容器/卷，不修改系统网络、凭证或 Kafka/数据库业务。
+- 允许文件：tasks/active_task.md；tasks/specs/feat-product-version.md；tasks/archive/feat-product-version.md（全部通过后仅归档规格文件）；tasks/product_backlog.md；README.md；docs/versioning.md；docs/testing.md；docs/building.md；前一 T5 工作台中的版本源码/测试允许列表继续有效，现阶段保持源码与产物冻结，仅环境诊断及验收。证据只写 evidence/product-version/t5/。
+- 执行顺序：先等待本轮并发工作停止并采样内存；单独完成标准 Dockerfile 镜像构建、运行和错误参数拒绝；确认无构建任务后，以 --jobs 1 执行不筛选 all；最终审查文档、格式、范围和证据再归档。
+- 验收命令：原生完整构建已通过，不无理由重复；如需修复后重建使用 cmake --build build -j2。Docker 使用同一 .dockerignore 归档和原 Dockerfile、实际产物身份，保留未完成构建日志；tools/test.sh all --config evidence/product-version/t5/environment.json --jobs 1；git diff --check；新增 C++ 行格式检查和版本文档链接检查。
+- 依赖/位置：沿用统一配置、私密引用与隔离测试项目 flowsql_product_version_20261019；Docker/本机原有业务资源保持，镜像/运行容器使用本 Feature 专用名，无业务卷。禁止通过关闭验证、增加超时或放宽断言取得通过。
+- 时间盒：2026-10-19 21:14–21:44 Asia/Shanghai，30 分钟；超过时记录真实检查点并沿用 T5，不扩大为其他 Feature。
+- 停止条件：selected=executed=passed 且 failed=skipped=not_executed=0、真实镜像验收通过才能勾选 T5；完成后 WIP=0。否则保留具体错误和未验证状态。
+
+### 上一切片检查点：当前错误待修复
+
+- T5 标准配置及完整构建通过，实际产物身份一致，新增 C++ 行格式和 diff 检查通过。
+- 首轮完整 all（20261019T125337Z-a45f0551）：169 选中/执行，168 通过、1 失败、0 跳过/未执行；Kafka Docker sink 的 11 个认证 profile 已通过，最后临时 broker 格式化失败。新临时目录同命令复现退出 0，未修改测试或断言。
+- Docker 首次构建遇 Ubuntu backports HTTP 502，目录上下文重试停滞，归档传输约 433 MB / 3 秒后 Buildx 报 COMPRESSION_ERROR；均不计为镜像通过。标准 doctor 随后从 Docker 实际执行位置通过全部依赖预检。
+- 第二轮 all 与 Engine 镜像构建并发期间出现个别预检超时；按用户低内存要求已主动中断并发工作，第二轮不是完整通过证据。之后不再同时运行这类验证。
+
+## 前一切片：产品版本与构建信息 / T5 / Atomic Slice 1
+
+- 业务意图：用真实镜像、完整统一回归和用户说明证明版本机制可使用、可交付，并如实记录未验证项。
+- Non-Goals：不发版、不创建产品标签、不提交/推送/上传，不操作现有业务资源，不修改秘密/凭证、网络、数据库或 Kafka 契约。
+- 允许文件：tasks/active_task.md；tasks/specs/feat-product-version.md；tasks/archive/feat-product-version.md（完整验收后仅归档文件）；tasks/product_backlog.md；README.md（版本说明链接与既有 Docker/Compose 命令同步，定位保持）；docs/versioning.md；docs/testing.md；docs/building.md；src/tests/test_environment/test_product_version.py；src/tests/test_environment/test_product_version_runtime.py；src/tests/test_environment/test_product_release.py；src/tests/test_environment/test_product_version_frontend.py；src/tests/test_environment/CMakeLists.txt；src/frontend/test/productVersion.test.mjs；src/frontend/vite.config.js；src/common/product_version.h；src/services/web/web_server.cpp；tools/release.py。仅允许修复当前版本 Feature 的验收阻塞，既有 T1～T4 diff 保留。
+- 步骤与契约：把真实前端/增量验证接入可重复测试；用户说明覆盖版本升级、所有查询入口、源码身份未知/修改、原生交付及发布校验、Docker/Compose；按实际标准 Dockerfile 构建专用本地镜像，验证 CLI/Web/Worker/静态记录与 OCI 标签；标准全量构建、只读 doctor 和不筛选 tools/test.sh all，核对 selected=executed=passed，零失败/跳过/未执行才可勾选 T5 并归档；若外部环境失败保留具体证据，不假称全绿。
+- 验收命令：cmake -B build src；cmake --build build -j8；python3 tools/release.py artifacts；python3 tools/release.py image --tag flowsql:product-version-test；本地隔离容器查询及错误参数 Docker build；ctest --test-dir build --output-on-failure；tools/test.sh doctor --location docker；tools/test.sh all --jobs 4；git diff --check；git diff -U0 | clang-format-diff -p1 与新公共头 clang-format；git status --short。
+- 依赖/执行位置：本机 CMake/Git/Python/Node/npm、已缓存依赖与 Docker SDK，Docker Engine 经权限通道；新镜像/容器使用专用测试名和标签，无用户卷，随机宿主端口，finally 仅回收本测试资源；完整回归依赖 config/testing/dependencies.json 和 environment.json，私密内容只从已存在统一运行时配置引用读取，不输出。标准 runner 自行管理受管测试夹具；不修改业务容器。证据 evidence/product-version/t5/ 和标准 test-environment/。
+- 时间盒：2026-10-19 20:45–21:15 Asia/Shanghai，30 分钟。停止条件：T5 完整通过才归档；若测试/镜像仍运行，记录真实检查点，保持 T5 原编号进入下一授权时间盒，不扩成其他功能。目录不移动或删除；Feature 归档仅移动规格文件。
+
+### T4 已收口
+
+- 标准全量构建最终退出 0；首次 -j4 构建为提高并行度中断，make 清理未完成目标后 -j8 增量恢复成功。主程序、24 产品共享库、Worker 和全部前端块身份一致，实际构建为 dirty=true；统一定向 CTest 4/4，发布 8 组/上下文 3 组测试通过，Compose 四服务默认与固定镜像均通过。T4 勾选，证据 evidence/product-version/t4/。
+
+## 当前：产品版本与构建信息 / T4 / Atomic Slice 1
+
+- 业务意图：为所有原生产品插件嵌入源码快照，打包时核对实际产物，镜像与 Worker 保留原身份，发布前只读验证版本/标签/源码一致。
+- Non-Goals：不自动提交、打标签、推送/上传、升级部署或修改业务状态；不扩展供应链签名，不改变产品/第三方 ABI。
+- 允许文件：tasks/active_task.md；tasks/specs/feat-product-version.md；tools/product_version.py；tools/release.py；src/cmake/product_version.cmake；src/CMakeLists.txt；src/frontend/vite.config.js；Dockerfile；.dockerignore；docker-compose.yml；src/tests/test_environment/test_product_release.py；src/tests/test_environment/CMakeLists.txt；src/tests/test_framework/test_docker_build_context.py。保留 T1～T3 与规格登记 diff。
+- 冻结契约：原生所有 libflowsql*.so、flowsql 主程序、Worker snapshot、静态 JS 内嵌记录及静态清单必须三字段一致；缺失/混合身份拒绝；Docker 复制已构建 Worker 不从新源码重标，OCI label 与实际产物不符失败；Compose FLOWSQL_IMAGE 默认 latest；正式/候选发布只读校验干净已知源码、请求版本、精确标签和产物，临时 Git 夹具自行建测试标签，绝不改产品仓库标签。
+- 当前阻塞核查：实际前端 JS 中普通版本注释被 Vite 压缩删除，导致实际产物校验拒绝；在 T4 允许范围中加入 vite.config.js，将嵌入记录改为压缩保留的注释并验证，不改展示契约。
+- 验收：python3 src/tests/test_environment/test_product_release.py；cmake -B build src；cmake --build build -j4；python3 tools/release.py artifacts；ctest --test-dir build -R '^test_product_(version|version_runtime|release)$|^test_docker_build_context$' --output-on-failure；docker compose config；git diff --check；git diff --name-only。
+- 测试依赖/位置：隔离临时 Git/伪产物夹具、Python3/CMake/Git；真实本机构建缓存；Docker SDK 上下文过滤测试，无外部数据库/Kafka。Docker 打包与运行验收在 T5 声明，不在本切片操作现有容器/卷或外部服务；打包检查只读产物，证据 evidence/product-version/t4/。
+- 时间盒：2026-10-19 20:15–20:45 Asia/Shanghai，30 分钟。停止条件：发布失败/通过契约测试及真实原生产物校验通过收口 T4；构建未完保持原编号，不提前勾选。
+
+### T3 已收口
+
+- 展示断言、CMake 前端构建、隔离独立 build、两个真实 Vue 组件渲染及 dev 版本刷新全部通过；首次夹具清理竞争已通过禁用夹具预扫描消除，复跑退出 0。未改仓库 VERSION 或 package/lock；证据 evidence/product-version/t3/。
+
+## 当前：产品版本与构建信息 / T3 / Atomic Slice 1
+
+- 业务意图：顶栏与保留侧栏展示前端自身 v0.1.0 及源码身份详情，不受后端请求状态影响。
+- Non-Goals：不改后端、发布、主题和导航功能，不改 package/lock 版本，不提交或发布。
+- 允许文件：tasks/active_task.md；tasks/specs/feat-product-version.md；src/frontend/src/App.vue；src/frontend/src/components/Sidebar.vue；src/frontend/src/productVersion.js；src/frontend/test/productVersion.test.mjs。保留此前登记、T1/T2 diff。
+- 契约：统一 virtual:flowsql-build-info 常量；两处 v<version>；悬浮详情短提交/修改/未知状态；不得回退 0.0.0 或请求后端覆盖。
+- 验收：node --test src/frontend/test/productVersion.test.mjs；cmake --build build --target flowsql_frontend -j4；实际独立 npm run build；独立 dev HTTP 返回版本模块与 VERSION 修改监测使用隔离复制树；git diff --check；git diff --name-only。
+- 测试依赖/位置：本机已安装 Node/npm/Vite；纯断言无外部服务；Vite 测试隔离临时目录、动态端口、清理自身子进程，无数据库/Kafka/Docker，不更改仓库 VERSION；构建按已确认权限通道执行。
+- 时间盒：2026-10-19 20:11–20:41 Asia/Shanghai，30 分钟。停止条件：T3 展示断言与实际构建/开发服务验证通过后收口，再冻结 T4。
+
+### T2 已收口
+
+- C++、Web、Router 构建成功，注册 CTest 2/2 通过（7 个工具契约断言组、2 个实际运行测试，含 CLI 各入口/HTTP 两监听）；新增 C++ 行格式检查与 diff 检查通过。第一次过早运行时 Router 仍在编译而使用旧库导致响应头断言失败；待目标全部完成后统一 CTest 通过，未放宽断言。T2 勾选，证据 evidence/product-version/t2/。
+
+## 当前：产品版本与构建信息 / T2 / Atomic Slice 2
+
+- 业务意图：CLI 无需启动服务即可查询实际产物身份，Web 直接监听和枚举路由提供相同三字段数据。
+- Non-Goals：不改 UI、发布工具、插件 ABI、健康接口或业务功能，不提交、打标签或推送。
+- 允许文件：tasks/active_task.md；tasks/specs/feat-product-version.md；src/common/product_version.h；src/app/main.cpp；src/python/flowsql/__init__.py；src/python/flowsql/product_info.py；src/python/flowsql/worker.py；src/services/web/web_server.h；src/services/web/web_server.cpp；src/services/router/router_agency_plugin.cpp；src/tests/test_environment/test_product_version_runtime.py；src/tests/test_environment/CMakeLists.txt。T1 与规格登记既有改动保留。
+- 冻结契约：严格采用规格 CLI 三行和 JSON 三字段；CLI 在配置、插件、算子和依赖导入前返回；两个 HTTP 入口均 no-store，不扩展路由 ABI，Router 仅为此固定 URI 设置响应头。
+- 验收：cmake -B build src；cmake --build build --target flowsql flowsql_web flowsql_router -j4；ctest --test-dir build -R '^test_product_version(_runtime)?$' --output-on-failure；clang-format --dry-run --Werror 修改的 C++；git diff --check；git diff --name-only。
+- 测试依赖/位置：真实 build/output 产物；本机 Python3/Git，CLI 使用 -S 验证无第三方依赖；HTTP 使用临时状态目录、动态本地端口及仅本测试创建的子进程，结束时终止回收；无数据库/Kafka/外部网络，监听需沙箱外权限，统一 runner 中无外部服务测试分类。
+- 时间盒：2026-10-19 20:08–20:38 Asia/Shanghai，30 分钟；沿用 T2 原契约与允许文件。停止条件：真实 CLI/HTTP 验收通过后记录 T2，重新冻结 T3；失败不勾选。
+- 上一时间盒检查点：进行中且主程序构建检查点通过，Web 编译尚在执行；未勾选 T2，未扩大任务边界。
+
+### T1 已收口
+
+- 7 个隔离契约测试通过，注册 CTest 1/1 通过，标准配置与 flowsql_frontend/flowsql_runtime_config 构建通过；前端 npm ci 的 esbuild 曾遇沙箱 EPERM，正式权限通道重跑成功，无需修改代码。语法/格式/diff 检查通过；证据在 evidence/product-version/t1/。T1 勾选，进入用户已授权的 T2。
+
+## 当前：产品版本与构建信息 / T1 / Atomic Slice 1
+
+- 授权：用户要求“开始实施，直至完成”；按 T1～T5 顺序验收，每阶段收口后重新冻结下一阶段，保持 WIP=1；不提交、不推送、不打发布标签。
+- 业务意图：建立统一 VERSION 与只读构建快照，使标准构建、独立前端及 Worker 分发取得真实一致的版本身份。
+- Non-Goals：本切片不接入 CLI/HTTP/UI、不实现打包发布工具、不改产品定位、第三方版本、ABI 或业务数据。
+- 允许文件：tasks/active_task.md；tasks/product_backlog.md；tasks/specs/feat-product-version.md；VERSION；tools/product_version.py；src/common/product_version.h；src/cmake/product_version.cmake；src/CMakeLists.txt；src/cmake/stage_runtime.cmake.in；src/app/CMakeLists.txt；src/python/setup.py；src/frontend/vite.config.js；src/services/web/CMakeLists.txt；src/tests/test_environment/CMakeLists.txt；src/tests/test_environment/test_product_version.py。既有规格登记改动保留。证据仅 evidence/product-version/。
+- 冻结契约：采用规格三字段 JSON / ProductBuildInfo、SemVer 子集和 PEP 440 映射；生成文件只写构建/分发区域；无变化不重写；每个目标内置自身身份，公共函数不产生跨插件符号覆盖。
+- 步骤：先写解析/Git/无变化生成断言；实现标准库版本工具、CMake 生成目标与消费者依赖、独立 Vite 读取及 Worker 包派生；配置并验收定向构建，再记录 T1 结果。
+- 验收：python3 src/tests/test_environment/test_product_version.py；cmake -B build src；cmake --build build --target flowsql_frontend flowsql_runtime_config -j4；ctest --test-dir build -R '^test_product_version$' --output-on-failure；git diff --check；git diff --name-only。
+- 依赖/位置：仓库根目录，本机 Python3/Git/CMake/C++17/Node/npm 与已缓存三方；纯版本测试使用临时目录和临时 Git 仓库，无数据库/Kafka/Docker，无网络或凭证需求。测试按现有无外部依赖用例注册，运行时统一 runner 负责分类。
+- 时间盒：2026-10-19 19:00–19:30 Asia/Shanghai，30 分钟。停止条件：T1 契约测试和定向构建通过后记录结果；未通过则保留具体失败，不提前勾选；下一 Task 前另行冻结边界。
+
+## 当前：产品版本与构建信息 / 规格登记 Atomic Slice 1
+
+- 关联 Feature：product-version；本轮只登记需求与冻结规格，尚未执行任何实施 Feature Task。
+- 业务意图：让构建、交付和故障排查人员能够用统一版本与源码身份识别产品，消除当前 Web、Worker 和交付产物版本来源分散的问题。
+- Non-Goals：不实现版本机制，不修改源码、VERSION、构建/部署配置或用户说明，不构建、不运行产品测试或服务，不创建标签、提交、推送或发布。
+- 允许修改文件：tasks/active_task.md、tasks/product_backlog.md、tasks/specs/feat-product-version.md；基线与文档校验仅写 evidence/product-version/spec/，不入库。
+- 契约与步骤：先核对当前版本展示、构建和打包路径；Backlog 增加一个 P1 待办 Feature，保持原 59 项及五项 P3 长远规划不变；规格冻结单一 VERSION 来源、构建快照、CLI/HTTP/Web 契约、交付校验及 5 个结果导向任务，全部未勾选；完成一轮有界审查和静态验收。
+- 验收命令：python3 evidence/product-version/spec/verify.py（Feature 唯一性、旧条目逐字保持、相对链接/锚点、JSON/C++17 契约示例、编号/状态、工作台历史及允许范围）；awk '/^## 完成证据/{exit} NF{n++} END{print n+0}' tasks/specs/feat-product-version.md；git diff --check；git diff --name-only。
+- 依赖/位置：仓库根目录，本机 Git/Python3/C++ 编译器，现有源码与规格；仅文档检查，不需要网络、外部服务、系统包安装或额外权限。示例可做语法检查，不代表产品已实现。
+- 时间盒：18:38–18:58 Asia/Shanghai，20 分钟。停止条件：三文件内文档验收通过后 WIP=0 并停止，Feature 保持 [ ]、T1～T5 未完成；不自动开始实施，不移动或删除目录。
+
+### 规格登记完成证据
+
+- 已新增 P1 待办 Feature product-version 及规格，T1～T5 全部未勾选；完成一轮有界审查，未发现需阻断规格的契约冲突。规格在完成证据前共 110 个非空行，未新增实施切片或开展后续任务。
+- 文档静态验收通过：Backlog 原 59 条逐字保持，新增后 60 项（54 已完成、6 待办），原五项 P3 长远规划与已完成能力章节逐字保持；新增链接/锚点、JSON 示例、C++17 值契约示例语法、任务编号/状态、工作台历史及三文件允许范围均通过检查。
+- git diff --check 通过；HEAD 与暂存区保持不变。校验脚本及报告位于 evidence/product-version/spec/，已核实被忽略，不入库。
+- 本轮仅完成需求登记与规格，未创建 VERSION、实现版本机制、构建或运行产品测试，未修改 README 定位、创建标签、提交或推送；WIP=0，停止。
 
 ## 当前：产品构建修复 / 本地提交
 

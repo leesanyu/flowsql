@@ -30,7 +30,7 @@
         <span class="status-dot" :class="gatewayOnline ? 'online' : 'offline'"></span>
         <span>Gateway {{ gatewayOnline ? '在线' : '离线' }}</span>
       </div>
-      <div class="footer-row version">v{{ version }}</div>
+      <div class="footer-row version" :title="versionDetails">v{{ version }}</div>
     </div>
   </aside>
 </template>
@@ -39,10 +39,12 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { DataAnalysis, Connection, Operation, Document, User } from '@element-plus/icons-vue'
-import pkg from '../../package.json'
+import buildInfo from 'virtual:flowsql-build-info'
+import { describeBuildInfo } from '../productVersion.js'
 
 const route = useRoute()
-const version = pkg.version
+const version = buildInfo.version
+const versionDetails = describeBuildInfo(buildInfo)
 const gatewayOnline = ref(false)
 
 const navItems = [

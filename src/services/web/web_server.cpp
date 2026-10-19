@@ -21,8 +21,9 @@
 #include <sys/types.h>
 
 #include <common/error_code.h>
-#include <common/json_depth.hpp>
 #include <common/log.h>
+#include <common/product_version.h>
+#include <common/json_depth.hpp>
 #include <services/web/pcap_upload_transaction.hpp>
 
 namespace flowsql {
@@ -416,6 +417,12 @@ int WebServer::Init(const std::string& db_path) {
     // 注册 /api/* 路由（通过 IRouterHandle 机制声明，此处直接绑定到 httplib）
     server_.Get("/api/health", [this](const httplib::Request&, httplib::Response& res) {
         std::string rsp; HandleHealth("", "", rsp);
+        res.set_content(rsp, "application/json");
+    });
+    server_.Get("/api/version", [this](const httplib::Request&, httplib::Response& res) {
+        std::string rsp;
+        HandleVersion("", "", rsp);
+        res.set_header("Cache-Control", "no-store");
         res.set_content(rsp, "application/json");
     });
     // list 风格新路由（保留旧路由兼容）
@@ -938,7 +945,15 @@ void WebServer::Stop() {
     server_.stop();
 }
 
+int32_t WebServer::HandleVersion(const std::string&, const std::string&, std::string& rsp) {
+    rsp = ProductBuildInfoJson();
+    return error::OK;
+}
+
 void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
+    cb({"GET", "/api/version", [this](const std::string& uri, const std::string& req, std::string& rsp) {
+            return HandleVersion(uri, req, rsp);
+        }});
     // 逻辑链：
     // 1) 声明 Web 插件本地处理的管理面 API；
     // 2) 对通道、任务、算子接口进行统一路由注册；

@@ -6,6 +6,10 @@ build/*
 !build/output/
 build/output/*
 !build/output/flowsql
+!build/output/build-info.json
+!build/output/python/
+!build/output/python/**
+build/output/python/**/__pycache__/
 !build/output/lib*.so*
 !build/output/static/
 !build/output/static/**
@@ -27,9 +31,14 @@ config/docker/*
 !src/
 src/*
 !src/python/
-!src/python/**
+src/python/*
+!src/python/requirements.txt
 src/python/**/*.egg-info/
 src/python/**/__pycache__/
+!tools/
+tools/*
+!tools/product_version.py
+!tools/release.py
 !src/plugins/
 src/plugins/*
 !src/plugins/npi/

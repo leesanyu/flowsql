@@ -39,7 +39,7 @@
           <el-icon size="13"><User /></el-icon>
           admin
         </span>
-        <span class="nav-version">v{{ version }}</span>
+        <span class="nav-version" :title="versionDetails">v{{ version }}</span>
       </div>
     </header>
 
@@ -54,10 +54,12 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { Moon, Sunny, User } from '@element-plus/icons-vue'
-import pkg from '../package.json'
+import buildInfo from 'virtual:flowsql-build-info'
+import { describeBuildInfo } from './productVersion.js'
 
 const route = useRoute()
-const version = pkg.version
+const version = buildInfo.version
+const versionDetails = describeBuildInfo(buildInfo)
 
 // 主题初始化
 const savedTheme = localStorage.getItem('theme')
