@@ -392,8 +392,7 @@ int WebServer::Init(const std::string& db_path) {
     server_.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
         if (IsExplorationPath(req.path)) {
             // cpp-httplib reads POST bodies after pre-routing; use the regular route below.
-            if (req.method == "POST" &&
-                (req.path == "/api/visualization/v1/compute" || req.path == "/api/visualization/v1/cancel"))
+            if (req.method == "POST" && IsExplorationPostPath(req.path))
                 return httplib::Server::HandlerResponse::Unhandled;
             ProxyExploration(visualization_upstream_, req, res);
             return httplib::Server::HandlerResponse::Handled;
@@ -403,7 +402,7 @@ int WebServer::Init(const std::string& db_path) {
         res.set_header("Access-Control-Allow-Headers", "Content-Type");
         return httplib::Server::HandlerResponse::Unhandled;
     });
-    server_.Post(R"(/api/visualization/v1/(compute|cancel))",
+    server_.Post(R"(/api/visualization/v1/(compute|cancel|snapshots/(acquire|renew|release)))",
                  [this](const auto& req, auto& res) { ProxyExploration(visualization_upstream_, req, res); });
     server_.Options(".*", [](const httplib::Request&, httplib::Response& res) {
         res.status = 204;

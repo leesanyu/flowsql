@@ -20,6 +20,12 @@ inline bool IsExplorationPath(const std::string& path) {
            path.rfind("/api/visualization/v1/", 0) == 0;
 }
 
+inline bool IsExplorationPostPath(const std::string& path) {
+    return path == "/api/visualization/v1/compute" || path == "/api/visualization/v1/cancel" ||
+           path == "/api/visualization/v1/snapshots/acquire" || path == "/api/visualization/v1/snapshots/renew" ||
+           path == "/api/visualization/v1/snapshots/release";
+}
+
 inline void ProxyExploration(const std::string& upstream, const httplib::Request& req, httplib::Response& res) {
     if (upstream.empty()) {
         res.status = 503;
@@ -30,7 +36,7 @@ inline void ProxyExploration(const std::string& upstream, const httplib::Request
     const bool api_get = req.path == "/api/visualization/v1/capabilities" ||
                          req.path == "/api/visualization/v1/sources" ||
                          req.path.rfind("/api/visualization/v1/sources/", 0) == 0;
-    const bool api_post = req.path == "/api/visualization/v1/compute" || req.path == "/api/visualization/v1/cancel";
+    const bool api_post = IsExplorationPostPath(req.path);
     if (!(((asset || api_get) && (req.method == "GET" || req.method == "HEAD")) ||
           (api_post && req.method == "POST"))) {
         res.status = 405;

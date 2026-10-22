@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { writeFile } from 'node:fs/promises'
 import { openBrowser } from './browser_support.mjs'
 
-const [direct, evidence] = process.argv.slice(2)
+const [direct, evidence, mode = 'standalone'] = process.argv.slice(2)
 const checks = [], measurements = []
 let failure
 
@@ -10,7 +10,7 @@ const chartTypes = ['bar', 'stacked_bar', 'grouped_bar', 'line', 'area', 'point'
   'highlight_table', 'histogram']
 
 try {
-  const browser = await openBrowser(direct, 'standalone')
+  const browser = await openBrowser(direct, mode)
   const { send, evaluate, wait, pause } = browser
   const click = (label) => evaluate(`[...document.querySelectorAll('button')].find(e=>e.textContent===${JSON.stringify(label)}).click()`)
   const snapshotId = () => evaluate(`(()=>{const o=document.querySelector('.snapshot-bar');return o?o.getAttribute('data-snapshot-id'):''})()`)
@@ -18,7 +18,7 @@ try {
     await send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false })
     // Renewal runs on a short interval so the page exercises the renew path during the run.
     await send('Page.addScriptToEvaluateOnNewDocument', { source: 'globalThis.__flowsqlRenewMilliseconds = 1000' })
-    await send('Page.navigate', { url: direct + '/exploration/' })
+    await send('Page.navigate', { url: direct + (mode === 'embedded' ? '/explore' : '/exploration/') })
     await wait(() => evaluate('document.querySelector("select[aria-label=数据来源]")?.options.length>=3'), 'sources')
     const groups = await evaluate(`[...document.querySelectorAll('select[aria-label="数据来源"] optgroup')].map(g=>g.label)`)
     assert.deepEqual(groups, ['数据库表', 'DataFrame 快照'])
@@ -33,6 +33,10 @@ try {
     await wait(() => snapshotId(), 'snapshot id')
     const first = await snapshotId()
     checks.push('snapshot_bar')
+    const renewal = await evaluate(`fetch('/api/visualization/v1/snapshots/renew',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({snapshot_id:${JSON.stringify(first)}})}).then(async r=>({status:r.status,body:await r.json()}))`)
+    assert.equal(renewal.status, 200, JSON.stringify(renewal))
+    assert(renewal.body.expires_at_unix > 0, JSON.stringify(renewal))
+    checks.push('snapshot_renewed')
 
     // Boxplot stays unavailable on the DataFrame path and states the reason.
     const marks = await evaluate(`[...document.querySelectorAll('select[aria-label=图表] option')].map(o=>o.value)`)
@@ -110,6 +114,6 @@ try {
   failure = error
   console.error('FAIL', error.message)
 }
-await writeFile(evidence + '/dataframe-browser.json', JSON.stringify({ checks, measurements, failure: failure?.message }, null, 2))
+await writeFile(evidence + '/dataframe-browser.json', JSON.stringify({ mode, checks, measurements, failure: failure?.message }, null, 2))
 if (failure) { console.error(failure.stack || failure.message); process.exit(1) }
 console.log(JSON.stringify({ checks }))

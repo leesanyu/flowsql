@@ -9,8 +9,9 @@ import sys
 import tempfile
 import time
 import urllib.request
+import uuid
 from pathlib import Path
-from test_entry import port, service
+from test_entry import port, request, service
 from test_compute import call
 
 
@@ -32,9 +33,10 @@ def main():
             connection.execute('CREATE TABLE rows(region TEXT, amount INTEGER)')
             connection.executemany('INSERT INTO rows VALUES(?,?)', [('north', 10), ('south', 20)])
 
-        source_port, visual_port = port(), port()
+        source_port, visual_port, web_port = port(), port(), port()
         source = f'http://127.0.0.1:{source_port}'
         visual = f'http://127.0.0.1:{visual_port}'
+        web = f'http://127.0.0.1:{web_port}'
         env = dict(os.environ, LD_LIBRARY_PATH=str(output) + ':' + os.environ.get('LD_LIBRARY_PATH', ''))
         source_option = f'data_dir={dataframes};exploration_shared_dir={shared};operator_db_path={directory}/meta.db'
         plugins = f'{output}/libflowsql_database.so,{output}/libflowsql_visualization.so'
@@ -69,8 +71,48 @@ def main():
                 assert status == 200, listing
                 labels = [item['label'] for item in listing['sources']]
                 assert 'dataframe.sales' in labels and 'memory.rows' in labels, labels
-                subprocess.run([node, str(Path(__file__).with_name('dataframe_browser.mjs')), visual, str(evidence)],
-                               check=True, timeout=240)
+                web_options = (f'port={web_port};db_path={directory}/web.db;'
+                               f'upload_dir={directory}/uploads;visualization_upstream={visual}')
+                with service(output, directory, 'web', web_options, web + '/api/version'):
+                    # Missing/invalid bodies must reach the exploration service as JSON errors.
+                    acquire_url = web + '/api/visualization/v1/snapshots/acquire'
+                    with request(urllib.request.Request(acquire_url, data=b'{}',
+                                 headers={'Content-Type': 'application/json'})) as response:
+                        assert response.status == 400, (response.status, response.read().decode())
+                        assert response.headers.get_content_type() == 'application/json'
+                        assert json.load(response)['code'] == 'INVALID_WORKFLOW'
+                    for operation in ('acquire', 'renew', 'release'):
+                        url = web + '/api/visualization/v1/snapshots/' + operation
+                        for method in ('GET', 'HEAD', 'DELETE'):
+                            with request(urllib.request.Request(url, method=method)) as response:
+                                assert response.status == 405, (operation, method, response.status)
+                    with request(urllib.request.Request(web + '/api/visualization/v1/snapshots/unknown',
+                                                       data=b'{}')) as response:
+                        assert response.status == 405, response.status
+                    status, proxied = call(web, 'sources')
+                    assert status == 200, proxied
+                    dataframe = next(item for item in proxied['sources'] if item['label'] == 'dataframe.sales')
+                    status, snapshot = call(web, 'snapshots/acquire',
+                                            {'request_id': str(uuid.uuid4()), 'source_id': dataframe['source_id']})
+                    assert status == 200 and snapshot['row_count'] == 3, snapshot
+                    binding = {'snapshot_id': snapshot['snapshot_id']}
+                    try:
+                        status, renewed = call(web, 'snapshots/renew', binding)
+                        assert status == 200 and renewed['expires_at_unix'] > 0, renewed
+                    finally:
+                        status, released = call(web, 'snapshots/release', binding)
+                        assert status == 200, released
+                    status, expired = call(web, 'snapshots/renew', binding)
+                    assert status == 409 and expired['code'] == 'SNAPSHOT_EXPIRED', expired
+                    (evidence / 'proxy-http.json').write_text(json.dumps({
+                        'invalid_body': 400, 'wrong_methods': 405, 'unknown_operation': 405,
+                        'acquire': snapshot, 'renew': renewed, 'release': released, 'expired': expired,
+                    }, indent=2))
+                    for mode, base in (('standalone', visual), ('embedded', web)):
+                        browser_evidence = evidence / mode
+                        browser_evidence.mkdir(exist_ok=True)
+                        subprocess.run([node, str(Path(__file__).with_name('dataframe_browser.mjs')),
+                                        base, str(browser_evidence), mode], check=True, timeout=240)
             finally:
                 for child in (process, source_process):
                     child.terminate()
