@@ -12,6 +12,7 @@
   - [已完成能力](#已完成能力)
     - [框架、插件与服务](#框架插件与服务)
     - [任务、通道与 Web 管理](#任务通道与-web-管理)
+    - [数据探索与可视化](#数据探索与可视化)
     - [流量采集与报文处理](#流量采集与报文处理)
     - [NPM 分析与结果管理](#npm-分析与结果管理)
     - [基线分析与预测](#基线分析与预测)
@@ -24,12 +25,7 @@
 
 | 状态 | Feature | 优先级 | 目标 | 规格 |
 | --- | --- | --- | --- | --- |
-| [x] | 基础探索与 Web 入口（SQLite，`visualization-database`） | P1 | 让需要探索 SQLite 数据表的用户，从现有 Web 顶栏“数据探索”进入独立、轻量的 Graphic Walker 工作区，使用过滤、分组和基础聚合观察柱状、折线及散点图；SQLite 原生 SQL 计算，查询有界且可取消，工作区也可直接访问并独立运行。 | [规格](archive/feat-visualization-database.md) |
-| [x] | 多数据库探索兼容 (`visualization-database-connectors`) | P1 | 让 MySQL、PostgreSQL、ClickHouse 用户在同一工作区直接探索已有数据库表，获得与 SQLite 基础探索一致且可解释的核心统计能力；依赖 visualization-database，查询使用各源库原生 SQL，并保持类型、只读访问、取消及资源回收保证。 | [规格](archive/feat-visualization-database-connectors.md) |
-| [x] | 数据库探索体验优化 (`visualization-experience`) | P1 | 让交互探索数据库表的用户获得充分利用页面空间的图表、按表保留的独立绘图工作页和一致的编辑入口，并能绘制常见 Decimal、识别近似精度及恢复查询错误；依赖已有基础探索与多数据库兼容能力。 | [规格](archive/feat-visualization-experience.md) |
-| [x] | 图表选择与字段语义优化 (`visualization-chart-authoring`) | P1 | 让数据库探索用户在默认界面直接选择全部非地图图表，按图表需要选择字段，并仅用一个数值字段绘制由源库计算的直方图。 | [规格](archive/feat-visualization-chart-authoring.md) |
-| [x] | 时间统计探索 (`visualization-statistics`) | P1 | 让需要按时间比较趋势及统计不同值数量的数据库用户，在同一工作区使用日/月时间桶与去重计数；依赖已有探索与图表选择能力，四库分别执行原生 SQL，空值及时间语义明确；直方图与数值分箱由 visualization-chart-authoring 交付。 | [归档](archive/feat-visualization-statistics.md) |
-| [x] | DataFrame 探索可视化 (`visualization-dataframe`) | P1 | 让需要探索 FlowSQL 中间结果或算子结果的用户，在同一工作区对命名 DataFrame 的不可变快照观察趋势、分布与变量关系，主动刷新数据版本，且已取得的数据不会因生产任务结束而悬空；复用已有探索工作区与计算契约，首版通过同机 Arrow IPC 接入并独立计算。 | [归档](archive/feat-visualization-dataframe.md) |
+| [ ] | DataFrame 启动恢复优化 (`dataframe-lazy-loading`) | P1 | 让持久化 DataFrame 数量多、数据量大的部署避免在进程启动和目录查询时全量读取 CSV；交付快速可用的服务与通道目录、首次访问时按需加载的数据，以及一致的并发读取、探索快照和通道管理行为。 | [规格](specs/feat-dataframe-lazy-loading.md) |
 
 ---
 
@@ -61,6 +57,17 @@
 | [x] | FlowSQL 阶段化过滤管线 (`stage-filter-pipeline`) | P0 | 支持 source 与每级 operator 输出的类型化 WHERE，以 Arrow 统一执行并允许 channel/operator 做精确谓词下推。 | [归档](archive/feat-stage-filter-pipeline.md) |
 | [x] | 流式算子时间驱动 (`stream-time-drive`) | P0 | 让实时有状态算子在暂时无包、持续繁忙及输出背压期间仍能获得版本化时间通知并按期维护；正常 EOF 单次终结且错误/取消不伪装成 EOF，使 `npm.basic` 可按最早截止时间驱动同一任务内全部已启用模块而不受当前观察结果影响。 | [归档](archive/feat-stream-time-drive.md) |
 | [x] | 配置资源通道 (`config-channel`) | P1 | 让需要跨任务复用静态规则、映射或字典的用户和算子不再绑定各自的本地配置目录；交付 JSON/YAML/XML 文件上传、具名配置通道、永久保存、重启恢复和不可变递增版本，消费者可用 `config.<name>@<revision>` 精确取得带格式、业务 Schema 与内容摘要的只读快照；不把配置通道作为普通 SQL 数据面或密钥管理系统。 | [归档](archive/feat-config-channel.md) |
+
+### 数据探索与可视化
+
+| 状态 | Feature | 优先级 | 目标 | 归档规格 |
+| --- | --- | --- | --- | --- |
+| [x] | 基础探索与 Web 入口（SQLite，`visualization-database`） | P1 | 让需要探索 SQLite 数据表的用户，从现有 Web 顶栏“数据探索”进入独立、轻量的 Graphic Walker 工作区，使用过滤、分组和基础聚合观察柱状、折线及散点图；SQLite 原生 SQL 计算，查询有界且可取消，工作区也可直接访问并独立运行。 | [规格](archive/feat-visualization-database.md) |
+| [x] | 多数据库探索兼容 (`visualization-database-connectors`) | P1 | 让 MySQL、PostgreSQL、ClickHouse 用户在同一工作区直接探索已有数据库表，获得与 SQLite 基础探索一致且可解释的核心统计能力；依赖 visualization-database，查询使用各源库原生 SQL，并保持类型、只读访问、取消及资源回收保证。 | [规格](archive/feat-visualization-database-connectors.md) |
+| [x] | 数据库探索体验优化 (`visualization-experience`) | P1 | 让交互探索数据库表的用户获得充分利用页面空间的图表、按表保留的独立绘图工作页和一致的编辑入口，并能绘制常见 Decimal、识别近似精度及恢复查询错误；依赖已有基础探索与多数据库兼容能力。 | [规格](archive/feat-visualization-experience.md) |
+| [x] | 图表选择与字段语义优化 (`visualization-chart-authoring`) | P1 | 让数据库探索用户在默认界面直接选择全部非地图图表，按图表需要选择字段，并仅用一个数值字段绘制由源库计算的直方图。 | [规格](archive/feat-visualization-chart-authoring.md) |
+| [x] | 时间统计探索 (`visualization-statistics`) | P1 | 让需要按时间比较趋势及统计不同值数量的数据库用户，在同一工作区使用日/月时间桶与去重计数；依赖已有探索与图表选择能力，四库分别执行原生 SQL，空值及时间语义明确；直方图与数值分箱由 visualization-chart-authoring 交付。 | [归档](archive/feat-visualization-statistics.md) |
+| [x] | DataFrame 探索可视化 (`visualization-dataframe`) | P1 | 让需要探索 FlowSQL 中间结果或算子结果的用户，在同一工作区对命名 DataFrame 的不可变快照观察趋势、分布与变量关系，主动刷新数据版本，且已取得的数据不会因生产任务结束而悬空；复用已有探索工作区与计算契约，首版通过同机 Arrow IPC 接入并独立计算。 | [归档](archive/feat-visualization-dataframe.md) |
 
 ### 流量采集与报文处理
 

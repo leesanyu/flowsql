@@ -103,11 +103,15 @@ def main():
         assert (output / artifact).exists(), artifact
     single = (repository / 'config/deploy-single.yaml').read_text()
     standalone = (repository / 'config/deploy-visualization.yaml').read_text()
-    assert 'exploration_shared_dir=./exploration-shared' in single
+    # Both sides need a 0700 directory, so the default must sit on a POSIX filesystem that stores
+    # permission bits; a repository-relative path under /mnt/d (9p/DrvFs) can never be 0700.
+    shared_dir = '/var/tmp/flowsql/exploration-shared'
+    assert f'exploration_shared_dir={shared_dir}' in single
     assert '"dataframe_upstream":"http://127.0.0.1:18803"' in single
-    assert '"dataframe_shared_dir":"./exploration-shared"' in single
+    assert f'"dataframe_shared_dir":"{shared_dir}"' in single
     assert '"dataframe_upstream":"http://127.0.0.1:18803"' in standalone
-    assert '"dataframe_shared_dir":"./exploration-shared"' in standalone
+    assert f'"dataframe_shared_dir":"{shared_dir}"' in standalone
+    assert not str(repository) in shared_dir
     doc = (repository / 'docs/exploration.md').read_text()
     for phrase in ('DataFrame 快照探索', 'exploration_shared_dir', '获取最新快照', 'SNAPSHOT_EXPIRED', '15 分钟'):
         assert phrase in doc, phrase

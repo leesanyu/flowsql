@@ -188,10 +188,12 @@ DataFrame 探索用于查看 FlowSQL 内部命名结果为 CSV 导入结果或�
 
 数据面需要来源服务与探索服务都能访问的私有目录，两端配置必须一致，且都不由浏览器提交：
 
-- 拥有 DataFrame 通道的服务（默认 `all` 中的 `libflowsql_catalog.so`）：`exploration_shared_dir=./exploration-shared`。
-- 探索服务（`visualization`）：`dataframe_upstream=http://127.0.0.1:18803` 与 `dataframe_shared_dir=./exploration-shared`。
+- 拥有 DataFrame 通道的服务（默认 `all` 中的 `libflowsql_catalog.so`）：`exploration_shared_dir=/var/tmp/flowsql/exploration-shared`。
+- 探索服务（`visualization`）：`dataframe_upstream=http://127.0.0.1:18803` 与 `dataframe_shared_dir=/var/tmp/flowsql/exploration-shared`。
 
 目录首次由来源服务创建为 `0700`，对象为 `0600`，并在其中持有 `flock` 排他锁，避免两个来源进程共用同一目录。
+该目录必须位于能真实保存权限位的 POSIX 文件系统：两端都要求目录为 `0700`，而 WSL 的 9p/DrvFs 挂载（如 `/mnt/d`）
+忽略 `chmod`，目录会始终显示为 `0777` 并导致来源服务启动失败。因此默认配置使用 `/var/tmp`，不要指向仓库工作区路径。
 未配置数据面或上游不可达时，数据库探索照常可用，来源列表只显示数据库表；申请 DataFrame 快照会明确返回
 `DATA_PLANE_UNAVAILABLE`，不会显示空数据。首版仅支持同机原生多进程，不提供跨主机或容器共享挂载。
 

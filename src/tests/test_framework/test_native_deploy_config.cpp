@@ -28,6 +28,9 @@ constexpr const char* kNpiOption = "{\"ldfile\":\"./config/protocols.yml\"}";
 constexpr const char* kPcapFileOption = "db_path=./meta/flowsql_meta.db";
 constexpr const char* kConfigChannelOption = "db_path=./meta/flowsql_meta.db";
 constexpr const char* kCatalogOption = "data_dir=./dataframes;operator_db_path=./meta/flowsql_meta.db";
+constexpr const char* kSingleCatalogOption =
+    "data_dir=./dataframes;operator_db_path=./meta/flowsql_meta.db;"
+    "exploration_shared_dir=/var/tmp/flowsql/exploration-shared";
 constexpr const char* kBinAddonOption = "operator_db_path=./meta/flowsql_meta.db;upload_dir=./uploads/binaddon";
 
 bool Expect(bool condition, const std::string& message) {
@@ -55,7 +58,8 @@ std::string PluginOption(const std::string& plugin) {
     return colon == std::string::npos ? std::string() : plugin.substr(colon + 1);
 }
 
-bool ExpectSchedulerRuntime(const flowsql::gateway::ServiceConfig& service, const std::string& deployment) {
+bool ExpectSchedulerRuntime(const flowsql::gateway::ServiceConfig& service, const std::string& deployment,
+                            const std::string& catalog_option) {
     bool ok = true;
     const std::string* kafka = FindPlugin(service, kKafkaPlugin);
     ok = Expect(kafka && PluginOption(*kafka) == "{}",
@@ -93,7 +97,7 @@ bool ExpectSchedulerRuntime(const flowsql::gateway::ServiceConfig& service, cons
     const std::string* catalog = FindPlugin(service, kCatalogPlugin);
     ok = Expect(catalog != nullptr, deployment + " Scheduler process must load Catalog") && ok;
     if (catalog) {
-        ok = Expect(PluginOption(*catalog) == kCatalogOption,
+        ok = Expect(PluginOption(*catalog) == catalog_option,
                     deployment + " Catalog must use the shared operator metadata database") &&
              ok;
     }
@@ -156,7 +160,7 @@ bool TestSingleProcessConfig() {
     const auto* all = FindService(config, "all");
     ok = Expect(all != nullptr, "single-process deployment must contain the all service") && ok;
     if (!all) return false;
-    const bool providers_ok = ExpectSchedulerRuntime(*all, "single-process deployment");
+    const bool providers_ok = ExpectSchedulerRuntime(*all, "single-process deployment", kSingleCatalogOption);
     const bool web_ok = ExpectWebUploadRoot(*all, "single-process deployment");
     return providers_ok && web_ok && ok;
 }
@@ -176,7 +180,7 @@ bool TestGuardianConfig() {
          ok;
     ok = Expect(FindPlugin(*web, kFlowLabelingPlugin) == nullptr, "Guardian Web must not load Flow Labeling") && ok;
     const bool web_ok = ExpectWebUploadRoot(*web, "Guardian deployment");
-    const bool providers_ok = ExpectSchedulerRuntime(*scheduler, "Guardian deployment");
+    const bool providers_ok = ExpectSchedulerRuntime(*scheduler, "Guardian deployment", kCatalogOption);
     return web_ok && providers_ok && ok;
 }
 

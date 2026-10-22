@@ -35,7 +35,9 @@ services:
       - name: libflowsql_catalog.so
         # exploration_shared_dir is the data plane for DataFrame snapshots: the source service
         # publishes Arrow IPC objects here and the visualization service maps them read-only.
-        option: "data_dir=./dataframes;operator_db_path=./meta/flowsql_meta.db;exploration_shared_dir=./exploration-shared"
+        # It must live on a POSIX filesystem: both sides require a 0700 directory, which 9p/DrvFs
+        # mounts (e.g. /mnt/d) cannot represent because chmod is a no-op there.
+        option: "data_dir=./dataframes;operator_db_path=./meta/flowsql_meta.db;exploration_shared_dir=/var/tmp/flowsql/exploration-shared"
       - name: libflowsql_binaddon.so
         option: "operator_db_path=./meta/flowsql_meta.db;upload_dir=./uploads/binaddon"
       - name: libflowsql_database.so
@@ -46,7 +48,7 @@ services:
   - name: visualization
     # dataframe_upstream points at the service that owns the DataFrame channels; both processes must
     # use the same dataframe_shared_dir. Without both keys the database path stays available.
-    option: '{"host":"127.0.0.1","port":18910,"static_dir":"exploration","dataframe_upstream":"http://127.0.0.1:18803","dataframe_shared_dir":"./exploration-shared"}'
+    option: '{"host":"127.0.0.1","port":18910,"static_dir":"exploration","dataframe_upstream":"http://127.0.0.1:18803","dataframe_shared_dir":"/var/tmp/flowsql/exploration-shared"}'
     plugins:
       - name: libflowsql_database.so
         option: "config_file=config/flowsql.yml"
