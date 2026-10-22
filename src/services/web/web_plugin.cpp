@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "web_plugin.h"
+#include "exploration_proxy.hpp"
 
 #include <charconv>
 #include <cstdio>
@@ -45,10 +46,12 @@ int WebPlugin::Option(const char* arg) {
         else if (key == "worker_host") worker_host_ = val;
         else if (key == "worker_port") worker_port_ = std::stoi(val);
         else if (key == "upload_dir") upload_dir_ = val;
-        else if (key == "pcap_upload_max_bytes") {
+        else if (key == "visualization_upstream") {
+            if (!ValidExplorationUpstream(val)) return -1;
+            visualization_upstream_ = val;
+        } else if (key == "pcap_upload_max_bytes") {
             if (!ParsePositiveUint64(val, &pcap_upload_max_bytes_)) return -1;
-        }
-        else if (key == "gateway") {
+        } else if (key == "gateway") {
             // 格式：host:port，内部服务转发目标
             size_t colon = val.find(':');
             if (colon != std::string::npos) {
@@ -64,6 +67,7 @@ int WebPlugin::Option(const char* arg) {
 }
 
 int WebPlugin::Load(IQuerier* /* querier */) {
+    server_.SetVisualizationUpstream(visualization_upstream_);
     server_.SetWorkerAddress(worker_host_, worker_port_);
     server_.SetSchedulerAddress(gateway_host_, gateway_port_);
     server_.SetUploadDir(upload_dir_);

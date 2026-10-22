@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 const routes = [
   { path: '/', redirect: '/dashboard' },
+  { path: '/explore', name: 'Explore', component: { render: () => null } },
   { path: '/dashboard', name: 'Dashboard', component: () => import('../views/Dashboard.vue') },
   { path: '/channels', name: 'Channels', component: () => import('../views/Channels.vue') },
   { path: '/operators', name: 'Operators', component: () => import('../views/Operators.vue') },

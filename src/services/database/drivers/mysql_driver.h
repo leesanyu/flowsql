@@ -4,6 +4,7 @@
 #ifndef _FLOWSQL_SERVICES_DATABASE_DRIVERS_MYSQL_DRIVER_H_
 #define _FLOWSQL_SERVICES_DATABASE_DRIVERS_MYSQL_DRIVER_H_
 
+#include <framework/interfaces/idatabase_exploration.h>
 #include <mysql/mysql.h>
 
 #include <functional>
@@ -52,6 +53,7 @@ class __attribute__((visibility("default"))) MysqlDriver : public IDbDriver,
     // 连接池相关
     std::shared_ptr<IDbSession> CreateSession() override;
     void DiscardSnapshot(MYSQL* conn);
+    void CancelExploration(unsigned long thread_id);
     void ReturnToPool(MYSQL* conn);
 
  private:
@@ -102,7 +104,9 @@ class MysqlResultSet : public IResultSet {
 };
 
 // MySQL Session 实现
-class MysqlSession : public RelationDbSessionBase<MysqlTraits>, public IDbSnapshotSession {
+class MysqlSession : public RelationDbSessionBase<MysqlTraits>,
+                     public IDbSnapshotSession,
+                     public IDatabaseExplorationSessionV1 {
  public:
     MysqlSession(MysqlDriver* driver, MYSQL* conn);
     ~MysqlSession() override;
@@ -115,6 +119,10 @@ class MysqlSession : public RelationDbSessionBase<MysqlTraits>, public IDbSnapsh
                      std::shared_ptr<arrow::Schema> expected, uint32_t rows, uint64_t bytes,
                      std::shared_ptr<arrow::RecordBatch>* output) override;
     void CancelSnapshot() override;
+    int Query(const char* sql, const DatabaseParameterV1* parameters, size_t count, uint32_t rows, uint64_t bytes,
+              ExplorationResultV1* output) override;
+    void Cancel() override;
+    std::string QueryError() const override { return last_error_; }
     int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
     int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
                              size_t execution_count) override;

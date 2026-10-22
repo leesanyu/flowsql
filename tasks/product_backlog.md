@@ -22,7 +22,14 @@
 
 ## 待办 Feature
 
-当前无近期待办 Feature；长远规划见文末。
+| 状态 | Feature | 优先级 | 目标 | 规格 |
+| --- | --- | --- | --- | --- |
+| [x] | 基础探索与 Web 入口（SQLite，`visualization-database`） | P1 | 让需要探索 SQLite 数据表的用户，从现有 Web 顶栏“数据探索”进入独立、轻量的 Graphic Walker 工作区，使用过滤、分组和基础聚合观察柱状、折线及散点图；SQLite 原生 SQL 计算，查询有界且可取消，工作区也可直接访问并独立运行。 | [规格](archive/feat-visualization-database.md) |
+| [x] | 多数据库探索兼容 (`visualization-database-connectors`) | P1 | 让 MySQL、PostgreSQL、ClickHouse 用户在同一工作区直接探索已有数据库表，获得与 SQLite 基础探索一致且可解释的核心统计能力；依赖 visualization-database，查询使用各源库原生 SQL，并保持类型、只读访问、取消及资源回收保证。 | [规格](archive/feat-visualization-database-connectors.md) |
+| [x] | 数据库探索体验优化 (`visualization-experience`) | P1 | 让交互探索数据库表的用户获得充分利用页面空间的图表、按表保留的独立绘图工作页和一致的编辑入口，并能绘制常见 Decimal、识别近似精度及恢复查询错误；依赖已有基础探索与多数据库兼容能力。 | [规格](archive/feat-visualization-experience.md) |
+| [x] | 图表选择与字段语义优化 (`visualization-chart-authoring`) | P1 | 让数据库探索用户在默认界面直接选择全部非地图图表，按图表需要选择字段，并仅用一个数值字段绘制由源库计算的直方图。 | [规格](archive/feat-visualization-chart-authoring.md) |
+| [x] | 时间统计探索 (`visualization-statistics`) | P1 | 让需要按时间比较趋势及统计不同值数量的数据库用户，在同一工作区使用日/月时间桶与去重计数；依赖已有探索与图表选择能力，四库分别执行原生 SQL，空值及时间语义明确；直方图与数值分箱由 visualization-chart-authoring 交付。 | [归档](archive/feat-visualization-statistics.md) |
+| [x] | DataFrame 探索可视化 (`visualization-dataframe`) | P1 | 让需要探索 FlowSQL 中间结果或算子结果的用户，在同一工作区对命名 DataFrame 的不可变快照观察趋势、分布与变量关系，主动刷新数据版本，且已取得的数据不会因生产任务结束而悬空；复用已有探索工作区与计算契约，首版通过同机 Arrow IPC 接入并独立计算。 | [归档](archive/feat-visualization-dataframe.md) |
 
 ---
 

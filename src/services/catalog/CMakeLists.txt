@@ -9,7 +9,8 @@ target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR})
 add_thirddepen(${PROJECT_NAME} arrow rapidjson sqlite)
 
 add_dependencies(${PROJECT_NAME} flowsql_common)
-target_link_libraries(${PROJECT_NAME} flowsql_common)
+find_package(OpenSSL REQUIRED)
+target_link_libraries(${PROJECT_NAME} flowsql_common OpenSSL::Crypto)
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output

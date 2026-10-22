@@ -45,6 +45,7 @@ class WebPlugin : public IPlugin, public IRouterHandle {
     std::string gateway_host_ = "127.0.0.1";
     int gateway_port_ = 18800;  // 内部服务转发目标（Gateway）
     std::string upload_dir_ = "./uploads";
+    std::string visualization_upstream_;
     uint64_t pcap_upload_max_bytes_ = kDefaultPcapUploadMaxBytes;
 };
 

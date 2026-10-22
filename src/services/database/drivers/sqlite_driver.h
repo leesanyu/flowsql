@@ -4,6 +4,7 @@
 #ifndef _FLOWSQL_SERVICES_DATABASE_DRIVERS_SQLITE_DRIVER_H_
 #define _FLOWSQL_SERVICES_DATABASE_DRIVERS_SQLITE_DRIVER_H_
 
+#include <framework/interfaces/idatabase_exploration.h>
 #include <sqlite3.h>
 
 #include <functional>
@@ -94,7 +95,9 @@ class SqliteResultSet : public IResultSet {
 };
 
 // SQLite Session 实现
-class SqliteSession : public RelationDbSessionBase<SqliteTraits>, public IDbSnapshotSession {
+class SqliteSession : public RelationDbSessionBase<SqliteTraits>,
+                      public IDbSnapshotSession,
+                      public IDatabaseExplorationSessionV1 {
  public:
     SqliteSession(SqliteDriver* driver, sqlite3* db);
     ~SqliteSession() override;
@@ -103,6 +106,10 @@ class SqliteSession : public RelationDbSessionBase<SqliteTraits>, public IDbSnap
                      std::shared_ptr<arrow::Schema> expected, uint32_t rows, uint64_t bytes,
                      std::shared_ptr<arrow::RecordBatch>* output) override;
     void CancelSnapshot() override;
+    int Query(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count, uint32_t max_rows,
+              uint64_t max_bytes, ExplorationResultV1* output) override;
+    void Cancel() override { CancelSnapshot(); }
+    std::string QueryError() const override { return last_error_; }
     int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
     int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
                              size_t execution_count) override;

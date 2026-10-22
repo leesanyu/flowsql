@@ -584,6 +584,91 @@ void SqliteSession::CancelSnapshot() {
     snapshot_cancelled_ = true;
     sqlite3_interrupt(conn_);
 }
+
+int SqliteSession::Query(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count,
+                         uint32_t max_rows, uint64_t max_bytes, ExplorationResultV1* output) {
+    *output = {};
+    last_error_.clear();
+    if (snapshot_cancelled_) {
+        last_error_ = "CANCELLED";
+        return -1;
+    }
+    const std::string text(sql ? sql : "");
+    const auto start = text.find_first_not_of(" \r\n\t");
+    if (!snapshot_transaction_ || start == std::string::npos || text.compare(start, 7, "SELECT ") != 0) {
+        last_error_ = "DATABASE_ERROR";
+        return -1;
+    }
+    struct Progress {
+        SqliteSession* self;
+        std::chrono::steady_clock::time_point deadline;
+        bool timeout = false;
+    } progress{this, std::chrono::steady_clock::now() + std::chrono::milliseconds(snapshot_timeout_ms_)};
+    sqlite3_progress_handler(
+        conn_, 1000,
+        [](void* context) {
+            auto* p = static_cast<Progress*>(context);
+            p->timeout = std::chrono::steady_clock::now() >= p->deadline;
+            return p->timeout || p->self->snapshot_cancelled_ ? 1 : 0;
+        },
+        &progress);
+    struct Clear {
+        sqlite3* db;
+        ~Clear() { sqlite3_progress_handler(db, 0, nullptr, nullptr); }
+    } clear{conn_};
+    sqlite3_stmt* raw = nullptr;
+    const char* tail = nullptr;
+    const int prepared = sqlite3_prepare_v2(conn_, sql, -1, &raw, &tail);
+    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(raw, sqlite3_finalize);
+    if (prepared != SQLITE_OK || !raw || !sqlite3_stmt_readonly(raw) ||
+        (tail && std::string(tail).find_first_not_of(" \r\n\t") != std::string::npos) ||
+        BindSqliteParameters(raw, parameters, parameter_count, &last_error_) != 0) {
+        last_error_ = snapshot_cancelled_ ? "CANCELLED" : (progress.timeout ? "TIMEOUT" : "DATABASE_ERROR");
+        return -1;
+    }
+    ExplorationResultV1 result;
+    for (int i = 0; i < sqlite3_column_count(raw); ++i) {
+        const char* native = sqlite3_column_decltype(raw, i);
+        result.columns.push_back({sqlite3_column_name(raw, i), native ? native : ""});
+    }
+    uint64_t bytes = 0;
+    int status;
+    while ((status = sqlite3_step(raw)) == SQLITE_ROW) {
+        if (result.rows.size() >= max_rows) {
+            last_error_ = "RESULT_LIMIT";
+            return -1;
+        }
+        std::vector<ExplorationValueV1> row;
+        for (int i = 0; i < sqlite3_column_count(raw); ++i) {
+            const int type = sqlite3_column_type(raw, i);
+            const auto length = (type == SQLITE_TEXT || type == SQLITE_BLOB) ? sqlite3_column_bytes(raw, i) : 0;
+            bytes += 32 + length;
+            if (bytes > max_bytes) {
+                last_error_ = "RESULT_LIMIT";
+                return -1;
+            }
+            if (type == SQLITE_NULL)
+                row.emplace_back(std::monostate{});
+            else if (type == SQLITE_INTEGER)
+                row.emplace_back(int64_t(sqlite3_column_int64(raw, i)));
+            else if (type == SQLITE_FLOAT)
+                row.emplace_back(sqlite3_column_double(raw, i));
+            else if (type == SQLITE_TEXT)
+                row.emplace_back(std::string(reinterpret_cast<const char*>(sqlite3_column_text(raw, i)), length));
+            else {
+                const auto* data = static_cast<const uint8_t*>(sqlite3_column_blob(raw, i));
+                row.emplace_back(length ? std::vector<uint8_t>(data, data + length) : std::vector<uint8_t>{});
+            }
+        }
+        result.rows.push_back(std::move(row));
+    }
+    if (status != SQLITE_DONE || snapshot_cancelled_) {
+        last_error_ = snapshot_cancelled_ ? "CANCELLED" : (progress.timeout ? "TIMEOUT" : "DATABASE_ERROR");
+        return -1;
+    }
+    *output = std::move(result);
+    return 0;
+}
 int SqliteSession::SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
                                 std::shared_ptr<arrow::Schema> expected, uint32_t max_rows, uint64_t max_bytes,
                                 std::shared_ptr<arrow::RecordBatch>* output) {

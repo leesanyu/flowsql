@@ -1454,9 +1454,93 @@ static void TestHttpRoutes() {
     std::puts("[PASS] T24-T40 http routes");
 }
 
+static void TestDataFrameSnapshots() {
+    const auto directory = MakeTempDir("snapshot");
+    CatalogPlugin catalog;
+    ASSERT_EQ(catalog.Option(MakeCatalogOption(directory).c_str()), 0);
+    // Snapshot provider does not require the operator registry to expose registered channels.
+    auto channel = MakeChannel("result");
+    ASSERT_EQ(catalog.Register("result", channel), 0);
+    std::vector<DataFrameSourceV1> sources;
+    std::string error;
+    ASSERT_EQ(catalog.List(&sources, &error), 0);
+    ASSERT_EQ(sources.size(), size_t(1));
+    DataFrameSnapshotRequestV1 request;
+    request.source_id = sources[0].source_id;
+    request.max_bytes = 1024 * 1024;
+    request.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    request.cancelled = std::make_shared<std::atomic_bool>(false);
+    DataFrameSnapshotV1 first;
+    ASSERT_EQ(catalog.Acquire(request, &first, &error), 0);
+    ASSERT_EQ(first.row_count, uint64_t(2));
+    ASSERT_TRUE(first.batch && first.lifetime && !first.schema_revision.empty());
+    const auto original = first.batch->ToString();
+    bool owner_alive = true;
+    DataFrameSnapshotV1 tracked;
+    tracked.lifetime = std::shared_ptr<void>(new int(0), [&](void* p) {
+        owner_alive = false;
+        delete static_cast<int*>(p);
+    });
+    tracked.batch = std::shared_ptr<arrow::RecordBatch>(first.batch.get(), [&](auto*) { ASSERT_TRUE(owner_alive); });
+    tracked = {};
+    ASSERT_TRUE(!owner_alive);
+    ASSERT_EQ(catalog.Rename("result", "renamed"), 0);
+    ASSERT_EQ(catalog.List(&sources, &error), 0);
+    ASSERT_EQ(sources[0].source_id, request.source_id);
+    ASSERT_EQ(sources[0].label, std::string("dataframe.renamed"));
+    DataFrame fixed;
+    fixed.FromArrow(first.batch);
+    std::thread writer([&] {
+        for (int i = 0; i < 50; ++i) ASSERT_EQ(channel->Append(&fixed), 0);
+    });
+    for (int i = 0; i < 25; ++i) {
+        DataFrameSnapshotV1 concurrent;
+        ASSERT_EQ(catalog.Acquire(request, &concurrent, &error), 0);
+        ASSERT_EQ(concurrent.batch->num_rows(), int64_t(concurrent.row_count));
+        ASSERT_TRUE(concurrent.batch->ValidateFull().ok());
+    }
+    writer.join();
+    ASSERT_EQ(first.batch->ToString(), original);
+    ASSERT_EQ(catalog.Unregister("renamed"), 0);
+    ASSERT_EQ(channel->Close(), 0);
+    channel.reset();
+    ASSERT_EQ(first.batch->ToString(), original);
+    ASSERT_EQ(catalog.Register("renamed", MakeChannel("other")), 0);
+    ASSERT_EQ(catalog.List(&sources, &error), 0);
+    ASSERT_TRUE(sources[0].source_id != request.source_id);
+    DataFrameSnapshotV1 output;
+    ASSERT_TRUE(catalog.Acquire(request, &output, &error) != 0 && !output.batch);
+    request.source_id = sources[0].source_id;
+    request.max_bytes = 1;
+    ASSERT_TRUE(catalog.Acquire(request, &output, &error) != 0 && !output.batch);
+    request.max_bytes = 1024 * 1024;
+    request.cancelled->store(true);
+    ASSERT_TRUE(catalog.Acquire(request, &output, &error) != 0 && !output.batch);
+    request.cancelled->store(false);
+    request.deadline = std::chrono::steady_clock::now();
+    ASSERT_TRUE(catalog.Acquire(request, &output, &error) != 0 && !output.batch);
+    auto empty = std::make_shared<DataFrameChannel>("dataframe", "empty");
+    ASSERT_EQ(empty->Open(), 0);
+    DataFrameSnapshotRequestV1 capture;
+    capture.max_bytes = 1024 * 1024;
+    capture.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    uint64_t bytes = 0;
+    std::shared_ptr<arrow::RecordBatch> batch;
+    ASSERT_TRUE(empty->CaptureSnapshot(capture, &batch, &bytes, &error) != 0 && !batch);
+    DataFrame zero;
+    zero.SetSchema({{"value", DataType::INT64}});
+    ASSERT_EQ(empty->Write(&zero), 0);
+    ASSERT_EQ(empty->CaptureSnapshot(capture, &batch, &bytes, &error), 0);
+    ASSERT_EQ(batch->num_rows(), int64_t(0));
+    catalog.Stop();
+    ASSERT_EQ(first.batch->ToString(), original);
+    std::puts("[PASS] dataframe snapshot ownership/identity/concurrency/budgets");
+}
+
 int main() {
     std::puts("=== CatalogPlugin Tests ===");
 
+    TestDataFrameSnapshots();
     TestRegistryBasic();
     TestRestartRecover();
     TestConcurrency();

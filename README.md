@@ -32,6 +32,7 @@ Linux 网卡与 Kafka 数据通道，提供 `npm.basic` 网络会话和协议分
 - **SQL 基线分析**：`explore.baseliner` 分析数据库或 DataFrame/CSV 快照，支持 Value/Ratio/Relation 评估、未来预测、预算受控的批量结果和独立模型参数输出；托管数据库出口支持模型、消费位置与结果联合恢复
 - **Kafka 接入与发布**：结构化 JSON source、分析结果 JSON sink、原始包 packet source/sink 四类通道，支持 TLS/mTLS、SASL 认证、成功处理后位点确认、重放与可观察交付状态，详见 [Kafka 使用说明](docs/kafka.md)
 - **Web 管理**：Vue.js 前端 + REST API，支持通道/算子/任务管理
+- **数据库探索**：SQLite/MySQL/PostgreSQL/ClickHouse 共用 Web 顶栏或独立入口，使用 Graphic Walker 观察柱状/折线/散点图，原生 SQL 计算、查询有界可取消；同一工作区还可探索 CSV 导入与任务输出的命名 DataFrame，按不可变快照版本化计算并在来源结束后继续使用；见 [数据探索说明](docs/exploration.md)
 - **可重复测试环境**：统一运行时配置、隔离数据库/Kafka 夹具、实际执行位置的认证预检，以及选中/执行/通过/失败/跳过/未执行清单
 
 ## 快速开始
@@ -1420,6 +1421,7 @@ flowSQL/
 
 ## 文档
 
+- [四库数据探索：启动、Web 入口、Compose 与独立升级](docs/exploration.md)
 - [项目愿景](docs/vision.md)
 - [架构设计](docs/framework.md)
 - [NetAdapter 采集与隔离真实联验](docs/netadapter.md)

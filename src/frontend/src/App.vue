@@ -20,6 +20,7 @@
         <el-menu-item index="/channels">通道管理</el-menu-item>
         <el-menu-item index="/operators">算子管理</el-menu-item>
         <el-menu-item index="/tasks">SQL 工作台</el-menu-item>
+        <el-menu-item index="/explore">数据探索</el-menu-item>
       </el-menu>
 
       <!-- 右：状态区 -->
@@ -44,20 +45,25 @@
     </header>
 
     <!-- 内容区 -->
-    <main class="app-main">
-      <router-view />
+    <main class="app-main" :class="{ 'exploration-active': exploring }">
+      <router-view v-if="!exploring" />
+      <ExplorationFrame v-if="explorationCreated" v-show="exploring" :visible="exploring" :theme="isDark ? 'dark' : 'light'" />
     </main>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { Moon, Sunny, User } from '@element-plus/icons-vue'
 import buildInfo from 'virtual:flowsql-build-info'
 import { describeBuildInfo } from './productVersion.js'
+import ExplorationFrame from './components/ExplorationFrame.vue'
 
 const route = useRoute()
+const exploring = computed(() => route.path === '/explore')
+const explorationCreated = ref(exploring.value)
+watch(exploring, (visible) => { if (visible) explorationCreated.value = true })
 const version = buildInfo.version
 const versionDetails = describeBuildInfo(buildInfo)
 
@@ -211,4 +217,5 @@ onUnmounted(() => clearInterval(timer))
   padding: 24px 32px;
   background-color: var(--bg-page);
 }
+.app-main.exploration-active { overflow: hidden; padding: 0; min-height: 0; }
 </style>

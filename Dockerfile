@@ -33,6 +33,7 @@ COPY build/output/flowsql          ./bin/flowsql
 COPY build/output/lib*.so*         ./bin/
 COPY .thirdparts_installed/yaml-cpp/lib/libyaml-cpp.so.0.9.0 ./bin/libyaml-cpp.so.0.9
 COPY build/output/static/          ./bin/static/
+COPY build/output/exploration/     ./bin/exploration/
 COPY build/output/build-info.json  ./bin/build-info.json
 COPY tools/product_version.py tools/release.py ./tools/
 ARG PRODUCT_VERSION

@@ -103,6 +103,7 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/services/bridge ${CMAKE_BINARY_DIR}/bridge)
 
 # Stage 2: Web 管理系统
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/web ${CMAKE_BINARY_DIR}/web)
+add_subdirectory(${CMAKE_SOURCE_DIR}/services/visualization ${CMAKE_BINARY_DIR}/visualization)
 
 # Stage 2: Scheduler 调度服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/scheduler ${CMAKE_BINARY_DIR}/scheduler)
@@ -156,6 +157,7 @@ if(BUILD_TESTING)
     add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_baseliner_contract ${CMAKE_BINARY_DIR}/test_baseliner_contract)
     add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_router ${CMAKE_BINARY_DIR}/test_router)
     add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_environment ${CMAKE_BINARY_DIR}/test_environment)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_visualization ${CMAKE_BINARY_DIR}/test_visualization)
     flowsql_finalize_environment("${CMAKE_SOURCE_DIR}")
 endif()
 flowsql_stamp_product_libraries("${CMAKE_SOURCE_DIR}")

@@ -17,6 +17,8 @@ build/output/python/**/__pycache__/
 !build/output/static/vite.svg
 !build/output/static/assets/
 !build/output/static/assets/*
+!build/output/exploration/
+!build/output/exploration/**
 !.thirdparts_installed/
 .thirdparts_installed/*
 !.thirdparts_installed/yaml-cpp/
@@ -28,6 +30,7 @@ config/*
 !config/docker/
 config/docker/*
 !config/docker/flowsql.yml
+!config/docker/deploy-visualization.yaml
 !src/
 src/*
 !src/python/

@@ -1,0 +1,7 @@
+services:
+  - name: visualization
+    option: '{"host":"0.0.0.0","port":18910,"static_dir":"/opt/flowsql/bin/exploration"}'
+    plugins:
+      - name: libflowsql_database.so
+        option: "config_file=/opt/flowsql/exploration-config/flowsql.yml"
+      - name: libflowsql_visualization.so

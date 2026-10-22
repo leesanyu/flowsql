@@ -5,6 +5,7 @@
 #define _FLOWSQL_SERVICES_DATABASE_DRIVERS_CLICKHOUSE_DRIVER_H_
 
 #include <framework/interfaces/idatabase_arrow_write.h>
+#include <framework/interfaces/idatabase_exploration.h>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -66,7 +67,8 @@ class ClickHouseSession : public IDbSession,
                           public IArrowReadable,
                           public IArrowWritable,
                           public IDbSnapshotSession,
-                          public IDatabaseArrowWriteV1 {
+                          public IDatabaseArrowWriteV1,
+                          public IDatabaseExplorationSessionV1 {
  public:
     ClickHouseSession(const std::string& host, int port, const std::string& user, const std::string& password,
                       const std::string& database, std::shared_ptr<ClickHouseWriteTransport> write_transport = nullptr);
@@ -77,6 +79,10 @@ class ClickHouseSession : public IDbSession,
                      std::shared_ptr<arrow::Schema> expected, uint32_t rows, uint64_t bytes,
                      std::shared_ptr<arrow::RecordBatch>* output) override;
     void CancelSnapshot() override;
+    int Query(const char* sql, const DatabaseParameterV1* parameters, size_t count, uint32_t rows, uint64_t bytes,
+              ExplorationResultV1* output) override;
+    void Cancel() override;
+    std::string QueryError() const override { return last_error_; }
     // ==================== 列式接口（核心实现）====================
 
     // 执行 Arrow 查询：构造 "{sql} FORMAT ArrowStream"，POST，解析响应体
@@ -125,6 +131,8 @@ class ClickHouseSession : public IDbSession,
 
     int ExecuteParameterizedHttp(const std::string& sql, const DatabaseParameterV1* parameters, size_t parameter_count);
 
+    std::string exploration_query_id_;
+    void KillExplorationQuery();
     std::shared_ptr<httplib::Client> snapshot_client_;
     std::shared_ptr<ClickHouseWriteTransport> write_transport_;
     std::string host_;

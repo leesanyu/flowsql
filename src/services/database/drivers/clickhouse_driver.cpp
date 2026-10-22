@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 
 #include "clickhouse_driver.h"
+#include <rapidjson/document.h>
+#include <unistd.h>
+#include "../exploration_read.h"
 #include "../managed_query_schema.h"
 
 #include <arrow/api.h>
@@ -109,7 +112,12 @@ ClickHouseSession::ClickHouseSession(const std::string& host, int port, const st
       port_(port),
       user_(user),
       password_(password),
-      database_(database) {}
+      database_(database) {
+    static std::atomic<uint64_t> sequence{0};
+    exploration_query_id_ = "flowsql-exploration-" + std::to_string(getpid()) + "-" +
+                            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
+                            std::to_string(++sequence);
+}
 
 bool ClickHouseSession::Ping() {
     httplib::Client client(host_, port_);
@@ -613,6 +621,177 @@ int ClickHouseSession::SnapshotPage(const char* sql, const DatabaseParameterV1* 
         }
     }
     return MakeSnapshotBatch(expected, rows, max_bytes, output, &last_error_);
+}
+
+void ClickHouseSession::KillExplorationQuery() {
+    httplib::Client control(host_, port_);
+    control.set_connection_timeout(std::chrono::milliseconds(500));
+    control.set_read_timeout(std::chrono::milliseconds(500));
+    control.set_write_timeout(std::chrono::milliseconds(500));
+    control.Post("/", {{"X-ClickHouse-User", user_}, {"X-ClickHouse-Key", password_}},
+                 "KILL QUERY WHERE query_id='" + exploration_query_id_ + "' SYNC", "text/plain");
+}
+void ClickHouseSession::Cancel() {
+    if (snapshot_cancelled_.exchange(true)) return;
+    KillExplorationQuery();
+    if (snapshot_client_) snapshot_client_->stop();
+}
+int ClickHouseSession::Query(const char* sql, const DatabaseParameterV1* parameters, size_t count, uint32_t max_rows,
+                             uint64_t max_bytes, ExplorationResultV1* output) {
+    *output = {};
+    last_error_.clear();
+    if (snapshot_cancelled_) {
+        last_error_ = "CANCELLED";
+        return -1;
+    }
+    if (!snapshot_client_ || !ExplorationSelect(sql, "clickhouse") || !max_rows || !max_bytes) {
+        last_error_ = "READ_ONLY";
+        return -1;
+    }
+    ClickHouseParameterizedSql rewritten;
+    if (!RewriteClickHouseParameters(sql, parameters, count, &rewritten)) {
+        last_error_ = "INVALID_PARAMETERS";
+        return -1;
+    }
+    auto encode = [](std::string_view input) {
+        const char* hex = "0123456789ABCDEF";
+        std::string value;
+        for (unsigned char c : input) {
+            if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+                value += c;
+            else {
+                value += '%';
+                value += hex[c >> 4];
+                value += hex[c & 15];
+            }
+        }
+        return value;
+    };
+    std::string path = "/?database=" + encode(database_) + "&query_id=" + exploration_query_id_ +
+                       "&readonly=2&max_execution_time=" + std::to_string(snapshot_timeout_ms_ / 1000.0) +
+                       "&timeout_before_checking_execution_speed=0&max_result_rows=" + std::to_string(max_rows) +
+                       "&result_overflow_mode=throw&output_format_json_quote_64bit_integers=1&output_format_json_quote_"
+                       "decimals=1&output_format_json_quote_denormals=1";
+    for (size_t i = 0; i < rewritten.parameters.size(); ++i)
+        path += "&param_p" + std::to_string(i) + "=" + encode(ClickHouseParameterValue(rewritten.parameters[i]));
+    httplib::Request request;
+    request.method = "POST";
+    request.path = path;
+    request.headers = {{"X-ClickHouse-User", user_}, {"X-ClickHouse-Key", password_}};
+    request.set_header("Content-Type", "text/plain");
+    request.body = rewritten.sql + " FORMAT JSONCompact";
+    std::string body;
+    bool overflow = false;
+    request.content_receiver = [&](const char* data, size_t size, uint64_t, uint64_t) {
+        if (size > max_bytes - body.size()) {
+            overflow = true;
+            return false;
+        }
+        if (snapshot_cancelled_) return false;
+        body.append(data, size);
+        return true;
+    };
+    const auto start = std::chrono::steady_clock::now();
+    if (snapshot_cancelled_) {
+        last_error_ = "CANCELLED";
+        return -1;
+    }
+    auto response = snapshot_client_->send(request);
+    if (snapshot_cancelled_) {
+        KillExplorationQuery();
+        last_error_ = "CANCELLED";
+        return -1;
+    }
+    if (overflow) {
+        KillExplorationQuery();
+        last_error_ = "RESULT_LIMIT";
+        return -1;
+    }
+    if (!response || response->status != 200) {
+        const bool timeout =
+            body.find("TIMEOUT_EXCEEDED") != std::string::npos ||
+            std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(snapshot_timeout_ms_);
+        if (timeout) KillExplorationQuery();
+        last_error_ =
+            timeout ? "TIMEOUT"
+            : body.find("TOO_MANY_ROWS") != std::string::npos || body.find("TOO_MANY_BYTES") != std::string::npos
+                ? "RESULT_LIMIT"
+                : "DATABASE_ERROR";
+        return -1;
+    }
+    rapidjson::Document document;
+    document.Parse(body.data(), body.size());
+    if (document.HasParseError() || !document.IsObject() || !document.HasMember("meta") ||
+        !document["meta"].IsArray() || !document.HasMember("data") || !document["data"].IsArray()) {
+        last_error_ = "DATABASE_ERROR";
+        return -1;
+    }
+    ExplorationResultV1 result;
+    std::vector<std::string> types;
+    for (const auto& column : document["meta"].GetArray()) {
+        if (!column.IsObject() || !column.HasMember("name") || !column["name"].IsString() ||
+            !column.HasMember("type") || !column["type"].IsString()) {
+            last_error_ = "DATABASE_ERROR";
+            return -1;
+        }
+        std::string native = column["type"].GetString(), type = native;
+        while ((type.rfind("Nullable(", 0) == 0 || type.rfind("LowCardinality(", 0) == 0) && type.back() == ')')
+            type = type.substr(type.find('(') + 1, type.size() - type.find('(') - 2);
+        types.push_back(type);
+        result.columns.push_back({column["name"].GetString(), native});
+    }
+    uint64_t bytes = 0;
+    for (const auto& values : document["data"].GetArray()) {
+        if (!values.IsArray() || values.Size() != types.size() || result.rows.size() >= max_rows) {
+            last_error_ = "RESULT_LIMIT";
+            return -1;
+        }
+        std::vector<ExplorationValueV1> row;
+        for (size_t c = 0; c < types.size(); ++c) {
+            const auto& cell = values[c];
+            const auto& type = types[c];
+            bytes += 16 + (cell.IsString() ? cell.GetStringLength() : 0);
+            if (bytes > max_bytes) {
+                last_error_ = "RESULT_LIMIT";
+                return -1;
+            }
+            if (cell.IsNull()) {
+                row.emplace_back(std::monostate{});
+                continue;
+            }
+            std::string text;
+            if (cell.IsString())
+                text.assign(cell.GetString(), cell.GetStringLength());
+            else if (cell.IsInt64())
+                text = std::to_string(cell.GetInt64());
+            else if (cell.IsUint64())
+                text = std::to_string(cell.GetUint64());
+            else if (cell.IsBool())
+                text = cell.GetBool() ? "1" : "0";
+            else if (cell.IsDouble()) {
+                std::ostringstream stream;
+                stream << std::setprecision(17) << cell.GetDouble();
+                text = stream.str();
+            } else {
+                last_error_ = "UNSUPPORTED_TYPE";
+                return -1;
+            }
+            const auto kind = type.rfind("Int", 0) == 0 || type.rfind("UInt", 0) == 0 ? "integer"
+                              : type.rfind("Float", 0) == 0                           ? "number"
+                              : type.rfind("Decimal", 0) == 0                         ? "decimal"
+                              : type == "Bool"                                        ? "boolean"
+                                                                                      : "text";
+            try {
+                row.push_back(ExplorationText(text, kind));
+            } catch (...) {
+                last_error_ = "UNSUPPORTED_TYPE";
+                return -1;
+            }
+        }
+        result.rows.push_back(std::move(row));
+    }
+    *output = std::move(result);
+    return 0;
 }
 
 }  // namespace database

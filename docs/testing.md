@@ -19,9 +19,29 @@ tools/test.sh doctor --location native
 tools/test.sh integration --location native --filter '^test_mysql$'
 ```
 
-`--filter` 使用正则表达式；相关 CTest setup fixture 自动纳入选中清单。带筛选的通过只代表该清单，完整 Feature 验收使用不带筛选的 `all`。直接 `ctest --test-dir build --output-on-failure` 同样执行运行时 guard、fixture 和资源锁，不允许缺依赖后返回成功。
+`--filter` 使用正则表达式；相关 CTest setup fixture 自动纳入选中清单。Feature 验收按规格能力和实际改动选择新增/修改用例、受影响模块及共享契约回归，在工作台冻结具体清单、选择依据和依赖；带筛选的清单可以完成 Feature 验收，但不能据此声明其他模块已验证。必需清单须全部执行并通过，不能通过漏选、跳过或放宽断言收口。
 
-以上示例使用保守并行度，适合资源有限的开发环境。编译、镜像构建和完整回归依次执行，避免同时占用内存；
+不带筛选的 `all` 用于产品发布、明确安排的全量检查，或已有证据表明需要全局回归并已冻结范围的改动，不是每个 Feature 的默认完成条件。扩大范围前须记录与具体改动、调用链、共享契约或失败证据的关系并更新工作台；只为所选用例准备数据库、Kafka 和身份服务。直接 CTest 同样执行运行时 guard、fixture 和资源锁，不允许缺依赖后返回成功；`tools/test.sh` 已调用 CTest，同一源码和产物不默认再跑一遍完整 CTest。
+
+SQLite 探索专项可用 `tools/test.sh all --filter '^test_visualization_' --jobs 1`，使用本机隔离 SQLite、随机 HTTP 端口和 Chromium，
+不启动外部数据库。浏览器可通过 `FLOWSQL_TEST_CHROMIUM` 指定可执行文件，默认使用现有 Playwright Chromium headless-shell 缓存；
+交付用例还会使用构建时 Node/npm 和已安装的 exploration 依赖实际重建升级包，验证主 Web 不重启时内嵌/独立三类图表。
+这些依赖缺失会失败，不能计为跳过；运行说明见[数据探索](exploration.md)。
+
+多库探索验收使用同一运行时测试配置和受管专用库，不从用户部署读取凭证。`test_visualization_mysql/postgres/clickhouse`
+从原生执行位置预检并验证原生 SQL、只读、精度、限额、取消、期限及服务端查询终止；
+`test_visualization_connectors_e2e` 还启动实际探索插件和 Chromium，在同一工作区验证三库的三类图表/过滤及原生 SQL 基准。
+E2E 创建随机名称表与 PG schema，在 finally 中回收；所需账号须有专用库 DDL、读取元信息及终止自身查询权限。
+源码/产物在验收期间保持不变。可执行：
+
+```bash
+tools/test.sh all --location native --filter '^test_visualization_' --jobs 1
+```
+
+原生三库端点由统一配置声明，工具准备其隔离发布端口；缺依赖或缺取消权限非零失败。
+此筛选不代表产品全量或容器矩阵通过，所需受影响驱动/共享快照回归在 Feature 工作台单独冻结。
+
+以上示例使用保守并行度，适合资源有限的开发环境。需要编译、镜像构建或回归时，按本次清单依次执行，避免同时占用内存；
 确认资源余量后可自行提高 `-j` 或 `--jobs`。验收运行期间保持源码与产物不变，重新编译后应重新验收。
 
 本地 `test_docker_build_context` 使用 Docker SDK 7.1.0 的真实上下文打包器，检查镜像输入和私有 Kafka
@@ -94,5 +114,5 @@ Kafka 结构化数据面单独注册 `test_kafka_source_native/docker`，复用�
 ./tools/test.sh unit --filter '^test_product_(version|version_runtime|version_frontend|release)$'
 ```
 
-真实镜像验收需 Docker Engine 权限及通过身份校验的完整构建；使用专用本地镜像和容器，不挂载业务卷，检查 CLI、Worker、Web、静态版本与 OCI 标签。
-这些定向检查不能替代不带筛选的 `./tools/test.sh all`。版本规则和发布操作见[版本说明](versioning.md)。
+本次容器运行或交付契约需要真实镜像验收时，才将其纳入清单；不得因仓库存在 Docker 配置就要求每个 Feature 构建或启动镜像。执行时需 Docker Engine 权限及通过身份校验的完整构建，使用专用本地镜像和容器，不挂载业务卷，检查所选 CLI、Worker、Web、静态版本与 OCI 标签契约。
+上述定向检查的覆盖以所选清单为准；是否执行全量 `all` 遵循本文开头的适用条件。版本规则和发布操作见[版本说明](versioning.md)。

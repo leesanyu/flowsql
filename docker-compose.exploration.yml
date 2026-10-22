@@ -1,0 +1,36 @@
+# Optional overlay: see docs/exploration.md. Only enable after preparing the two bind paths.
+services:
+  visualization:
+    image: ${FLOWSQL_IMAGE:-flowsql:latest}
+    command: ["flowsql", "--config", "/opt/flowsql/config/docker/deploy-visualization.yaml"]
+    ports:
+      - "127.0.0.1:${FLOWSQL_EXPLORATION_PORT:-18910}:18910"
+    volumes:
+      - type: bind
+        source: ${FLOWSQL_EXPLORATION_CONFIG:?Set the absolute exploration flowsql.yml path}
+        target: /opt/flowsql/exploration-config/flowsql.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${FLOWSQL_EXPLORATION_DATA:?Set the absolute SQLite directory}
+        target: /opt/flowsql/exploration-data
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [flowsql-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18910/api/visualization/v1/capabilities"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+  web:
+    command:
+      - flowsql
+      - --role
+      - web
+      - --port
+      - "18802"
+      - --plugins
+      - 'libflowsql_web.so:host=0.0.0.0;port=8081;gateway=gateway:18800;worker_host=pyworker;worker_port=18900;db_path=/opt/flowsql/uploads/web.db;upload_dir=/opt/flowsql/uploads;visualization_upstream=http://visualization:18910,libflowsql_router.so:host=web;port=18802;gateway=gateway:18800'

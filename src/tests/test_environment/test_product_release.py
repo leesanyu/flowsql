@@ -1,5 +1,6 @@
 """Release validation rejects mixed artifacts and mismatched source/tag identities."""
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -106,6 +107,35 @@ class ProductReleaseTest(unittest.TestCase):
             release.check_artifacts(self.output, expect_version='0.1.1')
         with self.assertRaises(ValueError):
             release.check_artifacts(self.output, expect_revision='unknown')
+
+    def test_independent_exploration_integrity_and_compatibility(self):
+        self.write(self.output / 'libflowsql_visualization.so',
+                   product_version.RECORD_BEGIN + json.dumps(self.info) + product_version.RECORD_END)
+        with self.assertRaises((OSError, ValueError)):
+            release.check_artifacts(self.output)
+        package = self.output / 'exploration'
+        independent = dict(self.info, revision='a' * 40, dirty=True)
+        assets = {'index.html': '<script src="/exploration/assets/ui.js"></script>',
+                  'assets/ui.js': product_version.RECORD_BEGIN + json.dumps(independent) + product_version.RECORD_END,
+                  'licenses/graphic-walker-LICENSE': 'Apache-2.0',
+                  'licenses/graphic-walker-LICENSE2': 'GWBL'}
+        for name, data in assets.items():
+            self.write(package / name, data)
+        manifest = dict(api_version=1, bridge_version=1, workflow_version='graphic-walker-0.5.3',
+                        ui_version='0.1.1', build=independent,
+                        files={name: hashlib.sha256(data.encode()).hexdigest() for name, data in assets.items()})
+        path = package / 'manifest.json'
+        path.write_text(json.dumps(manifest))
+        self.assertEqual(release.check_artifacts(self.output), self.info)
+        for change in ({'bridge_version': 2}, {'build': self.info}, {'files': {}},
+                       {'files': dict(manifest['files'], **{'../outside': '0' * 64})}):
+            path.write_text(json.dumps(dict(manifest, **change)))
+            with self.assertRaises((OSError, ValueError)):
+                release.check_artifacts(self.output)
+        path.write_text(json.dumps(manifest))
+        (package / 'assets/ui.js').write_text('corrupted')
+        with self.assertRaises(ValueError):
+            release.check_artifacts(self.output)
 
     def test_command_is_read_only_and_errors_exit_nonzero(self):
         before = self.git('status', '--porcelain')

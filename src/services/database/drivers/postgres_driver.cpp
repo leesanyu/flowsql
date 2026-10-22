@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "postgres_driver.h"
+#include "../exploration_read.h"
 
 #include "../relation_adapters.h"
 
@@ -874,6 +875,121 @@ int PostgresSession::SnapshotPage(const char* sql, const DatabaseParameterV1* pa
     }
     if (failed) return -1;
     return MakeSnapshotBatch(expected, rows, max_bytes, output, &last_error_);
+}
+
+int PostgresSession::Query(const char* sql, const DatabaseParameterV1* parameters, size_t count, uint32_t max_rows,
+                           uint64_t max_bytes, ExplorationResultV1* output) {
+    *output = {};
+    last_error_.clear();
+    if (snapshot_cancelled_) {
+        last_error_ = "CANCELLED";
+        return -1;
+    }
+    if (!snapshot_transaction_ || !ExplorationSelect(sql, "postgres") || !max_rows || !max_bytes) {
+        last_error_ = "READ_ONLY";
+        return -1;
+    }
+    bool valid = false;
+    auto converted = PostgresParameterSql(sql, count, &valid);
+    if (!valid) {
+        last_error_ = "INVALID_PARAMETERS";
+        return -1;
+    }
+    std::vector<std::string> values(count);
+    std::vector<const char*> pointers(count);
+    std::vector<Oid> types(count);
+    for (size_t i = 0; i < count; ++i) {
+        const auto& p = parameters[i];
+        if (p.kind == DatabaseParameterKindV1::kNull) continue;
+        if (p.kind == DatabaseParameterKindV1::kInt64)
+            values[i] = std::to_string(p.int64_value);
+        else if (p.kind == DatabaseParameterKindV1::kUInt64) {
+            values[i] = std::to_string(p.uint64_value);
+            types[i] = 1700;
+        } else if (p.kind == DatabaseParameterKindV1::kDouble) {
+            std::ostringstream stream;
+            stream << std::setprecision(17) << p.double_value;
+            values[i] = stream.str();
+        } else if (p.kind == DatabaseParameterKindV1::kString && (p.data || !p.size)) {
+            values[i].assign(p.data ? static_cast<const char*>(p.data) : "", p.size);
+            if (values[i].find('\0') != std::string::npos) {
+                last_error_ = "INVALID_PARAMETERS";
+                return -1;
+            }
+        } else {
+            last_error_ = "INVALID_PARAMETERS";
+            return -1;
+        }
+        pointers[i] = values[i].c_str();
+    }
+    if (!PQsendQueryParams(conn_, converted.c_str(), count, types.data(), pointers.data(), nullptr, nullptr, 0) ||
+        !PQsetSingleRowMode(conn_)) {
+        last_error_ = snapshot_cancelled_ ? "CANCELLED" : "DATABASE_ERROR";
+        return -1;
+    }
+    ExplorationResultV1 result;
+    uint64_t bytes = 0;
+    bool failed = false, complete = false;
+    PGresult* raw;
+    while ((raw = PQgetResult(conn_))) {
+        std::unique_ptr<PGresult, decltype(&PQclear)> row_result(raw, PQclear);
+        if (failed) continue;
+        const auto status = PQresultStatus(raw);
+        if (status != PGRES_SINGLE_TUPLE && status != PGRES_TUPLES_OK) {
+            const auto* state = PQresultErrorField(raw, PG_DIAG_SQLSTATE);
+            last_error_ = snapshot_cancelled_                      ? "CANCELLED"
+                          : state && std::string(state) == "57014" ? "TIMEOUT"
+                                                                   : "DATABASE_ERROR";
+            failed = true;
+            continue;
+        }
+        if (result.columns.empty())
+            for (int c = 0; c < PQnfields(raw); ++c)
+                result.columns.push_back({PQfname(raw, c), std::to_string(PQftype(raw, c))});
+        if (status == PGRES_TUPLES_OK) {
+            complete = true;
+            continue;
+        }
+        if (snapshot_cancelled_ || result.rows.size() >= max_rows) {
+            last_error_ = snapshot_cancelled_ ? "CANCELLED" : "RESULT_LIMIT";
+            Cancel();
+            failed = true;
+            continue;
+        }
+        std::vector<ExplorationValueV1> row;
+        for (int c = 0; c < PQnfields(raw); ++c) {
+            bytes += 16 + PQgetlength(raw, 0, c);
+            if (bytes > max_bytes) {
+                last_error_ = "RESULT_LIMIT";
+                Cancel();
+                failed = true;
+                break;
+            }
+            if (PQgetisnull(raw, 0, c)) {
+                row.emplace_back(std::monostate{});
+                continue;
+            }
+            const auto oid = PQftype(raw, c);
+            const std::string type = oid == 20 || oid == 21 || oid == 23 ? "integer"
+                                     : oid == 1700                       ? "decimal"
+                                     : oid == 700 || oid == 701          ? "number"
+                                     : oid == 16                         ? "boolean"
+                                     : oid == 17                         ? "binary"
+                                                                         : "text";
+            try {
+                row.push_back(ExplorationText(std::string(PQgetvalue(raw, 0, c), PQgetlength(raw, 0, c)), type));
+            } catch (...) {
+                last_error_ = "UNSUPPORTED_TYPE";
+                Cancel();
+                failed = true;
+                break;
+            }
+        }
+        if (!failed) result.rows.push_back(std::move(row));
+    }
+    if (failed || !complete) return -1;
+    *output = std::move(result);
+    return 0;
 }
 
 }  // namespace database

@@ -1,6 +1,89 @@
 {
   "schema_version": 1,
   "tests": {
+    "test_visualization_statistics": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "visualization_browser"
+      ]
+    },
+    "test_visualization_connectors_e2e": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "driver",
+      "location": "native",
+      "resources": [
+        "database_driver",
+        "visualization_browser"
+      ]
+    },
+    "test_visualization_clickhouse": {
+      "services": [
+        "clickhouse"
+      ],
+      "role": "driver",
+      "location": "native",
+      "resources": [
+        "database_driver"
+      ]
+    },
+    "test_visualization_postgres": {
+      "services": [
+        "postgres"
+      ],
+      "role": "driver",
+      "location": "native",
+      "resources": [
+        "database_driver"
+      ]
+    },
+    "test_visualization_mysql": {
+      "services": [
+        "mysql"
+      ],
+      "role": "driver",
+      "location": "native",
+      "resources": [
+        "database_driver"
+      ]
+    },
+    "test_visualization_delivery": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "visualization_browser"
+      ]
+    },
+    "test_visualization_limits": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "visualization_limits"
+      ]
+    },
+    "test_visualization_compute": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "visualization_browser"
+      ]
+    },
+    "test_visualization_entry": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "visualization_browser"
+      ]
+    },
     "test_mysql": {
       "services": [
         "mysql"
@@ -315,6 +398,46 @@
       "location": "native",
       "resources": [
         "kafka_packet_sink_capture"
+      ]
+    },
+    "test_visualization_experience": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "visualization_browser"
+      ]
+    },
+    "test_visualization_dataframe_transfer": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "visualization_dataframe_transfer"
+      ]
+    },
+    "test_visualization_dataframe_workflow": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "visualization_dataframe_workflow"
+      ]
+    },
+    "test_visualization_dataframe_browser": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "visualization_browser"
+      ]
+    },
+    "test_visualization_dataframe_native": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "visualization_dataframe_transfer"
       ]
     }
   }

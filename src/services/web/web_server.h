@@ -36,6 +36,7 @@ class WebServer {
     // 设置 Scheduler 转发地址
     void SetSchedulerAddress(const std::string& host, int port);
     void SetUploadDir(const std::string& dir) { upload_dir_ = dir; }
+    void SetVisualizationUpstream(const std::string& upstream) { visualization_upstream_ = upstream; }
     void SetPcapUploadMaxBytes(uint64_t max_bytes) { pcap_upload_max_bytes_ = max_bytes; }
 
     // 启动静态文件服务监听（阻塞）
@@ -97,6 +98,7 @@ class WebServer {
     std::string scheduler_host_ = "127.0.0.1";
     int scheduler_port_ = 18800;
     std::string upload_dir_ = "./uploads";
+    std::string visualization_upstream_;
     uint64_t pcap_upload_max_bytes_ = kDefaultPcapUploadMaxBytes;
     ManagedCaptureStore managed_capture_store_;
 };

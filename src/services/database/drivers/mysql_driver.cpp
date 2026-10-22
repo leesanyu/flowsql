@@ -4,6 +4,7 @@
 #include "mysql_driver.h"
 #include <sys/socket.h>
 #include <array>
+#include "../exploration_read.h"
 
 #include "../relation_adapters.h"
 
@@ -761,6 +762,159 @@ int MysqlSession::SnapshotPage(const char* sql, const DatabaseParameterV1* param
         return -1;
     }
     return MakeSnapshotBatch(expected, rows, max_bytes, output, &last_error_);
+}
+
+void MysqlDriver::CancelExploration(unsigned long thread_id) {
+    MYSQL* control = mysql_init(nullptr);
+    if (!control) return;
+    unsigned int timeout = 1;
+    mysql_options(control, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
+    mysql_options(control, MYSQL_OPT_READ_TIMEOUT, &timeout);
+    if (mysql_real_connect(control, host_.c_str(), user_.c_str(), password_.c_str(), database_.c_str(), port_, nullptr,
+                           0))
+        mysql_query(control, ("KILL QUERY " + std::to_string(thread_id)).c_str());
+    mysql_close(control);
+}
+void MysqlSession::Cancel() {
+    if (snapshot_cancelled_.exchange(true)) return;
+    static_cast<MysqlDriver*>(driver_)->CancelExploration(mysql_thread_id(conn_));
+    const int socket = snapshot_socket_.load();
+    if (socket >= 0) shutdown(socket, SHUT_RDWR);
+}
+int MysqlSession::Query(const char* sql, const DatabaseParameterV1* parameters, size_t count, uint32_t max_rows,
+                        uint64_t max_bytes, ExplorationResultV1* output) {
+    const auto started = std::chrono::steady_clock::now();
+    auto failure = [&](unsigned code) {
+        const bool timeout =
+            code == 3024 || code == 1317 ||
+            std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(snapshot_timeout_ms_);
+        const bool cancelled = snapshot_cancelled_;
+        if (timeout && !cancelled) Cancel();
+        last_error_ = cancelled ? "CANCELLED" : timeout ? "TIMEOUT" : "DATABASE_ERROR";
+        return -1;
+    };
+    *output = {};
+    last_error_.clear();
+    if (snapshot_cancelled_) {
+        last_error_ = "CANCELLED";
+        return -1;
+    }
+    if (!snapshot_transaction_ || !ExplorationSelect(sql, "mysql") || !max_rows || !max_bytes) {
+        last_error_ = "READ_ONLY";
+        return -1;
+    }
+    std::string bounded = sql;
+    bounded.insert(bounded.find_first_not_of(" \r\n\t") + 6,
+                   " /*+ MAX_EXECUTION_TIME(" + std::to_string(snapshot_timeout_ms_) + ") */");
+    MYSQL_STMT* raw = PrepareStatement(conn_, bounded.c_str(), &last_error_);
+    if (!raw) return -1;
+    std::unique_ptr<MYSQL_STMT, decltype(&mysql_stmt_close)> statement(raw, mysql_stmt_close);
+    if (BindMysqlParameters(raw, parameters, count, &last_error_) < 0) {
+        return failure(mysql_stmt_errno(raw));
+    }
+    std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)> metadata(mysql_stmt_result_metadata(raw),
+                                                                      mysql_free_result);
+    if (!metadata) {
+        last_error_ = "DATABASE_ERROR";
+        return -1;
+    }
+    const auto n = mysql_num_fields(metadata.get());
+    const auto* fields = mysql_fetch_fields(metadata.get());
+    ExplorationResultV1 result;
+    std::vector<std::string> types;
+    for (unsigned i = 0; i < n; ++i) {
+        std::string type = "text";
+        switch (fields[i].type) {
+            case MYSQL_TYPE_TINY:
+            case MYSQL_TYPE_SHORT:
+            case MYSQL_TYPE_INT24:
+            case MYSQL_TYPE_LONG:
+            case MYSQL_TYPE_LONGLONG:
+                type = "integer";
+                break;
+            case MYSQL_TYPE_FLOAT:
+            case MYSQL_TYPE_DOUBLE:
+                type = "number";
+                break;
+            case MYSQL_TYPE_DATE:
+            case MYSQL_TYPE_DATETIME:
+            case MYSQL_TYPE_TIMESTAMP:
+            case MYSQL_TYPE_TIME:
+            case MYSQL_TYPE_YEAR:
+                type = "text";
+                break;
+            case MYSQL_TYPE_DECIMAL:
+            case MYSQL_TYPE_NEWDECIMAL:
+                type = "decimal";
+                break;
+            default:
+                if (fields[i].charsetnr == 63) type = "binary";
+                break;
+        }
+        types.push_back(type);
+        result.columns.push_back({fields[i].name, type});
+    }
+    std::vector<MYSQL_BIND> bindings(n);
+    std::vector<unsigned long> lengths(n);
+    std::vector<std::array<char, 128>> scratch(n);
+    auto nulls = std::make_unique<bool[]>(n);
+    auto truncated = std::make_unique<bool[]>(n);
+    for (unsigned i = 0; i < n; ++i) {
+        bindings[i] = {};
+        bindings[i].buffer_type = MYSQL_TYPE_STRING;
+        bindings[i].buffer = scratch[i].data();
+        bindings[i].buffer_length = scratch[i].size();
+        bindings[i].length = &lengths[i];
+        bindings[i].is_null = &nulls[i];
+        bindings[i].error = &truncated[i];
+    }
+    if (mysql_stmt_bind_result(raw, bindings.data())) {
+        last_error_ = "DATABASE_ERROR";
+        return -1;
+    }
+    uint64_t bytes = 0;
+    int rc;
+    while ((rc = mysql_stmt_fetch(raw)) == 0 || rc == MYSQL_DATA_TRUNCATED) {
+        if (snapshot_cancelled_ || result.rows.size() >= max_rows) {
+            last_error_ = snapshot_cancelled_ ? "CANCELLED" : "RESULT_LIMIT";
+            return -1;
+        }
+        std::vector<ExplorationValueV1> row;
+        for (unsigned i = 0; i < n; ++i) {
+            bytes += 16 + (nulls[i] ? 0 : lengths[i]);
+            if (bytes > max_bytes) {
+                last_error_ = "RESULT_LIMIT";
+                return -1;
+            }
+            if (nulls[i]) {
+                row.emplace_back(std::monostate{});
+                continue;
+            }
+            std::string text(lengths[i], '\0');
+            MYSQL_BIND binding{};
+            binding.buffer_type = MYSQL_TYPE_STRING;
+            binding.buffer = text.data();
+            binding.buffer_length = text.size();
+            if (mysql_stmt_fetch_column(raw, &binding, i, 0)) {
+                last_error_ = "DATABASE_ERROR";
+                return -1;
+            }
+            try {
+                row.push_back(ExplorationText(text, types[i]));
+            } catch (...) {
+                last_error_ = "UNSUPPORTED_TYPE";
+                return -1;
+            }
+        }
+        result.rows.push_back(std::move(row));
+    }
+    if (rc != MYSQL_NO_DATA) {
+        return failure(mysql_stmt_errno(raw));
+    }
+    if (std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(snapshot_timeout_ms_))
+        return failure(3024);
+    *output = std::move(result);
+    return 0;
 }
 
 }  // namespace database

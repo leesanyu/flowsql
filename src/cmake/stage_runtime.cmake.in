@@ -5,7 +5,7 @@ configure_file("@FLOWSQL_VERSION_DIR@/build-info.json"
     "@CMAKE_BINARY_DIR@/output/python/flowsql/_build_info.json" COPYONLY)
 configure_file("@FLOWSQL_VERSION_DIR@/build-info.json"
     "@CMAKE_BINARY_DIR@/output/build-info.json" COPYONLY)
-foreach(deployment deploy-single.yaml deploy-multi.yaml)
+foreach(deployment deploy-single.yaml deploy-multi.yaml deploy-visualization.yaml)
     file(READ "@CMAKE_SOURCE_DIR@/../config/${deployment}" content)
     string(REPLACE "python3 -m flowsql.worker" "./flowsql-worker" content "${content}")
     file(WRITE "@CMAKE_BINARY_DIR@/output/config/${deployment}" "${content}")

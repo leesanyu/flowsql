@@ -23,6 +23,23 @@ DatabaseChannel::~DatabaseChannel() {
     if (opened_) Close();
 }
 
+int DatabaseChannel::CreateExplorationSession(const DatabaseSnapshotOptionsV1& options,
+                                              std::shared_ptr<IDatabaseExplorationSessionV1>* output) {
+    output->reset();
+    if ((type_ != "sqlite" && type_ != "mysql" && type_ != "postgres" && type_ != "clickhouse") || !opened_ ||
+        !session_factory_ || options.struct_size != sizeof(options) || options.contract_version != 1 ||
+        !options.operation_timeout_ms)
+        return -1;
+    auto session = session_factory_();
+    auto query = std::dynamic_pointer_cast<IDatabaseExplorationSessionV1>(session);
+    auto* snapshot = dynamic_cast<IDbSnapshotSession*>(session.get());
+    auto read_options = options;
+    if (type_ == "clickhouse") read_options.consistent_transaction = false;
+    if (!query || !snapshot || snapshot->BeginSnapshot(read_options) != 0) return -1;
+    *output = std::move(query);
+    return 0;
+}
+
 int DatabaseChannel::Open() {
     if (opened_) return 0;
     // 驱动已由 DatabasePlugin 负责连接，这里只验证连接状态

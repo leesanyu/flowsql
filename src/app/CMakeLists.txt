@@ -43,6 +43,7 @@ add_custom_target(flowsql_runtime_config
         ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/flowsql.yml
         ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/deploy-single.yaml
         ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/deploy-multi.yaml
+        ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/deploy-visualization.yaml
         ${FLOWSQL_NPI_PROTOCOLS_SOURCE}
     COMMENT "Initializing channel config and syncing runtime assets to output/config"
     VERBATIM

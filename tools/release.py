@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate actual product artifacts; explicitly build local images without publishing."""
 import argparse
+import hashlib
 import json
 import mmap
 from pathlib import Path
@@ -46,6 +47,40 @@ def embedded_info(path):
     return records[0]
 
 
+def check_exploration(directory):
+    directory = Path(directory).resolve()
+    manifest = json.loads((directory / 'manifest.json').read_text(encoding='utf-8'))
+    if (manifest.get('api_version') != 1 or manifest.get('bridge_version') != 1 or
+            manifest.get('workflow_version') != 'graphic-walker-0.5.3'):
+        raise ValueError('Incompatible exploration package')
+    parse_version(manifest['ui_version'])
+    info = validate_info(manifest['build'])
+    files = manifest['files']
+    if not isinstance(files, dict) or 'index.html' not in files:
+        raise ValueError('Missing exploration HTML')
+    scripts = []
+    for name, digest in files.items():
+        path = directory / name
+        if (not name or Path(name).is_absolute() or '..' in Path(name).parts or
+                not path.resolve().is_relative_to(directory) or not path.is_file()):
+            raise ValueError('Invalid exploration asset path')
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError(f'Exploration asset digest mismatch: {name}')
+        if name.endswith('.js'):
+            scripts.append(path)
+            if embedded_info(path) != info:
+                raise ValueError(f'Exploration identity mismatch: {name}')
+    html = (directory / 'index.html').read_text(encoding='utf-8')
+    entries = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html)
+    if not scripts or not entries or any(not name.startswith('/exploration/') or
+            name.removeprefix('/exploration/') not in files for name in entries):
+        raise ValueError('Missing exploration entry asset')
+    for name in ('licenses/graphic-walker-LICENSE', 'licenses/graphic-walker-LICENSE2'):
+        if name not in files:
+            raise ValueError('Missing Graphic Walker license')
+    return manifest
+
+
 def check_artifacts(output, worker=None, expect_version=None, expect_revision=None):
     output = Path(output)
     info = read_info(output / 'build-info.json')
@@ -67,6 +102,8 @@ def check_artifacts(output, worker=None, expect_version=None, expect_revision=No
     for path in (output / 'static/build-info.json', worker or output / 'python/flowsql/_build_info.json'):
         if read_info(path) != info:
             raise ValueError(f'Artifact identity mismatch: {path}')
+    if (output / 'libflowsql_visualization.so').exists():
+        check_exploration(output / 'exploration')
     if expect_version is not None and info['version'] != expect_version:
         raise ValueError('Image version argument does not match actual artifacts')
     if expect_revision is not None and (info['revision'] or 'unknown') != expect_revision:
@@ -99,6 +136,8 @@ def main():
     artifacts.add_argument('--worker', type=Path)
     artifacts.add_argument('--expect-version')
     artifacts.add_argument('--expect-revision')
+    exploration = commands.add_parser('exploration', help='Validate an independently built exploration package')
+    exploration.add_argument('--package', type=Path, required=True)
     verify = commands.add_parser('verify', help='Read-only release validation; never creates tags or publishes')
     verify.add_argument('--root', type=Path, default=ROOT)
     verify.add_argument('--output', type=Path, default=ROOT / 'build/output')
@@ -109,6 +148,8 @@ def main():
     try:
         if args.command == 'artifacts':
             info = check_artifacts(args.output, args.worker, args.expect_version, args.expect_revision)
+        elif args.command == 'exploration':
+            info = check_exploration(args.package)
         elif args.command == 'verify':
             info = verify_release(args.root, args.output, args.version)
         else:
@@ -119,7 +160,7 @@ def main():
                             '--build-arg', f"PRODUCT_REVISION={info['revision'] or 'unknown'}",
                             '-t', args.tag, '.'], cwd=ROOT, check=True)
         print(json.dumps(info))
-    except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
         parser.exit(1, f'product release: {exc}\n')
 
 

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "web_server.h"
+#include "exploration_proxy.hpp"
 
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -388,12 +389,22 @@ int WebServer::Init(const std::string& db_path) {
     const std::string index_html = static_dir + "/index.html";
 
     // CORS 统一处理
-    server_.set_pre_routing_handler([](const httplib::Request&, httplib::Response& res) {
+    server_.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
+        if (IsExplorationPath(req.path)) {
+            // cpp-httplib reads POST bodies after pre-routing; use the regular route below.
+            if (req.method == "POST" &&
+                (req.path == "/api/visualization/v1/compute" || req.path == "/api/visualization/v1/cancel"))
+                return httplib::Server::HandlerResponse::Unhandled;
+            ProxyExploration(visualization_upstream_, req, res);
+            return httplib::Server::HandlerResponse::Handled;
+        }
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
         res.set_header("Access-Control-Allow-Headers", "Content-Type");
         return httplib::Server::HandlerResponse::Unhandled;
     });
+    server_.Post(R"(/api/visualization/v1/(compute|cancel))",
+                 [this](const auto& req, auto& res) { ProxyExploration(visualization_upstream_, req, res); });
     server_.Options(".*", [](const httplib::Request&, httplib::Response& res) {
         res.status = 204;
     });
@@ -403,6 +414,7 @@ int WebServer::Init(const std::string& db_path) {
     server_.set_error_handler([index_html](const httplib::Request& req, httplib::Response& res) {
         if (res.status != 404) return;
         if (req.method != "GET") return;
+        if (IsExplorationPath(req.path)) return;
         if (req.path == "/api" || req.path.rfind("/api/", 0) == 0) return;
         if (req.path.find('.') != std::string::npos) return;  // 静态资源 404 保持原样
 

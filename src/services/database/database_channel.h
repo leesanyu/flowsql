@@ -7,6 +7,7 @@
 #include <framework/interfaces/idatabase_arrow_write.h>
 #include <framework/interfaces/idatabase_atomic_target.h>
 #include <framework/interfaces/idatabase_channel.h>
+#include <framework/interfaces/idatabase_exploration.h>
 #include <framework/interfaces/idatabase_published_source.h>
 #include <framework/interfaces/idatabase_snapshot_source.h>
 
@@ -28,7 +29,8 @@ class DatabaseChannel : public IDatabaseChannel,
                         public IDatabaseArrowWriteV1,
                         public IDatabaseSnapshotSourceV1,
                         public IDatabasePublishedSourceV1,
-                        public IDatabaseAtomicTargetV1 {
+                        public IDatabaseAtomicTargetV1,
+                        public IDatabaseExplorationSourceV1 {
  public:
     using SessionFactory = std::function<std::shared_ptr<IDbSession>()>;
 
@@ -70,6 +72,8 @@ class DatabaseChannel : public IDatabaseChannel,
 
     int CreateSnapshotSession(const DatabaseSnapshotOptionsV1& options,
                               std::shared_ptr<IDatabaseSnapshotSessionV1>* output) override;
+    int CreateExplorationSession(const DatabaseSnapshotOptionsV1& options,
+                                 std::shared_ptr<IDatabaseExplorationSessionV1>* output) override;
     int CreatePublishedProgressReader(const DatabaseSnapshotOptionsV1& options,
                                       std::shared_ptr<IDatabasePublishedProgressReaderV1>* output) override;
 

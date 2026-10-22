@@ -1,21 +1,18 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_CATALOG_CATALOG_PLUGIN_H_
 #define _FLOWSQL_SERVICES_CATALOG_CATALOG_PLUGIN_H_
 
 #include <common/iplugin.h>
+#include <framework/interfaces/ibinaddon_host.h>
 #include <framework/interfaces/ichannel_registry.h>
 #include <framework/interfaces/idataframe_channel.h>
-#include <framework/interfaces/ibinaddon_host.h>
+#include <framework/interfaces/idataframe_snapshot.h>
 #include <framework/interfaces/ioperator_catalog.h>
 #include <framework/interfaces/ioperator_registry.h>
 #include <framework/interfaces/irouter_handle.h>
+#include "dataframe_transfer.h"
 
 #include <rapidjson/document.h>
 #include <sqlite3.h>
@@ -29,8 +26,12 @@
 namespace flowsql {
 namespace catalog {
 
-class __attribute__((visibility("default"))) CatalogPlugin
-    : public IPlugin, public IChannelRegistry, public IOperatorRegistry, public IOperatorCatalog, public IRouterHandle {
+class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
+                                                             public IChannelRegistry,
+                                                             public IOperatorRegistry,
+                                                             public IOperatorCatalog,
+                                                             public IRouterHandle,
+                                                             public IDataFrameSnapshotProviderV1 {
  public:
     CatalogPlugin() = default;
     ~CatalogPlugin() override = default;
@@ -48,6 +49,9 @@ class __attribute__((visibility("default"))) CatalogPlugin
     int Unregister(const char* name) override;
     int Rename(const char* old_name, const char* new_name) override;
     void List(std::function<void(const char* name, std::shared_ptr<IChannel>)> callback) override;
+
+    int List(std::vector<DataFrameSourceV1>* output, std::string* error) override;
+    int Acquire(const DataFrameSnapshotRequestV1& request, DataFrameSnapshotV1* output, std::string* error) override;
 
     // IOperatorRegistry
     int Register(const char* name, OperatorFactory factory) override;
@@ -67,6 +71,10 @@ class __attribute__((visibility("default"))) CatalogPlugin
     int32_t HandleListChannels(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleImportCsv(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandlePreview(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleSnapshotSources(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleSnapshotAcquire(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleSnapshotCancel(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleSnapshotRelease(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleRename(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleDelete(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleListOperators(const std::string& uri, const std::string& req, std::string& rsp);
@@ -85,17 +93,10 @@ class __attribute__((visibility("default"))) CatalogPlugin
     std::string OperatorCatalogDbPath() const;
     static bool ParseOperatorRef(const rapidjson::Value& doc, std::string* category, std::string* name);
     static bool ParseOperatorRefFromName(const std::string& full_name, std::string* category, std::string* name);
-    int QueryOperatorDetail(const std::string& category,
-                            const std::string& name,
-                            OperatorMeta* meta,
-                            int* active,
-                            int* editable,
-                            std::string* created_at,
-                            std::string* updated_at);
+    int QueryOperatorDetail(const std::string& category, const std::string& name, OperatorMeta* meta, int* active,
+                            int* editable, std::string* created_at, std::string* updated_at);
     int SetOperatorActive(const std::string& category, const std::string& name, int active);
-    int UpdateOperatorFields(const std::string& category,
-                             const std::string& name,
-                             const std::string* description,
+    int UpdateOperatorFields(const std::string& category, const std::string& name, const std::string* description,
                              const std::string* position);
     std::string OperatorsDirPath() const;
     std::string OperatorContentPath(const std::string& category, const std::string& name) const;
@@ -120,12 +121,15 @@ class __attribute__((visibility("default"))) CatalogPlugin
     IQuerier* querier_ = nullptr;
     IBinAddonHost* binaddon_host_ = nullptr;
     std::unordered_map<std::string, std::shared_ptr<IChannel>> channels_;
+    std::unordered_map<std::string, std::string> source_ids_;
     std::unordered_map<std::string, OperatorFactory> op_factories_;
     std::string data_dir_ = "./dataframes";
+    std::string exploration_shared_dir_;
     std::string operator_db_dir_ = "./catalog";
     std::string operator_db_path_;
     sqlite3* operator_db_ = nullptr;
     mutable std::mutex mu_;
+    DataFrameTransferStore dataframe_transfers_;
 };
 
 }  // namespace catalog

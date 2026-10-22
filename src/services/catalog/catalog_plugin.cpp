@@ -12,6 +12,8 @@
 #include <common/error_code.h>
 #include <common/log.h>
 
+#include <arrow/ipc/api.h>
+#include <openssl/sha.h>
 #include <unistd.h>
 #include <algorithm>
 #include <cctype>
@@ -22,6 +24,8 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <random>
 #include <sstream>
 #include <string_view>
 #include <type_traits>
@@ -39,6 +43,21 @@ namespace flowsql {
 namespace catalog {
 
 namespace {
+std::string SnapshotToken() {
+    std::random_device random;
+    std::ostringstream result;
+    for (int i = 0; i < 8; ++i) result << std::hex << std::setfill('0') << std::setw(8) << random();
+    return result.str();
+}
+std::string SnapshotSchemaRevision(const arrow::Schema& schema) {
+    const auto encoded = arrow::ipc::SerializeSchema(schema);
+    if (!encoded.ok()) return {};
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256((*encoded)->data(), (*encoded)->size(), digest);
+    std::ostringstream result;
+    for (auto byte : digest) result << std::hex << std::setfill('0') << std::setw(2) << unsigned(byte);
+    return result.str();
+}
 bool EqualsIgnoreCase(const std::string& a, const char* b) {
     if (!b) return false;
     size_t n = a.size();
@@ -208,6 +227,7 @@ int CatalogPlugin::Option(const char* arg) {
         std::string key = opts.substr(pos, eq - pos);
         std::string val = opts.substr(eq + 1, end - eq - 1);
         if (key == "data_dir" && !val.empty()) data_dir_ = val;
+        if (key == "exploration_shared_dir" && !val.empty()) exploration_shared_dir_ = val;
         if (key == "operator_db_dir" && !val.empty()) operator_db_dir_ = val;
         if (key == "operator_db_path" && !val.empty()) operator_db_path_ = val;
         pos = (end < opts.size()) ? end + 1 : opts.size();
@@ -267,6 +287,7 @@ int CatalogPlugin::Start() {
     if (EnsureDataDir() != 0) return -1;
     if (EnsureOperatorDbDir() != 0) return -1;
     if (EnsureOperatorCatalogDb() != 0) return -1;
+    if (!exploration_shared_dir_.empty() && dataframe_transfers_.Init(exploration_shared_dir_) != 0) return -1;
 
     for (const auto& entry : fs::directory_iterator(data_dir_)) {
         if (!entry.is_regular_file()) continue;
@@ -277,14 +298,17 @@ int CatalogPlugin::Start() {
 
         std::lock_guard<std::mutex> lock(mu_);
         channels_[name] = std::move(channel);
+        source_ids_[name] = SnapshotToken();
     }
     return 0;
 }
 
 int CatalogPlugin::Stop() {
+    dataframe_transfers_.Stop();
     std::lock_guard<std::mutex> lock(mu_);
     binaddon_host_ = nullptr;
     channels_.clear();
+    source_ids_.clear();
     if (operator_db_ != nullptr) {
         sqlite3_close(operator_db_);
         operator_db_ = nullptr;
@@ -306,6 +330,7 @@ int CatalogPlugin::Register(const char* name, std::shared_ptr<IChannel> channel)
     std::lock_guard<std::mutex> lock(mu_);
     if (channels_.find(name) != channels_.end()) return -1;
     channels_[name] = std::move(channel);
+    source_ids_[name] = SnapshotToken();
     return 0;
 }
 
@@ -327,6 +352,7 @@ int CatalogPlugin::Unregister(const char* name) {
         if (it == channels_.end()) return -1;
         remove_csv = dynamic_cast<IDataFrameChannel*>(it->second.get()) != nullptr;
         channels_.erase(it);
+        source_ids_.erase(name);
     }
 
     if (remove_csv) {
@@ -354,6 +380,8 @@ int CatalogPlugin::Rename(const char* old_name, const char* new_name) {
     auto channel = old_it->second;
     channels_.erase(old_it);
     channels_[new_name] = std::move(channel);
+    source_ids_[new_name] = source_ids_.at(old_name);
+    source_ids_.erase(old_name);
     return 0;
 }
 
@@ -369,6 +397,58 @@ void CatalogPlugin::List(std::function<void(const char* name, std::shared_ptr<IC
         }
     }
     for (const auto& [name, ch] : snapshot) callback(name.c_str(), ch);
+}
+
+int CatalogPlugin::List(std::vector<DataFrameSourceV1>* output, std::string* error) {
+    if (!output || !error) return -1;
+    output->clear();
+    error->clear();
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto& [name, channel] : channels_) {
+        if (dynamic_cast<IDataFrameSnapshotReaderV1*>(channel.get()))
+            output->push_back({source_ids_.at(name), "dataframe." + name});
+    }
+    std::sort(output->begin(), output->end(), [](const auto& a, const auto& b) { return a.label < b.label; });
+    return 0;
+}
+
+int CatalogPlugin::Acquire(const DataFrameSnapshotRequestV1& request, DataFrameSnapshotV1* output, std::string* error) {
+    if (!output || !error) return -1;
+    *output = {};
+    error->clear();
+    std::shared_ptr<IChannel> channel;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (const auto& [name, id] : source_ids_)
+            if (id == request.source_id) {
+                channel = channels_.at(name);
+                break;
+            }
+    }
+    auto* reader = channel ? dynamic_cast<IDataFrameSnapshotReaderV1*>(channel.get()) : nullptr;
+    if (!reader) {
+        *error = "SOURCE_UNAVAILABLE";
+        return -1;
+    }
+    DataFrameSnapshotV1 snapshot;
+    if (reader->CaptureSnapshot(request, &snapshot.batch, &snapshot.retained_bytes, error) != 0) return -1;
+    snapshot.schema_revision = SnapshotSchemaRevision(*snapshot.batch->schema());
+    if (snapshot.schema_revision.empty()) {
+        *error = "SOURCE_UNAVAILABLE";
+        return -1;
+    }
+    snapshot.source_id = request.source_id;
+    snapshot.snapshot_id = SnapshotToken();
+    snapshot.row_count = snapshot.batch->num_rows();
+    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm utc{};
+    gmtime_r(&now, &utc);
+    char text[32];
+    std::strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    snapshot.captured_at = text;
+    snapshot.lifetime = std::move(channel);
+    *output = std::move(snapshot);
+    return 0;
 }
 
 int CatalogPlugin::Register(const char* name, OperatorFactory factory) {
@@ -497,6 +577,22 @@ int CatalogPlugin::SetActive(const std::string& category, const std::string& nam
 }
 
 void CatalogPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
+    cb({"GET", "/channels/dataframe/exploration/v1/sources",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleSnapshotSources(u, req, rsp);
+        }});
+    cb({"POST", "/channels/dataframe/exploration/v1/snapshots/acquire",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleSnapshotAcquire(u, req, rsp);
+        }});
+    cb({"POST", "/channels/dataframe/exploration/v1/snapshots/cancel",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleSnapshotCancel(u, req, rsp);
+        }});
+    cb({"POST", "/channels/dataframe/exploration/v1/snapshots/release",
+        [this](const std::string& u, const std::string& req, std::string& rsp) {
+            return HandleSnapshotRelease(u, req, rsp);
+        }});
     cb({"GET", "/channels/dataframe", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleListChannels(u, req, rsp);
         }});
@@ -533,6 +629,137 @@ void CatalogPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
     cb({"POST", "/operators/upsert_batch", [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleOperatorUpsertBatch(u, req, rsp);
         }});
+}
+
+int32_t CatalogPlugin::HandleSnapshotSources(const std::string&, const std::string&, std::string& rsp) {
+    std::vector<DataFrameSourceV1> sources;
+    std::string error_text;
+    if (List(&sources, &error_text) != 0) {
+        rsp = R"({"code":"DATA_PLANE_UNAVAILABLE"})";
+        return error::UNAVAILABLE;
+    }
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    writer.StartObject();
+    writer.Key("sources");
+    writer.StartArray();
+    for (const auto& source : sources) {
+        writer.StartObject();
+        writer.Key("source_id");
+        writer.String(source.source_id.c_str());
+        writer.Key("label");
+        writer.String(source.label.c_str());
+        writer.EndObject();
+    }
+    writer.EndArray();
+    writer.EndObject();
+    rsp = buffer.GetString();
+    return error::OK;
+}
+
+int32_t CatalogPlugin::HandleSnapshotAcquire(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document document;
+    document.Parse(req.c_str());
+    if (document.HasParseError() || !document.IsObject() || !document.HasMember("request_id") ||
+        !document["request_id"].IsString() || !document.HasMember("source_id") || !document["source_id"].IsString()) {
+        rsp = R"({"code":"INVALID_REQUEST"})";
+        return error::BAD_REQUEST;
+    }
+    const std::string request_id(document["request_id"].GetString(), document["request_id"].GetStringLength());
+    const std::string source_id(document["source_id"].GetString(), document["source_id"].GetStringLength());
+    const auto max_bytes = document.HasMember("max_bytes") && document["max_bytes"].IsUint64()
+                               ? document["max_bytes"].GetUint64()
+                               : 256ULL * 1024 * 1024;
+    const auto timeout_ms = document.HasMember("remaining_timeout_ms") && document["remaining_timeout_ms"].IsUint()
+                                ? document["remaining_timeout_ms"].GetUint()
+                                : 0;
+    if (request_id.empty() || request_id.size() > 128 || source_id.empty() || max_bytes == 0 || timeout_ms == 0 ||
+        timeout_ms > 60000) {
+        rsp = R"({"code":"INVALID_REQUEST"})";
+        return error::BAD_REQUEST;
+    }
+    DataFrameSnapshotRequestV1 request;
+    request.source_id = source_id;
+    request.max_bytes = max_bytes;
+    request.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    auto cancellation = std::make_shared<std::atomic_bool>(false);
+    request.cancelled = cancellation;
+    DataFrameTransferInfoV1 info;
+    std::string failure;
+    if (dataframe_transfers_.Acquire(*this, request_id, request, &info, &failure) != 0) {
+        rsp = "{\"request_id\":\"" + request_id + "\",\"code\":\"" + failure + "\"}";
+        if (failure == "BUSY") return error::TOO_MANY_REQUESTS;
+        if (failure == "SNAPSHOT_LIMIT") return error::PAYLOAD_TOO_LARGE;
+        if (failure == "SOURCE_UNAVAILABLE") return error::NOT_FOUND;
+        if (failure == "DATA_PLANE_UNAVAILABLE") return error::UNAVAILABLE;
+        if (failure == "DUPLICATE_REQUEST") return error::CONFLICT;
+        return error::BAD_REQUEST;
+    }
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    writer.StartObject();
+    writer.Key("request_id");
+    writer.String(request_id.c_str());
+    writer.Key("source_id");
+    writer.String(info.source_id.c_str());
+    writer.Key("transfer_id");
+    writer.String(info.transfer_id.c_str());
+    writer.Key("snapshot_id");
+    writer.String(info.snapshot_id.c_str());
+    writer.Key("schema_revision");
+    writer.String(info.schema_revision.c_str());
+    writer.Key("captured_at");
+    writer.String(info.captured_at.c_str());
+    writer.Key("row_count");
+    writer.Uint64(info.row_count);
+    writer.Key("ipc_bytes");
+    writer.Uint64(info.ipc_bytes);
+    const auto expires_at =
+        std::chrono::duration_cast<std::chrono::seconds>(info.expires_at.time_since_epoch()).count();
+    writer.Key("expires_at_unix");
+    writer.Int64(expires_at);
+    writer.Key("fields");
+    writer.StartArray();
+    for (const auto& field : info.schema->fields()) {
+        writer.StartObject();
+        writer.Key("name");
+        writer.String(field->name().c_str());
+        writer.Key("type");
+        writer.String(field->type()->ToString().c_str());
+        writer.Key("nullable");
+        writer.Bool(field->nullable());
+        writer.EndObject();
+    }
+    writer.EndArray();
+    writer.EndObject();
+    rsp = buffer.GetString();
+    return error::OK;
+}
+
+int32_t CatalogPlugin::HandleSnapshotCancel(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document document;
+    document.Parse(req.c_str());
+    if (document.HasParseError() || !document.IsObject() || !document.HasMember("request_id") ||
+        !document["request_id"].IsString()) {
+        rsp = R"({"code":"INVALID_REQUEST"})";
+        return error::BAD_REQUEST;
+    }
+    const bool cancelled = dataframe_transfers_.Cancel(document["request_id"].GetString());
+    rsp = cancelled ? R"({"status":"cancel_requested"})" : R"({"status":"not_running"})";
+    return error::OK;
+}
+
+int32_t CatalogPlugin::HandleSnapshotRelease(const std::string&, const std::string& req, std::string& rsp) {
+    rapidjson::Document document;
+    document.Parse(req.c_str());
+    if (document.HasParseError() || !document.IsObject() || !document.HasMember("transfer_id") ||
+        !document["transfer_id"].IsString()) {
+        rsp = R"({"code":"INVALID_REQUEST"})";
+        return error::BAD_REQUEST;
+    }
+    dataframe_transfers_.Release(document["transfer_id"].GetString());
+    rsp = R"({"status":"released"})";
+    return error::OK;
 }
 
 int32_t CatalogPlugin::HandleListChannels(const std::string&, const std::string&, std::string& rsp) {
