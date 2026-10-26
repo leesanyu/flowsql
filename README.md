@@ -1374,7 +1374,7 @@ C++ 算子以“插件文件（`.so`）”为管理单元。一个插件可包�
 ## 项目结构
 
 ```
-flowSQL/
+flowsql/
 ├── build/output/           # 编译产物（.so、可执行文件、static/）
 ├── config/
 │   ├── deploy-single.yaml  # 单进程部署配置（开发调试）

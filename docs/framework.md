@@ -553,7 +553,7 @@ channels:
 ## 项目结构
 
 ```
-flowSQL/
+flowsql/
 ├── src/
 │   ├── common/             # 公共头文件（define.h、error_code.h、loader.hpp、toolkit.hpp 等）
 │   ├── channels/pcapfile/  # 有限 pcap/pcapng block-stream source provider

@@ -41,12 +41,12 @@ flowchart LR
 ### 1. 启动 Kafka 与 FlowSQL
 
 需要 Docker Engine、Docker Compose v2、Python 3，以及已经编译好的 FlowSQL。打开 WSL/Linux 终端，
-进入仓库根目录；本机路径为 `/mnt/d/working/flowSQL`，大小写须一致。以下脚本用 Bash 执行，不直接粘贴到 PowerShell。
+进入仓库根目录；本机路径为 `/mnt/d/working/flowsql`，大小写须一致。以下脚本用 Bash 执行，不直接粘贴到 PowerShell。
 
 终端 A 启动 FlowSQL；如果服务已经运行，复用现有进程即可：
 
 ```bash
-cd /mnt/d/working/flowSQL
+cd /mnt/d/working/flowsql
 ./start.sh
 ```
 
@@ -56,7 +56,7 @@ cd /mnt/d/working/flowSQL
 终端 B 启动 Kafka 并检查状态：
 
 ```bash
-cd /mnt/d/working/flowSQL
+cd /mnt/d/working/flowsql
 ./tools/kafka-manual.sh up
 ./tools/kafka-manual.sh status
 ```
@@ -199,7 +199,7 @@ INTO kafka.manual_sink;
 先在终端 C 进入仓库并持续查看 sink：
 
 ```bash
-cd /mnt/d/working/flowSQL
+cd /mnt/d/working/flowsql
 ./tools/kafka-manual.sh read sink
 ```
 

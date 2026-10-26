@@ -88,8 +88,8 @@ PF_RING 8.8.0 在当前部署中核查出两处上游生命周期问题，补丁
 先在对应 PF_RING 源码根目录应用补丁，再按该部署的构建方式重新构建用户态库及匹配运行内核的模块：
 
 ```bash
-git apply /path/to/flowSQL/src/channels/netadapter/pfring-8.8.0-close.patch
-git apply /path/to/flowSQL/src/channels/netadapter/pfring-8.8.0-netns.patch
+git apply /path/to/flowsql/src/channels/netadapter/pfring-8.8.0-close.patch
+git apply /path/to/flowsql/src/channels/netadapter/pfring-8.8.0-netns.patch
 ```
 
 模块替换前核对 `vermagic`、符号 CRC 与活动 ring/引用，保留原模块；不强制加载或卸载。
