@@ -28,6 +28,8 @@ def main():
         dataframes.mkdir()
         (dataframes / 'sales.csv').write_text(
             'region,channel,amount,cost\nnorth,web,10,1.5\nsouth,app,20,2.5\nnorth,app,5,3.5\n')
+        (dataframes / 'lazy_ui.csv').write_text('label,value\nvisible,7\n')
+        (dataframes / 'failed_ui.csv').write_text('')
         database = directory / 'data.db'
         with sqlite3.connect(database) as connection:
             connection.execute('CREATE TABLE rows(region TEXT, amount INTEGER)')
@@ -72,7 +74,7 @@ def main():
                 labels = [item['label'] for item in listing['sources']]
                 assert 'dataframe.sales' in labels and 'memory.rows' in labels, labels
                 web_options = (f'port={web_port};db_path={directory}/web.db;'
-                               f'upload_dir={directory}/uploads;visualization_upstream={visual}')
+                               f'upload_dir={directory}/uploads;visualization_upstream={visual};gateway=127.0.0.1:{source_port}')
                 with service(output, directory, 'web', web_options, web + '/api/version'):
                     # Missing/invalid bodies must reach the exploration service as JSON errors.
                     acquire_url = web + '/api/visualization/v1/snapshots/acquire'

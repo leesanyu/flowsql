@@ -3,6 +3,7 @@
 
 #include "catalog_plugin.h"
 #include <common/network/address_display.h>
+#include "lazy_dataframe_channel.h"
 
 #include <framework/core/dataframe.h>
 #include <framework/core/dataframe_channel.h>
@@ -213,6 +214,8 @@ bool WritePacketPreviewValue(JsonWriter* writer, const std::shared_ptr<arrow::Ar
 }
 }  // namespace
 
+CatalogPlugin::~CatalogPlugin() { Stop(); }
+
 int CatalogPlugin::Option(const char* arg) {
     if (!arg || !*arg) return 0;
 
@@ -293,8 +296,7 @@ int CatalogPlugin::Start() {
         if (!entry.is_regular_file()) continue;
         if (entry.path().extension() != ".csv") continue;
         const std::string name = entry.path().stem().string();
-        auto channel = LoadCsvFile(entry.path().string(), name);
-        if (!channel) continue;
+        auto channel = std::make_shared<LazyDataFrameChannel>(entry.path().string(), name, ParseCsv);
 
         std::lock_guard<std::mutex> lock(mu_);
         channels_[name] = std::move(channel);
@@ -307,6 +309,9 @@ int CatalogPlugin::Stop() {
     dataframe_transfers_.Stop();
     std::lock_guard<std::mutex> lock(mu_);
     binaddon_host_ = nullptr;
+    for (const auto& [name, channel] : channels_) {
+        if (auto* lazy = dynamic_cast<LazyDataFrameChannel*>(channel.get())) lazy->Retire();
+    }
     channels_.clear();
     source_ids_.clear();
     if (operator_db_ != nullptr) {
@@ -344,21 +349,17 @@ std::shared_ptr<IChannel> CatalogPlugin::Get(const char* name) {
 
 int CatalogPlugin::Unregister(const char* name) {
     if (!name || !*name) return -1;
-    bool remove_csv = false;
-
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        auto it = channels_.find(name);
-        if (it == channels_.end()) return -1;
-        remove_csv = dynamic_cast<IDataFrameChannel*>(it->second.get()) != nullptr;
-        channels_.erase(it);
-        source_ids_.erase(name);
-    }
-
-    if (remove_csv) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = channels_.find(name);
+    if (it == channels_.end()) return -1;
+    if (dynamic_cast<IDataFrameChannel*>(it->second.get())) {
         std::error_code ec;
         fs::remove(CsvPath(name), ec);
+        if (ec) return -1;
     }
+    if (auto* lazy = dynamic_cast<LazyDataFrameChannel*>(it->second.get())) lazy->Retire();
+    channels_.erase(it);
+    source_ids_.erase(name);
     return 0;
 }
 
@@ -371,7 +372,9 @@ int CatalogPlugin::Rename(const char* old_name, const char* new_name) {
     if (channels_.find(new_name) != channels_.end()) return -1;
 
     auto* df_channel = dynamic_cast<IDataFrameChannel*>(old_it->second.get());
-    if (df_channel) {
+    if (auto* lazy = dynamic_cast<LazyDataFrameChannel*>(old_it->second.get())) {
+        if (lazy->RenameFile(CsvPath(new_name), new_name) != 0) return -1;
+    } else if (df_channel) {
         std::error_code ec;
         fs::rename(CsvPath(old_name), CsvPath(new_name), ec);
         if (ec) return -1;
@@ -772,19 +775,40 @@ int32_t CatalogPlugin::HandleListChannels(const std::string&, const std::string&
     List([&](const char* name, std::shared_ptr<IChannel> ch) {
         auto* df_ch = dynamic_cast<IDataFrameChannel*>(ch.get());
         if (!name || !df_ch) return;
-        DataFrame data;
-        int rows = 0;
+        int64_t rows = -1;
         std::vector<Field> schema;
-        if (df_ch->Read(&data) == 0) {
-            rows = data.RowCount();
-            schema = data.GetSchema();
+        std::string state = "loaded", load_error;
+        if (auto* lazy = dynamic_cast<LazyDataFrameChannel*>(ch.get())) {
+            const auto metadata = lazy->Describe();
+            rows = metadata.rows;
+            schema = metadata.schema;
+            state = metadata.state;
+            load_error = metadata.error;
+        } else {
+            DataFrame data;
+            if (df_ch->Read(&data) == 0) {
+                rows = data.RowCount();
+                schema = data.GetSchema();
+            }
         }
         w.StartObject();
         w.Key("name");
         w.String(name);
+        w.Key("load_state");
+        w.String(state.c_str());
+        w.Key("load_error");
+        w.String(load_error.c_str());
         w.Key("rows");
-        w.Int(rows);
+        if (rows < 0)
+            w.Null();
+        else
+            w.Int64(rows);
         w.Key("schema");
+        if (rows < 0) {
+            w.Null();
+            w.EndObject();
+            return;
+        }
         w.StartArray();
         for (const auto& f : schema) {
             w.StartObject();
@@ -921,6 +945,9 @@ int32_t CatalogPlugin::HandlePreview(const std::string&, const std::string& req,
     DataFrame data;
     if (ch->Read(&data) != 0) {
         rsp = R"({"error":"failed to read channel"})";
+        auto* lazy = dynamic_cast<LazyDataFrameChannel*>(ch.get());
+        if (lazy && lazy->Describe().error == "CSV_LOAD_FAILED")
+            rsp = R"({"error":"failed to load persisted CSV","code":"CSV_LOAD_FAILED"})";
         return error::INTERNAL_ERROR;
     }
 
@@ -1927,7 +1954,12 @@ int CatalogPlugin::PersistChannelToCsv(const std::string& name, IDataFrameChanne
 std::shared_ptr<IDataFrameChannel> CatalogPlugin::LoadCsvFile(const std::string& path, const std::string& name) {
     std::ifstream in(path, std::ios::binary);
     if (!in.is_open()) return nullptr;
+    return ParseCsv(in, name, [] { return false; });
+}
 
+std::shared_ptr<IDataFrameChannel> CatalogPlugin::ParseCsv(std::istream& in, const std::string& name,
+                                                           const std::function<bool()>& interrupted) {
+    if (interrupted()) return nullptr;
     std::string line;
     if (!std::getline(in, line)) return nullptr;
     if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -1946,6 +1978,7 @@ std::shared_ptr<IDataFrameChannel> CatalogPlugin::LoadCsvFile(const std::string&
 
     std::vector<std::vector<std::string>> rows;
     while (std::getline(in, line)) {
+        if (interrupted()) return nullptr;
         if (!line.empty() && line.back() == '\r') line.pop_back();
         auto row = ParseCsvLine(line);
         if (row.size() < headers.size()) row.resize(headers.size());
@@ -1953,6 +1986,7 @@ std::shared_ptr<IDataFrameChannel> CatalogPlugin::LoadCsvFile(const std::string&
         rows.push_back(std::move(row));
     }
 
+    if (in.bad() || interrupted()) return nullptr;
     std::vector<Field> schema;
     schema.reserve(headers.size());
     for (size_t c = 0; c < headers.size(); ++c) {
@@ -1960,6 +1994,7 @@ std::shared_ptr<IDataFrameChannel> CatalogPlugin::LoadCsvFile(const std::string&
         bool all_double = !rows.empty();
 
         for (const auto& row : rows) {
+            if (interrupted()) return nullptr;
             const auto& cell = row[c];
             if (cell.empty()) {
                 all_int64 = false;
@@ -1983,6 +2018,7 @@ std::shared_ptr<IDataFrameChannel> CatalogPlugin::LoadCsvFile(const std::string&
     DataFrame df;
     df.SetSchema(schema);
     for (const auto& row : rows) {
+        if (interrupted()) return nullptr;
         std::vector<FieldValue> values;
         values.reserve(schema.size());
         for (size_t c = 0; c < schema.size(); ++c) {
@@ -2002,6 +2038,7 @@ std::shared_ptr<IDataFrameChannel> CatalogPlugin::LoadCsvFile(const std::string&
         if (df.AppendRow(values) != 0) return nullptr;
     }
 
+    if (interrupted()) return nullptr;
     auto ch = std::make_shared<DataFrameChannel>("dataframe", name);
     ch->Open();
     if (ch->Write(&df) != 0) return nullptr;

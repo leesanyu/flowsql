@@ -11,11 +11,27 @@ const chartTypes = ['bar', 'stacked_bar', 'grouped_bar', 'line', 'area', 'point'
 
 try {
   const browser = await openBrowser(direct, mode)
-  const { send, evaluate, wait, pause } = browser
+  const { send, evaluate, evaluateRoot, wait, pause } = browser
   const click = (label) => evaluate(`[...document.querySelectorAll('button')].find(e=>e.textContent===${JSON.stringify(label)}).click()`)
   const snapshotId = () => evaluate(`(()=>{const o=document.querySelector('.snapshot-bar');return o?o.getAttribute('data-snapshot-id'):''})()`)
   try {
     await send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false })
+    if (mode === 'embedded') {
+      await send('Page.navigate', { url: direct + '/channels' })
+      const row = (name) => `[...document.querySelectorAll('.el-table__row')].find(e=>e.textContent.includes(${JSON.stringify(name)}))`
+      await wait(() => evaluateRoot(`${row('lazy_ui')}?.textContent.includes('未加载')`), 'unloaded channel row')
+      const initial = await evaluateRoot(`${row('lazy_ui')}.textContent`)
+      assert(initial.includes('未知') && initial.includes('首次访问后确定'), initial)
+      await evaluateRoot(`[...${row('lazy_ui')}.querySelectorAll('button')].find(e=>e.textContent.includes('预览')).click()`)
+      await wait(() => evaluateRoot(`${row('lazy_ui')}?.textContent.includes('已加载')`), 'loaded channel row')
+      assert((await evaluateRoot(`${row('lazy_ui')}.textContent`)).includes('2 字段'))
+      await send('Page.navigate', { url: direct + '/channels' })
+      await wait(() => evaluateRoot(`${row('failed_ui')}?.textContent.includes('未加载')`), 'unloaded broken channel')
+      await evaluateRoot(`[...${row('failed_ui')}.querySelectorAll('button')].find(e=>e.textContent.includes('预览')).click()`)
+      await wait(() => evaluateRoot(`${row('failed_ui')}?.textContent.includes('加载失败')`), 'failed channel row')
+      assert((await evaluateRoot(`${row('failed_ui')}.textContent`)).includes('未知'))
+      checks.push('channel_unloaded_loaded_failed_states')
+    }
     // Renewal runs on a short interval so the page exercises the renew path during the run.
     await send('Page.addScriptToEvaluateOnNewDocument', { source: 'globalThis.__flowsqlRenewMilliseconds = 1000' })
     await send('Page.navigate', { url: direct + (mode === 'embedded' ? '/explore' : '/exploration/') })

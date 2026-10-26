@@ -3,7 +3,7 @@ import { createConfigChannelApi } from './configChannel.js'
 import { createKafkaChannelApi } from './kafkaChannel.js'
 
 const api = axios.create({
-  baseURL: 'http://localhost:8081',  // WebPlugin 对外端口，统一入口
+  baseURL: '',  // 使用当前页面的 Web 服务，开发环境由 Vite 代理 /api。
   timeout: 30000
 })
 

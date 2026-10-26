@@ -17,6 +17,7 @@
 #include <rapidjson/document.h>
 #include <sqlite3.h>
 
+#include <istream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -34,7 +35,7 @@ class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
                                                              public IDataFrameSnapshotProviderV1 {
  public:
     CatalogPlugin() = default;
-    ~CatalogPlugin() override = default;
+    ~CatalogPlugin() override;
 
     // IPlugin
     int Option(const char* arg) override;
@@ -107,7 +108,9 @@ class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
     static const char* DataTypeName(DataType t);
 
     int PersistChannelToCsv(const std::string& name, IDataFrameChannel* channel);
-    std::shared_ptr<IDataFrameChannel> LoadCsvFile(const std::string& path, const std::string& name);
+    static std::shared_ptr<IDataFrameChannel> LoadCsvFile(const std::string& path, const std::string& name);
+    static std::shared_ptr<IDataFrameChannel> ParseCsv(std::istream& input, const std::string& name,
+                                                       const std::function<bool()>& interrupted);
     std::string CsvPath(const std::string& name) const;
     int EnsureDataDir();
     IBinAddonHost* ResolveBinAddonHost();

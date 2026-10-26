@@ -1,6 +1,6 @@
 # Feature: DataFrame 启动恢复优化
 
-状态：`[ ]` 已登记，未实施；以下为待评审的精益契约草案。
+状态：`[x]` 已完成；2026-10-26 T1→T2→T3 顺序验收通过并归档。
 优先级：P1
 前置能力：`operator-catalog`、`visualization-dataframe`（均已交付）。
 
@@ -10,11 +10,11 @@
 用户可以先访问服务、查看通道和探索来源，再在预览、SQL 读取或获取探索快照时加载所选 DataFrame。
 启动成本只包含文件发现与目录登记，不随 CSV 总内容量执行全量类型推断和内存物化。
 
-已核查：`CatalogPlugin::Start()` 串行调用 `LoadCsvFile()` 恢复全部 CSV，且插件 Start 批次依次执行，
+实施前核查：原 `CatalogPlugin::Start()` 串行调用 `LoadCsvFile()` 恢复全部 CSV，且插件 Start 批次依次执行，
 因此后续 Database、Scheduler 和 Gateway 的启动会被阻塞；`HandleListChannels()` 也读取每个通道的数据。
 仅缩短类型推断循环不能消除全量恢复随数据增长的成本。
 
-本会话前轮隔离测量：23 个 CSV、273692299 bytes，Catalog Start 约 12.86 秒；空目录约 0.00002 秒
+2026-10-23 登记时隔离测量：23 个 CSV、273692299 bytes，Catalog Start 约 12.86 秒；空目录约 0.00002 秒
 （完整探针进程启动分别约 12.98 秒、0.084 秒）。该数据仅是问题依据，不是本 Feature 的验收结果或性能承诺。
 原始记录在本地 `evidence/startup-investigation/diagnosis.json`，未入库；实施时需在相同环境重新建立对照。
 
@@ -26,7 +26,7 @@
 - 不改变控制面 HTTP、数据面 Arrow IPC / 共享内存，以及公共通道和快照接口 ABI。
 - 不迁移、删除或修改已有业务 CSV，不自动重启用户服务，不扩展外部数据库/Kafka/Docker 验收矩阵。
 
-## 核心数据与接口契约（待评审）
+## 核心数据与接口契约
 
 复用 `IChannelRegistry`、`IDataFrameChannel`、`IAppendableDataFrameChannel` 和 DataFrame Snapshot V1，
 优先在 Catalog 内部实现持久化通道的加载状态，不新增跨插件纯虚方法。
@@ -42,7 +42,14 @@
 | 探索快照 | 保留 source_id、不可变快照、取消、截止时间、大小预算及所有权保证；加载等待与解析纳入请求预算。 |
 | 未加载通道管理 | 重命名更新实际文件与后续加载位置并保留 source_id；删除不触发解析；重启后按现有持久化规则恢复。 |
 
-具体内部 Struct、列表字段的兼容规则和失败重试契约，在实施前输出并进行一轮有限评审；本次登记不修改公共头文件。
+内部 `LazyDataFrameChannel` 组合内存通道，持有路径、名称、状态、错误、加载代次、互斥量与条件变量；
+加载器为不捕获 Catalog 的静态函数。公共头文件与虚表不变。
+HTTP 通道列表新增 `load_state` 和 `load_error`；未物化时 `rows/schema` 为 JSON null，已加载保持原格式。
+`Schema()` 未加载时返回 JSON `null`，不触发推断。失败记录为 failed，同批等待者收到失败，后续新请求可重试；
+取消/超时回到 unloaded，不发布半成品。关闭清空缓存，重开按持久化 CSV 重新加载；删除/停止使旧句柄永久失效。
+同一通道最多一个解析者；替换写入使在途旧加载失效。重命名保留 source_id 和在途读取的文件所有权。
+快照请求的等待、CSV 扫描、推断和物化共用截止时间及取消信号，成功后沿用既有大小预算和不可变复制保证。
+有限评审结论：保持公共 ABI、不在目录锁内解析、不捕获 Catalog；并发状态及退役路径通过 T2/T3 测试收口。
 
 ## 主链路
 
@@ -53,9 +60,9 @@
 
 ## Feature Task
 
-- [ ] T1：交付无需全量解析数据的启动恢复和目录查询，使服务及持久化 DataFrame 名称先于数据加载可用。
-- [ ] T2：交付并发安全的按需数据访问与快照生命周期，使首次读取、后续复用及失败/取消行为保持可解释且数据一致。
-- [ ] T3：交付完整的通道管理与用户状态展示，并通过聚焦回归和隔离性能对照证明多 DataFrame 场景的可用性与启动收益。
+- [x] T1：交付无需全量解析数据的启动恢复和目录查询，使服务及持久化 DataFrame 名称先于数据加载可用。
+- [x] T2：交付并发安全的按需数据访问与快照生命周期，使首次读取、后续复用及失败/取消行为保持可解释且数据一致。
+- [x] T3：交付完整的通道管理与用户状态展示，并通过聚焦回归和隔离性能对照证明多 DataFrame 场景的可用性与启动收益。
 
 ## Feature 验收边界
 
@@ -71,3 +78,13 @@
 ## 完成证据
 
 - 2026-10-23：按用户“先不实现代码，先登记 Feature”的要求登记；T1～T3 均未开始，无实现或验收结论。
+
+- 2026-10-26 T1：启动只登记延迟通道，列表明确 null 元信息；主产物及测试构建通过。`test_catalog_lazy_loading` 1/1 通过，IN_OPEN/IN_ACCESS 断言目录路径零 CSV 读取，首次目标读取保留 INT64/DOUBLE/STRING。证据：`evidence/test-environment/20261026T044027Z-7d4e78b6/summary.json`，未入库。
+
+- 2026-10-26 T2：锁外解析、同批结果共享、独立等待预算与解析取消/期限、失败重试、替换失效、关闭/重开及停止退役完成。确定性 Gate 与真实 CSV/Schema/空表断言通过。主构建成功，标准原生入口 selected=executed=passed=3，failed=skipped=not_executed=0：`evidence/test-environment/20261026T044801Z-0730e4b1/summary.json`。首次沙箱运行仅共享快照用例本地监听失败，外层同清单复测全绿，未放宽断言。
+
+- 2026-10-26 T3：未加载与在途 rename/delete、source_id、关闭/重开/停止退役及快照所有权验收完成；真实主产物覆盖恢复后的 SQL/预览、不可读旧 CSV 的替换、快照和 standalone/embedded 绘图。主通道页真实 Chromium 验证未加载、已加载、失败及未知元信息。
+- T3 首轮 11 项完整执行，主通道页因共享 API 客户端硬编码 localhost:8081 失败；定位后仅将基址改为同源，保持端点/方法/数据契约，按原清单重建主 Web 并复测，未放宽断言。工作台 Slice 1 以“当前错误待修复”关闭，Slice 2 沿用 T3 完成。
+- Feature 最终清单：selected=executed=passed=11（7 业务 + 4 必要环境 fixture），failed=skipped=not_executed=0；`evidence/test-environment/20261026T052611Z-c44b5f03/summary.json`。无外部 DB/Kafka/Docker，未运行全量/发布/镜像矩阵。
+- 隔离性能：空目录、4×约64 KiB、4×约2 MiB、1×约2 MiB、8×约2 MiB，每组旧/新各三次独立进程；默认无优化构建、热缓存、无并行构建/验收。8 文件 16777320 bytes 的 Start 中位数 1473.99→27.379 ms，列表 0.099→0.186 ms，目标首次 Read 0.012→201.137 ms，启动/列表峰值 RSS 66920→23828 KiB。完整环境、原始记录及源码/主产物 SHA256 在 `evidence/dataframe-lazy-loading/performance.json`、`verification.json`，本地忽略不入库；使用说明与限制见 `docs/exploration.md`。
+- 主 Catalog/Scheduler/Web/visualization、两套前端与相关测试构建成功；格式、Python/JS 语法及变更范围审查通过。沙箱内本地监听/esbuild EPERM 按原范围在外层执行通过；未重启用户服务，未提交或推送。

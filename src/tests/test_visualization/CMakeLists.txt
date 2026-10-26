@@ -1,4 +1,13 @@
 find_program(FLOWSQL_TEST_NODE NAMES node nodejs REQUIRED)
+add_executable(test_catalog_lazy_loading test_catalog_lazy_loading.cpp
+    ${CMAKE_SOURCE_DIR}/services/catalog/lazy_dataframe_channel.cpp)
+target_include_directories(test_catalog_lazy_loading PRIVATE ${CMAKE_SOURCE_DIR})
+add_thirddepen(test_catalog_lazy_loading arrow rapidjson sqlite)
+target_link_libraries(test_catalog_lazy_loading flowsql_catalog flowsql_common)
+target_compile_options(test_catalog_lazy_loading PRIVATE -UNDEBUG)
+set_target_properties(test_catalog_lazy_loading PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_catalog_lazy_loading COMMAND test_catalog_lazy_loading)
+set_tests_properties(test_catalog_lazy_loading PROPERTIES TIMEOUT 30)
 add_executable(test_visualization_workflow test_workflow.cpp ${CMAKE_SOURCE_DIR}/services/visualization/workflow.cpp)
 target_include_directories(test_visualization_workflow PRIVATE ${CMAKE_SOURCE_DIR})
 add_thirddepen(test_visualization_workflow arrow rapidjson sqlite)

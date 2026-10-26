@@ -121,6 +121,10 @@ def main():
     shared = root / 'exploration-shared'
     dataframes = root / 'dataframes'
     dataframes.mkdir()
+    (dataframes / 'restored.csv').write_text('name,value\nalpha,1\nbeta,2\n')
+    (dataframes / 'preview_only.csv').write_text('name,value\ngamma,3\n')
+    (dataframes / 'unused.csv').write_text('name,value\nunread,9\n')
+    (dataframes / 'overwrite.csv').write_text('')
     database = root / 'source.db'
     with sqlite3.connect(database) as connection:
         connection.execute('CREATE TABLE samples(host TEXT, value INTEGER)')
@@ -152,6 +156,32 @@ def main():
             wait_ready(visual_url, '/api/visualization/v1/capabilities', visual, visual_log, 'visualization')
             assert shared.is_dir() and (shared.stat().st_mode & 0o077) == 0, oct(shared.stat().st_mode)
             assert (shared / '.owner.lock').exists()
+
+            status, listing = call(source_url, '/channels/dataframe')
+            assert status == 200 and len(listing['channels']) == 4, listing
+            assert all(item['rows'] is None and item['schema'] is None and item['load_state'] == 'unloaded'
+                       for item in listing['channels']), listing
+            status, generic = call(source_url, '/channels/dataframe/query', {})
+            assert status == 200, generic
+            assert all(item['schema'] == 'null' for item in generic if item['category'] == 'dataframe'), generic
+            status, _ = call(source_url, '/scheduler/batch/execute',
+                             dict(sql='SELECT * FROM dataframe.restored INTO dataframe.recovered_output'))
+            assert status == 200
+            status, preview = call(source_url, '/channels/dataframe/preview', dict(name='recovered_output'))
+            assert status == 200 and preview['rows'] == 2 and preview['data'][0] == ['alpha', 1], preview
+            status, preview = call(source_url, '/channels/dataframe/preview', dict(name='preview_only'))
+            assert status == 200 and preview['rows'] == 1 and preview['data'][0] == ['gamma', 3], preview
+            status, replaced = call(source_url, '/scheduler/batch/execute',
+                                    dict(sql='SELECT * FROM sqlite.local.samples INTO dataframe.overwrite'))
+            assert status == 200, replaced
+            status, listing = call(source_url, '/channels/dataframe')
+            channels = {item['name']: item for item in listing['channels']}
+            assert channels['unused']['load_state'] == 'unloaded', channels
+            assert all(channels[name]['load_state'] == 'loaded' for name in ('restored', 'preview_only', 'overwrite'))
+            restored_id = dataframe_source(visual_url, 'dataframe.recovered_output')
+            restored_snapshot = acquire(visual_url, restored_id)
+            assert count_rows(visual_url, restored_id, restored_snapshot) == 2
+            passed('cold restoration: metadata/SQL/preview/snapshot and unread overwrite isolation')
 
             # CSV import through the running source service becomes an explorable named DataFrame.
             csv = root / 'import.csv'

@@ -23,9 +23,7 @@
 
 ## 待办 Feature
 
-| 状态 | Feature | 优先级 | 目标 | 规格 |
-| --- | --- | --- | --- | --- |
-| [ ] | DataFrame 启动恢复优化 (`dataframe-lazy-loading`) | P1 | 让持久化 DataFrame 数量多、数据量大的部署避免在进程启动和目录查询时全量读取 CSV；交付快速可用的服务与通道目录、首次访问时按需加载的数据，以及一致的并发读取、探索快照和通道管理行为。 | [规格](specs/feat-dataframe-lazy-loading.md) |
+暂无当前已立项的待办 Feature。
 
 ---
 
@@ -50,6 +48,7 @@
 
 | 状态 | Feature | 优先级 | 目标 | 归档规格 |
 | --- | --- | --- | --- | --- |
+| [x] | DataFrame 启动恢复优化 (`dataframe-lazy-loading`) | P1 | 让持久化 DataFrame 数量多、数据量大的部署避免在进程启动和目录查询时全量读取 CSV；交付快速可用的服务与通道目录、首次访问时按需加载的数据，以及一致的并发读取、探索快照和通道管理行为。 | [归档](archive/feat-dataframe-lazy-loading.md) |
 | [x] | Python 算子与 Web 管理 (`python-web`) | P0 | 打通 C++ 与 Python 算子桥接，并提供算子、任务和通道的 Web 管理入口。 | [归档](archive/feat-python-web.md) |
 | [x] | Web 控制台 (`web-console`) | P1 | 提供可操作的任务、通道和系统状态管理界面。 | [归档](archive/feat-web-console.md) |
 | [x] | Pipeline 与异步任务 (`pipeline-async`) | P1 | 支持多算子编排、异步执行、取消、超时和结构化诊断。 | [归档](archive/feat-pipeline-async.md) |

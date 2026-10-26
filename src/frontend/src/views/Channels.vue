@@ -75,10 +75,20 @@
 
           <el-table v-if="activeChannelType === 'dataframe'" :data="filteredDfChannels" style="width: 100%" v-loading="loadingDf">
             <el-table-column prop="name" label="名称" min-width="220" />
-            <el-table-column prop="rows" label="行数" width="120" />
+            <el-table-column label="行数" width="100">
+              <template #default="scope">{{ scope.row.rows === null ? '未知' : scope.row.rows }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="120">
+              <template #default="scope">
+                <el-tooltip :content="scope.row.load_error || dfLoadStateLabel(scope.row.load_state)">
+                  <el-tag :type="scope.row.load_state === 'failed' ? 'danger' : 'info'">{{ dfLoadStateLabel(scope.row.load_state) }}</el-tag>
+                </el-tooltip>
+              </template>
+            </el-table-column>
             <el-table-column label="Schema" min-width="260">
               <template #default="scope">
-                <el-popover placement="top" :width="420" trigger="hover">
+                <span v-if="scope.row.schema === null">首次访问后确定</span>
+                <el-popover v-else placement="top" :width="420" trigger="hover">
                   <template #reference>
                     <el-tag>{{ scope.row.schema.length }} 字段</el-tag>
                   </template>
@@ -651,14 +661,18 @@ const loadDbChannels = async () => {
   }
 }
 
+const dfLoadStateLabel = (state) => ({ unloaded: '未加载', loading: '加载中', loaded: '已加载', failed: '加载失败' }[state] || state)
+
 const loadDfChannels = async () => {
   loadingDf.value = true
   try {
     const res = await api.listDfChannels()
     dfChannels.value = (res.data.channels || []).map(ch => ({
       name: ch.name,
-      rows: ch.rows || 0,
-      schema: ch.schema || []
+      rows: ch.rows ?? null,
+      schema: ch.schema ?? null,
+      load_state: ch.load_state || 'loaded',
+      load_error: ch.load_error || ''
     }))
   } catch (error) {
     ElMessage.error('加载 DataFrame 通道失败: ' + (error.response?.data?.error || error.message))
@@ -1091,6 +1105,8 @@ const toRows = (res) => {
 const loadDfPreview = async () => {
   if (!dfPreviewName.value) return
   previewLoading.value = true
+  const channel = dfChannels.value.find(ch => ch.name === dfPreviewName.value)
+  if (channel && channel.load_state !== 'loaded') channel.load_state = 'loading'
   try {
     const res = await api.previewDfChannel(dfPreviewName.value, dfPreviewPage.value, dfPreviewPageSize.value)
     previewData.value = { columns: res.data.columns || [], rows: toRows(res.data) }
@@ -1099,6 +1115,7 @@ const loadDfPreview = async () => {
     ElMessage.error('获取预览失败: ' + (e.response?.data?.error || e.message))
   } finally {
     previewLoading.value = false
+    await loadDfChannels()
   }
 }
 
