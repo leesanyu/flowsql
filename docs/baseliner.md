@@ -1,5 +1,8 @@
 # Baseliner 使用说明
 
+SQL 入口选择与可复现的独立快照示例见 [SQL 工作流指引](sql-workflow.md)。
+NPM 与 Baseliner 分次提交，以已发布的 DataFrame 或数据库结果衔接；本文维护模型配置、输出与恢复语义。
+
 `explore.baseliner` 从数据库表或已注册的 DataFrame 读取时间序列，评估当前桶的实际值、预期值、
 上下界和偏离程度，并按配置生成未来预测。一个任务可以同时使用 Value、Ratio 和 Relation 模型。
 

@@ -1,5 +1,8 @@
 # Kafka 连接、结构化/原始包接入与发布
 
+通道发现、执行入口及四类适配器的方向对照见 [SQL 工作流指引](sql-workflow.md#持续-block-来源与-kafka-条件模板)。
+指引中的 Kafka SQL 为条件模板，实际连接、认证、读写权限和交付边界按本文在目标部署核验。
+
 FlowSQL 提供可复用的 Kafka 连接配置与具名通道管理。连接负责 broker、TLS/SASL 与凭证生命周期；通道引用连接，并指定 `source`、`sink` 或 `both`、Topic、消费组和数据类别。
 
 结构化 JSON source 可将外部日志、指标或业务记录转换为固定 Arrow Schema，供异步 SQL 分析使用；packet source 保留探针原始包和采集进度，供 NPM 实时分析。结构化 sink 发布逐行 JSON 结果信封；packet sink 将网卡采集的原始包与同次采集事实发布到集中端。连接验证只证明认证和元数据访问；读写权限在实际任务中检查。source 只能用于 FROM、sink 只能用于 INTO，角色不符返回 `KAFKA_ROLE_MISMATCH`。

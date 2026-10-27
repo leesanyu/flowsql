@@ -1,6 +1,30 @@
 {
   "schema_version": 1,
   "tests": {
+    "test_sql_workflow_docs": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": ["sql_workflow"]
+    },
+    "test_sql_workflow_stream": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": ["sql_workflow"]
+    },
+    "test_sql_workflow_finite": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": ["sql_workflow", "flow_labeling_eal"]
+    },
+    "test_sql_workflow_discovery": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": ["sql_workflow"]
+    },
     "test_visualization_statistics": {
       "services": [],
       "role": "source",

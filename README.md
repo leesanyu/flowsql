@@ -10,7 +10,7 @@ Linux 网卡与 Kafka 数据通道，提供 `npm.basic` 网络会话和协议分
 
 平台采用 Gateway + RouterAgency 插件架构：所有 C++ 服务共享同一个框架程序（加载不同 .so），业务插件通过 IRouterHandle 声明路由，RouterAgencyPlugin 统一收集并向 Gateway 注册，Python Worker 作为独立 FastAPI 进程运行。控制面统一走 HTTP + URI 路由，数据面通过共享内存 / Arrow IPC 实现零拷贝传输。
 
-常用入口：[快速开始](#快速开始) · [SQL 与阶段过滤](#sql-过滤能力) ·
+常用入口：[快速开始](#快速开始) · [SQL 采集、分析与输出指引](docs/sql-workflow.md) · [SQL 与阶段过滤](#sql-过滤能力) ·
 [实时网卡采集](#netadapter-实时网卡采集) · [Kafka 接入与发布](#kafka-接入与发布) ·
 [NPM 分析](#npmbasic-网络会话与协议分析) · [基线分析](#explorebaseliner-基线分析) ·
 [任务能力与入口](#sql-任务能力矩阵当前) · [测试](#测试) · [文档索引](#文档)
@@ -383,6 +383,10 @@ C++ 服务进程的插件列表中加载 `libflowsql_baseline.so`。
 常见动作词汇（非穷举）：`list` / `query` / `detail` / `add` / `remove` / `modify` / `preview` / `execute` / `status` / `stop` / `cancel` / `refresh` / `reload`
 
 ## SQL 语法示例
+
+完整的数据准备、能力发现、执行入口、结果核验与结束步骤见 [SQL 采集、分析与输出指引](docs/sql-workflow.md)。
+其中 E01～E06 提供可复现的本地示例；真实网卡与 Kafka 的 C01～C05 为条件模板，需准备对应部署与权限。
+下列片段仅展示语句形状，来源、算子和中间通道均须先创建或激活。
 
 ```sql
 -- 批处理算子示例（需先准备 dataframe.input 通道）
@@ -1421,6 +1425,7 @@ flowsql/
 
 ## 文档
 
+- [SQL 采集、分析与输出：能力发现、执行入口与可复现示例](docs/sql-workflow.md)
 - [四库数据探索：启动、Web 入口、Compose 与独立升级](docs/exploration.md)
 - [项目愿景](docs/vision.md)
 - [架构设计](docs/framework.md)

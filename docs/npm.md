@@ -1,5 +1,8 @@
 # NPM 网络会话与协议分析
 
+通道发现、任务入口和固定 DNS PCAP 的完整准备与核验见 [SQL 工作流指引](sql-workflow.md#e03固定-pcap-的-basicsession-与-dns)。
+本文维护 NPM 的模块、参数与结果语义；基线分析通过已发布的结果另起任务衔接。
+
 `npm.basic` 分析 PCAP/PCAPNG 或持续采集流量，提供 Basic 周期统计、Session 性能指标以及
 DNS、HTTP/1、TLS、ICMP 事件。多个模块共享解码和会话归属；IPv4、IPv6 分别输出，
 可以选一个实体写入 DataFrame，也可以将所有启用实体保存到数据库。

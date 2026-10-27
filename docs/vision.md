@@ -7,39 +7,41 @@ DPDK和Hyperscan广泛使用之后，网络流量采集与分析已经没有技�
 
 ## 基于SQL语法的网络流量分析共创平台
 
-### 平台简述
+### 平台简述：当前主链路
 
-基于SQL语法的网络流量分析共创平台，全栈采用SQL语法，提供以下能力：
-1. 数据采集
-> select *packet* from *netcard.nic1, netcard.nic2* into *ss.packets*  <br>
-> :采集网卡nic1和nic2的流量，将数据包存储在*ss.packets*磁盘存储空间。
-2. NPM
-> npm.basic packet from *netcard.nic1, netcard.nic2* into *ts.npm*  <br>
-> :采集网卡nic1和nic2的流量，实时NPM分析 <br>
-> npm.basic packet from *ss.packets* into *ts.npm*  <br>
-> :回放*ss.packets*磁盘存储空间的数据包，事后NPM分析
-3. 数据查询
-> select packet from *ss.packets*  <br>
-> select * from *ts.npm.tcp_session* where ip = '8.8.8.8'  <br>
-4. 描述性统计分析
-> statistic.hist bps from *ts.npm.tcp_session* where time = '[2024/07/14 00:00:00 - 2024/07/14 23:59:59]' group by application granularity 60 <br>
-5. 探索性分析
-> explore.pca bps,rss,connect_suc_rate from *ts.npm.tcp_session* where time = '[2024/07/14 00:00:00 - 2024/07/14 23:59:59]' group by application granularity 60  <br>
-> explore.naivebayes bps,rss,connect_suc_rate from *ts.npm.tcp_session* where time = '[2024/07/14 00:00:00 - 2024/07/14 23:59:59]' group by application granularity 60  <br>
-6. 模型助手
-> 提供数据预处理和训练助手，基于神经网络的小模型进行数据模型探索。  <br>
+FlowSQL 用现有 SQL 把已配置来源、已激活算子和兼容出口连接起来。完整准备、API 请求、结果核验和停止步骤统一维护在
+[SQL 采集、分析与输出指引](sql-workflow.md)；这里说明方向与能力边界。
 
-基于上述能力，用户无需关注底层技术，只需要以关切的数据作为对象，就可以构建自己的流量分析平台。<br>
+| 当前链路 | 用户可观察的结果与前提 |
+| --- | --- |
+| CSV / DataFrame → builtin 算子 → DataFrame | 有限快照的查询与算子链；E01 展示两个算子各自绑定 WITH。 |
+| 数据库 → 查询 / 算子 → 结果 | 原生过滤与聚合遵循源库语义；E02 使用隔离 SQLite，不外推到所有通道。 |
+| PCAP / PCAPNG → npm.basic → DataFrame / 托管数据库 | E03 核验 Basic、Session、DNS；协议分析、模块配置与观测限制见 [NPM](npm.md)。 |
+| 已发布 DataFrame / 数据库快照 → explore.baseliner → 评估、预测与模型 | E04 独立提交；不承诺 NPM 与 Baseliner 直接 THEN 串联，详见 [Baseliner](baseliner.md)。 |
+| IStreamChannel → 流式算子 → DataFrame / 中间通道 | E05/E06 覆盖单 SQL、纯 Stream 与 mixed DAG，明确 EOF 与正常 Stop 的边界。 |
+| NetAdapter / Kafka → 分析与发布 | 具备来源、身份和权限后按 [NetAdapter](netadapter.md)、[Kafka](kafka.md) 执行；指引 C01～C05 是未在该指引验收中执行的条件模板。 |
+
+当前 SQL 结构示意如下；尖括号为占位符，不能原样执行，实际请求使用指引中的带 ID 示例：
+
+```text
+SELECT <projection> FROM <source> [WHERE <source-filter>]
+  [USING <operator> [WITH <params>] [WHERE <operator-filter>]
+    {THEN <operator> [WITH <params>] [WHERE <operator-filter>]}]
+  [INTO <destination>]
+```
+
+持续 block 来源通过异步 batch 入口执行；它与 IStreamChannel 的 Stream 入口不同。
+来源、算子和出口是否兼容，按实际部署的分类结果与各自契约判断。
 
 ### 架构弹性与流量分析闭环
 
 FlowSQL 的长期价值不应绑定在某一个固定功能上，而应体现在一套可演进的流量分析运行时上。平台通过通道、数据实体、算子和插件服务把能力拆成相对独立的模块：通道负责产生和消费数据，数据实体定义平台内部可理解的数据形态，算子负责对数据执行分析、转换和检测，插件服务则向同进程内的其他模块提供可复用能力。随着业务演进，新的采集方式、新的协议分析能力、新的检测算法和新的输出目标都可以以插件或算子的形式加入，而不需要推翻 SQL 编排模型和运行框架。
 
-Baseline 只是这种架构弹性的一个样板。它当前作为插件提供在线基线检测能力，未来可以按需要适配为算子，也可以继续作为其他算子调用的进程内服务。类似地，平台还可以继续增加规则匹配、统计分析、模型推理、关系风险识别、协议画像等插件和算子。FlowSQL 的目标不是把所有能力一次性写死，而是让流量分析人员可以把新的分析想法沉淀为可注册、可编排、可复用的运行单元。
+Baseline 是这种架构弹性的一个样板。它通过插件接口提供在线基线检测能力，当前已有 explore.baseliner 算子调用该能力，处理数据库和 DataFrame 快照；插件也可供同进程其他算子复用。类似地，平台还可以继续增加规则匹配、统计分析、模型推理、关系风险识别、协议画像等插件和算子。FlowSQL 的目标不是把所有能力一次性写死，而是让流量分析人员可以把新的分析想法沉淀为可注册、可编排、可复用的运行单元。
 
-对流量分析场景来说，网络流量通道和 NPM 分析算子是平台进化的基础。只有具备 `netcard`、`pcapfile`、`pcap_replay`、`kafka` 等流量输入通道，平台才能自己产生 packet、flow、session、protocol 等事实数据；只有具备 `npm.basic`、TCP 会话、UDP 会话、DNS、HTTP、TLS、ICMP 等 NPM 算子，平台才能把原始流量转化为可查询、可聚合、可建模的数据对象。否则，FlowSQL 只能消费外部系统已经加工好的结果，难以形成自己的数据闭环。
+对流量分析场景来说，网络流量通道和 NPM 分析算子是平台进化的基础。只有具备 `netadapter`、`pcapfile`、`kafka` 等流量输入通道，平台才能自己产生 packet、flow、session、protocol 等事实数据；只有具备 `npm.basic`、TCP 会话、UDP 会话、DNS、HTTP、TLS、ICMP 等 NPM 算子，平台才能把原始流量转化为可查询、可聚合、可建模的数据对象。否则，FlowSQL 只能消费外部系统已经加工好的结果，难以形成自己的数据闭环。
 
-因此，FlowSQL 的核心闭环应当是：
+因此，FlowSQL 的目标闭环如下（架构方向示意，包含规划中的规则、告警及外部集成，不表示各环节均已交付）：
 
 ```text
 网络流量通道 / 日志通道 / 数据库通道
@@ -57,30 +59,27 @@ SQL 流批编排
 
 在这个闭环中，成熟底层能力可以作为插件依赖被吸收进来：高性能包处理可以使用 DPDK，特征匹配可以使用 Hyperscan，外部网络安全工具产生的日志也可以作为输入通道进入平台。FlowSQL 负责的是把这些能力 SQL 化、插件化、任务化，让会写 SQL 的分析人员可以持续构建、验证并固化自己的流量分析逻辑。
 
-### 类SQL语法扩展
-以通道和算子的概念补充SQL语句能力，同时补充了触发器和时间聚合粒度关键字。
-|关键字|描述|
-|-----|-----|
-|各通道|如：netcard、kafka、ss、ts、smq|
-|各算子|如：npm、statistic、explore、model|
-|granularity|数据聚合粒度，时间单位为秒。与 GROUP BY 配合使用时，自动引入时间维度的分组，即 `GROUP BY field GRANULARITY 60` 等价于按 field 和60秒时间窗口联合分组|
-|into|指定数据输出的目标通道，始终作为语句的最后一个子句|
-|label|模型训练时指定标签字段|
-|with|指定算子或模型的附加参数|
+### 当前 SQL 与规划扩展的边界
 
-**标准子句顺序**：`算子 字段 FROM 通道 WHERE 条件 GROUP BY 分组 GRANULARITY 粒度 HAVING 聚合过滤 ORDER BY 排序 LIMIT 限制 INTO 目标`
+当前使用 SELECT / FROM / USING / WITH / THEN / INTO；WITH 绑定紧邻算子，WHERE 绑定紧邻的生产阶段。
+类型化阶段过滤仅覆盖已支持的 block 路径与可绑定输出 Schema；数据库、DataFrame 和 IStreamChannel 遵循各自能力。
+SQL 分类和执行入口、参数转义、普通与托管出口的区别见 [统一指引](sql-workflow.md)。
 
-**时间范围格式**：`'[起始时间 - 结束时间]'`，格式统一为 `yyyy/MM/dd HH:mm:ss`
-- 闭合范围：`'[2024/07/14 00:00:00 - 2024/07/14 23:59:59]'`
-- 开放结束（持续采集）：`'[2024/07/14 00:00:00 - ]'`
-- 开放起始（历史至某时刻）：`'[ - 2024/07/14 23:59:59]'`
+**规划，非当前 SQL 契约：** 原有算子前置语法、GRANULARITY 时间窗口、LABEL、统一时间区间字符串、
+通用模型训练/推理及 SQL 任务控制均保留为后文设计素材。不能据此推断 Parser 支持这些语法，
+也不能将源库支持 GROUP BY 或聚合外推为所有通道的能力。
 
 ### 数据标准
+
+**规划：** 统一数据字典注册与消费机制尚在独立 Feature 中；以下是目标描述，当前字段与观测边界以专业说明为准。
 平台提供的基本的NPM能力，各种指标均有标准化的定义，以便于统一使用。 <br>
 平台提供数据字典注册机制，用户扩展算子***operator***提供的数据可以采用此机制进行标准化。<br>
 平台提供数据处理标准化机制，用户可以扩展自定义数据通道***channel***。<br>
 
 ## 平台架构
+
+本节保留早期概念架构。通道表、算子表、注册 SQL 与自定义 SDK 均为**规划示意**，不是当前可调用接口；
+当前插件接口与批次生命周期见 [架构说明](framework.md)，实际通道名称和注册入口见 [SQL 指引](sql-workflow.md)。
 ### 逻辑架构图
 ![alt text](逻辑架构图.png)
 
@@ -130,6 +129,8 @@ update operator set active=false where position='storage' and catelog='data' and
 #### 自定义算子
 ##### 高性能算子
 高性能算子采用C++语言编写，接口伪代码定义如下：
+> **规划接口示意，非当前 SDK 契约。**
+
 ```C++
 #include <string>
 #include <vector>
@@ -146,6 +147,8 @@ interface IOperator {
 数据探索算子采用python语言编写，用户可实时编写python代码对数据进行探索性分析，并将有价值的探索固化为算子注入平台。
 数据探索算子处理的数据实体类型为pandas.DataFrame，返回值也是pandas.DataFrame
 1. 探索
+> **规划接口示意，非当前 SDK 契约。**
+
 ```Python
 import numpy as np
 import pandas as pd
@@ -165,6 +168,8 @@ Chisquare(dfdata)
 ```
 
 2. 注入算子
+> **规划接口示意，非当前 SDK 契约。**
+
 ```Python
 import numpy as np
 import pandas as pd
@@ -208,6 +213,8 @@ class ChisquareOperator:
 operator.Inject(ChisquareOperator)
 ```
 3. 使用自定义算子
+> **规划接口示意，非当前 SDK 契约。**
+
 ```Python
 import numpy as np
 import pandas as pd
@@ -219,6 +226,8 @@ print(dfdata)
 #### 自定义通道与数据实体
 ##### 高性能通道
 高性能通道采用C++语言编写，接口伪代码定义如下：
+> **规划接口示意，非当前 SDK 契约。**
+
 ```C++
 #include <string>
 interface IChannel {
@@ -234,6 +243,8 @@ interface IChannel {
 **数据实体定义**
 
 数据实体采用标准化接口定义，提供统一的数据访问和操作能力：
+
+> **规划接口示意，非当前 SDK 契约。**
 
 ```C++
 #include <string>
@@ -339,6 +350,8 @@ public:
 **数据实体注册机制**：
 
 数据实体通过 `data_entity` 表统一注册，通道在 profile 中通过实体名称引用已注册的数据实体定义。
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- 注册数据实体定义
 INSERT INTO data_entity(name, schema, description)
@@ -355,6 +368,8 @@ VALUES('kafka', 'q1', '{"entity": "packet", "bootstrap_servers": "..."}');
 ##### 数据探索通道
 数据探索通道采用python语言编写，用户可实时编写python代码对数据进行探索性分析，并将有价值的探索固化为通道注入平台。<br>
 数据探索通道的数据实体类型都是pandas.DataFrame
+> **规划接口示意，非当前 SDK 契约。**
+
 ```Python
 import numpy as np
 import pandas as pd
@@ -388,8 +403,13 @@ class MyChannel:
 channel.Inject(MyChannel)
 ```
 
-## 平台能力描述
+## 平台能力描述（规划参考）
+
+本节保留历史能力设想；其中的旧实体、字段、存储策略与 SQL 均为**规划示意**，不作为当前可执行示例。
+当前 NPM、Kafka、NetAdapter 已有独立实现和使用说明，能力与参数以本文开头链接的专业说明为准。
 ### 数据采集
+
+**规划：以下 netcard/ss 和 INSERT INTO channel 语句不是当前采集/配置入口。Kafka 当前有四类独立适配器，不承诺下表的任意格式互换或自动位点事务。**
 #### 网卡采集数据包
 ##### 全量采集
 > select *packet* from *netcard.nic1, netcard.nic2* where time = '[2024/07/14 00:00:00 - ]' into *ss.packets*  <br>
@@ -409,6 +429,8 @@ Kafka 通道用于从 Kafka 队列中读取数据或向 Kafka 队列写入数据
 
 ##### Kafka 通道配置
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- 创建 Kafka 通道
 INSERT INTO channel(type, name, profile)
@@ -425,6 +447,8 @@ VALUES('kafka', 'traffic_queue', '{
 ```
 
 ##### 从 Kafka 采集数据
+
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
 
 ```sql
 -- 从 Kafka 队列读取数据包并进行 NPM 分析
@@ -444,6 +468,8 @@ INTO ss.http_packets;
 ```
 
 ##### 向 Kafka 写入数据
+
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
 
 ```sql
 -- 将网卡采集的数据包写入 Kafka
@@ -467,6 +493,8 @@ INTO kafka.analysis_results;
 - 支持批量读写以提高性能
 
 ### NPM
+
+**规划：下文是早期分析与存储设想，字段、聚合和过滤示例不能代替当前 npm.basic 结果契约。当前支持范围见 [NPM 说明](npm.md)。**
 #### 数据包存储
 ##### 完整存储
 支持将采集的数据包进行全量存储。
@@ -498,6 +526,8 @@ NPM 的会话统计分析提供对 TCP/UDP 会话的全面统计能力。
 
 ##### TCP 会话统计指标
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- TCP 会话基本统计
 SELECT
@@ -527,6 +557,8 @@ WHERE time = '[2024/07/14 00:00:00 - 2024/07/14 23:59:59]';
 
 ##### 会话聚合统计
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- 按应用聚合统计
 SELECT
@@ -555,6 +587,8 @@ GRANULARITY 60;  -- 1分钟粒度
 
 ##### 会话质量分析
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- 识别异常会话
 SELECT
@@ -581,6 +615,8 @@ ICMP 协议分析用于网络诊断和故障排查。
 
 ##### ICMP 消息类型统计
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- ICMP 消息类型分布
 SELECT
@@ -595,6 +631,8 @@ GRANULARITY 60;
 ```
 
 ##### Ping 分析
+
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
 
 ```sql
 -- Ping 往返时间分析
@@ -626,6 +664,8 @@ GROUP BY src_ip, dst_ip;
 
 ##### ICMP 异常检测
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- 检测 ICMP 洪泛攻击
 SELECT
@@ -655,6 +695,8 @@ HTTP 协议分析提供 Web 流量的深度洞察。
 
 ##### HTTP 事务分析
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- HTTP 事务详情
 SELECT
@@ -676,6 +718,8 @@ WHERE time = '[2024/07/14 00:00:00 - 2024/07/14 23:59:59]';
 ```
 
 ##### HTTP 性能分析
+
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
 
 ```sql
 -- 慢请求分析
@@ -703,6 +747,8 @@ ORDER BY count DESC;
 
 ##### HTTP 流量分析
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- Top 访问的 URL
 SELECT
@@ -727,6 +773,8 @@ ORDER BY count DESC;
 
 ##### HTTP 安全分析
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- 检测可疑的 HTTP 请求
 SELECT
@@ -749,6 +797,8 @@ TLS 握手分析用于加密流量的可见性和安全审计。
 
 ##### TLS 握手信息
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- TLS 握手详情
 SELECT
@@ -770,6 +820,8 @@ WHERE time = '[2024/07/14 00:00:00 - 2024/07/14 23:59:59]';
 ```
 
 ##### TLS 安全分析
+
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
 
 ```sql
 -- 检测过期或即将过期的证书
@@ -797,6 +849,8 @@ DNS 协议分析用于域名解析监控和安全检测。
 
 ##### DNS 查询分析
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- DNS 查询详情
 SELECT
@@ -815,6 +869,8 @@ WHERE time = '[2024/07/14 00:00:00 - 2024/07/14 23:59:59]';
 ```
 
 ##### DNS 统计分析
+
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
 
 ```sql
 -- Top 查询域名
@@ -846,6 +902,8 @@ GROUP BY response_code;
 ```
 
 ##### DNS 安全分析
+
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
 
 ```sql
 -- 检测 DNS 隧道（异常长的域名查询）
@@ -882,6 +940,8 @@ HAVING query_count > 100;        -- 10秒内超过100次查询
 ```
 
 ### 数据查询
+
+**规划：下文的 ss 原始包查询对象及时间区间语法尚不是当前通用查询接口。**
 #### 数据包查询
 支持选定时间范围，以物理地址、IP地址、端口、协议、应用作为条件查询数据包，语法与过滤采集相同。<br>
 select packet from ss.packets where time = '[2024/07/14 00:00:00 - 2024/07/14 01:59:59]' and protocol = 'HTTP' into ***channel*** <br>
@@ -890,15 +950,21 @@ select packet from ss.packets where time = '[2024/07/14 00:00:00 - 2024/07/14 01
 #### 数据查询
 
 ### 描述性统计分析
+
+**规划：下列算子列表不表示当前部署已注册或激活。**
 #### statistic.basic 基本统计指标
 #### statistic.hist 数据分布统计
 
 ### 探索性分析
+
+**规划：下列能力仍需独立交付，当前基线快照分析见 [Baseliner](baseliner.md)。**
 #### explore.pca 主成分分析
 #### explore.anova 方差分析
 #### explore.chisquare 卡方分析
 
 ### 基于模型的数据探索
+
+**规划：以下 model.*、LABEL、模型注册表及训练/推理/评估语句均非当前可执行能力；当前 explore.baseliner 不提供这些通用模型语句。**
 
 模型算子提供基于机器学习和深度学习的数据探索能力，用于流量分类、异常检测、模式识别等高级分析场景。
 
@@ -915,6 +981,8 @@ select packet from ss.packets where time = '[2024/07/14 00:00:00 - 2024/07/14 01
 | model.xgboost | XGBoost | 高性能分类和回归 |
 
 #### 模型训练
+
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
 
 ```sql
 -- 训练加密流量分类模型
@@ -948,6 +1016,8 @@ WITH parameters = '{
 
 #### 模型推理
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- 使用模型进行加密流量分类
 model.predict encrypted_traffic_classifier
@@ -966,6 +1036,8 @@ INTO ts.npm.anomaly_scores;
 ```
 
 #### 模型评估
+
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
 
 ```sql
 -- 评估模型性能
@@ -988,6 +1060,8 @@ WHERE model_name = 'encrypted_traffic_classifier';
 
 #### 模型管理
 
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
+
 ```sql
 -- 注册模型
 INSERT INTO model.registry(name, type, file_path, description, parameters)
@@ -1006,9 +1080,13 @@ WHERE name = 'encrypted_traffic_classifier';
 
 ### 任务生命周期管理
 
+**规划：以下 sys.tasks、STOP/PAUSE/RESUME TASK 和 paused 状态不是当前公共 SQL 契约。当前通过任务 HTTP API 查询与 Stop/Cancel，不承诺通用暂停续跑，见 [观察结果与结束任务](sql-workflow.md#观察结果与结束任务)。**
+
 持续运行的采集和分析任务需要生命周期管理能力。
 
 #### 任务控制语句
+
+> **规划示意，非当前可执行 SQL。** 使用当前接口时请参考 [SQL 工作流指引](sql-workflow.md)。
 
 ```sql
 -- 查看当前运行的任务

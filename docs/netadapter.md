@@ -1,5 +1,8 @@
 # NetAdapter 采集与联验
 
+能力发现、异步任务入口与正常结束步骤见 [SQL 工作流指引](sql-workflow.md)。
+网卡示例为条件模板；实际设备、后端权限与观测边界按本文核验。
+
 `netadapter` 用同一个具名 source 接入一个观测域中的多张 Ethernet 网卡；创建配置选择
 `af_packet`、`pfring_classic` 或 `af_xdp_copy_skb`。三后端完整性能矩阵仍按规格 T5 验收。
 

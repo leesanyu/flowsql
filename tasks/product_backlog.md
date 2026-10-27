@@ -23,7 +23,9 @@
 
 ## 待办 Feature
 
-暂无当前已立项的待办 Feature。
+| 状态 | Feature | 优先级 | 目标 | 规格 |
+| --- | --- | --- | --- | --- |
+| [x] | SQL 统一采集、分析与输出指引 (`sql-workflow-guidance`) | P1 | 让使用 SQL 构建采集、分析和输出流程的用户，能够依据与当前实现一致的能力说明发现可用通道与算子、选择执行入口并编写可运行语句；以现有 SELECT … USING … THEN … INTO … 语法更新愿景，补齐能力发现、示例与执行边界说明，避免旧语法和实际行为不一致造成误用。 | [归档](archive/feat-sql-workflow-guidance.md) |
 
 ---
 
