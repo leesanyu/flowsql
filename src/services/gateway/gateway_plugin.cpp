@@ -1,16 +1,12 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "gateway_plugin.h"
 
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <common/metadata_http.hpp>
 
 #include <chrono>
 #include <cstdio>
@@ -222,9 +218,20 @@ void GatewayPlugin::HandleForward(const httplib::Request& req, httplib::Response
         }
     }
 
+    std::string body = req.body;
+    const auto deadline =
+        MetadataPath(req.path) ? MetadataDeadline(body, req.get_header_value(kMetadataDeadlineHeader)) : 0;
+    if (!MetadataRemaining(&body, deadline)) {
+        res.status = 504;
+        res.set_content(MetadataTimeoutJson(), "application/json");
+        return;
+    }
+    httplib::Headers metadata_headers;
+    if (deadline) metadata_headers.emplace(kMetadataDeadlineHeader, std::to_string(deadline));
     httplib::Client client(host, port);
     client.set_connection_timeout(5);
     client.set_read_timeout(30);
+    MetadataHttpBudget metadata_budget(client, deadline);
 
     std::string content_type = req.get_header_value("Content-Type");
     httplib::Result result(nullptr, httplib::Error::Unknown);
@@ -232,7 +239,7 @@ void GatewayPlugin::HandleForward(const httplib::Request& req, httplib::Response
     if (req.method == "GET") {
         result = client.Get(target);
     } else if (req.method == "POST") {
-        result = client.Post(target, req.body, content_type.empty() ? "application/json" : content_type);
+        result = client.Post(target, metadata_headers, body, content_type.empty() ? "application/json" : content_type);
     } else if (req.method == "DELETE") {
         result = client.Delete(target);
     } else if (req.method == "PUT") {
@@ -240,6 +247,11 @@ void GatewayPlugin::HandleForward(const httplib::Request& req, httplib::Response
     }
 
     if (!result) {
+        if (deadline && MetadataNow() >= deadline) {
+            res.status = 504;
+            res.set_content(MetadataTimeoutJson(), "application/json");
+            return;
+        }
         res.status = 502;
         res.set_content(
             R"({"error":"upstream unreachable","address":")" + route.address + R"("})",

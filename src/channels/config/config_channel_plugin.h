@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <string>
 
+#include "channel_dictionary.h"
 #include "config_channel_provider.h"
 #include "data_semantics_registry.h"
 
@@ -25,13 +26,40 @@ class ConfigChannelPlugin final : public IPlugin,
     using ConfigChannelProvider::Open;
     using ConfigChannelProvider::Resolve;
     int Option(const char* option) override {
-        constexpr char prefix[] = "db_path=";
-        if (!option || std::string(option).compare(0, sizeof(prefix) - 1, prefix) != 0) return EINVAL;
-        db_path_ = std::string(option).substr(sizeof(prefix) - 1);
-        return db_path_.empty() || db_path_.find(';') != std::string::npos ? EINVAL : 0;
+        if (!option) return EINVAL;
+        std::string options(option);
+        size_t pos = 0;
+        bool has_path = false;
+        while (pos < options.size()) {
+            const auto end = options.find(';', pos);
+            const auto item = options.substr(pos, end == std::string::npos ? end : end - pos);
+            const auto eq = item.find('=');
+            if (eq == std::string::npos) return EINVAL;
+            const auto key = item.substr(0, eq), value = item.substr(eq + 1);
+            if (value.empty()) return EINVAL;
+            if (key == "db_path" && !has_path) {
+                db_path_ = value;
+                has_path = true;
+            } else if (key == "gateway") {
+                const auto colon = value.rfind(':');
+                if (colon == std::string::npos || colon == 0) return EINVAL;
+                try {
+                    gateway_port_ = std::stoi(value.substr(colon + 1));
+                } catch (...) {
+                    return EINVAL;
+                }
+                if (gateway_port_ < 1 || gateway_port_ > 65535) return EINVAL;
+                gateway_host_ = value.substr(0, colon);
+            } else
+                return EINVAL;
+            if (end == std::string::npos) break;
+            pos = end + 1;
+        }
+        return has_path ? 0 : EINVAL;
     }
 
-    int Load(IQuerier*) override {
+    int Load(IQuerier* querier) override {
+        querier_ = querier;
         std::string error;
         int rc = ConfigChannelProvider::Open(db_path_, &error);
         if (rc == 0) {
@@ -60,6 +88,10 @@ class ConfigChannelPlugin final : public IPlugin,
     int32_t HandleHistory(const std::string& uri, const std::string& request, std::string& response);
     int32_t HandleResolve(const std::string& uri, const std::string& request, std::string& response);
 
+    int DescribeDataset(const ChannelDatasetRequestV1&, ChannelDatasetSnapshotV1*, DataSemanticsErrorV1*);
+    IQuerier* querier_ = nullptr;
+    std::string gateway_host_ = "127.0.0.1";
+    int gateway_port_ = 18800;
     std::string db_path_;
 };
 

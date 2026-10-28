@@ -3,6 +3,7 @@
 
 #include "postgres_driver.h"
 #include "../exploration_read.h"
+#include "../metadata_deadline.h"
 
 #include "../relation_adapters.h"
 
@@ -23,6 +24,19 @@ namespace flowsql {
 namespace database {
 
 namespace {
+class MetadataPostgresSession final : public PostgresSession {
+ public:
+    MetadataPostgresSession(PostgresDriver* driver, PGconn* conn, int64_t deadline)
+        : PostgresSession(driver, conn), budget_(PQsocket(conn), deadline) {}
+    ~MetadataPostgresSession() override { snapshot_cancelled_ = true; }
+    void Cancel() override {
+        snapshot_cancelled_ = true;
+        shutdown(PQsocket(conn_), SHUT_RDWR);
+    }
+
+ private:
+    MetadataSocketDeadline budget_;
+};
 constexpr int kPostgresOidBool = 16;
 constexpr int kPostgresOidBytea = 17;
 constexpr int kPostgresOidInt8 = 20;
@@ -659,7 +673,25 @@ int PostgresDriver::Connect(const std::unordered_map<std::string, std::string>& 
     it = params.find("timeout");
     if (it != params.end()) timeout_ = std::stoi(it->second);
 
-    auto factory = [this](std::string* error) -> PGconn* {
+    const auto deadline = params.count("_dataset_deadline_ms") ? std::stoll(params.at("_dataset_deadline_ms")) : 0;
+    auto factory = [this, deadline](std::string* error) -> PGconn* {
+        if (deadline) {
+            const auto port = std::to_string(port_);
+            const char* keys[] = {"host", "port", "user", "password", "dbname", nullptr};
+            const char* values[] = {host_.c_str(),     port.c_str(),      user_.c_str(),
+                                    password_.c_str(), database_.c_str(), nullptr};
+            PGconn* conn = PQconnectStartParams(keys, values, 0);
+            while (conn && MetadataIoNow() < deadline) {
+                const auto state = PQconnectPoll(conn);
+                if (state == PGRES_POLLING_OK) return conn;
+                if (state == PGRES_POLLING_FAILED ||
+                    !MetadataPoll(PQsocket(conn), state == PGRES_POLLING_READING ? POLLIN : POLLOUT, deadline))
+                    break;
+            }
+            if (conn) PQfinish(conn);
+            *error = "metadata connection unavailable";
+            return nullptr;
+        }
         PGconn* conn = PQconnectdb(BuildConninfo().c_str());
         if (!conn || PQstatus(conn) != CONNECTION_OK) {
             if (error) *error = conn ? PQerrorMessage(conn) : "PQconnectdb failed";
@@ -739,6 +771,9 @@ std::shared_ptr<IDbSession> PostgresDriver::CreateSession() {
         last_error_ = error;
         return nullptr;
     }
+    if (atomic_parameters.count("_dataset_deadline_ms"))
+        return std::make_shared<MetadataPostgresSession>(this, conn,
+                                                         std::stoll(atomic_parameters.at("_dataset_deadline_ms")));
     return std::make_shared<PostgresSession>(this, conn);
 }
 

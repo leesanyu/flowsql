@@ -6,6 +6,7 @@
 #include <framework/interfaces/iblock_stream_channel_descriptor.h>
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_reader.h>
+#include <framework/interfaces/ichannel_dataset_descriptor.h>
 #include <framework/interfaces/ipacket_sink.h>
 #include <framework/interfaces/iresult_sink.h>
 #include <framework/interfaces/irouter_handle.h>
@@ -23,7 +24,8 @@ class Plugin final : public IPlugin,
                      public IBlockStreamChannelDescriptorV1,
                      public IResultSinkFactoryV1,
                      public IPacketSinkFactoryV1,
-                     public IFilterDomainResolverV1 {
+                     public IFilterDomainResolverV1,
+                     public IChannelDatasetDescriptorV1 {
  public:
     int Option(const char* options) override;
     int Load(IQuerier*) override;
@@ -37,6 +39,8 @@ class Plugin final : public IPlugin,
     int CreateWriter(const ResultSinkContextV1&, std::unique_ptr<IResultSinkWriterV1>*) override;
     int CreateWriter(const PacketSinkContextV1&, std::unique_ptr<IPacketSinkWriterV1>*) override;
     int DescribeChannel(const char* name, KafkaChannelDescriptionV1* description) override;
+    const char* ProviderId() const override { return "kafka"; }
+    int Describe(const ChannelDatasetRequestV1&, ChannelDatasetSnapshotV1*, DataSemanticsErrorV1*) override;
     Store& Definitions() { return store_; }
     const Deployment& Environment() const { return deployment_; }
     IBlockStreamChannel* Get(const char* type, const char* name) override;

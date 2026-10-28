@@ -10,13 +10,16 @@
 #include "dataframe.h"
 #include "framework/interfaces/ichannel.h"
 #include "framework/interfaces/idataframe_channel.h"
+#include "framework/interfaces/idataframe_metadata.h"
 #include "framework/interfaces/idataframe_snapshot.h"
 
 namespace flowsql {
 
 // DataFrameChannel — IDataFrameChannel 的内存实现
 // Read() 快照语义（非破坏性），Write() 替换语义
-class DataFrameChannel : public IAppendableDataFrameChannel, public IDataFrameSnapshotReaderV1 {
+class DataFrameChannel : public IAppendableDataFrameChannel,
+                         public IDataFrameSnapshotReaderV1,
+                         public IDataFrameMetadataV1 {
  public:
     DataFrameChannel(const std::string& category, const std::string& name);
     ~DataFrameChannel() override = default;
@@ -40,6 +43,7 @@ class DataFrameChannel : public IAppendableDataFrameChannel, public IDataFrameSn
     int Write(IDataFrame* df) override;
     int Append(IDataFrame* df) override;
     int Read(IDataFrame* df) override;
+    DataFrameMetadataV1 DescribeMetadata() override;
     int CaptureSnapshot(const DataFrameSnapshotRequestV1& request, std::shared_ptr<arrow::RecordBatch>* output,
                         uint64_t* retained_bytes, std::string* error) override;
 
@@ -50,6 +54,7 @@ class DataFrameChannel : public IAppendableDataFrameChannel, public IDataFrameSn
     std::string category_;
     std::string name_;
     bool opened_ = false;
+    uint64_t replacement_generation_ = 0;
     DataFrame data_;            // 内部存储
     std::string schema_cache_;  // Schema() 返回值缓存
     mutable std::mutex mutex_;  // 保护并发读写

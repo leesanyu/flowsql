@@ -2150,6 +2150,328 @@
         "declared_schema"
       ],
       "additionalProperties": false
+    },
+    "datasetLocator": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "kafka_source"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "dataframe"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "database_table"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "sqlite",
+                "mysql",
+                "postgres",
+                "clickhouse"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "database": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "table": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "required": [
+            "kind",
+            "type",
+            "name",
+            "table"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "sourceField": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "type": {
+          "oneOf": [
+            {
+              "$ref": "#/%24defs/type"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nullable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "nullable"
+      ],
+      "additionalProperties": false
+    },
+    "datasetSnapshot": {
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "type": "string",
+          "enum": [
+            "flowsql.channel-dataset.v1"
+          ]
+        },
+        "object_key": {
+          "$ref": "#/%24defs/object_key"
+        },
+        "locator": {
+          "$ref": "#/%24defs/datasetLocator"
+        },
+        "source_revision": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "identity_state": {
+          "type": "string",
+          "enum": [
+            "known",
+            "unknown"
+          ]
+        },
+        "schema_state": {
+          "type": "string",
+          "enum": [
+            "known",
+            "pending",
+            "incomplete"
+          ]
+        },
+        "fields": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/%24defs/sourceField"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "producer_metadata": {
+          "type": "object"
+        },
+        "structure_gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/gap"
+          }
+        }
+      },
+      "required": [
+        "schema_id",
+        "object_key",
+        "locator",
+        "source_revision",
+        "identity_state",
+        "schema_state",
+        "fields",
+        "schema_fingerprint",
+        "producer_metadata",
+        "structure_gaps"
+      ],
+      "additionalProperties": false
+    },
+    "bindingConfirmation": {
+      "type": "object",
+      "properties": {
+        "source_revision": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "source_revision",
+        "items"
+      ],
+      "additionalProperties": false
+    },
+    "gap": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "channelBinding": {
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "type": "string",
+          "enum": [
+            "flowsql.data-binding.v2"
+          ]
+        },
+        "object_key": {
+          "$ref": "#/%24defs/object_key"
+        },
+        "object_label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dictionary_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "field_map": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "declared_schema": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "$ref": "#/%24defs/type"
+                  },
+                  "nullable": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "type",
+                  "nullable"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ]
+        },
+        "source_snapshot": {
+          "$ref": "#/%24defs/datasetSnapshot"
+        },
+        "confirmation": {
+          "$ref": "#/%24defs/bindingConfirmation"
+        }
+      },
+      "required": [
+        "schema_id",
+        "object_key",
+        "object_label",
+        "dictionary_ref",
+        "field_map",
+        "declared_schema",
+        "source_snapshot",
+        "confirmation"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -2161,6 +2483,9 @@
     },
     {
       "$ref": "#/%24defs/binding"
+    },
+    {
+      "$ref": "#/%24defs/channelBinding"
     }
   ]
 }

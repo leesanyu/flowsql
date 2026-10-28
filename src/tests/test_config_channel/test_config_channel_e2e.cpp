@@ -4,6 +4,7 @@
 #include <tests/common/packet_family_test_support.h>
 
 #include <framework/interfaces/iconfig_channel_registry.h>
+#include <tests/support/scoped_shared_library.h>
 #include <common/loader.hpp>
 
 #ifdef FLOWSQL_CONFIG_LABELING_E2E
@@ -12,7 +13,6 @@
 #include <framework/core/packet_codec.h>
 #include <framework/interfaces/cpp_operator_plugin_abi.h>
 #include <framework/interfaces/iblock_transform_operator.h>
-#include <tests/support/scoped_shared_library.h>
 #endif
 
 #include <httplib.h>
@@ -191,11 +191,15 @@ class Runtime {
 
 // This test consumer resolves and compiles exactly once at task opening; events only read typed memory.
 struct BoundTask {
+    // The immutable snapshot deliberately outlives Runtime; its shared_ptr deleter lives in this SO.
+    flowsql::test::ScopedSharedLibrary library{
+        (std::string(flowsql::get_absolute_process_path()) + "/libflowsql_config_channel.so").c_str()};
     flowsql::ConfigChannelSnapshot snapshot;
     uint64_t value = 0;
     unsigned resolve_calls = 0;
 
     void Open(flowsql::IConfigChannelRegistryV1* registry) {
+        assert(library);
         std::string error;
         ++resolve_calls;
         assert(registry->Resolve("config.rules@1", &snapshot, &error) == 0);

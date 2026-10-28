@@ -27,6 +27,7 @@
 | --- | --- | --- | --- | --- |
 | [x] | SQL 统一采集、分析与输出指引 (`sql-workflow-guidance`) | P1 | 让使用 SQL 构建采集、分析和输出流程的用户，能够依据与当前实现一致的能力说明发现可用通道与算子、选择执行入口并编写可运行语句；以现有 SELECT … USING … THEN … INTO … 语法更新愿景，补齐能力发现、示例与执行边界说明，避免旧语法和实际行为不一致造成误用。 | [归档](archive/feat-sql-workflow-guidance.md) |
 | [x] | 标准与字典管理 (`data-semantics-registry`) | P1 | 让数据维护者和程序调用方集中创建、查询、补充与复用数据标准和字典，获得持久化、精确版本、历史及引用关系可追溯的统一定义；交付统一管理页面和符合 JSON Schema / OpenAPI 的 HTTP 契约，使人工编辑与程序读取使用同一份内容。 | [规格](archive/feat-data-semantics-registry.md)；[拆分边界](specs/epic-data-semantics-dictionary.md#data-semantics-registry) |
+| [x] | 通道数据字典生成与绑定 (`channel-data-dictionary`) | P1 | 让接入 Kafka 结构化数据、CSV/DataFrame 和已有数据库表的用户，从实际字段配置或结构自动获得默认字典，并能补充语义、引用标准及按数据集绑定版本；结构变化时保留人工说明并显式核验差异，减少重复填写和错误沿用。 | [规格](archive/feat-channel-data-dictionary.md)；[拆分边界](specs/epic-data-semantics-dictionary.md#channel-data-dictionary) |
 
 ---
 

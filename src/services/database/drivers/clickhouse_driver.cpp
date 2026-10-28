@@ -4,6 +4,7 @@
 #include "clickhouse_driver.h"
 #include <rapidjson/document.h>
 #include <unistd.h>
+#include <common/metadata_http.hpp>
 #include "../exploration_read.h"
 #include "../managed_query_schema.h"
 
@@ -52,6 +53,7 @@ static std::string QuoteIdentifier(const std::string& name) {
 // ==================== ClickHouseDriver 实现 ====================
 
 int ClickHouseDriver::Connect(const std::unordered_map<std::string, std::string>& params) {
+    metadata_deadline_ = params.count("_dataset_deadline_ms") ? std::stoll(params.at("_dataset_deadline_ms")) : 0;
     auto get = [&](const std::string& k, const std::string& def) {
         auto it = params.find(k);
         return it != params.end() ? it->second : def;
@@ -76,6 +78,7 @@ int ClickHouseDriver::Connect(const std::unordered_map<std::string, std::string>
 bool ClickHouseDriver::Ping() {
     httplib::Client client(host_, port_);
     client.set_connection_timeout(5);
+    MetadataHttpBudget budget(client, metadata_deadline_);
     httplib::Headers headers = {{"X-ClickHouse-User", user_}, {"X-ClickHouse-Key", password_}};
     auto res = client.Get("/?query=SELECT+1", headers);
     if (!res) {

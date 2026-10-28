@@ -519,7 +519,7 @@ int SqliteDriver::Connect(const std::unordered_map<std::string, std::string>& pa
             return nullptr;
         }
 
-        sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+        if (!readonly) sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
         return db;
     };
 

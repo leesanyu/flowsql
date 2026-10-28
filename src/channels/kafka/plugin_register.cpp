@@ -12,4 +12,5 @@ ____INTERFACE(flowsql::IID_RESULT_SINK_FACTORY_V1, flowsql::IResultSinkFactoryV1
 ____INTERFACE(flowsql::IID_PACKET_SINK_FACTORY_V1, flowsql::IPacketSinkFactoryV1)
 ____INTERFACE(flowsql::IID_FILTER_DOMAIN_RESOLVER_V1, flowsql::IFilterDomainResolverV1)
 ____INTERFACE(flowsql::IID_ROUTER_HANDLE, flowsql::IRouterHandle)
+____INTERFACE(flowsql::IID_CHANNEL_DATASET_DESCRIPTOR_V1, flowsql::IChannelDatasetDescriptorV1)
 END_PLUGIN_REGIST()

@@ -5,25 +5,34 @@
       "services": [],
       "role": "source",
       "location": "native",
-      "resources": ["sql_workflow"]
+      "resources": [
+        "sql_workflow"
+      ]
     },
     "test_sql_workflow_stream": {
       "services": [],
       "role": "source",
       "location": "native",
-      "resources": ["sql_workflow"]
+      "resources": [
+        "sql_workflow"
+      ]
     },
     "test_sql_workflow_finite": {
       "services": [],
       "role": "source",
       "location": "native",
-      "resources": ["sql_workflow", "flow_labeling_eal"]
+      "resources": [
+        "sql_workflow",
+        "flow_labeling_eal"
+      ]
     },
     "test_sql_workflow_discovery": {
       "services": [],
       "role": "source",
       "location": "native",
-      "resources": ["sql_workflow"]
+      "resources": [
+        "sql_workflow"
+      ]
     },
     "test_visualization_statistics": {
       "services": [],
@@ -465,6 +474,35 @@
       ]
     },
     "test_data_semantics_browser": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http",
+        "visualization_browser"
+      ]
+    },
+    "test_channel_dictionary_api": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http"
+      ]
+    },
+    "test_channel_dictionary_database": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "driver",
+      "location": "native",
+      "resources": [
+        "database_driver"
+      ]
+    },
+    "test_channel_dictionary_browser": {
       "services": [],
       "role": "source",
       "location": "native",

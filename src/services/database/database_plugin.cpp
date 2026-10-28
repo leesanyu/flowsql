@@ -7,6 +7,7 @@
 #include <common/log.h>
 #include <unistd.h>
 #include <cerrno>
+#include <common/channel_dataset.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -120,6 +121,7 @@ int DatabasePlugin::ParseSingleConfig(const char* arg) {
     std::string key = type_it->second + "." + name_it->second;
 
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!params.count("dataset_instance_id")) params["dataset_instance_id"] = dataset::Token();
     configs_[key] = std::move(params);
     LOG_INFO("DatabasePlugin::ParseSingleConfig: configured %s (total configs: %zu)", key.c_str(), configs_.size());
     return 0;
@@ -346,6 +348,7 @@ int DatabasePlugin::AddChannel(const char* config_str) {
             last_error_ = "channel already exists: " + key + " (use UpdateChannel to modify)";
             return -1;
         }
+        params["dataset_instance_id"] = dataset::Token();
         configs_[key] = params;
     }
 
@@ -439,6 +442,7 @@ int DatabasePlugin::UpdateChannel(const char* config_str) {
             return EBUSY;
         }
         old_params = configs_[key];
+        params["dataset_instance_id"] = old_params.at("dataset_instance_id");
         // 关闭旧连接，下次 Get() 时重建
         auto ch_it = channels_.find(key);
         if (ch_it != channels_.end()) {
@@ -472,8 +476,10 @@ int DatabasePlugin::LoadFromYaml() {
         YAML::Node root = YAML::LoadFile(config_file_);
         auto db_channels = root["channels"]["database_channels"];
         if (!db_channels || !db_channels.IsSequence()) return 0;
+        bool migrate_identity = false;
 
         for (const auto& ch : db_channels) {
+            migrate_identity = migrate_identity || !ch["dataset_instance_id"];
             std::string config_str;
             for (const auto& kv : ch) {
                 std::string key = kv.first.as<std::string>();
@@ -488,6 +494,7 @@ int DatabasePlugin::LoadFromYaml() {
         }
         LOG_INFO("DatabasePlugin::LoadFromYaml: loaded %zu channel(s) from %s",
                  configs_.size(), config_file_.c_str());
+        if (migrate_identity && SaveToYaml() != 0) return -1;
     } catch (const std::exception& e) {
         LOG_ERROR("DatabasePlugin::LoadFromYaml: failed to parse %s: %s",
                   config_file_.c_str(), e.what());
@@ -674,6 +681,8 @@ std::string DatabasePlugin::DecryptPassword(const std::string& cipher) {
 // ==================== IRouterHandle — /channels/database/* ====================
 
 void DatabasePlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
+    cb({"POST", "/channels/database/dataset/describe",
+        [this](const auto&, const auto& req, auto& rsp) { return dataset::DescriptorControl(*this, req, rsp); }});
     cb({"POST", "/channels/database/add",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleAdd(u, req, rsp);

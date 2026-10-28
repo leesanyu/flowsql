@@ -3,8 +3,9 @@
 FlowSQL 的“标准与字典”页面与 HTTP API 管理同一份版本库。数据维护者可人工定义标准、实体/字段字典，
 并将具体数据集登记为绑定；普通程序可读取绑定的精确字典版本、未知属性和使用局限。
 
-当前能力覆盖人工录入和 JSON/YAML 导入。通道结构自动发现、算子输入输出契约、NPM 领域字典和查询/探索中的
-自动接线属于后续独立 Feature；登记绑定不会连接数据源、改写业务数据、执行单位转换或自动升级任务。
+当前能力覆盖人工录入、JSON/YAML 导入，以及 Kafka 结构化 source、CSV/命名 DataFrame、已有数据库限定表的结构生成与绑定。
+算子输入输出契约、NPM 领域字典和查询/探索中的自动接线属于后续独立 Feature。生成与核对读取来源元数据，
+不会消费 Kafka 消息、扫描业务行、改写业务数据、执行单位转换或自动升级任务。
 
 ## 入口与持久化
 
@@ -13,7 +14,7 @@ FlowSQL 的“标准与字典”页面与 HTTP API 管理同一份版本库。�
 经 Web → Gateway → Router → Config 提供控制 API。
 
 语义库复用 Config 插件的 `db_path`，在同一个 SQLite 数据库中使用独立的
-`semantics_object`、`semantics_revision`、`semantics_reference` 表。默认配置为 `./meta/flowsql_meta.db`，
+`semantics_object`、`semantics_revision`、`semantics_reference`、`semantics_observation` 表。默认配置为 `./meta/flowsql_meta.db`，
 `./start.sh` 从 `build/output` 运行，因此默认实际路径是 `build/output/meta/flowsql_meta.db`。
 部署时将此数据库所在目录放在持久存储中；备份和恢复应包括完整数据库。迁移事务失败会使插件加载失败，
 不会退回内存库。原有普通配置通道保持自己的数据和接口。
@@ -66,6 +67,56 @@ F1 精确比较类型描述，不推断不同类型系统的等价性。关系�
 保存冲突或失败会保留输入，不自动用服务端内容覆盖表单。遇到 `REVISION_CONFLICT`，先保留所需改动，
 重新读取当前版本，再重新编辑或另存；不要只递增 expected 值盲目覆盖。离开有未保存内容的页面会提示。
 编辑内容只在当前浏览器表单中，没有服务端草稿保存保证。
+
+## 从通道生成与绑定
+
+在“通道管理”中使用以下入口：
+
+| 对象 | 入口与结构依据 | 适用边界 |
+| --- | --- | --- |
+| DataFrame / CSV | 行操作“数据字典”；已加载对象使用真实 Arrow Schema | pending 不会隐式加载；点击“显式加载 DataFrame 结构”经已有加载入口取得结构 |
+| Kafka | 结构化 source（含 both）的“数据字典” | 使用已保存配置和真实解码 Schema，保留 JSON Pointer、显式单位及五个 `__kafka_*` 列；packet 和 sink-only 不支持 |
+| SQLite/MySQL/PostgreSQL/ClickHouse | 连接行“表字典”，填写明确 table 及适用的 database/schema | 一张限定表一个绑定；读取系统目录，空表可用；不接收 SQL、不登记整个连接或扫描全库 |
+
+“从来源生成候选”只预览，不保存版本。字段名、完整类型参数、可空性来自本次结构；Arrow 保留时区、
+时间精度、Decimal 和嵌套信息，数据库保留原生类型与 dialect。SQLite 只表达列声明，不保证每行的实际值类型。
+无类型声明或结构缺失会列出 structure_gaps；pending/incomplete 不能伪装成可直接应用的完整字典。
+
+展开字段补充定义、角色、单位、时间、NULL、聚合和标准精确引用；行含义等不能从名称推断，默认保持 unknown。
+producer 表示来源配置的声明，不代表业务质量已验证。人工说明和来源声明冲突时同时保留，并在差异详情展示。
+
+- 新建候选填写独立的字典名称与绑定名称，依次保存和应用；也可使用“保存字典并应用”。
+- 选择已有字典精确版本后，检查并显式提交 field_id → 来源字段的映射；必须全覆盖、不重复，允许额外源列。
+  复用不会自动认定 Arrow 与原生数据库类型等价。类型不符时，可“按来源适配候选”并保存新版本，或“另存新字典”。
+- 结构变化展示新增、删除、类型、可空性、顺序、生产者声明及可能重命名；未变字段保留 field_id、人工内容和标准。
+  删除字段身份使用 JSON 数组，重命名通过 field_id → 新来源字段的显式映射确认；内部身份/时间/关联引用需先修订。
+  历史字典与旧绑定保留原说明，同名重新出现的字段不会自行恢复已删除语义。
+- 共享与历史引用范围在编辑区展示。修改共享字典不会自动更新其他绑定；可另存以保留共享定义。
+- 勾选本次 required_confirmations 后应用。预览后来源已变化返回 SOURCE_CHANGED；重新获取预览并核对，不能盲目重试。
+  409 保留表单。若字典已保存但应用失败，页面同时显示已保存精确版本和“绑定未更新”；可基于当前绑定重新确认后应用。
+
+“刷新核对”重取当前来源，保持当前编辑内容；失败会清除旧的 matched。状态含义：
+
+| state | 含义 |
+| --- | --- |
+| unbound | 当前对象没有绑定 |
+| pending | 当前结构尚未确定，未强制加载 |
+| matched | 此次观察的结构/映射一致，所需身份或语义确认已记录 |
+| mismatch | 缺列、原生类型/可空性等与绑定字典不符 |
+| needs_confirmation | 身份连续性、来源声明或历史导入需要显式确认 |
+| unavailable | 本次来源不可访问；HTTP 同时返回具体错误 |
+
+matched 与 semantic_gaps 分开，data_validation 始终为 not_run。应用不冻结外部表；后续变化在下一次显式核对或页面刷新时反映。
+
+Kafka/DataFrame 的受管身份独立于名称且可重启恢复；重命名保留身份，同结构追加不换绑定，整体替换/删除重建产生新身份。
+同名替换时页面展示旧/新对象身份及旧字典精确版本，可显式复用旧定义并重新应用，旧绑定不会迁移。
+数据库使用持久连接实例及限定表身份；可取得的 PostgreSQL OID、ClickHouse UUID 参与对象隔离。
+连接改指向或可观测表重建需要重新确认。SQLite/MySQL 等无法证明库外同名重建的来源为 identity_state=unknown，
+需明确确认本次语义连续性；确认是用户声明，不能证明未观察的外部 DDL 或业务含义从未变化。
+
+v2 绑定保留 source_snapshot 和 confirmation；只有 channels/apply 重取来源并核验后才在同一事务中建立服务端观察记录。
+导入/通用 save 的快照只作历史声明，即使内容自洽也不会自行变为可信当前观察，需要 observation 确认并重新应用。
+旧 v1 的 declared_schema 继续表示人工声明，显式升级时保留并单独检查，旧版本保持不变。
 
 ## 人工绑定与保存后应用
 
@@ -134,6 +185,10 @@ F1 精确比较类型描述，不推断不同类型系统的等价性。关系�
 | binding_lookup | 按 object_key 取得当前 binding 及字典精确引用 |
 | import | kind/name/format/content，返回待保存规范文档，预览不写入 |
 | export | exact_reference/format，返回可回导信封和 content |
+| channels/describe | locator 获取来源结构快照和本次观察时间 |
+| channels/preview | locator、可选精确字典与显式映射/重命名/删除，返回候选、差异和确认项；不写入 |
+| channels/check | locator 重取来源，返回精确引用、核对状态、结构/语义缺口 |
+| channels/apply | 精确字典、映射、expected binding revision、来源基准和确认项；重取来源后原子保存 v2 绑定 |
 
 首次保存 `expected_current_revision=0`，后续传读取时的 current revision。
 内容与当前规范文档相同时返回同一版本、`created_revision=false`；不同内容且 expected 不匹配返回 409。
@@ -189,6 +244,47 @@ python3 examples/semantics/client.py "$FLOWSQL_SEMANTICS_URL" manual app.request
 
 程序按状态与 code 分支，不解析 message 判断业务结果。
 
+## 通道 HTTP 示例
+
+以下代码对已经保存的 Kafka 结构化 source `events` 生成候选；将 locator 换成
+`{"kind":"dataframe","name":"sample"}` 或
+`{"kind":"database_table","type":"postgres","name":"analytics","database":"app","schema":"public","table":"requests"}`
+可使用同一控制流程。DataFrame pending 时先通过现有显式加载入口加载，再请求预览。
+
+```python
+import importlib.util, os
+spec = importlib.util.spec_from_file_location('client', 'examples/semantics/client.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+client = module.Client(os.environ['FLOWSQL_SEMANTICS_URL'])
+locator = {'kind': 'kafka_source', 'name': 'events'}
+preview = client.call('previewChannelDictionary', {'locator': locator, 'timeout_ms': 5000})
+assert preview['source_snapshot']['schema_state'] == 'known'
+# 补充 preview['dictionary'] 的人工语义，核对差异、引用范围及 required_confirmations。
+saved = client.call('saveDataSemantics', {
+    'kind': 'dictionary', 'name': 'app.events', 'expected_current_revision': 0,
+    'document': preview['dictionary']})
+source = preview['source_snapshot']
+# 首次绑定示例：存在绑定时必须采用读取时的当前 revision。
+# 只有人工逐项确认后，才把已确认键填入 confirmations；不自动同意所有项。
+applied = client.call('applyChannelDictionaryBinding', {
+    'locator': locator, 'name': 'app.events', 'dictionary_ref': saved['exact_reference'],
+    'field_map': preview['field_map'], 'expected_current_revision': 0,
+    'source_basis': {k: source[k] for k in ['object_key', 'source_revision', 'schema_fingerprint']},
+    'confirmations': []})
+check = client.call('checkChannelDictionaryBinding', {'locator': locator})
+assert check['binding_ref'] == applied['exact_reference']
+key = source['object_key']
+context = client.consume(key['provider_id'], key['object_id'])
+assert context['dictionary_fields']['exact_reference'] == check['dictionary_ref']
+```
+
+四个通道操作的 timeout_ms 默认 5000，范围 1～30000；Web/Gateway/Router/数据库读取共用一次总预算。
+来源超时返回 504/SOURCE_TIMEOUT；不可访问或认证/目录读取失败返回 503/SOURCE_UNAVAILABLE；
+不支持来源和不完整结构分别返回 400/UNSUPPORTED_SOURCE、400/INCOMPLETE_STRUCTURE，
+确认缺失为 409/CONFIRMATION_REQUIRED，来源变化为 409/SOURCE_CHANGED。
+错误时不沿用上一次 matched。保存和应用是两个事务，保存成功后遇到应用错误不会撤销字典。
+
 ## 进程内消费与验证范围
 
 C++ 插件通过 IQuerier 查找 [IDataSemanticsRegistryV1](../src/framework/interfaces/idata_semantics_registry.h)，
@@ -196,4 +292,5 @@ C++ 插件通过 IQuerier 查找 [IDataSemanticsRegistryV1](../src/framework/int
 消费者不接触 SQLite 句柄，不在逐行/逐包数据面查询注册表。
 
 回归入口见[测试说明](testing.md)。本 Feature 验证隔离原生进程、临时 SQLite、真实控制链路和实际 Chromium 页面，
-覆盖同时写入、事务回滚、重启、精确快照与旧配置字节保留。声明结构匹配的结论不扩展为业务数据质量或外部数据源接入保证。
+覆盖三类入口、四库真实目录、同时应用冲突、观察记录事务回滚、重启、精确快照/标准上下文与旧配置字节保留。
+Kafka 元数据生成不运行 Consumer；本验收不覆盖外部 Kafka 数据面/认证矩阵、容器交付矩阵或全产品发布，结构匹配不等于业务数据质量验证。

@@ -11,6 +11,7 @@ namespace error {
 
 // 业务错误码，由 fnRouterHandler 返回
 // RouterAgencyPlugin 负责将其映射为 HTTP 状态码
+constexpr int32_t TIMEOUT = -8;            // 504 Gateway Timeout
 constexpr int32_t ACCEPTED = 1;            // 202 Accepted
 constexpr int32_t TOO_MANY_REQUESTS = -7;  // 429 Too Many Requests
 constexpr int32_t OK = 0;                  // 200 OK

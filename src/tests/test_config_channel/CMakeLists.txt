@@ -2,6 +2,7 @@ project(test_config_channel)
 
 add_executable(${PROJECT_NAME}
     test_config_channel.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/channel_dictionary.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_control.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
@@ -11,7 +12,7 @@ add_executable(${PROJECT_NAME}
 )
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/channels/config)
 target_compile_options(${PROJECT_NAME} PRIVATE -UNDEBUG)
-add_thirddepen(${PROJECT_NAME} rapidjson sqlite yaml-cpp)
+add_thirddepen(${PROJECT_NAME} rapidjson sqlite yaml-cpp httplib)
 find_package(OpenSSL REQUIRED)
 target_link_libraries(${PROJECT_NAME} OpenSSL::Crypto ${CMAKE_DL_LIBS})
 add_dependencies(${PROJECT_NAME} flowsql_config_channel)
@@ -66,3 +67,70 @@ find_program(FLOWSQL_SEMANTICS_NODE NAMES node nodejs REQUIRED)
 add_test(NAME test_data_semantics_browser COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_data_semantics_browser.py $<TARGET_FILE:test_data_semantics_host> ${FLOWSQL_SEMANTICS_NODE})
 set_tests_properties(test_data_semantics_browser PROPERTIES TIMEOUT 180 RESOURCE_LOCK "semantics_http;visualization_browser")
+
+add_executable(test_channel_dictionary test_channel_dictionary.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/channel_dictionary.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_control.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
+target_include_directories(test_channel_dictionary PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/channels/config)
+target_compile_options(test_channel_dictionary PRIVATE -UNDEBUG)
+add_thirddepen(test_channel_dictionary rapidjson sqlite yaml-cpp)
+target_link_libraries(test_channel_dictionary OpenSSL::Crypto)
+add_test(NAME test_channel_dictionary COMMAND $<TARGET_FILE:test_channel_dictionary>)
+add_test(NAME test_channel_dictionary_schema COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_channel_dictionary_schema.py ${CMAKE_SOURCE_DIR}/..)
+
+add_executable(test_channel_dictionary_sources test_channel_dictionary_sources.cpp
+    ${CMAKE_SOURCE_DIR}/services/catalog/lazy_dataframe_channel.cpp)
+target_include_directories(test_channel_dictionary_sources PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_channel_dictionary_sources PRIVATE -UNDEBUG)
+add_thirddepen(test_channel_dictionary_sources arrow rapidjson sqlite)
+target_link_libraries(test_channel_dictionary_sources flowsql_catalog flowsql_kafka_runtime OpenSSL::Crypto)
+add_test(NAME test_channel_dictionary_sources COMMAND $<TARGET_FILE:test_channel_dictionary_sources>)
+
+add_executable(test_channel_dictionary_host channel_dictionary_host.cpp)
+target_include_directories(test_channel_dictionary_host PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_channel_dictionary_host PRIVATE -UNDEBUG)
+add_thirddepen(test_channel_dictionary_host rapidjson sqlite)
+target_link_libraries(test_channel_dictionary_host ${CMAKE_DL_LIBS} OpenSSL::Crypto)
+add_dependencies(test_channel_dictionary_host flowsql_config_channel flowsql_web flowsql_gateway flowsql_router
+    flowsql_builtin flowsql_catalog flowsql_kafka flowsql_database)
+add_test(NAME test_channel_dictionary_api COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_channel_dictionary_api.py $<TARGET_FILE:test_channel_dictionary_host>)
+set_tests_properties(test_channel_dictionary_api PROPERTIES TIMEOUT 180 RESOURCE_LOCK semantics_http)
+add_test(NAME test_channel_dictionary_iid COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_channel_dictionary_iid.py $<TARGET_FILE:test_channel_dictionary_host>)
+set_tests_properties(test_channel_dictionary_iid PROPERTIES TIMEOUT 60)
+
+add_executable(test_channel_dictionary_database test_channel_dictionary_database.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/channel_dictionary.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_control.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
+target_include_directories(test_channel_dictionary_database PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/channels/config)
+target_compile_options(test_channel_dictionary_database PRIVATE -UNDEBUG)
+add_thirddepen(test_channel_dictionary_database arrow rapidjson sqlite yaml-cpp)
+target_link_libraries(test_channel_dictionary_database flowsql_database OpenSSL::Crypto)
+add_test(NAME test_channel_dictionary_database COMMAND $<TARGET_FILE:test_channel_dictionary_database>)
+add_test(NAME test_channel_dictionary_database_unit COMMAND $<TARGET_FILE:test_channel_dictionary_database> --sqlite)
+set_tests_properties(test_channel_dictionary_database PROPERTIES TIMEOUT 180 RESOURCE_LOCK database_driver)
+
+add_test(NAME test_channel_dictionary_browser COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_channel_dictionary_browser.py $<TARGET_FILE:test_channel_dictionary_host> ${FLOWSQL_SEMANTICS_NODE})
+set_tests_properties(test_channel_dictionary_browser PROPERTIES TIMEOUT 200 RESOURCE_LOCK "semantics_http;visualization_browser")
+
+add_executable(test_channel_dictionary_consistency test_channel_dictionary_consistency.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/channel_dictionary.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_control.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
+target_include_directories(test_channel_dictionary_consistency PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/channels/config)
+target_compile_options(test_channel_dictionary_consistency PRIVATE -UNDEBUG)
+add_thirddepen(test_channel_dictionary_consistency rapidjson sqlite yaml-cpp)
+target_link_libraries(test_channel_dictionary_consistency OpenSSL::Crypto)
+add_test(NAME test_channel_dictionary_consistency COMMAND $<TARGET_FILE:test_channel_dictionary_consistency>)
+set_tests_properties(test_channel_dictionary_consistency PROPERTIES TIMEOUT 30)

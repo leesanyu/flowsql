@@ -28,6 +28,7 @@
       <el-table-column label="操作" min-width="350">
         <template #default="{ row }">
           <el-button text @click="detail = row">详情</el-button>
+          <el-button v-if="tab === 'channels' && row.payload_kind === 'structured' && row.role !== 'sink'" text @click="dictionary(row)">数据字典</el-button>
           <el-button text :disabled="!!blockedReason(row, tab)" :title="blockedReason(row, tab)" @click="tab === 'channels' ? openChannel(row) : openConnection(row)">编辑</el-button>
           <el-button text :disabled="testing" @click="verifySaved(row)">验证</el-button>
           <el-button v-if="tab === 'channels'" text @click="copyReference(row)">复制引用</el-button>
@@ -169,9 +170,12 @@
 </template>
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
 import { connectionDraft, channelDraft, buildConnection, buildChannel, usesTls, usesSasl, secretFields, blockedReason, kafkaError, verificationLabel } from '../utils/kafkaChannel.js'
+const router = useRouter()
+function dictionary(row) { router.push({ path: '/semantics', query: { dataset: JSON.stringify({ kind: 'kafka_source', name: row.name }) } }) }
 const props = defineProps({ searchText: { type: String, default: '' } })
 const emit = defineEmits(['count-change'])
 const tab = ref('channels'), connections = ref([]), channels = ref([]), definitions = ref({})

@@ -337,11 +337,13 @@ int main() {
     route_registry->EnumRoutes([&](const flowsql::RouteItem& item) {
         discovered_routes.emplace(item.uri, item.handler);
     });
-    assert(discovered_routes.size() == 12);
+    assert(discovered_routes.size() == 16);
     for (const char* op : {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export"})
         assert(discovered_routes.count(std::string("/semantics/v1/") + op) == 1);
     for (const char* op : {"list", "publish", "history", "resolve"})
         assert(discovered_routes.count(std::string("/channels/config/") + op) == 1);
+    for (const char* op : {"describe", "preview", "check", "apply"})
+        assert(discovered_routes.count(std::string("/semantics/v1/channels/") + op) == 1);
     assert(discovered_routes.count("/channels/config/publish") == 1);
     assert(registry->Resolve("config.rules@1", &snapshot, &error) == 0);
     assert(*snapshot.content == "{}" && snapshot.sha256_hex == original_hash);
@@ -357,7 +359,9 @@ int main() {
         assert(item.method == "POST");
         routes.emplace(item.uri, item.handler);
     });
-    assert(routes.size() == 12);
+    assert(routes.size() == 16);
+    for (const char* op : {"describe", "preview", "check", "apply"})
+        assert(routes.count(std::string("/semantics/v1/channels/") + op) == 1);
     std::string response;
     const auto call = [&](const char* route, const std::string& body) {
         response.clear();

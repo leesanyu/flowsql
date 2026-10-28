@@ -1,5 +1,6 @@
 <template>
-  <section class="semantics-page">
+  <ChannelDictionaryEditor v-if="datasetLocator" :key="json(datasetLocator)" :locator="datasetLocator" />
+  <section v-else class="semantics-page">
     <header><h1>标准与字典</h1><p>维护业务定义和人工结构声明；未知信息可留空，保存不代表业务数据已通过验证。</p></header>
     <p v-if="error" role="alert" data-testid="error">{{ error }}</p>
     <p v-if="notice" role="status" data-testid="notice">{{ notice }}</p>
@@ -100,8 +101,10 @@
 import { ref, computed, reactive, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import SemanticValueEditor from '../components/SemanticValueEditor.vue'
+import ChannelDictionaryEditor from '../components/ChannelDictionaryEditor.vue'
 import { blankDocument, blankField, semanticKeys, labels, json, parseJson, clone, structuralDiff, semanticsCall as call, saveAndApply } from '../utils/dataSemantics.js'
 const route = useRoute(), router = useRouter()
+const datasetLocator = computed(() => { try { return route.query.dataset ? parseJson(String(route.query.dataset)) : null } catch { return null } })
 const kinds = { standard: '标准', dictionary: '字典', binding: '绑定' }
 const filterKind = ref(''), query = ref(''), items = ref([]), nextCursor = ref(''), busy = ref(false), error = ref(''), notice = ref('')
 const kind = ref('standard'), name = ref(''), document = ref(null), original = ref(null), revision = ref(0), exact = ref(''), editing = ref(false), structureEditing = ref(false)
@@ -116,7 +119,7 @@ const valid = (key, ok) => ok ? invalid.delete(key) : invalid.add(key)
 const discard = () => !dirty.value || window.confirm('存在未保存内容，确认离开并丢弃？')
 onBeforeRouteLeave(() => discard())
 function beforeUnload(e) { if (dirty.value) { e.preventDefault(); e.returnValue = '' } }
-onMounted(() => { window.addEventListener('beforeunload', beforeUnload); run(async () => { await list(); await choices(); if (route.query.ref) await load(String(route.query.ref)) }) })
+onMounted(() => { if (datasetLocator.value) return; window.addEventListener('beforeunload', beforeUnload); run(async () => { await list(); await choices(); if (route.query.ref) await load(String(route.query.ref)) }) })
 onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
 async function run(fn) { if (busy.value) return; busy.value = true; error.value = ''; try { await fn() } catch (e) { error.value = e.message } finally { busy.value = false } }
 async function all(op, payload) { const result = []; let cursor = ''; do { const p = await call(op, { ...payload, cursor, limit: 100 }); result.push(...p.items); cursor = p.next_cursor } while (cursor); return result }

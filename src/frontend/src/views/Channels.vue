@@ -104,6 +104,7 @@
             <el-table-column label="操作" width="260">
               <template #default="scope">
                 <el-button type="primary" size="small" text @click="previewDf(scope.row)">预览</el-button>
+                <el-button size="small" text @click="dictionary({ kind: 'dataframe', name: scope.row.name })">数据字典</el-button>
                 <el-button type="warning" size="small" text @click="renameDf(scope.row)">重命名</el-button>
                 <el-button type="danger" size="small" text @click="removeDf(scope.row)">删除</el-button>
               </template>
@@ -116,6 +117,7 @@
             <el-table-column prop="schema" label="Schema" min-width="200" />
             <el-table-column label="操作" width="160">
               <template #default="scope">
+                <el-button size="small" text @click="tableDictionary(scope.row)">表字典</el-button>
                 <el-button type="primary" size="small" text @click="openDbBrowser(scope.row)">浏览</el-button>
                 <el-button type="danger" size="small" text @click="handleRemoveDb(scope.row)">删除</el-button>
               </template>
@@ -300,6 +302,12 @@
       </div>
     </el-drawer>
 
+    <el-dialog :model-value="!!dictionaryConnection" title="限定表数据字典" @close="dictionaryConnection = null">
+      <label>表名 <input v-model="dictionaryTable" aria-label="字典表名" /></label>
+      <label>Database（空则使用连接配置）<input v-model="dictionaryDatabase" aria-label="字典 Database" /></label>
+      <label>Schema（PostgreSQL）<input v-model="dictionarySchema" aria-label="字典 Schema" /></label>
+      <button :disabled="!dictionaryTable" @click="openTableDictionary">打开表字典</button>
+    </el-dialog>
     <el-dialog v-model="showAddDialog" title="新增数据库通道" width="500px" @close="resetForm">
       <el-form :model="form" label-width="100px" ref="formRef">
         <el-form-item label="类型" prop="type" required>
@@ -504,6 +512,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { Search, Loading } from '@element-plus/icons-vue'
 import api, {
   PCAP_REPLAY_SPEEDS,
@@ -518,6 +527,11 @@ import ConfigChannels from './ConfigChannels.vue'
 import KafkaChannels from './KafkaChannels.vue'
 import { normalizeStreamOptions as buildStreamOptions } from '../utils/streamChannel.js'
 
+const router = useRouter()
+const dictionary = locator => router.push({ path: '/semantics', query: { dataset: JSON.stringify(locator) } })
+const dictionaryConnection = ref(null), dictionaryTable = ref(''), dictionarySchema = ref(''), dictionaryDatabase = ref('')
+function tableDictionary(row) { dictionaryConnection.value = row; dictionaryTable.value = ''; dictionarySchema.value = row.type === 'postgres' ? 'public' : ''; dictionaryDatabase.value = '' }
+function openTableDictionary() { const row = dictionaryConnection.value; dictionary({ kind: 'database_table', type: row.type, name: row.name, table: dictionaryTable.value, ...(dictionarySchema.value ? { schema: dictionarySchema.value } : {}), ...(dictionaryDatabase.value ? { database: dictionaryDatabase.value } : {}) }) }
 const searchText = ref('')
 const activeChannelType = ref('dataframe')
 const showAddDialog = ref(false)

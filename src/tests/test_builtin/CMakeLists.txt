@@ -30,6 +30,8 @@ set_target_properties(fixture_cpp_operator_v2 PROPERTIES
 add_executable(${PROJECT_NAME}
     test_builtin.cpp
     ${CMAKE_SOURCE_DIR}/services/catalog/catalog_plugin.cpp
+    ${CMAKE_SOURCE_DIR}/services/catalog/catalog_dataset.cpp
+    ${CMAKE_SOURCE_DIR}/services/catalog/lazy_dataframe_channel.cpp
     ${CMAKE_SOURCE_DIR}/services/catalog/dataframe_transfer.cpp
     ${CMAKE_SOURCE_DIR}/services/binaddon/binaddon_host_plugin.cpp
     ${CMAKE_SOURCE_DIR}/framework/builtin/dataframe/concat_operator.cpp

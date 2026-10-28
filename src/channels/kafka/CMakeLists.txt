@@ -18,7 +18,7 @@ target_include_directories(flowsql_kafka_store PUBLIC ${rapidjson_LINK_INC} PRIV
 target_link_libraries(flowsql_kafka_store PUBLIC flowsql_kafka_structured flowsql_kafka_result_codec flowsql_kafka_packet PRIVATE OpenSSL::Crypto ${sqlite_LINK_DIR}/libsqlite3.a)
 target_link_libraries(flowsql_kafka_store PUBLIC flowsql_common)
 set_target_properties(flowsql_kafka_store PROPERTIES POSITION_INDEPENDENT_CODE ON)
-add_library(flowsql_kafka_runtime STATIC kafka_client.cpp kafka_producer.cpp kafka_packet_writer.cpp kafka_writer.cpp kafka_reader.cpp kafka_packet_reader.cpp kafka_plugin.cpp kafka_control.cpp
+add_library(flowsql_kafka_runtime STATIC kafka_client.cpp kafka_producer.cpp kafka_packet_writer.cpp kafka_writer.cpp kafka_reader.cpp kafka_packet_reader.cpp kafka_plugin.cpp kafka_control.cpp kafka_dataset.cpp
     ${CMAKE_SOURCE_DIR}/plugins/npi/packet_decoder.cpp
     ${CMAKE_SOURCE_DIR}/channels/pcapfile/packet_filter_domain.cpp)
 target_include_directories(flowsql_kafka_runtime PUBLIC ${CMAKE_SOURCE_DIR})

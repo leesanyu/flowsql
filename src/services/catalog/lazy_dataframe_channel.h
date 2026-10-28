@@ -5,6 +5,7 @@
 
 #include <framework/core/dataframe.h>
 #include <framework/interfaces/idataframe_channel.h>
+#include <framework/interfaces/idataframe_metadata.h>
 #include <framework/interfaces/idataframe_snapshot.h>
 
 #include <condition_variable>
@@ -15,7 +16,9 @@
 namespace flowsql::catalog {
 
 // Catalog-private implementation; public channel and snapshot vtables remain unchanged.
-class LazyDataFrameChannel : public IAppendableDataFrameChannel, public IDataFrameSnapshotReaderV1 {
+class LazyDataFrameChannel : public IAppendableDataFrameChannel,
+                             public IDataFrameSnapshotReaderV1,
+                             public IDataFrameMetadataV1 {
  public:
     using Check = std::function<bool()>;
     using Loader = std::function<std::shared_ptr<IDataFrameChannel>(std::istream&, const std::string&, const Check&)>;
@@ -40,6 +43,7 @@ class LazyDataFrameChannel : public IAppendableDataFrameChannel, public IDataFra
     int CaptureSnapshot(const DataFrameSnapshotRequestV1& request, std::shared_ptr<arrow::RecordBatch>* output,
                         uint64_t* retained_bytes, std::string* error) override;
     Metadata Describe();
+    DataFrameMetadataV1 DescribeMetadata() override;
     void Retire();
     int RenameFile(const std::string& path, const std::string& name);
 
@@ -52,6 +56,7 @@ class LazyDataFrameChannel : public IAppendableDataFrameChannel, public IDataFra
     bool opened_ = true;
     bool retired_ = false;
     bool loading_ = false;
+    uint64_t replacement_generation_ = 0;
     struct Attempt {
         bool done = false;
         std::string error;

@@ -3,6 +3,8 @@
 
 #include "catalog_plugin.h"
 #include <common/network/address_display.h>
+#include <framework/interfaces/idataframe_metadata.h>
+#include <common/channel_dataset.hpp>
 #include "lazy_dataframe_channel.h"
 
 #include <framework/core/dataframe.h>
@@ -301,6 +303,7 @@ int CatalogPlugin::Start() {
         std::lock_guard<std::mutex> lock(mu_);
         channels_[name] = std::move(channel);
         source_ids_[name] = SnapshotToken();
+        if (DatasetIdentity(name, 0, false).empty()) return -1;
     }
     return 0;
 }
@@ -314,6 +317,7 @@ int CatalogPlugin::Stop() {
     }
     channels_.clear();
     source_ids_.clear();
+    dataset_generations_.clear();
     if (operator_db_ != nullptr) {
         sqlite3_close(operator_db_);
         operator_db_ = nullptr;
@@ -324,6 +328,7 @@ int CatalogPlugin::Stop() {
 int CatalogPlugin::Register(const char* name, std::shared_ptr<IChannel> channel) {
     if (!name || !*name || !channel) return -1;
     auto* df_channel = dynamic_cast<IDataFrameChannel*>(channel.get());
+    if (df_channel && EnsureOperatorCatalogDb() != 0) return -1;
 
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -334,6 +339,11 @@ int CatalogPlugin::Register(const char* name, std::shared_ptr<IChannel> channel)
 
     std::lock_guard<std::mutex> lock(mu_);
     if (channels_.find(name) != channels_.end()) return -1;
+    if (df_channel) {
+        auto* metadata = dynamic_cast<IDataFrameMetadataV1*>(channel.get());
+        if (DatasetIdentity(name, metadata ? metadata->DescribeMetadata().replacement_generation : 0, true).empty())
+            return -1;
+    }
     channels_[name] = std::move(channel);
     source_ids_[name] = SnapshotToken();
     return 0;
@@ -358,6 +368,7 @@ int CatalogPlugin::Unregister(const char* name) {
         if (ec) return -1;
     }
     if (auto* lazy = dynamic_cast<LazyDataFrameChannel*>(it->second.get())) lazy->Retire();
+    if (RemoveDatasetIdentity(name) != 0) return -1;
     channels_.erase(it);
     source_ids_.erase(name);
     return 0;
@@ -381,6 +392,7 @@ int CatalogPlugin::Rename(const char* old_name, const char* new_name) {
     }
 
     auto channel = old_it->second;
+    if (df_channel && RenameDatasetIdentity(old_name, new_name) != 0) return -1;
     channels_.erase(old_it);
     channels_[new_name] = std::move(channel);
     source_ids_[new_name] = source_ids_.at(old_name);
@@ -580,6 +592,8 @@ int CatalogPlugin::SetActive(const std::string& category, const std::string& nam
 }
 
 void CatalogPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
+    cb({"POST", "/channels/dataframe/dataset/describe",
+        [this](const auto&, const auto& req, auto& rsp) { return dataset::DescriptorControl(*this, req, rsp); }});
     cb({"GET", "/channels/dataframe/exploration/v1/sources",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleSnapshotSources(u, req, rsp);
@@ -1653,6 +1667,11 @@ int CatalogPlugin::EnsureOperatorCatalogDb() {
 
 int CatalogPlugin::EnsureOperatorCatalogSchema() {
     if (operator_db_ == nullptr) return -1;
+    if (sqlite3_exec(operator_db_,
+                     "CREATE TABLE IF NOT EXISTS dataset_identities(name TEXT PRIMARY KEY,"
+                     "object_id TEXT NOT NULL,file_stamp TEXT NOT NULL)",
+                     nullptr, nullptr, nullptr) != SQLITE_OK)
+        return -1;
     const char* ddl_catalog =
         "CREATE TABLE IF NOT EXISTS operator_catalog ("
         "category TEXT NOT NULL,"

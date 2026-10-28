@@ -6,6 +6,7 @@
 
 #include <common/iplugin.h>
 #include <framework/interfaces/ibinaddon_host.h>
+#include <framework/interfaces/ichannel_dataset_descriptor.h>
 #include <framework/interfaces/ichannel_registry.h>
 #include <framework/interfaces/idataframe_channel.h>
 #include <framework/interfaces/idataframe_snapshot.h>
@@ -32,7 +33,8 @@ class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
                                                              public IOperatorRegistry,
                                                              public IOperatorCatalog,
                                                              public IRouterHandle,
-                                                             public IDataFrameSnapshotProviderV1 {
+                                                             public IDataFrameSnapshotProviderV1,
+                                                             public IChannelDatasetDescriptorV1 {
  public:
     CatalogPlugin() = default;
     ~CatalogPlugin() override;
@@ -53,6 +55,8 @@ class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
 
     int List(std::vector<DataFrameSourceV1>* output, std::string* error) override;
     int Acquire(const DataFrameSnapshotRequestV1& request, DataFrameSnapshotV1* output, std::string* error) override;
+    const char* ProviderId() const override { return "dataframe"; }
+    int Describe(const ChannelDatasetRequestV1&, ChannelDatasetSnapshotV1*, DataSemanticsErrorV1*) override;
 
     // IOperatorRegistry
     int Register(const char* name, OperatorFactory factory) override;
@@ -89,6 +93,9 @@ class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
 
  private:
     int EnsureOperatorCatalogDb();
+    std::string DatasetIdentity(const std::string& name, uint64_t generation, bool replace);
+    int RemoveDatasetIdentity(const std::string& name);
+    int RenameDatasetIdentity(const std::string& old_name, const std::string& new_name);
     int EnsureOperatorCatalogSchema();
     int EnsureOperatorDbDir() const;
     std::string OperatorCatalogDbPath() const;
@@ -125,6 +132,7 @@ class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
     IBinAddonHost* binaddon_host_ = nullptr;
     std::unordered_map<std::string, std::shared_ptr<IChannel>> channels_;
     std::unordered_map<std::string, std::string> source_ids_;
+    std::unordered_map<std::string, uint64_t> dataset_generations_;
     std::unordered_map<std::string, OperatorFactory> op_factories_;
     std::string data_dir_ = "./dataframes";
     std::string exploration_shared_dir_;

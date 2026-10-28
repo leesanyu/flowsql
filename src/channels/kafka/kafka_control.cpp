@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 #include <algorithm>
 #include <cerrno>
+#include <common/channel_dataset.hpp>
 #include "kafka_plugin.h"
 
 namespace flowsql::channels::kafka {
@@ -48,6 +49,8 @@ Json Failed(const char* code, const char* stage) {
 }
 }  // namespace
 void Plugin::EnumRoutes(std::function<void(const RouteItem&)> callback) {
+    callback({"POST", "/channels/kafka/dataset/describe",
+              [this](const auto&, const auto& req, auto& rsp) { return dataset::DescriptorControl(*this, req, rsp); }});
     for (const char* operation : {"definitions/query", "connections/query", "connections/add", "connections/modify",
                                   "connections/remove", "channels/query", "channels/add", "channels/modify",
                                   "channels/remove", "tests/start", "tests/query", "tests/cancel"}) {

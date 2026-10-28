@@ -150,7 +150,8 @@ int NormalizeSemantics(const std::string& kind, const std::string& text, rapidjs
         validator.GetInvalidDocumentPointer().Stringify(path);
         return SemanticsFail(e, "INVALID_DOCUMENT", "document does not match published JSON Schema", path.GetString());
     }
-    if (Str((*d)["schema_id"]) != "flowsql.data-" + kind + ".v1")
+    if (Str((*d)["schema_id"]) != "flowsql.data-" + kind + ".v1" &&
+        !(kind == "binding" && Str((*d)["schema_id"]) == "flowsql.data-binding.v2"))
         return SemanticsFail(e, "INVALID_DOCUMENT", "schema_id differs from kind", "/schema_id");
     if (kind == "dictionary") {
         std::unordered_set<std::string> ids, names;
@@ -215,6 +216,19 @@ int NormalizeSemantics(const std::string& kind, const std::string& text, rapidjs
     return 0;
 }
 int CheckSemanticsBinding(const Value& b, const Value& dictionary, std::string* check, DataSemanticsErrorV1* e) {
+    if (b.HasMember("source_snapshot")) {
+        const auto& source = b["source_snapshot"];
+        if (source["object_key"] != b["object_key"] || source["schema_state"] != "known" ||
+            !source["fields"].IsArray() || b["confirmation"]["source_revision"] != source["source_revision"])
+            return SemanticsFail(e, "BINDING_MISMATCH", "binding observation is incomplete or inconsistent",
+                                 "/source_snapshot");
+        rapidjson::Document observed;
+        observed.CopyFrom(b, observed.GetAllocator());
+        observed.RemoveMember("source_snapshot");
+        observed["declared_schema"].CopyFrom(source["fields"], observed.GetAllocator());
+        std::string observation_check;
+        if (CheckSemanticsBinding(observed, dictionary, &observation_check, e)) return -1;
+    }
     const auto& mapping = b["field_map"];
     const auto& fields = dictionary["fields"];
     if (mapping.MemberCount() != fields.Size())

@@ -38,6 +38,7 @@ class Store {
     Json Mutate(const std::string& kind, const std::string& operation, Json request);
     Json Query(const std::string& kind, const std::string& name = "", const std::string& after = "",
                size_t limit = 100);
+    Json DescribeDataset(const rapidjson::Value& locator);
     Binding Acquire(const std::string& name, const std::string& usage);
     void Release(const KafkaBindingSnapshotV1& snapshot);
     Binding Draft(Json connection);

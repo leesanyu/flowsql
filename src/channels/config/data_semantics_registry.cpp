@@ -34,6 +34,13 @@ std::string Digest(const std::string& text) {
     }
     return hex;
 }
+bool MarkObserved(sqlite3* db, const std::string& exact, bool observed) {
+    if (!observed) return true;
+    auto s = Prepare(db, "INSERT OR IGNORE INTO semantics_observation VALUES(?)");
+    if (!s) return false;
+    Bind(s.get(), 1, exact);
+    return sqlite3_step(s.get()) == SQLITE_DONE;
+}
 struct Rollback {
     sqlite3* db;
     ~Rollback() {
@@ -75,6 +82,7 @@ int DataSemanticsRegistry::Open(const std::string& path, DataSemanticsErrorV1* e
         "created_at INTEGER NOT NULL,base_revision INTEGER,change_note TEXT NOT NULL,PRIMARY KEY(kind,name,revision));"
         "CREATE TABLE IF NOT EXISTS semantics_reference("
         "source TEXT NOT NULL,target TEXT NOT NULL,field_path TEXT NOT NULL,PRIMARY KEY(source,target,field_path));"
+        "CREATE TABLE IF NOT EXISTS semantics_observation(exact_reference TEXT PRIMARY KEY NOT NULL);"
         "CREATE INDEX IF NOT EXISTS semantics_target ON semantics_reference(target);"
         "COMMIT;";
     if (sqlite3_exec(db_, sql, nullptr, nullptr, nullptr) != SQLITE_OK) {
@@ -176,6 +184,8 @@ int DataSemanticsRegistry::Save(const SemanticsSaveRequest& r, SemanticsSaveResu
     rapidjson::Document d;
     std::vector<SemanticsReference> refs;
     if (NormalizeSemantics(r.kind, r.document_json, &d, &refs, e)) return -1;
+    if (r.source_observed && (r.kind != "binding" || !d.HasMember("source_snapshot")))
+        return SemanticsFail(e, "INVALID_DOCUMENT", "observed binding required");
     const auto content = SemanticsJson(d), digest = Digest(content);
     std::lock_guard<std::mutex> lock(mutex_);
     if (!db_) return SemanticsFail(e, "UNAVAILABLE", "semantics registry is closed");
@@ -209,6 +219,7 @@ int DataSemanticsRegistry::Save(const SemanticsSaveRequest& r, SemanticsSaveResu
                 return SemanticsFail(e, "BINDING_MISMATCH", "object_key is immutable", "/object_key");
         }
         if (*previous.document_json == content) {
+            if (!MarkObserved(db_, previous.exact_reference, r.source_observed)) return StorageError(e);
             if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) return StorageError(e);
             rollback.db = nullptr;
             out->snapshot = previous;
@@ -276,6 +287,7 @@ int DataSemanticsRegistry::Save(const SemanticsSaveRequest& r, SemanticsSaveResu
         Bind(s.get(), 3, ref.path);
         if (sqlite3_step(s.get()) != SQLITE_DONE) return StorageError(e);
     }
+    if (!MarkObserved(db_, exact, r.source_observed)) return StorageError(e);
     if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) return StorageError(e);
     rollback.db = nullptr;
     out->snapshot = {exact, d["schema_id"].GetString(), digest, std::make_shared<const std::string>(content)};
@@ -302,6 +314,20 @@ int DataSemanticsRegistry::BindingLookup(const std::string& provider, const std:
     if (rc == SQLITE_DONE) return SemanticsFail(e, "NOT_FOUND", "binding not found");
     if (rc != SQLITE_ROW) return StorageError(e);
     return Read(Exact("binding", Text(s.get(), 0), sqlite3_column_int64(s.get(), 1)), out, e);
+}
+int DataSemanticsRegistry::ObservationTrusted(const std::string& reference, bool* trusted, DataSemanticsErrorV1* e) {
+    if (e) *e = {};
+    if (!trusted) return SemanticsFail(e, "INVALID_DOCUMENT", "observation output required");
+    *trusted = false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!db_) return SemanticsFail(e, "UNAVAILABLE", "registry closed");
+    auto s = Prepare(db_, "SELECT 1 FROM semantics_observation WHERE exact_reference=?");
+    if (!s) return StorageError(e);
+    Bind(s.get(), 1, reference);
+    const int rc = sqlite3_step(s.get());
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) return StorageError(e);
+    *trusted = rc == SQLITE_ROW;
+    return 0;
 }
 int DataSemanticsRegistry::References(const std::string& target, bool history, std::vector<SemanticsReferenceItem>* out,
                                       DataSemanticsErrorV1* e) {

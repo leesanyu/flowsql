@@ -2161,6 +2161,9 @@
         },
         {
           "$ref": "#/%24defs/binding"
+        },
+        {
+          "$ref": "#/%24defs/channelBinding"
         }
       ]
     },
@@ -2199,7 +2202,14 @@
                 "BINDING_MISMATCH",
                 "LIMIT_EXCEEDED",
                 "UNAVAILABLE",
-                "STORAGE_ERROR"
+                "STORAGE_ERROR",
+                "INVALID_REQUEST",
+                "INCOMPLETE_STRUCTURE",
+                "UNSUPPORTED_SOURCE",
+                "CONFIRMATION_REQUIRED",
+                "SOURCE_CHANGED",
+                "SOURCE_TIMEOUT",
+                "SOURCE_UNAVAILABLE"
               ]
             },
             "message": {
@@ -3077,6 +3087,818 @@
             "document",
             "format",
             "content"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "datasetLocator": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "kafka_source"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "dataframe"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "database_table"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "sqlite",
+                "mysql",
+                "postgres",
+                "clickhouse"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "database": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "table": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "required": [
+            "kind",
+            "type",
+            "name",
+            "table"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "sourceField": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "type": {
+          "oneOf": [
+            {
+              "$ref": "#/%24defs/type"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nullable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "nullable"
+      ],
+      "additionalProperties": false
+    },
+    "datasetSnapshot": {
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "type": "string",
+          "enum": [
+            "flowsql.channel-dataset.v1"
+          ]
+        },
+        "object_key": {
+          "$ref": "#/%24defs/object_key"
+        },
+        "locator": {
+          "$ref": "#/%24defs/datasetLocator"
+        },
+        "source_revision": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "identity_state": {
+          "type": "string",
+          "enum": [
+            "known",
+            "unknown"
+          ]
+        },
+        "schema_state": {
+          "type": "string",
+          "enum": [
+            "known",
+            "pending",
+            "incomplete"
+          ]
+        },
+        "fields": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/%24defs/sourceField"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "producer_metadata": {
+          "type": "object"
+        },
+        "structure_gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/gap"
+          }
+        }
+      },
+      "required": [
+        "schema_id",
+        "object_key",
+        "locator",
+        "source_revision",
+        "identity_state",
+        "schema_state",
+        "fields",
+        "schema_fingerprint",
+        "producer_metadata",
+        "structure_gaps"
+      ],
+      "additionalProperties": false
+    },
+    "bindingConfirmation": {
+      "type": "object",
+      "properties": {
+        "source_revision": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "source_revision",
+        "items"
+      ],
+      "additionalProperties": false
+    },
+    "channelBinding": {
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "type": "string",
+          "enum": [
+            "flowsql.data-binding.v2"
+          ]
+        },
+        "object_key": {
+          "$ref": "#/%24defs/object_key"
+        },
+        "object_label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dictionary_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "field_map": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "declared_schema": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "$ref": "#/%24defs/type"
+                  },
+                  "nullable": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "type",
+                  "nullable"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ]
+        },
+        "source_snapshot": {
+          "$ref": "#/%24defs/datasetSnapshot"
+        },
+        "confirmation": {
+          "$ref": "#/%24defs/bindingConfirmation"
+        }
+      },
+      "required": [
+        "schema_id",
+        "object_key",
+        "object_label",
+        "dictionary_ref",
+        "field_map",
+        "declared_schema",
+        "source_snapshot",
+        "confirmation"
+      ],
+      "additionalProperties": false
+    },
+    "channels_describeRequest": {
+      "type": "object",
+      "properties": {
+        "locator": {
+          "$ref": "#/%24defs/datasetLocator"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000,
+          "default": 5000
+        }
+      },
+      "required": [
+        "locator"
+      ],
+      "additionalProperties": false
+    },
+    "channels_previewRequest": {
+      "type": "object",
+      "properties": {
+        "locator": {
+          "$ref": "#/%24defs/datasetLocator"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000,
+          "default": 5000
+        },
+        "base_dictionary_ref": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "field_map": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]+$"
+          }
+        },
+        "renames": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]+$"
+          }
+        },
+        "remove_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]+$"
+          }
+        }
+      },
+      "required": [
+        "locator"
+      ],
+      "additionalProperties": false
+    },
+    "channels_checkRequest": {
+      "type": "object",
+      "properties": {
+        "locator": {
+          "$ref": "#/%24defs/datasetLocator"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000,
+          "default": 5000
+        }
+      },
+      "required": [
+        "locator"
+      ],
+      "additionalProperties": false
+    },
+    "channels_applyRequest": {
+      "type": "object",
+      "properties": {
+        "locator": {
+          "$ref": "#/%24defs/datasetLocator"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000,
+          "default": 5000
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "dictionary_ref": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "field_map": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]+$"
+          }
+        },
+        "expected_current_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_basis": {
+          "type": "object",
+          "properties": {
+            "object_key": {
+              "$ref": "#/%24defs/object_key"
+            },
+            "source_revision": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "schema_fingerprint": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "required": [
+            "object_key",
+            "source_revision",
+            "schema_fingerprint"
+          ],
+          "additionalProperties": false
+        },
+        "confirmations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]+$"
+          }
+        }
+      },
+      "required": [
+        "locator",
+        "name",
+        "dictionary_ref",
+        "field_map",
+        "expected_current_revision",
+        "source_basis",
+        "confirmations"
+      ],
+      "additionalProperties": false
+    },
+    "channelDifference": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "added",
+            "removed",
+            "type_changed",
+            "nullable_changed",
+            "order_changed",
+            "producer_changed",
+            "renamed",
+            "identity_changed"
+          ]
+        },
+        "field_id": {
+          "type": "string"
+        },
+        "source_name": {
+          "type": "string"
+        },
+        "before": {},
+        "after": {},
+        "confirmation_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "field_id",
+        "source_name",
+        "before",
+        "after",
+        "confirmation_key"
+      ],
+      "additionalProperties": false
+    },
+    "channelCheckResult": {
+      "type": "object",
+      "properties": {
+        "binding_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dictionary_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "unbound",
+            "pending",
+            "matched",
+            "mismatch",
+            "needs_confirmation",
+            "unavailable"
+          ]
+        },
+        "differences": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/channelDifference"
+          }
+        },
+        "structure_gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/gap"
+          }
+        },
+        "semantic_gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/gap"
+          }
+        },
+        "required_confirmations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]+$"
+          }
+        },
+        "checked_at": {
+          "type": "integer"
+        },
+        "data_validation": {
+          "type": "string",
+          "enum": [
+            "not_run"
+          ]
+        }
+      },
+      "required": [
+        "binding_ref",
+        "dictionary_ref",
+        "state",
+        "differences",
+        "structure_gaps",
+        "semantic_gaps",
+        "required_confirmations",
+        "checked_at",
+        "data_validation"
+      ],
+      "additionalProperties": false
+    },
+    "channels_describeResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "source_snapshot": {
+              "$ref": "#/%24defs/datasetSnapshot"
+            },
+            "checked_at": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_snapshot",
+            "checked_at"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "channels_previewResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "source_snapshot": {
+              "$ref": "#/%24defs/datasetSnapshot"
+            },
+            "dictionary": {
+              "oneOf": [
+                {
+                  "$ref": "#/%24defs/dictionary"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "field_map": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]+$"
+              }
+            },
+            "binding_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_dictionary_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "differences": {
+              "type": "array",
+              "items": {
+                "$ref": "#/%24defs/channelDifference"
+              }
+            },
+            "required_confirmations": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]+$"
+              }
+            },
+            "semantic_gaps": {
+              "type": "array",
+              "items": {
+                "$ref": "#/%24defs/gap"
+              }
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "unbound",
+                "pending",
+                "matched",
+                "mismatch",
+                "needs_confirmation"
+              ]
+            }
+          },
+          "required": [
+            "source_snapshot",
+            "dictionary",
+            "field_map",
+            "binding_ref",
+            "base_dictionary_ref",
+            "differences",
+            "required_confirmations",
+            "semantic_gaps",
+            "state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "channels_checkResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "binding_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dictionary_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "unbound",
+                "pending",
+                "matched",
+                "mismatch",
+                "needs_confirmation",
+                "unavailable"
+              ]
+            },
+            "differences": {
+              "type": "array",
+              "items": {
+                "$ref": "#/%24defs/channelDifference"
+              }
+            },
+            "structure_gaps": {
+              "type": "array",
+              "items": {
+                "$ref": "#/%24defs/gap"
+              }
+            },
+            "semantic_gaps": {
+              "type": "array",
+              "items": {
+                "$ref": "#/%24defs/gap"
+              }
+            },
+            "required_confirmations": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]+$"
+              }
+            },
+            "checked_at": {
+              "type": "integer"
+            },
+            "data_validation": {
+              "type": "string",
+              "enum": [
+                "not_run"
+              ]
+            }
+          },
+          "required": [
+            "binding_ref",
+            "dictionary_ref",
+            "state",
+            "differences",
+            "structure_gaps",
+            "semantic_gaps",
+            "required_confirmations",
+            "checked_at",
+            "data_validation"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "channels_applyResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "exact_reference": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "created_revision": {
+              "type": "boolean"
+            },
+            "source_snapshot": {
+              "$ref": "#/%24defs/datasetSnapshot"
+            },
+            "check": {
+              "$ref": "#/%24defs/channelCheckResult"
+            }
+          },
+          "required": [
+            "exact_reference",
+            "created_revision",
+            "source_snapshot",
+            "check"
           ],
           "additionalProperties": false
         }

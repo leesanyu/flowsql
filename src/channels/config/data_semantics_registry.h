@@ -8,6 +8,8 @@ namespace flowsql::channels::config {
 struct SemanticsSaveRequest {
     std::string kind, name, document_json, change_note;
     uint64_t expected_current_revision = 0, base_revision = 0;
+    // Internal only: set by channels/apply after re-observing the provider. Never imported from JSON.
+    bool source_observed = false;
 };
 struct SemanticsSaveResult {
     DataSemanticsSnapshotV1 snapshot;
@@ -35,6 +37,7 @@ class DataSemanticsRegistry : public IDataSemanticsRegistryV1 {
 
     int BindingLookup(const std::string& provider, const std::string& object, DataSemanticsSnapshotV1* out,
                       DataSemanticsErrorV1* error);
+    int ObservationTrusted(const std::string& reference, bool* trusted, DataSemanticsErrorV1* error);
     int References(const std::string& target, bool history, std::vector<SemanticsReferenceItem>* out,
                    DataSemanticsErrorV1* error);
 

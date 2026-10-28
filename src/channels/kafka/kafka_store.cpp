@@ -11,6 +11,7 @@
 #include <sqlite3.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <common/channel_dataset_arrow.hpp>
 #include <common/json_depth.hpp>
 #include <cstring>
 #include <memory>
@@ -179,7 +180,11 @@ void Store::Open(const std::string& path, const std::array<unsigned char, 32>& k
             "KEY,definition TEXT NOT NULL); CREATE TABLE IF NOT EXISTS channels(name TEXT PRIMARY KEY,connection_name "
             "TEXT NOT NULL REFERENCES connections(name),definition TEXT NOT NULL); CREATE TABLE IF NOT EXISTS "
             "secrets(id TEXT PRIMARY KEY,cipher BLOB NOT NULL); CREATE TABLE IF NOT EXISTS key_check(id INTEGER "
-            "PRIMARY KEY,cipher BLOB NOT NULL);");
+            "PRIMARY KEY,cipher BLOB NOT NULL); CREATE TABLE IF NOT EXISTS dataset_identities("
+            "kind TEXT NOT NULL,name TEXT NOT NULL,object_id TEXT NOT NULL,PRIMARY KEY(kind,name));"
+            "INSERT OR IGNORE INTO dataset_identities SELECT 'channels',name,lower(hex(randomblob(16))) FROM channels;"
+            "INSERT OR IGNORE INTO dataset_identities SELECT 'connections',name,lower(hex(randomblob(16))) FROM "
+            "connections;");
         Statement check(db_, "SELECT cipher FROM key_check WHERE id=1");
         if (check.Row())
             Require(Decrypt(check.At(0)) == "flowsql-kafka-key-v1", "SECRET_DECRYPTION_FAILED", 500);
@@ -479,6 +484,10 @@ Json Store::Mutate(const std::string& kind, const std::string& operation, Json r
             Statement remove(db_, "DELETE FROM " + kind + " WHERE name=?");
             remove.TextBind(1, name);
             remove.Row();
+            Statement identity(db_, "DELETE FROM dataset_identities WHERE kind=? AND name=?");
+            identity.TextBind(1, kind);
+            identity.TextBind(2, name);
+            identity.Row();
             Exec("COMMIT");
             return Parse("{\"removed\":true}");
         }
@@ -508,6 +517,13 @@ Json Store::Mutate(const std::string& kind, const std::string& operation, Json r
             insert.TextBind(3, Encode(request));
             insert.Row();
         }
+        if (operation == "add") {
+            Statement identity(db_, "INSERT INTO dataset_identities VALUES(?,?,?)");
+            identity.TextBind(1, kind);
+            identity.TextBind(2, name);
+            identity.TextBind(3, dataset::Token());
+            identity.Row();
+        }
         Exec("COMMIT");
         return Public(std::move(request), kind);
     } catch (...) {
@@ -534,6 +550,56 @@ Json Store::Query(const std::string& kind, const std::string& name, const std::s
     }
     result.AddMember("items", items, result.GetAllocator());
     return result;
+}
+Json Store::DescribeDataset(const rapidjson::Value& locator) {
+    using namespace dataset;
+    std::lock_guard<std::mutex> lock(mutex_);
+    Require(db_, "SOURCE_UNAVAILABLE", 503);
+    auto channel = Get("channels", dataset::Get(locator, "name"));
+    Require(Text(channel, "payload_kind") == "structured" && Text(channel, "role") != "sink", "UNSUPPORTED_SOURCE");
+    Require(channel.HasMember("payload_options") && channel["payload_options"].HasMember("source") &&
+                !channel["payload_options"]["source"].ObjectEmpty(),
+            "SOURCE_CONFIGURATION_REQUIRED");
+    auto config = ParseStructuredConfig(channel["payload_options"]["source"]);
+    auto connection = Get("connections", Text(channel, "connection_name"));
+    auto identity = [&](const std::string& kind, const std::string& name) {
+        Statement s(db_, "SELECT object_id FROM dataset_identities WHERE kind=? AND name=?");
+        s.TextBind(1, kind);
+        s.TextBind(2, name);
+        Require(s.Row(), "PERSISTENCE_FAILURE", 500);
+        return s.At(0);
+    };
+    const auto id = identity("channels", Text(channel, "name"));
+    Json metadata(rapidjson::kObjectType);
+    auto& a = metadata.GetAllocator();
+    Value by_field(rapidjson::kObjectType);
+    for (const auto& f : config.fields) {
+        Value m(rapidjson::kObjectType);
+        Set(m, "json_pointer", f.path, a);
+        if (!f.unit.empty()) {
+            Value unit(rapidjson::kObjectType);
+            Set(unit, "code", f.unit, a);
+            Set(unit, "label", f.unit, a);
+            m.AddMember("unit", unit, a);
+        }
+        by_field.AddMember(Value(f.name.c_str(), a), m, a);
+    }
+    for (const auto* n :
+         {"__kafka_topic", "__kafka_partition", "__kafka_offset", "__kafka_timestamp_ms", "__kafka_key"}) {
+        Value m(rapidjson::kObjectType);
+        Set(m, "definition", std::string("Kafka record metadata: ") + n, a);
+        by_field.AddMember(Value(n, a), m, a);
+    }
+    metadata.AddMember("fields", by_field, a);
+    Set(metadata, "entity", config.entity, a);
+    Set(metadata, "encoding", "json", a);
+    // Only dataset selection enters the non-secret revision; never resolve credentials or lease clients.
+    Json target(rapidjson::kObjectType);
+    auto& ta = target.GetAllocator();
+    Set(target, "connection_instance", identity("connections", Text(channel, "connection_name")), ta);
+    Set(target, "topic", Text(channel, "topic"), ta);
+    target.AddMember("bootstrap_servers", Copy(connection["bootstrap_servers"], ta), ta);
+    return Snapshot("kafka", id, locator, ArrowFields(*StructuredSchema(config), a), metadata, Canonical(target));
 }
 Binding Store::Acquire(const std::string& name, const std::string& usage) {
     std::lock_guard<std::mutex> lock(mutex_);

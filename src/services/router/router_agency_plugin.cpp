@@ -6,6 +6,7 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <common/metadata_http.hpp>
 
 #include <chrono>
 #include <cstdio>
@@ -64,6 +65,11 @@ int RouterAgencyPlugin::Load(IQuerier* querier) {
 }
 
 int RouterAgencyPlugin::Unload() {
+    Stop();
+    // Route callbacks own code from provider SOs; release them while every provider is still loaded.
+    route_table_.clear();
+    prefixes_.clear();
+    querier_ = nullptr;
     return 0;
 }
 
@@ -124,17 +130,15 @@ int RouterAgencyPlugin::CollectRoutes(IQuerier* querier) {
         return 0;
     });
 
-    // 从路由表提取一级前缀（用于 Gateway 注册）
+    // Each channel provider owns a separate control prefix, including in separate processes.
     for (const auto& [key, _] : route_table_) {
         auto colon = key.find(':');
         if (colon == std::string::npos) continue;
-        std::string uri = key.substr(colon + 1);
+        const auto uri = key.substr(colon + 1);
         if (uri.empty() || uri[0] != '/') continue;
-        // 取第一个路径段作为前缀，如 "/channels/database/add" → "/channels"
-        size_t second_slash = uri.find('/', 1);
-        std::string prefix = (second_slash != std::string::npos)
-                                 ? uri.substr(0, second_slash)
-                                 : uri;
+        size_t boundary = uri.find('/', 1);
+        if (uri.rfind("/channels/", 0) == 0) boundary = uri.find('/', 10);
+        const auto prefix = boundary == std::string::npos ? uri : uri.substr(0, boundary);
         prefixes_.insert(prefix);
     }
 
@@ -185,7 +189,15 @@ void RouterAgencyPlugin::Dispatch(const httplib::Request& req, httplib::Response
     std::string rsp_json;
     int32_t rc = error::INTERNAL_ERROR;
     try {
-        rc = it->second(req.path, req.body, rsp_json);
+        std::string body = req.body;
+        const auto deadline =
+            MetadataPath(req.path) ? MetadataDeadline(body, req.get_header_value(kMetadataDeadlineHeader)) : 0;
+        if (!MetadataRemaining(&body, deadline)) {
+            res.status = 504;
+            res.set_content(MetadataTimeoutJson(), "application/json");
+            return;
+        }
+        rc = it->second(req.path, body, rsp_json);
     } catch (const std::exception& e) {
         LOG_ERROR("RouterAgencyPlugin: handler exception: %s", e.what());
         rsp_json = R"({"error":"handler exception"})";
@@ -216,6 +228,8 @@ int RouterAgencyPlugin::HttpStatus(int32_t rc) {
         case error::CONFLICT:       return 409;
         case error::PAYLOAD_TOO_LARGE: return 413;
         case error::UNAVAILABLE:    return 503;
+        case error::TIMEOUT:
+            return 504;
         case error::INTERNAL_ERROR: return 500;
         default:                    return (rc >= 0) ? 200 : 500;
     }

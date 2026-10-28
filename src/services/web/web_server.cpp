@@ -27,6 +27,7 @@
 #include <common/log.h>
 #include <common/product_version.h>
 #include <common/json_depth.hpp>
+#include <common/metadata_http.hpp>
 #include <services/web/pcap_upload_transaction.hpp>
 
 namespace flowsql {
@@ -153,8 +154,21 @@ int32_t ProxyConfigPost(const std::string& host, int port, const std::string& pa
     client.set_connection_timeout(5);
     client.set_read_timeout(30);
     client.set_write_timeout(30);
-    const auto result = client.Post(path.c_str(), request, "application/json");
+    std::string body = request;
+    const auto deadline = MetadataPath(path) ? MetadataDeadline(body) : 0;
+    if (!MetadataRemaining(&body, deadline)) {
+        *response = MetadataTimeoutJson();
+        return error::TIMEOUT;
+    }
+    httplib::Headers headers;
+    if (deadline) headers.emplace(kMetadataDeadlineHeader, std::to_string(deadline));
+    MetadataHttpBudget budget(client, deadline);
+    const auto result = client.Post(path.c_str(), headers, body, "application/json");
     if (!result) {
+        if (deadline && MetadataNow() >= deadline) {
+            *response = MetadataTimeoutJson();
+            return error::TIMEOUT;
+        }
         *response = ConfigError("gateway unreachable");
         return error::UNAVAILABLE;
     }
@@ -170,6 +184,8 @@ int32_t ProxyConfigPost(const std::string& host, int port, const std::string& pa
         case 409: return error::CONFLICT;
         case 413: return error::PAYLOAD_TOO_LARGE;
         case 503: return error::UNAVAILABLE;
+        case 504:
+            return error::TIMEOUT;
         default: return error::INTERNAL_ERROR;
     }
 }
@@ -208,6 +224,8 @@ int ConfigHttpStatus(int32_t code) {
         case error::CONFLICT: return 409;
         case error::PAYLOAD_TOO_LARGE: return 413;
         case error::UNAVAILABLE: return 503;
+        case error::TIMEOUT:
+            return 504;
         default: return 500;
     }
 }
@@ -770,7 +788,8 @@ int WebServer::Init(const std::string& db_path) {
         });
     }
     for (const char* operation :
-         {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export"}) {
+         {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export", "channels/describe",
+          "channels/preview", "channels/check", "channels/apply"}) {
         const std::string target = std::string("/semantics/v1/") + operation;
         server_.Post("/api" + target, [this, target](const httplib::Request& req, httplib::Response& res) {
             std::string response;
@@ -1185,7 +1204,8 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
             }});
     }
     for (const char* operation :
-         {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export"}) {
+         {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export", "channels/describe",
+          "channels/preview", "channels/check", "channels/apply"}) {
         const std::string target = std::string("/semantics/v1/") + operation;
         cb({"POST", "/api" + target, [this, target](const auto&, const auto& request, auto& response) {
                 return ProxySemanticsPost(scheduler_host_, scheduler_port_, target, request, &response);

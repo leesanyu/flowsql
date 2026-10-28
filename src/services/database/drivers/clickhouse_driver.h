@@ -55,6 +55,7 @@ class __attribute__((visibility("default"))) ClickHouseDriver : public IDbDriver
     std::string password_;
     std::string database_;
     bool connected_ = false;
+    int64_t metadata_deadline_ = 0;
     std::string last_error_;
     std::shared_ptr<ClickHouseWriteTransport> write_transport_;
 };

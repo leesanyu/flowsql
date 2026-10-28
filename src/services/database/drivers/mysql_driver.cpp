@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <array>
 #include "../exploration_read.h"
+#include "../metadata_deadline.h"
 
 #include "../relation_adapters.h"
 
@@ -24,6 +25,19 @@
 
 namespace flowsql {
 namespace database {
+
+namespace {
+class MetadataMysqlSession final : public MysqlSession {
+ public:
+    MetadataMysqlSession(MysqlDriver* driver, MYSQL* conn, int64_t deadline)
+        : MysqlSession(driver, conn), budget_(conn->net.fd, deadline) {}
+    ~MetadataMysqlSession() override { snapshot_cancelled_ = true; }
+    void Cancel() override { CancelSnapshot(); }
+
+ private:
+    MetadataSocketDeadline budget_;
+};
+}  // namespace
 
 // ==================== MysqlResultSet 实现 ====================
 
@@ -565,7 +579,8 @@ int MysqlDriver::Connect(const std::unordered_map<std::string, std::string>& par
     it = params.find("timeout");
     if (it != params.end()) timeout_ = std::stoi(it->second);
 
-    auto factory = [this](std::string* error) -> MYSQL* {
+    const auto deadline = params.count("_dataset_deadline_ms") ? std::stoll(params.at("_dataset_deadline_ms")) : 0;
+    auto factory = [this, deadline](std::string* error) -> MYSQL* {
         MYSQL* conn = mysql_init(nullptr);
         if (!conn) {
             *error = "mysql_init failed";
@@ -573,6 +588,19 @@ int MysqlDriver::Connect(const std::unordered_map<std::string, std::string>& par
         }
         mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout_);
         mysql_options(conn, MYSQL_SET_CHARSET_NAME, charset_.c_str());
+        if (deadline) {
+            net_async_status status = NET_ASYNC_NOT_READY;
+            while (MetadataIoNow() < deadline) {
+                status = mysql_real_connect_nonblocking(conn, host_.c_str(), user_.c_str(), password_.c_str(),
+                                                        database_.c_str(), port_, nullptr, 0);
+                if (status != NET_ASYNC_NOT_READY) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (status == NET_ASYNC_COMPLETE && MetadataIoNow() < deadline) return conn;
+            *error = "metadata connection unavailable";
+            mysql_close(conn);
+            return nullptr;
+        }
         if (!mysql_real_connect(conn, host_.c_str(), user_.c_str(), password_.c_str(), database_.c_str(), port_,
                                 nullptr, 0)) {
             *error = mysql_error(conn);
@@ -624,6 +652,9 @@ std::shared_ptr<IDbSession> MysqlDriver::CreateSession() {
         return nullptr;
     }
 
+    if (atomic_parameters.count("_dataset_deadline_ms"))
+        return std::make_shared<MetadataMysqlSession>(this, conn,
+                                                      std::stoll(atomic_parameters.at("_dataset_deadline_ms")));
     return std::make_shared<MysqlSession>(this, conn);
 }
 

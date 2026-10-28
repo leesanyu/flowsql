@@ -1,6 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
+#include <common/channel_dataset.hpp>
+#include <common/metadata_http.hpp>
 #include "config_channel_plugin.h"
 
 #include <common/error_code.h>
@@ -77,8 +79,8 @@ bool ParseObject(const std::string& request, const std::unordered_set<std::strin
     return true;
 }
 
-bool ReadString(const rapidjson::Document& document, const char* name, bool required,
-                std::string* value, std::string* detail) {
+bool ReadString(const rapidjson::Document& document, const char* name, bool required, std::string* value,
+                std::string* detail) {
     const auto member = document.FindMember(name);
     if (member == document.MemberEnd()) {
         if (!required) return true;
@@ -93,8 +95,8 @@ bool ReadString(const rapidjson::Document& document, const char* name, bool requ
     return true;
 }
 
-bool ReadUint64(const rapidjson::Document& document, const char* name, bool required,
-                uint64_t* value, std::string* detail) {
+bool ReadUint64(const rapidjson::Document& document, const char* name, bool required, uint64_t* value,
+                std::string* detail) {
     const auto member = document.FindMember(name);
     if (member == document.MemberEnd()) {
         if (!required) return true;
@@ -137,9 +139,8 @@ int DecodeBase64(const std::string& encoded, std::string* decoded, std::string* 
         const bool fourth_padding = encoded[offset + 3] == '=';
         const int third = third_padding ? 0 : Base64Value(encoded[offset + 2]);
         const int fourth = fourth_padding ? 0 : Base64Value(encoded[offset + 3]);
-        if (first < 0 || second < 0 || third < 0 || fourth < 0 ||
-            (third_padding && !fourth_padding) || ((third_padding || fourth_padding) && !last) ||
-            (third_padding && (second & 0x0f) != 0) ||
+        if (first < 0 || second < 0 || third < 0 || fourth < 0 || (third_padding && !fourth_padding) ||
+            ((third_padding || fourth_padding) && !last) || (third_padding && (second & 0x0f) != 0) ||
             (fourth_padding && !third_padding && (third & 0x03) != 0)) {
             decoded->clear();
             *detail = "invalid Base64 content";
@@ -158,8 +159,7 @@ int DecodeBase64(const std::string& encoded, std::string* decoded, std::string* 
 }
 
 std::string EncodeBase64(const std::string& content) {
-    constexpr char alphabet[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string encoded;
     encoded.reserve(((content.size() + 2) / 3) * 4);
     for (size_t offset = 0; offset < content.size(); offset += 3) {
@@ -207,7 +207,66 @@ void WriteSnapshotMeta(Writer* writer, const ConfigChannelSnapshot& snapshot) {
 
 }  // namespace
 
+int ConfigChannelPlugin::DescribeDataset(const ChannelDatasetRequestV1& request, ChannelDatasetSnapshotV1* out,
+                                         DataSemanticsErrorV1* error) {
+    using namespace dataset;
+    *out = {};
+    Json locator;
+    locator.Parse(request.locator_json.c_str());
+    const auto kind = Get(locator, "kind");
+    const std::string provider = kind == "kafka_source" ? "kafka" : kind == "dataframe" ? "dataframe" : "database";
+    IChannelDatasetDescriptorV1* descriptor = nullptr;
+    if (querier_)
+        querier_->Traverse(IID_CHANNEL_DATASET_DESCRIPTOR_V1, [&](void* p) {
+            auto* candidate = static_cast<IChannelDatasetDescriptorV1*>(p);
+            if (provider == candidate->ProviderId()) {
+                descriptor = candidate;
+                return 1;
+            }
+            return 0;
+        });
+    if (descriptor) return descriptor->Describe(request, out, error);
+    const auto deadline = MetadataNow() + request.timeout_ms;
+    Json body(rapidjson::kObjectType);
+    body.AddMember("locator", Copy(locator, body.GetAllocator()), body.GetAllocator());
+    body.AddMember("timeout_ms", request.timeout_ms, body.GetAllocator());
+    httplib::Client client(gateway_host_, gateway_port_);
+    client.set_connection_timeout(std::chrono::milliseconds(request.timeout_ms));
+    client.set_read_timeout(std::chrono::milliseconds(request.timeout_ms));
+    client.set_write_timeout(std::chrono::milliseconds(request.timeout_ms));
+    MetadataHttpBudget budget(client, deadline);
+    const auto result =
+        client.Post(("/channels/" + provider + "/dataset/describe").c_str(),
+                    {{kMetadataDeadlineHeader, std::to_string(deadline)}}, Encode(body), "application/json");
+    if (!result)
+        return Fail(error, MetadataNow() >= deadline ? "SOURCE_TIMEOUT" : "SOURCE_UNAVAILABLE",
+                    "metadata provider unreachable");
+    Json response;
+    response.Parse(result->body.c_str());
+    if (!response.IsObject()) return Fail(error, "SOURCE_UNAVAILABLE", "invalid metadata response");
+    if (result->status != 200) {
+        if (response.HasMember("error") && response["error"].IsObject())
+            return Fail(error, Get(response["error"], "code", "SOURCE_UNAVAILABLE"), Get(response["error"], "message"));
+        return Fail(error, result->status == 504 ? "SOURCE_TIMEOUT" : "SOURCE_UNAVAILABLE",
+                    "metadata source unavailable");
+    }
+    if (!response.HasMember("data") || !response["data"].IsObject() || !response["data"].HasMember("snapshot"))
+        return Fail(error, "SOURCE_UNAVAILABLE", "metadata response has no snapshot");
+    out->document_json = std::make_shared<const std::string>(Encode(response["data"]["snapshot"]));
+    return 0;
+}
+
 void ConfigChannelPlugin::EnumRoutes(std::function<void(const RouteItem&)> callback) {
+    for (const char* operation : {"describe", "preview", "check", "apply"}) {
+        const std::string op(operation);
+        callback({"POST", "/semantics/v1/channels/" + op, [this, op](const auto&, const auto& request, auto& response) {
+                      ChannelDictionaryService service(*this, [this](const auto& req, auto* out, auto* error) {
+                          return DescribeDataset(req, out, error);
+                      });
+                      return service.Control(op, request, response);
+                  }});
+    }
+
     for (const char* operation :
          {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export"}) {
         const std::string op(operation);
@@ -215,31 +274,26 @@ void ConfigChannelPlugin::EnumRoutes(std::function<void(const RouteItem&)> callb
                       return DataSemanticsRegistry::Control(op, request, response);
                   }});
     }
-    callback({"POST", "/channels/config/list",
-              [this](const auto& uri, const auto& request, auto& response) {
+    callback({"POST", "/channels/config/list", [this](const auto& uri, const auto& request, auto& response) {
                   return HandleList(uri, request, response);
               }});
-    callback({"POST", "/channels/config/publish",
-              [this](const auto& uri, const auto& request, auto& response) {
+    callback({"POST", "/channels/config/publish", [this](const auto& uri, const auto& request, auto& response) {
                   return HandlePublish(uri, request, response);
               }});
-    callback({"POST", "/channels/config/history",
-              [this](const auto& uri, const auto& request, auto& response) {
+    callback({"POST", "/channels/config/history", [this](const auto& uri, const auto& request, auto& response) {
                   return HandleHistory(uri, request, response);
               }});
-    callback({"POST", "/channels/config/resolve",
-              [this](const auto& uri, const auto& request, auto& response) {
+    callback({"POST", "/channels/config/resolve", [this](const auto& uri, const auto& request, auto& response) {
                   return HandleResolve(uri, request, response);
               }});
 }
 
-int32_t ConfigChannelPlugin::HandlePublish(const std::string&, const std::string& request,
-                                           std::string& response) {
+int32_t ConfigChannelPlugin::HandlePublish(const std::string&, const std::string& request, std::string& response) {
     rapidjson::Document document;
     std::string detail;
     const std::unordered_set<std::string> allowed = {
-        "name", "expected_current_revision", "format", "schema_id", "content_base64",
-        "base_revision", "original_filename", "change_note"};
+        "name",          "expected_current_revision", "format",     "schema_id", "content_base64",
+        "base_revision", "original_filename",         "change_note"};
     if (!ParseObject(request, allowed, &document, &detail)) {
         response = ErrorJson(detail);
         return request.size() > kMaxControlRequestBytes ? error::PAYLOAD_TOO_LARGE : error::BAD_REQUEST;
@@ -247,8 +301,7 @@ int32_t ConfigChannelPlugin::HandlePublish(const std::string&, const std::string
     ConfigPublishRequest publish;
     std::string encoded;
     if (!ReadString(document, "name", true, &publish.name, &detail) ||
-        !ReadUint64(document, "expected_current_revision", true,
-                    &publish.expected_current_revision, &detail) ||
+        !ReadUint64(document, "expected_current_revision", true, &publish.expected_current_revision, &detail) ||
         !ReadString(document, "format", true, &publish.format, &detail) ||
         !ReadString(document, "schema_id", true, &publish.schema_id, &detail) ||
         !ReadString(document, "content_base64", true, &encoded, &detail) ||
@@ -288,8 +341,7 @@ int32_t ConfigChannelPlugin::HandlePublish(const std::string&, const std::string
     return error::OK;
 }
 
-int32_t ConfigChannelPlugin::HandleList(const std::string&, const std::string& request,
-                                        std::string& response) {
+int32_t ConfigChannelPlugin::HandleList(const std::string&, const std::string& request, std::string& response) {
     rapidjson::Document document;
     std::string detail;
     if (!ParseObject(request, {"cursor", "limit"}, &document, &detail)) {
@@ -317,24 +369,31 @@ int32_t ConfigChannelPlugin::HandleList(const std::string&, const std::string& r
     writer.StartArray();
     for (const auto& item : items) {
         writer.StartObject();
-        writer.Key("name"); writer.String(item.name.c_str());
-        writer.Key("current_revision"); writer.Uint64(item.current_revision);
-        writer.Key("format"); writer.String(item.format.c_str());
-        writer.Key("schema_id"); writer.String(item.schema_id.c_str());
-        writer.Key("sha256_hex"); writer.String(item.sha256_hex.c_str());
-        writer.Key("content_bytes"); writer.Uint64(item.content_bytes);
-        writer.Key("updated_at_unix_ms"); writer.Int64(item.updated_at_unix_ms);
+        writer.Key("name");
+        writer.String(item.name.c_str());
+        writer.Key("current_revision");
+        writer.Uint64(item.current_revision);
+        writer.Key("format");
+        writer.String(item.format.c_str());
+        writer.Key("schema_id");
+        writer.String(item.schema_id.c_str());
+        writer.Key("sha256_hex");
+        writer.String(item.sha256_hex.c_str());
+        writer.Key("content_bytes");
+        writer.Uint64(item.content_bytes);
+        writer.Key("updated_at_unix_ms");
+        writer.Int64(item.updated_at_unix_ms);
         writer.EndObject();
     }
     writer.EndArray();
-    writer.Key("next_cursor"); writer.String(next_cursor.c_str());
+    writer.Key("next_cursor");
+    writer.String(next_cursor.c_str());
     writer.EndObject();
     response = buffer.GetString();
     return error::OK;
 }
 
-int32_t ConfigChannelPlugin::HandleHistory(const std::string&, const std::string& request,
-                                           std::string& response) {
+int32_t ConfigChannelPlugin::HandleHistory(const std::string&, const std::string& request, std::string& response) {
     rapidjson::Document document;
     std::string detail;
     if (!ParseObject(request, {"name", "cursor", "limit"}, &document, &detail)) {
@@ -354,8 +413,7 @@ int32_t ConfigChannelPlugin::HandleHistory(const std::string&, const std::string
     }
     std::vector<ConfigRevisionListItem> items;
     uint64_t next_cursor = 0;
-    const int rc = ListHistory(name, before_revision, static_cast<uint32_t>(limit),
-                               &items, &next_cursor, &detail);
+    const int rc = ListHistory(name, before_revision, static_cast<uint32_t>(limit), &items, &next_cursor, &detail);
     if (rc != 0) {
         response = ErrorJson(detail);
         return ProviderError(rc);
@@ -367,16 +425,27 @@ int32_t ConfigChannelPlugin::HandleHistory(const std::string&, const std::string
     writer.StartArray();
     for (const auto& item : items) {
         writer.StartObject();
-        writer.Key("revision"); writer.Uint64(item.revision);
-        writer.Key("format"); writer.String(item.format.c_str());
-        writer.Key("schema_id"); writer.String(item.schema_id.c_str());
-        writer.Key("sha256_hex"); writer.String(item.sha256_hex.c_str());
-        writer.Key("content_bytes"); writer.Uint64(item.content_bytes);
-        writer.Key("created_at_unix_ms"); writer.Int64(item.created_at_unix_ms);
+        writer.Key("revision");
+        writer.Uint64(item.revision);
+        writer.Key("format");
+        writer.String(item.format.c_str());
+        writer.Key("schema_id");
+        writer.String(item.schema_id.c_str());
+        writer.Key("sha256_hex");
+        writer.String(item.sha256_hex.c_str());
+        writer.Key("content_bytes");
+        writer.Uint64(item.content_bytes);
+        writer.Key("created_at_unix_ms");
+        writer.Int64(item.created_at_unix_ms);
         writer.Key("base_revision");
-        if (item.base_revision) writer.Uint64(item.base_revision); else writer.Null();
-        writer.Key("original_filename"); writer.String(item.original_filename.c_str());
-        writer.Key("change_note"); writer.String(item.change_note.c_str());
+        if (item.base_revision)
+            writer.Uint64(item.base_revision);
+        else
+            writer.Null();
+        writer.Key("original_filename");
+        writer.String(item.original_filename.c_str());
+        writer.Key("change_note");
+        writer.String(item.change_note.c_str());
         writer.EndObject();
     }
     writer.EndArray();
@@ -388,8 +457,7 @@ int32_t ConfigChannelPlugin::HandleHistory(const std::string&, const std::string
     return error::OK;
 }
 
-int32_t ConfigChannelPlugin::HandleResolve(const std::string&, const std::string& request,
-                                           std::string& response) {
+int32_t ConfigChannelPlugin::HandleResolve(const std::string&, const std::string& request, std::string& response) {
     rapidjson::Document document;
     std::string detail;
     if (!ParseObject(request, {"exact_reference"}, &document, &detail)) {
@@ -410,7 +478,8 @@ int32_t ConfigChannelPlugin::HandleResolve(const std::string&, const std::string
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     writer.StartObject();
-    writer.Key("exact_reference"); writer.String(reference.c_str());
+    writer.Key("exact_reference");
+    writer.String(reference.c_str());
     WriteSnapshotMeta(&writer, snapshot);
     writer.Key("content_base64");
     const std::string encoded = EncodeBase64(*snapshot.content);

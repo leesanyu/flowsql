@@ -768,6 +768,398 @@
           }
         }
       }
+    },
+    "/channels/describe": {
+      "post": {
+        "operationId": "describeChannelDataset",
+        "summary": "Channel dictionary describe",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/$defs/channels_describeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/channels_describeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict or confirmation required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Source unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Source timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/channels/preview": {
+      "post": {
+        "operationId": "previewChannelDictionary",
+        "summary": "Channel dictionary preview",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/$defs/channels_previewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/channels_previewResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict or confirmation required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Source unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Source timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/channels/check": {
+      "post": {
+        "operationId": "checkChannelDictionaryBinding",
+        "summary": "Channel dictionary check",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/$defs/channels_checkRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/channels_checkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict or confirmation required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Source unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Source timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/channels/apply": {
+      "post": {
+        "operationId": "applyChannelDictionaryBinding",
+        "summary": "Channel dictionary apply",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/$defs/channels_applyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/channels_applyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict or confirmation required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Source unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Source timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

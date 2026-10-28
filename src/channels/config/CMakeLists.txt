@@ -1,6 +1,7 @@
 project(flowsql_config_channel)
 
 add_library(${PROJECT_NAME} SHARED
+    channel_dictionary.cpp
     data_semantics_control.cpp
     data_semantics_model.cpp
     data_semantics_registry.cpp
@@ -10,7 +11,7 @@ add_library(${PROJECT_NAME} SHARED
     plugin_register.cpp
 )
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR})
-add_thirddepen(${PROJECT_NAME} rapidjson sqlite yaml-cpp)
+add_thirddepen(${PROJECT_NAME} rapidjson sqlite yaml-cpp httplib)
 find_package(OpenSSL REQUIRED)
 target_link_libraries(${PROJECT_NAME} OpenSSL::Crypto)
 set_target_properties(${PROJECT_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)

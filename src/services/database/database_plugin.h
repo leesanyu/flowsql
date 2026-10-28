@@ -6,6 +6,7 @@
 
 #include <common/error_code.h>
 #include <common/iplugin.h>
+#include <framework/interfaces/ichannel_dataset_descriptor.h>
 #include <framework/interfaces/idatabase_factory.h>
 #include <framework/interfaces/irouter_handle.h>
 
@@ -24,6 +25,7 @@ namespace database {
 class __attribute__((visibility("default"))) DatabasePlugin : public IPlugin,
                                                               public IDatabaseFactory,
                                                               public IDatabaseChannelLeaseProviderV1,
+                                                              public IChannelDatasetDescriptorV1,
                                                               public IRouterHandle {
  public:
     DatabasePlugin() = default;
@@ -51,6 +53,10 @@ class __attribute__((visibility("default"))) DatabasePlugin : public IPlugin,
 
     // IRouterHandle — 声明 /channels/database/* 路由
     void EnumRoutes(std::function<void(const RouteItem&)> callback) override;
+
+    const char* ProviderId() const override { return "database"; }
+    int Describe(const ChannelDatasetRequestV1& request, ChannelDatasetSnapshotV1* out,
+                 DataSemanticsErrorV1* error) override;
 
  private:
     // 路由处理（fnRouterHandler 签名）

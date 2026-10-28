@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026 LIHUO. All rights reserved.
 # Licensed under the MIT License.
-"""Read a manually registered object's exact semantics through published OpenAPI."""
+"""Read a registered dataset's exact semantics through published OpenAPI."""
 import argparse
 import json
 import urllib.error

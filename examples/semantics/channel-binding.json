@@ -1,0 +1,74 @@
+{
+  "schema_id": "flowsql.data-binding.v2",
+  "object_key": {
+    "provider_id": "manual",
+    "object_id": "app.requests"
+  },
+  "object_label": "应用请求声明",
+  "dictionary_ref": "dictionary.app.requests@1",
+  "field_map": {
+    "request_id": "id",
+    "elapsed": "elapsed_ms"
+  },
+  "declared_schema": [
+    {
+      "name": "id",
+      "type": {
+        "system": "arrow",
+        "name": "utf8",
+        "parameters": {}
+      },
+      "nullable": false
+    },
+    {
+      "name": "elapsed_ms",
+      "type": {
+        "system": "arrow",
+        "name": "float64",
+        "parameters": {}
+      },
+      "nullable": true
+    }
+  ],
+  "source_snapshot": {
+    "schema_id": "flowsql.channel-dataset.v1",
+    "object_key": {
+      "provider_id": "manual",
+      "object_id": "app.requests"
+    },
+    "locator": {
+      "kind": "dataframe",
+      "name": "requests"
+    },
+    "source_revision": "example-source-v1",
+    "identity_state": "known",
+    "schema_state": "known",
+    "fields": [
+      {
+        "name": "id",
+        "type": {
+          "system": "arrow",
+          "name": "utf8",
+          "parameters": {}
+        },
+        "nullable": false
+      },
+      {
+        "name": "elapsed_ms",
+        "type": {
+          "system": "arrow",
+          "name": "float64",
+          "parameters": {}
+        },
+        "nullable": true
+      }
+    ],
+    "schema_fingerprint": "1b6f2fb94c666e3b75990dc780a453d1d3ad59aa4223161514bce5a9f9535dd7",
+    "producer_metadata": {},
+    "structure_gaps": []
+  },
+  "confirmation": {
+    "source_revision": "example-source-v1",
+    "items": []
+  }
+}

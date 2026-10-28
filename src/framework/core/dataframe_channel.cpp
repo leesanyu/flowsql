@@ -65,6 +65,7 @@ int DataFrameChannel::Write(IDataFrame* df) {
         data_.FromArrow(batch);
     }
     RefreshSchemaCacheLocked();
+    ++replacement_generation_;
     return 0;
 }
 
@@ -130,6 +131,13 @@ int DataFrameChannel::Append(IDataFrame* df) {
     }
     RefreshSchemaCacheLocked();
     return 0;
+}
+
+DataFrameMetadataV1 DataFrameChannel::DescribeMetadata() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto batch = data_.ToArrow();
+    return {batch ? batch->schema() : nullptr, replacement_generation_, false,
+            opened_ ? std::string() : "SOURCE_UNAVAILABLE"};
 }
 
 int DataFrameChannel::Read(IDataFrame* df) {

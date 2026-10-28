@@ -172,6 +172,7 @@ int LazyDataFrameChannel::Write(IDataFrame* frame) {
     if (replacement->Write(frame) != 0) return -1;
     if (load_cancelled_) load_cancelled_->store(true);
     data_ = std::move(replacement);
+    ++replacement_generation_;
     state_ = "loaded";
     error_.clear();
     changed_.notify_all();
@@ -188,6 +189,26 @@ int LazyDataFrameChannel::CaptureSnapshot(const DataFrameSnapshotRequestV1& requ
     return dynamic_cast<IDataFrameSnapshotReaderV1*>(data.get())
         ->CaptureSnapshot(request, output, retained_bytes, error);
 }
+DataFrameMetadataV1 LazyDataFrameChannel::DescribeMetadata() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    DataFrameMetadataV1 result;
+    result.replacement_generation = replacement_generation_;
+    if (!opened_ || retired_)
+        result.error = "SOURCE_UNAVAILABLE";
+    else if (state_ == "failed")
+        result.error = error_;
+    else if (!data_)
+        result.pending = true;
+    else {
+        auto* reader = dynamic_cast<IDataFrameMetadataV1*>(data_.get());
+        if (reader)
+            result.schema = reader->DescribeMetadata().schema;
+        else
+            result.error = "METADATA_UNSUPPORTED";
+    }
+    return result;
+}
+
 LazyDataFrameChannel::Metadata LazyDataFrameChannel::Describe() {
     std::lock_guard<std::mutex> lock(mutex_);
     Metadata result{state_, error_, -1, {}};
