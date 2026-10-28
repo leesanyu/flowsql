@@ -1,0 +1,89 @@
+{
+  "schema_id": "flowsql.data-dictionary.v1",
+  "title": "应用请求",
+  "description": {
+    "state": "declared",
+    "value": "人工声明的请求记录结构",
+    "origin": "manual"
+  },
+  "entity": {
+    "row_meaning": {
+      "state": "declared",
+      "value": "一行表示一次请求",
+      "origin": "manual"
+    },
+    "row_semantics": {
+      "state": "declared",
+      "value": "event",
+      "origin": "manual"
+    },
+    "identity_fields": {
+      "state": "declared",
+      "value": [
+        "request_id"
+      ],
+      "origin": "manual"
+    },
+    "limitations": {
+      "state": "declared",
+      "value": [
+        "未检查实际业务数据"
+      ],
+      "origin": "manual"
+    }
+  },
+  "fields": [
+    {
+      "field_id": "request_id",
+      "name": "id",
+      "type": {
+        "system": "arrow",
+        "name": "utf8",
+        "parameters": {}
+      },
+      "nullable": false,
+      "title": "请求标识",
+      "role": {
+        "state": "declared",
+        "value": "identity",
+        "origin": "manual"
+      }
+    },
+    {
+      "field_id": "elapsed",
+      "name": "elapsed_ms",
+      "type": {
+        "system": "arrow",
+        "name": "float64",
+        "parameters": {}
+      },
+      "nullable": true,
+      "title": "请求耗时",
+      "definition": {
+        "state": "declared",
+        "value": "请求经过时间",
+        "origin": "manual"
+      },
+      "unit": {
+        "state": "declared",
+        "value": {
+          "code": "ms",
+          "label": "毫秒"
+        },
+        "origin": "manual"
+      },
+      "null_meaning": {
+        "state": "declared",
+        "value": "未测量，不等于零",
+        "origin": "manual"
+      },
+      "standard_refs": {
+        "state": "declared",
+        "value": [
+          "standard.request.duration@1"
+        ],
+        "origin": "manual"
+      }
+    }
+  ]
+}

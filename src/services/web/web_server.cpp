@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #include "web_server.h"
+#include "data_semantics_api_schema.h"
+#include "data_semantics_schema.h"
 #include "exploration_proxy.hpp"
 
 #include <rapidjson/document.h>
@@ -170,6 +172,28 @@ int32_t ProxyConfigPost(const std::string& host, int port, const std::string& pa
         case 503: return error::UNAVAILABLE;
         default: return error::INTERNAL_ERROR;
     }
+}
+
+int32_t ProxySemanticsPost(const std::string& host, int port, const std::string& path, const std::string& request,
+                           std::string* response) {
+    auto code = ProxyConfigPost(host, port, path, request, response);
+    if (code == error::OK) return code;
+    rapidjson::Document parsed;
+    parsed.Parse(response->c_str());
+    if (!parsed.HasParseError() && parsed.IsObject() && parsed.HasMember("error") && parsed["error"].IsObject())
+        return code;
+    const char* label = code == error::PAYLOAD_TOO_LARGE ? "LIMIT_EXCEEDED" : "UNAVAILABLE";
+    if (code != error::PAYLOAD_TOO_LARGE) code = error::UNAVAILABLE;
+    *response = std::string("{\"error\":{\"code\":\"") + label +
+                "\",\"message\":\"semantics provider unavailable or control request exceeds "
+                "limit\",\"field_path\":\"\",\"details\":{}}}";
+    return code;
+}
+const char* SemanticsContract(const std::string& name) {
+    using namespace flowsql::channels::config;
+    if (name == "openapi.json") return kSemanticsOpenApi;
+    if (name == "api.schema.json") return kSemanticsApiSchema;
+    return kSemanticsSchema;
 }
 
 int ConfigHttpStatus(int32_t code) {
@@ -740,6 +764,21 @@ int WebServer::Init(const std::string& db_path) {
             res.set_content(response, "application/json");
         });
     }
+    for (const char* name : {"openapi.json", "api.schema.json", "documents.schema.json"}) {
+        server_.Get(std::string("/api/semantics/v1/") + name, [name](const httplib::Request&, httplib::Response& res) {
+            res.set_content(SemanticsContract(name), "application/json");
+        });
+    }
+    for (const char* operation :
+         {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export"}) {
+        const std::string target = std::string("/semantics/v1/") + operation;
+        server_.Post("/api" + target, [this, target](const httplib::Request& req, httplib::Response& res) {
+            std::string response;
+            const auto code = ProxySemanticsPost(scheduler_host_, scheduler_port_, target, req.body, &response);
+            res.status = ConfigHttpStatus(code);
+            res.set_content(response, "application/json");
+        });
+    }
     for (const char* operation : {"list", "publish", "history", "resolve"}) {
         const std::string target = std::string("/channels/config/") + operation;
         server_.Post(std::string("/api") + target, [this, target](const httplib::Request& req, httplib::Response& res) {
@@ -1137,6 +1176,19 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
         const std::string target = std::string("/channels/kafka/") + operation;
         cb({"POST", "/api" + target, [this, target](const std::string&, const std::string& req, std::string& rsp) {
                 return ProxyConfigPost(scheduler_host_, scheduler_port_, target, req, &rsp);
+            }});
+    }
+    for (const char* name : {"openapi.json", "api.schema.json", "documents.schema.json"}) {
+        cb({"GET", std::string("/api/semantics/v1/") + name, [name](const auto&, const auto&, auto& response) {
+                response = SemanticsContract(name);
+                return error::OK;
+            }});
+    }
+    for (const char* operation :
+         {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export"}) {
+        const std::string target = std::string("/semantics/v1/") + operation;
+        cb({"POST", "/api" + target, [this, target](const auto&, const auto& request, auto& response) {
+                return ProxySemanticsPost(scheduler_host_, scheduler_port_, target, request, &response);
             }});
     }
     for (const char* operation : {"list", "publish", "history", "resolve"}) {

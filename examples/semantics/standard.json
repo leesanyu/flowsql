@@ -1,0 +1,22 @@
+{
+  "schema_id": "flowsql.data-standard.v1",
+  "title": "请求耗时",
+  "definition": {
+    "state": "declared",
+    "value": "一次请求从开始到结束的经过时间",
+    "origin": "manual"
+  },
+  "scope": {
+    "state": "declared",
+    "value": "应用请求",
+    "origin": "manual"
+  },
+  "unit": {
+    "state": "declared",
+    "value": {
+      "code": "ms",
+      "label": "毫秒"
+    },
+    "origin": "manual"
+  }
+}

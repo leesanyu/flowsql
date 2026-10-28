@@ -10,7 +10,7 @@ file(GLOB WEB_PLUGIN_SRCS
 
 add_library(flowsql_web SHARED ${WEB_PLUGIN_SRCS})
 add_dependencies(flowsql_web flowsql_version)
-target_include_directories(flowsql_web PUBLIC ${CMAKE_SOURCE_DIR})
+target_include_directories(flowsql_web PUBLIC ${CMAKE_SOURCE_DIR} PRIVATE ${CMAKE_BINARY_DIR}/channels/config)
 add_thirddepen(flowsql_web httplib rapidjson sqlite)
 # Web 不需要 flowsql_common（不使用 DataFrame 等公共基础设施）
 set_target_properties(flowsql_web PROPERTIES

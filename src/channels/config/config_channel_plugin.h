@@ -12,13 +12,18 @@
 #include <string>
 
 #include "config_channel_provider.h"
+#include "data_semantics_registry.h"
 
 namespace flowsql::channels::config {
 
 class ConfigChannelPlugin final : public IPlugin,
                                   public ConfigChannelProvider,
+                                  public DataSemanticsRegistry,
                                   public IRouterHandle {
  public:
+    using ConfigChannelProvider::Close;
+    using ConfigChannelProvider::Open;
+    using ConfigChannelProvider::Resolve;
     int Option(const char* option) override {
         constexpr char prefix[] = "db_path=";
         if (!option || std::string(option).compare(0, sizeof(prefix) - 1, prefix) != 0) return EINVAL;
@@ -28,13 +33,22 @@ class ConfigChannelPlugin final : public IPlugin,
 
     int Load(IQuerier*) override {
         std::string error;
-        const int rc = Open(db_path_, &error);
+        int rc = ConfigChannelProvider::Open(db_path_, &error);
+        if (rc == 0) {
+            DataSemanticsErrorV1 semantics_error;
+            rc = DataSemanticsRegistry::Open(db_path_, &semantics_error);
+            if (rc != 0) {
+                error = semantics_error.message;
+                ConfigChannelProvider::Close();
+            }
+        }
         if (rc != 0) std::fprintf(stderr, "ConfigChannelPlugin::Load: %s\n", error.c_str());
         return rc;
     }
 
     int Unload() override {
-        Close();
+        DataSemanticsRegistry::Close();
+        ConfigChannelProvider::Close();
         return 0;
     }
 

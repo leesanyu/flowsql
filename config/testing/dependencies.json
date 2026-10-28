@@ -463,6 +463,15 @@
       "resources": [
         "visualization_dataframe_transfer"
       ]
+    },
+    "test_data_semantics_browser": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http",
+        "visualization_browser"
+      ]
     }
   }
 }

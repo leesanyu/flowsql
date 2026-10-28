@@ -116,3 +116,21 @@ Kafka 结构化数据面单独注册 `test_kafka_source_native/docker`，复用�
 
 本次容器运行或交付契约需要真实镜像验收时，才将其纳入清单；不得因仓库存在 Docker 配置就要求每个 Feature 构建或启动镜像。执行时需 Docker Engine 权限及通过身份校验的完整构建，使用专用本地镜像和容器，不挂载业务卷，检查所选 CLI、Worker、Web、静态版本与 OCI 标签契约。
 上述定向检查的覆盖以所选清单为准；是否执行全量 `all` 遵循本文开头的适用条件。版本规则和发布操作见[版本说明](versioning.md)。
+
+`test_data_semantics_api` 使用临时 SQLite、随机回环端口和实际 Config/Web/Gateway/Router 动态库，
+需要本地 socket 权限、Python `jsonschema` 与 `PyYAML`。`test_data_semantics_host` 是该用例的隔离进程夹具，
+通过 stdin 结束；既有用户服务、配置与业务数据不参与测试。用例从发布的 OpenAPI/Schema 校验实际 HTTP 内容，
+依赖缺失或监听失败均非零退出；无数据库/Kafka 凭证依赖。可使用
+`tools/test.sh unit --location native --filter '^(test_data_semantics_api|test_data_semantics|test_config_channel|test_config_channel_e2e)$' --jobs 1`。
+
+`test_data_semantics_browser` 复用上述隔离链路并以本地缓存 Chromium 打开实际编译的 Vue 页面，覆盖标准/字典/人工绑定、历史/引用、冲突保留、保存/应用部分成功、结构编辑及 JSON/YAML 交换。需要 Node、`~/.cache/ms-playwright/chromium_headless_shell-*`（可用 `FLOWSQL_TEST_CHROMIUM` 指定可执行文件）、socket/浏览器进程权限；不自动下载浏览器，无外部数据库依赖。先构建 `test_data_semantics_host`（包含前端静态包），再运行 `tools/test.sh unit --location native --filter '^test_data_semantics_api$' --jobs 1；tools/test.sh integration --location native --filter '^test_data_semantics_browser$' --jobs 1`。
+
+标准与字典完整 Feature 验收使用有筛选的 `all`，同时包括普通单测及已登记的浏览器环境夹具：
+
+```bash
+cmake --build build --target test_data_semantics_host test_data_semantics test_config_channel test_config_channel_e2e test_router flowsql_runtime_config -j4
+tools/test.sh all --location native --filter '^(test_data_semantics_browser|test_data_semantics_api|test_data_semantics|test_config_channel|test_config_channel_e2e|test_router)$' --jobs 1
+node --test --test-isolation=none src/frontend/src/utils/dataSemantics.test.js src/frontend/src/utils/configChannel.test.js src/frontend/src/api/configChannel.test.js
+```
+
+该清单覆盖 A1～A8、两个 HTTP 客户端并发、引用事务中途失败、跨进程恢复、HTTP/IID 摘要一致、旧配置字节保持及 OpenAPI 普通客户端消费。只使用临时 SQLite、随机回环端口与缓存 Chromium；无外部数据库/Kafka、模型或容器依赖。产物/源码摘要和页面诊断放在 `evidence/data-semantics-registry/`，标准 runner 清单位于 `evidence/test-environment/<run_id>/`，均不提交。

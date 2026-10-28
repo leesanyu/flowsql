@@ -7,7 +7,8 @@
 #include "config_channel_plugin.h"
 
 BEGIN_PLUGIN_REGIST(flowsql::channels::config::ConfigChannelPlugin)
-    ____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
-    ____INTERFACE(flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1, flowsql::IConfigChannelRegistryV1)
-    ____INTERFACE(flowsql::IID_ROUTER_HANDLE, flowsql::IRouterHandle)
+____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
+____INTERFACE(flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1, flowsql::IConfigChannelRegistryV1)
+____INTERFACE(flowsql::IID_DATA_SEMANTICS_REGISTRY_V1, flowsql::IDataSemanticsRegistryV1)
+____INTERFACE(flowsql::IID_ROUTER_HANDLE, flowsql::IRouterHandle)
 END_PLUGIN_REGIST()

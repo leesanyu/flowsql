@@ -1,0 +1,33 @@
+{
+  "schema_id": "flowsql.data-binding.v1",
+  "object_key": {
+    "provider_id": "manual",
+    "object_id": "app.requests"
+  },
+  "object_label": "应用请求声明",
+  "dictionary_ref": "dictionary.app.requests@1",
+  "field_map": {
+    "request_id": "id",
+    "elapsed": "elapsed_ms"
+  },
+  "declared_schema": [
+    {
+      "name": "id",
+      "type": {
+        "system": "arrow",
+        "name": "utf8",
+        "parameters": {}
+      },
+      "nullable": false
+    },
+    {
+      "name": "elapsed_ms",
+      "type": {
+        "system": "arrow",
+        "name": "float64",
+        "parameters": {}
+      },
+      "nullable": true
+    }
+  ]
+}

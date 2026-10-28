@@ -35,6 +35,9 @@ add_custom_target(flowsql_runtime_config
         "-DDESTINATION=${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/flowsql.yml"
         -P ${FLOWSQL_RUNTIME_CONFIG_INITIALIZER}
     COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/stage_runtime.cmake
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/semantics
+        ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/semantics
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${FLOWSQL_NPI_PROTOCOLS_SOURCE}
         ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/protocols.yml

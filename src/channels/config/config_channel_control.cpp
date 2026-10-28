@@ -208,6 +208,13 @@ void WriteSnapshotMeta(Writer* writer, const ConfigChannelSnapshot& snapshot) {
 }  // namespace
 
 void ConfigChannelPlugin::EnumRoutes(std::function<void(const RouteItem&)> callback) {
+    for (const char* operation :
+         {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export"}) {
+        const std::string op(operation);
+        callback({"POST", "/semantics/v1/" + op, [this, op](const auto&, const auto& request, auto& response) {
+                      return DataSemanticsRegistry::Control(op, request, response);
+                  }});
+    }
     callback({"POST", "/channels/config/list",
               [this](const auto& uri, const auto& request, auto& response) {
                   return HandleList(uri, request, response);

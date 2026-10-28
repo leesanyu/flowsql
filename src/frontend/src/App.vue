@@ -18,6 +18,7 @@
       >
         <el-menu-item index="/dashboard">仪表盘</el-menu-item>
         <el-menu-item index="/channels">通道管理</el-menu-item>
+        <el-menu-item index="/semantics">标准与字典</el-menu-item>
         <el-menu-item index="/operators">算子管理</el-menu-item>
         <el-menu-item index="/tasks">SQL 工作台</el-menu-item>
         <el-menu-item index="/explore">数据探索</el-menu-item>

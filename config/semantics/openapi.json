@@ -1,0 +1,773 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "FlowSQL 标准与字典管理",
+    "version": "1.0.0",
+    "description": "人工声明与检查结果独立；不执行业务数据验证。精确版本不可变。"
+  },
+  "servers": [
+    {
+      "url": "/api/semantics/v1"
+    }
+  ],
+  "paths": {
+    "/list": {
+      "post": {
+        "operationId": "listDataSemantics",
+        "summary": "list",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/%24defs/listRequest"
+              },
+              "example": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/listResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/resolve": {
+      "post": {
+        "operationId": "resolveDataSemantics",
+        "summary": "resolve",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/%24defs/resolveRequest"
+              },
+              "example": {
+                "exact_reference": "dictionary.app.requests@1"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/resolveResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/history": {
+      "post": {
+        "operationId": "listDataSemanticsHistory",
+        "summary": "history",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/%24defs/historyRequest"
+              },
+              "example": {
+                "kind": "dictionary",
+                "name": "app.requests"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/historyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/save": {
+      "post": {
+        "operationId": "saveDataSemantics",
+        "summary": "save",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/%24defs/saveRequest"
+              },
+              "example": {
+                "kind": "standard",
+                "name": "request.duration",
+                "expected_current_revision": 0,
+                "document": {
+                  "schema_id": "flowsql.data-standard.v1",
+                  "title": "请求耗时",
+                  "definition": {
+                    "state": "declared",
+                    "value": "一次请求从开始到结束的经过时间",
+                    "origin": "manual"
+                  },
+                  "scope": {
+                    "state": "declared",
+                    "value": "应用请求",
+                    "origin": "manual"
+                  },
+                  "unit": {
+                    "state": "declared",
+                    "value": {
+                      "code": "ms",
+                      "label": "毫秒"
+                    },
+                    "origin": "manual"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/saveResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/references": {
+      "post": {
+        "operationId": "listDataSemanticsReferences",
+        "summary": "references",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/%24defs/referencesRequest"
+              },
+              "example": {
+                "exact_reference": "standard.request.duration@1"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/referencesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/binding_lookup": {
+      "post": {
+        "operationId": "lookupDataSemanticsBinding",
+        "summary": "binding_lookup",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/%24defs/binding_lookupRequest"
+              },
+              "example": {
+                "object_key": {
+                  "provider_id": "manual",
+                  "object_id": "app.requests"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/binding_lookupResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/import": {
+      "post": {
+        "operationId": "importDataSemantics",
+        "summary": "import",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/%24defs/importRequest"
+              },
+              "example": {
+                "kind": "standard",
+                "name": "request.duration",
+                "format": "json",
+                "content": "{\n  \"schema_id\": \"flowsql.data-standard.v1\",\n  \"title\": \"请求耗时\",\n  \"definition\": {\n    \"state\": \"declared\",\n    \"value\": \"一次请求从开始到结束的经过时间\",\n    \"origin\": \"manual\"\n  },\n  \"scope\": {\n    \"state\": \"declared\",\n    \"value\": \"应用请求\",\n    \"origin\": \"manual\"\n  },\n  \"unit\": {\n    \"state\": \"declared\",\n    \"value\": {\n      \"code\": \"ms\",\n      \"label\": \"毫秒\"\n    },\n    \"origin\": \"manual\"\n  }\n}\n"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/importResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/export": {
+      "post": {
+        "operationId": "exportDataSemantics",
+        "summary": "export",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/%24defs/exportRequest"
+              },
+              "example": {
+                "exact_reference": "standard.request.duration@1",
+                "format": "yaml"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/exportResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Structured error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

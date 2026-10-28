@@ -1,0 +1,7 @@
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
+#pragma once
+namespace flowsql::channels::config {
+inline constexpr char kSemanticsApiSchema[] = R"SEMANTICS(@FLOWSQL_SEMANTICS_API_SCHEMA@)SEMANTICS";
+inline constexpr char kSemanticsOpenApi[] = R"SEMANTICS(@FLOWSQL_SEMANTICS_OPENAPI@)SEMANTICS";
+}
