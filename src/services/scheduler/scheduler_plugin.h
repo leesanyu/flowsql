@@ -25,6 +25,7 @@
 #include <framework/interfaces/ibridge.h>
 #include <framework/interfaces/icpp_operator_plugin_registry.h>
 #include <framework/interfaces/idataframe_channel.h>
+#include <framework/interfaces/ioperator_contract_catalog.h>
 #include <framework/interfaces/irouter_handle.h>
 #include <framework/interfaces/ischeduler_control_service.h>
 #include <framework/interfaces/istream_channel.h>
@@ -105,6 +106,7 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
     int32_t HandleModifyStreamChannel(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleResetStreamChannel(const std::string& uri, const std::string& req, std::string& rsp);
     int32_t HandleRemoveStreamChannel(const std::string& uri, const std::string& req, std::string& rsp);
+    int32_t HandleOperatorContractCheck(const std::string&, const std::string&, std::string&);
     int32_t HandleRefreshOperators(const std::string& uri, const std::string& req, std::string& rsp);
 
     // 通道管理
@@ -138,6 +140,7 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
     struct BlockTransformProviderRef {
         IBlockTransformOperatorV1* v1 = nullptr;
         IBlockTransformOperatorV2* v2 = nullptr;
+        OperatorComponentContractV1 component;
 
         explicit operator bool() const { return v1 || v2; }
     };
@@ -167,14 +170,16 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
                                       BlockExecutionTerminal* terminal, int64_t* rows_affected,
                                       std::string* managed_result_json, std::string* error,
                                       std::shared_ptr<IDatabaseChannel> database_source = {},
-                                      std::shared_ptr<IDataFrameChannel> dataframe_source = {});
+                                      std::shared_ptr<IDataFrameChannel> dataframe_source = {},
+                                      std::string* contract_checks = nullptr);
     int ExecuteSingleBlockTransformPipeline(
         IBlockStreamChannel* source, BlockTransformProviderRef provider, IDataFrameChannel* sink,
         const BlockTransformManagedSinkBindingV1* managed_sink, const SqlStatement& stmt,
         const std::shared_ptr<const BoundFilterExpr>& source_residual, BlockExecutionTerminal* terminal,
         int64_t* rows_affected, std::string* managed_result_json, std::string* error,
         std::shared_ptr<IDatabaseChannel> database_source = {},
-        std::shared_ptr<IDataFrameChannel> dataframe_source = {}, IResultSinkWriterV1* result_sink = nullptr);
+        std::shared_ptr<IDataFrameChannel> dataframe_source = {}, IResultSinkWriterV1* result_sink = nullptr,
+        std::string* contract_checks = nullptr);
 
     int32_t ExecuteResultSink(IChannel*, const SqlStatement&, const std::shared_ptr<const BoundFilterExpr>&,
                               std::string&);
@@ -189,7 +194,8 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
                             const SqlStatement& stmt, int64_t* rows_affected = nullptr, std::string* error = nullptr);
     int ExecuteWithOperatorChain(Span<IChannel*> inputs, IChannel* sink, const std::vector<IOperator*>& ops,
                                  const std::string& sink_type, const SqlStatement& stmt,
-                                 int64_t* rows_affected = nullptr, std::string* error = nullptr);
+                                 int64_t* rows_affected = nullptr, std::string* error = nullptr,
+                                 std::string* contract_checks = nullptr);
 
     int32_t ExecuteStreamTask(const SqlStatement& stmt, std::string& rsp, const std::string& lease_owner_id = "",
                               bool skip_lease_acquire = false);

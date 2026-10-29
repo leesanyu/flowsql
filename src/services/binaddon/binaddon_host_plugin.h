@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_SERVICES_BINADDON_BINADDON_HOST_PLUGIN_H_
 #define _FLOWSQL_SERVICES_BINADDON_BINADDON_HOST_PLUGIN_H_
@@ -12,9 +7,11 @@
 #include <common/iplugin.h>
 #include <framework/interfaces/cpp_operator_plugin_abi.h>
 #include <framework/interfaces/ibinaddon_host.h>
+#include <framework/interfaces/icpp_operator_contract_provider.h>
 #include <framework/interfaces/icpp_operator_plugin_registry.h>
 #include <framework/interfaces/ioperator.h>
 #include <framework/interfaces/ioperator_catalog.h>
+#include <framework/interfaces/ioperator_contract_catalog.h>
 #include <framework/interfaces/ioperator_registry.h>
 
 #include <sqlite3.h>
@@ -31,7 +28,8 @@ namespace binaddon {
 
 class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin,
                                                                   public IBinAddonHost,
-                                                                  public ICppOperatorPluginRegistryV1 {
+                                                                  public ICppOperatorPluginRegistryV1,
+                                                                  public ICppOperatorContractProviderV1 {
  public:
     struct PluginStoreRow {
         std::string plugin_id;
@@ -74,6 +72,7 @@ class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin
         std::vector<std::string> operator_keys;
         std::vector<std::string> operator_names;
         std::vector<Capability> capabilities;
+        std::vector<OperatorComponentContractV1> data_contracts;
         ~LoadedPlugin();
     };
 
@@ -98,6 +97,8 @@ class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin
     // ICppOperatorPluginRegistryV1
     int Acquire(const char* category, const char* name, const Guid& contract_iid,
                 CppOperatorCapabilityLeaseV1* lease) override;
+    int AcquireContract(const char* category, const char* name, const Guid& execution_iid,
+                        CppOperatorCapabilityLeaseV1* lease, OperatorComponentContractV1* component) override;
 
  private:
     int EnsureOperatorDbDir() const;
@@ -105,12 +106,8 @@ class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin
     int EnsureSchemaLocked();
     std::string OperatorDbPath() const;
     bool QueryPluginByIdLocked(const std::string& plugin_id, PluginStoreRow* row);
-    int UpdatePluginStatusLocked(const std::string& plugin_id,
-                                 const std::string& status,
-                                 const std::string& last_error,
-                                 int abi_version,
-                                 int operator_count,
-                                 const std::string& operators_json);
+    int UpdatePluginStatusLocked(const std::string& plugin_id, const std::string& status, const std::string& last_error,
+                                 int abi_version, int operator_count, const std::string& operators_json);
     int MarkPluginBrokenLocked(const std::string& plugin_id, const std::string& last_error, int abi_version);
     int UpsertCppOperatorsLocked(const std::string& plugin_id, const std::vector<OperatorMeta>& operators);
     int SetCppOperatorsActiveByPluginLocked(const std::string& plugin_id, int active);

@@ -267,6 +267,7 @@
         <el-form-item v-if="showCreateMeta" label="算子名称" required>
           <el-input
             v-model="operatorForm.fullName"
+            aria-label="新算子名称"
             placeholder="例如: explore.chisquare"
             @input="parseOperatorName"
           >
@@ -299,6 +300,11 @@
           </div>
         </el-form-item>
 
+        <el-form-item label="静态契约 JSON（可选）">
+          <el-input v-model="operatorForm.contract" aria-label="静态契约 JSON" type="textarea" :rows="5"
+            placeholder='完整声明或 {"contract_ref":"operator_contract.category.name@1"}' />
+          <p>声明会写入源码的 register_operator(data_contract=...)。已有内嵌声明可直接在代码中编辑；上传 .py 保留相同声明。</p>
+        </el-form-item>
         <el-form-item
           :label="showCreateMeta ? 'Python 代码' : ''"
           required
@@ -328,6 +334,7 @@
             <div class="code-editor-stage">
               <pre ref="createCodeHighlightRef" class="code-content code-highlight-layer"><code v-html="highlightedCreateCode"></code></pre>
               <textarea
+                aria-label="新算子源码"
                 ref="createCodeTextareaRef"
                 v-model="operatorForm.code"
                 class="code-editor-input"
@@ -391,15 +398,19 @@
           </el-form-item>
           <el-form-item label="算子列表">
             <div class="cpp-op-list">
-              <el-tag v-for="name in cppDetail.operators" :key="name" type="info">{{ name }}</el-tag>
+              <el-button v-for="name in cppDetail.operators" :key="name" text @click="componentContractName = name">{{ name }} 契约</el-button>
               <span v-if="!Array.isArray(cppDetail.operators) || cppDetail.operators.length === 0">-</span>
             </div>
           </el-form-item>
+          <OperatorContractPanel v-if="componentContractName" :key="componentContractName" :full-name="componentContractName" />
           <el-form-item label="错误信息">
             <el-input :model-value="cppDetail.last_error || '-'" type="textarea" :rows="3" disabled />
           </el-form-item>
         </template>
         <template v-else>
+          <OperatorContractPanel v-if="detailDialogVisible" :key="detailForm.fullName" :full-name="detailForm.fullName" />
+          <p v-if="detailMode === 'edit'" data-testid="component-edit-basis">编辑依据：{{ detailForm.component_revision || 'unknown' }}。版本冲突会保留草稿，请核对当前版本后再编辑。</p>
+          <p v-if="editError" role="alert" data-testid="operator-edit-error">{{ editError }}</p>
           <el-form-item v-if="showDetailMeta" label="算子名称">
             <el-input v-model="detailForm.fullName" disabled />
           </el-form-item>
@@ -453,6 +464,7 @@
                 <div class="code-editor-stage">
                   <pre ref="detailCodeHighlightRef" class="code-content code-highlight-layer"><code v-html="highlightedDetailCode"></code></pre>
                   <textarea
+                    aria-label="编辑算子源码"
                     ref="detailCodeTextareaRef"
                     v-model="detailForm.code"
                     class="code-editor-input"
@@ -487,11 +499,14 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, onMounted } from 'vue'
+import { computed, nextTick, ref, onMounted, watch } from 'vue'
+import OperatorContractPanel from '../components/OperatorContractPanel.vue'
 import { Upload, Edit, QuestionFilled, Document, Tickets, FullScreen, Search } from '@element-plus/icons-vue'
 import api from '../api'
 import { ElMessage } from 'element-plus'
 
+const readDraft = key => { try { return JSON.parse(sessionStorage.getItem('flowsql.operator.' + key) || 'null') } catch { return null } }
+const componentContractName = ref(''), editError = ref('')
 const operators = ref([])
 const searchText = ref('')
 const operatorType = ref('python')
@@ -520,6 +535,7 @@ const operatorForm = ref({
   name: '',
   description: '',
   dependencies: '',
+  contract: '',
   code: ''
 })
 
@@ -905,6 +921,8 @@ const formatPosition = (position) => {
 }
 
 const openDetail = async (fullName, mode) => {
+  const savedDraft = readDraft('detail')
+  editError.value = ''
   try {
     const res = await api.getOperatorDetail({ type: operatorType.value, name: fullName })
     const d = res.data || {}
@@ -928,8 +946,10 @@ const openDetail = async (fullName, mode) => {
       source: d.source || '',
       type: d.type || '',
       editable: !!d.editable,
+      component_revision: d.component_revision || '',
       code: d.content || ''
     }
+    if (mode === 'edit' && savedDraft?.form?.fullName === fullName) detailForm.value = savedDraft.form
     if (mode === 'edit' && !detailForm.value.editable) {
       ElMessage.warning('该算子不支持编辑（通常是内置算子）')
       return
@@ -946,6 +966,7 @@ const openDetail = async (fullName, mode) => {
 }
 
 const openCppDetail = async (pluginId) => {
+  componentContractName.value = ''
   try {
     const res = await api.getOperatorDetail({ type: 'cpp', plugin_id: pluginId })
     const d = res.data || {}
@@ -1025,13 +1046,17 @@ const saveOperatorEdit = async () => {
   try {
     await api.updateOperator(detailForm.value.fullName, {
       description: detailForm.value.description,
-      content: detailForm.value.code
+      content: detailForm.value.code,
+      expected_component_revision: detailForm.value.component_revision
     })
+    sessionStorage.removeItem('flowsql.operator.detail')
     ElMessage.success('算子更新成功')
     detailDialogVisible.value = false
     await loadOperators()
   } catch (error) {
-    ElMessage.error('更新失败: ' + (error.response?.data?.error || error.message))
+    const issue = error.response?.data?.error
+    editError.value = typeof issue === 'object' ? `${issue.code}: ${issue.message}` : issue || error.message
+    ElMessage.error('更新失败: ' + editError.value)
   } finally {
     uploading.value = false
   }
@@ -1087,12 +1112,13 @@ const handleUploadError = (error) => {
 }
 
 const showCreateDialog = () => {
-  operatorForm.value = {
+  operatorForm.value = readDraft('create') || {
     fullName: '',
     category: '',
     name: '',
     description: '',
     dependencies: '',
+    contract: '',
     code: ''
   }
   createDialogFullscreen.value = false
@@ -1206,6 +1232,13 @@ const saveOperator = async (autoActivate) => {
   try {
     // 添加依赖注释（如果有）
     let finalCode = operatorForm.value.code
+    if (operatorForm.value.contract?.trim()) {
+      const declaration = JSON.parse(operatorForm.value.contract)
+      if (!declaration || Array.isArray(declaration) || typeof declaration !== 'object') throw Error('静态声明必须是 JSON 对象')
+      if (/\bdata_contract\s*=/.test(finalCode)) throw Error('代码已有 data_contract，请直接编辑已有声明或清空独立声明输入')
+      if (!finalCode.includes('@register_operator(')) throw Error('源码需要 @register_operator(...) 装饰器')
+      finalCode = finalCode.replace('@register_operator(', '@register_operator(data_contract=__import__("json").loads(' + JSON.stringify(JSON.stringify(declaration)) + '), ')
+    }
     if (operatorForm.value.dependencies.trim()) {
       finalCode = `# DEPENDENCIES: ${operatorForm.value.dependencies}\n\n${finalCode}`
     }
@@ -1231,6 +1264,7 @@ const saveOperator = async (autoActivate) => {
 
     // 关闭对话框并刷新列表
     createDialogVisible.value = false
+    sessionStorage.removeItem('flowsql.operator.create')
     await waitOperatorSynced('')
   } catch (error) {
     ElMessage.error('保存失败: ' + error.message)
@@ -1260,8 +1294,17 @@ const deletePythonOperator = async (row) => {
   }
 }
 
+watch(operatorForm, () => { if (createDialogVisible.value) sessionStorage.setItem('flowsql.operator.create', JSON.stringify(operatorForm.value)) }, { deep: true })
+watch([detailForm, detailDialogVisible], () => {
+  if (detailDialogVisible.value && detailMode.value === 'edit') sessionStorage.setItem('flowsql.operator.detail', JSON.stringify({ form: detailForm.value, mode: detailMode.value, operatorType: operatorType.value }))
+  else if (!detailDialogVisible.value) sessionStorage.removeItem('flowsql.operator.detail')
+}, { deep: true })
 onMounted(async () => {
+  const saved = readDraft('detail'), creating = readDraft('create')
+  if (saved) operatorType.value = saved.operatorType
   await Promise.allSettled([loadOperators(), refreshOperatorCounts()])
+  if (saved) await openDetail(saved.form.fullName, saved.mode)
+  else if (creating) showCreateDialog()
 })
 </script>
 

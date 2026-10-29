@@ -16,5 +16,6 @@ ____INTERFACE(flowsql::IID_DATAFRAME_SNAPSHOT_PROVIDER_V1, flowsql::IDataFrameSn
 ____INTERFACE(flowsql::IID_CHANNEL_DATASET_DESCRIPTOR_V1, flowsql::IChannelDatasetDescriptorV1)
 ____INTERFACE(flowsql::IID_OPERATOR_REGISTRY, flowsql::IOperatorRegistry)
 ____INTERFACE(flowsql::IID_OPERATOR_CATALOG, flowsql::IOperatorCatalog)
+____INTERFACE(flowsql::IID_OPERATOR_CONTRACT_CATALOG_V1, flowsql::IOperatorContractCatalogV1)
 ____INTERFACE(flowsql::IID_ROUTER_HANDLE, flowsql::IRouterHandle)
 END_PLUGIN_REGIST()

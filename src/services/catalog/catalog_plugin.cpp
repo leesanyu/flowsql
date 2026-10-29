@@ -11,6 +11,7 @@
 #include <framework/core/dataframe_channel.h>
 #include <framework/core/packet_codec.h>
 #include <framework/interfaces/ibuiltin_registry.h>
+#include <framework/interfaces/ipython_operator_publisher.h>
 
 #include <common/error_code.h>
 #include <common/log.h>
@@ -76,6 +77,24 @@ bool EqualsIgnoreCase(const std::string& a, const char* b) {
 std::string ToLowerAscii(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return s;
+}
+
+int32_t PythonPublicationError(const DataSemanticsErrorV1& issue, std::string* response) {
+    dataset::Json result(rapidjson::kObjectType);
+    rapidjson::Value detail(rapidjson::kObjectType);
+    auto& a = result.GetAllocator();
+    dataset::Set(detail, "code", issue.code, a);
+    dataset::Set(detail, "message", issue.message, a);
+    dataset::Set(detail, "field_path", issue.field_path, a);
+    detail.AddMember("details", rapidjson::Value(rapidjson::kObjectType), a);
+    result.AddMember("error", detail, a);
+    *response = dataset::Encode(result);
+    if (issue.code == "COMPONENT_CHANGED" || issue.code == "REVISION_CONFLICT") return error::CONFLICT;
+    if (issue.code == "UNAVAILABLE") return error::UNAVAILABLE;
+    if (issue.code == "STORAGE_ERROR") return error::INTERNAL_ERROR;
+    if (issue.code == "NOT_FOUND") return error::NOT_FOUND;
+    if (issue.code == "LIMIT_EXCEEDED") return error::PAYLOAD_TOO_LARGE;
+    return error::BAD_REQUEST;
 }
 
 bool IsSafeUploadFilename(const std::string& filename) {
@@ -1256,6 +1275,33 @@ int32_t CatalogPlugin::HandleOperatorUpload(const std::string&, const std::strin
         return host->UploadCppPlugin(filename, tmp_path, rsp);
     }
 
+    auto* publisher = querier_
+                          ? static_cast<IPythonOperatorPublisherV1*>(querier_->First(IID_PYTHON_OPERATOR_PUBLISHER_V1))
+                          : nullptr;
+    if (publisher) {
+        std::ifstream input(src, std::ios::binary);
+        const std::string content{std::istreambuf_iterator<char>(input), {}};
+        DataSemanticsErrorV1 issue;
+        const auto expected = dataset::Get(doc, "expected_component_revision");
+        if (publisher->PublishPythonSource(filename.c_str(), content.c_str(), expected.c_str(), &rsp, &issue)) {
+            return PythonPublicationError(issue, &rsp);
+        }
+        return error::OK;
+    }
+    // Legacy minimal deployments can persist undeclared source without a Worker.
+    // An existing declared component cannot silently take this path.
+    const auto stem = fs::path(filename).stem().string();
+    const auto separator = stem.find('_');
+    if (separator != std::string::npos) {
+        OperatorComponentContractV1 previous;
+        DataSemanticsErrorV1 issue;
+        if (Lookup(stem.substr(0, separator).c_str(), stem.substr(separator + 1).c_str(), &previous, &issue) ||
+            previous.contract_state == "declared") {
+            rsp = R"({"error":{"code":"UNAVAILABLE","message":"Python publisher unavailable for declared component"}})";
+            return error::UNAVAILABLE;
+        }
+    }
+
     fs::path target_dir = OperatorsDirPath();
 
     std::error_code ec;
@@ -1428,9 +1474,33 @@ int32_t CatalogPlugin::HandleOperatorDetail(const std::string&, const std::strin
         return error::NOT_FOUND;
     }
 
+    OperatorComponentContractV1 association;
+    DataSemanticsErrorV1 contract_error;
+    const bool association_available = Lookup(category.c_str(), name.c_str(), &association, &contract_error) == 0;
+    if (association_available && association.contract_state == "declared") {
+        auto* definitions =
+            querier_ ? static_cast<IDataSemanticsRegistryV1*>(querier_->First(IID_DATA_SEMANTICS_REGISTRY_V1))
+                     : nullptr;
+        DataSemanticsSnapshotV1 snapshot;
+        if (!definitions || definitions->Resolve(association.contract_ref.c_str(), &snapshot, &contract_error))
+            association.contract_state = "unavailable";
+    }
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
     w.StartObject();
+    w.Key("contract_state");
+    w.String(association_available ? association.contract_state.c_str() : "unavailable");
+    w.Key("component_revision");
+    w.String(association.component_revision.c_str());
+    w.Key("operator_version");
+    w.String(association.operator_version.c_str());
+    w.Key("version_state");
+    w.String(association.operator_version.empty() ? "unknown" : "declared");
+    w.Key("contract_ref");
+    if (association.contract_ref.empty())
+        w.Null();
+    else
+        w.String(association.contract_ref.c_str());
     w.Key("category");
     w.String(meta.category.c_str());
     w.Key("name");
@@ -1453,7 +1523,22 @@ int32_t CatalogPlugin::HandleOperatorDetail(const std::string&, const std::strin
     w.Int(editable);
     if (EqualsIgnoreCase(meta.type, "python")) {
         std::string content;
-        if (LoadOperatorContent(meta.category, meta.name, &content) == 0) {
+        bool available = false;
+        auto* publisher =
+            querier_ ? static_cast<IPythonOperatorPublisherV1*>(querier_->First(IID_PYTHON_OPERATOR_PUBLISHER_V1))
+                     : nullptr;
+        if (publisher) {
+            std::string source_response;
+            DataSemanticsErrorV1 issue;
+            if (!publisher->ReadPythonSource(meta.category.c_str(), meta.name.c_str(), &source_response, &issue)) {
+                dataset::Json source;
+                source.Parse(source_response.c_str());
+                content = dataset::Get(source, "source");
+                available = true;
+            }
+        } else
+            available = LoadOperatorContent(meta.category, meta.name, &content) == 0;
+        if (available) {
             w.Key("content");
             w.String(content.c_str());
         }
@@ -1584,6 +1669,31 @@ int32_t CatalogPlugin::HandleOperatorUpdate(const std::string&, const std::strin
         return error::BAD_REQUEST;
     }
 
+    if (content_ptr) {
+        auto* publisher =
+            querier_ ? static_cast<IPythonOperatorPublisherV1*>(querier_->First(IID_PYTHON_OPERATOR_PUBLISHER_V1))
+                     : nullptr;
+        OperatorComponentContractV1 previous;
+        DataSemanticsErrorV1 issue;
+        if (Lookup(category.c_str(), name.c_str(), &previous, &issue)) return error::UNAVAILABLE;
+        if (publisher) {
+            std::string source_response;
+            if (publisher->ReadPythonSource(category.c_str(), name.c_str(), &source_response, &issue))
+                return PythonPublicationError(issue, &rsp);
+            dataset::Json source_info;
+            source_info.Parse(source_response.c_str());
+            const auto filename = dataset::Get(source_info, "filename");
+            const auto expected = dataset::Get(doc, "expected_component_revision");
+            if (publisher->PublishPythonSource(filename.c_str(), content.c_str(), expected.c_str(), &rsp, &issue)) {
+                return PythonPublicationError(issue, &rsp);
+            }
+            content_ptr = nullptr;
+        } else if (previous.contract_state == "declared") {
+            rsp = R"({"error":{"code":"UNAVAILABLE","message":"Python publisher unavailable for declared component"}})";
+            return error::UNAVAILABLE;
+        }
+    }
+
     const int rc = UpdateOperatorFields(category, name, description_ptr, position_ptr);
     if (rc == 1) return error::NOT_FOUND;
     if (rc != 0) {
@@ -1670,6 +1780,13 @@ int CatalogPlugin::EnsureOperatorCatalogSchema() {
     if (sqlite3_exec(operator_db_,
                      "CREATE TABLE IF NOT EXISTS dataset_identities(name TEXT PRIMARY KEY,"
                      "object_id TEXT NOT NULL,file_stamp TEXT NOT NULL)",
+                     nullptr, nullptr, nullptr) != SQLITE_OK)
+        return -1;
+    if (sqlite3_exec(operator_db_,
+                     "CREATE TABLE IF NOT EXISTS operator_contract_association("
+                     "category TEXT NOT NULL COLLATE NOCASE,name TEXT NOT NULL COLLATE NOCASE,"
+                     "component_revision TEXT NOT NULL,operator_version TEXT NOT NULL,"
+                     "contract_ref TEXT NOT NULL,contract_state TEXT NOT NULL,PRIMARY KEY(category,name))",
                      nullptr, nullptr, nullptr) != SQLITE_OK)
         return -1;
     const char* ddl_catalog =

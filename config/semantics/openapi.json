@@ -3,7 +3,7 @@
   "info": {
     "title": "FlowSQL 标准与字典管理",
     "version": "1.0.0",
-    "description": "人工声明与检查结果独立；不执行业务数据验证。精确版本不可变。"
+    "description": "人工声明与检查结果独立；不执行业务数据验证。精确版本不可变。 Operator contracts use immutable JSON definitions; operator_use is execution-owned and read-only to management clients. Resolve supports summary/resource views with exact context references."
   },
   "servers": [
     {
@@ -1084,6 +1084,104 @@
               "application/json": {
                 "schema": {
                   "$ref": "./api.schema.json#/$defs/channels_applyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict or confirmation required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Source unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Source timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/operators/check": {
+      "post": {
+        "operationId": "checkOperatorDataContract",
+        "summary": "Check actual operator inputs without reading business rows",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/$defs/operators_checkRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/operators_checkResponse"
                 }
               }
             }

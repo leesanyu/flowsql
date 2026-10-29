@@ -5,6 +5,8 @@
 #include <framework/interfaces/iblock_transform_dataframe_input.h>
 #include "snapshot_reader.h"
 namespace flowsql::baseliner {
+// Structural admissibility only. Actual casts retain Arrow's safe value checks.
+bool CanConvertDataFrameType(std::string_view physical, LogicalType logical, bool empty);
 struct DataFrameReadStats {
     uint64_t source_buffer_bytes = 0;
     uint64_t peak_buffer_bytes = 0;  // Source buffers plus bounded Arrow allocations, including sort index/pages.

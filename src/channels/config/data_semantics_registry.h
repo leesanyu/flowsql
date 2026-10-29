@@ -33,6 +33,9 @@ class DataSemanticsRegistry : public IDataSemanticsRegistryV1 {
                 std::string* structure_check, DataSemanticsErrorV1* error);
     int32_t Control(const std::string& operation, const std::string& request, std::string& response);
     int Save(const SemanticsSaveRequest& request, SemanticsSaveResult* out, DataSemanticsErrorV1* error);
+    // Trusted execution only; one write transaction publishes all output metadata.
+    int SaveBatch(const std::vector<SemanticsSaveRequest>& requests, std::vector<SemanticsSaveResult>* out,
+                  DataSemanticsErrorV1* error);
     int Resolve(const char* reference, DataSemanticsSnapshotV1* out, DataSemanticsErrorV1* error) override;
 
     int BindingLookup(const std::string& provider, const std::string& object, DataSemanticsSnapshotV1* out,
@@ -42,6 +45,10 @@ class DataSemanticsRegistry : public IDataSemanticsRegistryV1 {
                    DataSemanticsErrorV1* error);
 
  private:
+    int SaveUnlocked(const SemanticsSaveRequest& request, bool execution_owned, SemanticsSaveResult* out,
+                     DataSemanticsErrorV1* error);
+    int WriteBatch(const std::vector<SemanticsSaveRequest>& requests, bool execution_owned,
+                   std::vector<SemanticsSaveResult>* out, DataSemanticsErrorV1* error);
     int ValidateLinks(const std::string& kind, const rapidjson::Value& document,
                       const std::vector<SemanticsReference>& references, std::string* structure_check,
                       DataSemanticsErrorV1* error);

@@ -19,6 +19,7 @@
 #include <services/database/database_plugin.h>
 #include <cassert>
 #include <chrono>
+#include <common/operator_contract_observation.hpp>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -632,7 +633,9 @@ void ModelOutputTaskPath() {
         assert(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0);
         std::vector<BlockTransformOutputV1> outputs;
         if (scenario != 5) {
-            assert(task->ProcessBlock(Batch({Input(0), Input(1)}), 0, &outputs) == 0);
+            assert(task->ProcessBlock(Batch(scenario == 4 ? std::vector<Observation>{Input(0)}
+                                                          : std::vector<Observation>{Input(0), Input(1)}),
+                                      0, &outputs) == 0);
             outputs.clear();
         }
         if (scenario == 3) {
@@ -653,6 +656,19 @@ void ModelOutputTaskPath() {
         auto batch = frame.ToArrow();
         assert(batch && batch->schema()->Equals(*MakeSchema(SchemaKind::kModelParameters), true));
         assert(batch->num_rows() == (scenario == 5 ? 0 : 1));
+        dataset::Json observed;
+        DataSemanticsErrorV1 contract_error;
+        assert(contracts::ProducerOutputs(dynamic_cast<IOperatorOutputObservationV1*>(task.get()), &observed,
+                                          &contract_error) == 0);
+        bool found = false;
+        for (const auto& port : observed.GetArray())
+            if (dataset::Get(port, "port_id") == "model_parameters") {
+                found = true;
+                assert(port["row_count"].GetInt64() == batch->num_rows());
+                assert(port["snapshot"]["fields"] == dataset::ArrowFields(*batch->schema(), observed.GetAllocator()));
+            }
+        assert(found);
+        if (scenario == 4) assert(batch->GetColumnByName("parameters_json")->IsNull(0));
         if (scenario == 6) task->Cancel();  // Registration succeeded before the cancellation raced with confirmation.
         assert(scenario == 6 ? models->CompleteModelOutputPublication(true) != 0
                              : models->CompleteModelOutputPublication(true) == 0);

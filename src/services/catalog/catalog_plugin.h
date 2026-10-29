@@ -11,6 +11,7 @@
 #include <framework/interfaces/idataframe_channel.h>
 #include <framework/interfaces/idataframe_snapshot.h>
 #include <framework/interfaces/ioperator_catalog.h>
+#include <framework/interfaces/ioperator_contract_catalog.h>
 #include <framework/interfaces/ioperator_registry.h>
 #include <framework/interfaces/irouter_handle.h>
 #include "dataframe_transfer.h"
@@ -32,6 +33,7 @@ class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
                                                              public IChannelRegistry,
                                                              public IOperatorRegistry,
                                                              public IOperatorCatalog,
+                                                             public IOperatorContractCatalogV1,
                                                              public IRouterHandle,
                                                              public IDataFrameSnapshotProviderV1,
                                                              public IChannelDatasetDescriptorV1 {
@@ -69,7 +71,12 @@ class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
     UpsertResult UpsertBatch(const std::vector<OperatorMeta>& operators) override;
     int SetActive(const std::string& category, const std::string& name, bool active) override;
 
-    // IRouterHandle（9.4 再补 HTTP 端点）
+    int Prepare(const std::vector<OperatorContractDeclarationV1>&, std::vector<PreparedOperatorContractV1>*,
+                DataSemanticsErrorV1*) override;
+    int Commit(const std::vector<PreparedOperatorContractV1>&, DataSemanticsErrorV1*) override;
+    int Lookup(const char*, const char*, OperatorComponentContractV1*, DataSemanticsErrorV1*) override;
+
+    // IRouterHandle
     void EnumRoutes(std::function<void(const RouteItem&)> callback) override;
 
  private:

@@ -183,6 +183,7 @@ int32_t ProxyConfigPost(const std::string& host, int port, const std::string& pa
         case 404: return error::NOT_FOUND;
         case 409: return error::CONFLICT;
         case 413: return error::PAYLOAD_TOO_LARGE;
+        case 422: return error::UNPROCESSABLE_ENTITY;
         case 503: return error::UNAVAILABLE;
         case 504:
             return error::TIMEOUT;
@@ -223,6 +224,7 @@ int ConfigHttpStatus(int32_t code) {
         case error::NOT_FOUND: return 404;
         case error::CONFLICT: return 409;
         case error::PAYLOAD_TOO_LARGE: return 413;
+        case error::UNPROCESSABLE_ENTITY: return 422;
         case error::UNAVAILABLE: return 503;
         case error::TIMEOUT:
             return 504;
@@ -252,6 +254,7 @@ int32_t ProxyPostJson(const std::string& host, int port, const std::string& path
     if (result->status == 400) return error::BAD_REQUEST;
     if (result->status == 404) return error::NOT_FOUND;
     if (result->status == 409) return error::CONFLICT;
+    if (result->status == 422) return error::UNPROCESSABLE_ENTITY;
     if (result->status == 503) return error::UNAVAILABLE;
     return error::INTERNAL_ERROR;
 }
@@ -657,12 +660,12 @@ int WebServer::Init(const std::string& db_path) {
     });
     server_.Post("/api/operators/update", [this](const httplib::Request& req, httplib::Response& res) {
         std::string rsp; int32_t rc = HandleUpdateOperator("", req.body, rsp);
-        res.status = (rc == error::OK) ? 200 : 400;
+        res.status = ConfigHttpStatus(rc);
         res.set_content(rsp, "application/json");
     });
     server_.Post("/api/tasks/batch/execute", [this](const httplib::Request& req, httplib::Response& res) {
         std::string rsp; int32_t rc = HandleBatchExecuteTask("", req.body, rsp);
-        res.status = (rc == 0) ? 200 : 400;
+        res.status = ConfigHttpStatus(rc);
         res.set_content(rsp, "application/json");
     });
     server_.Post("/api/tasks/sql/classify", [this](const httplib::Request& req, httplib::Response& res) {
@@ -789,7 +792,7 @@ int WebServer::Init(const std::string& db_path) {
     }
     for (const char* operation :
          {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export", "channels/describe",
-          "channels/preview", "channels/check", "channels/apply"}) {
+          "channels/preview", "channels/check", "channels/apply", "operators/check"}) {
         const std::string target = std::string("/semantics/v1/") + operation;
         server_.Post("/api" + target, [this, target](const httplib::Request& req, httplib::Response& res) {
             std::string response;
@@ -1205,7 +1208,7 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
     }
     for (const char* operation :
          {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export", "channels/describe",
-          "channels/preview", "channels/check", "channels/apply"}) {
+          "channels/preview", "channels/check", "channels/apply", "operators/check"}) {
         const std::string target = std::string("/semantics/v1/") + operation;
         cb({"POST", "/api" + target, [this, target](const auto&, const auto& request, auto& response) {
                 return ProxySemanticsPost(scheduler_host_, scheduler_port_, target, request, &response);

@@ -3,6 +3,9 @@ project(flowsql_config_channel)
 add_library(${PROJECT_NAME} SHARED
     channel_dictionary.cpp
     data_semantics_control.cpp
+    operator_data_contract_model.cpp
+    operator_contract_service.cpp
+    operator_contract_derivation.cpp
     data_semantics_model.cpp
     data_semantics_registry.cpp
     config_channel_provider.cpp

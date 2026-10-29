@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #include <common/error_code.h>
 #include <openssl/sha.h>
+#include <rapidjson/pointer.h>
 #include <rapidjson/schema.h>
 #include <rapidjson/stringbuffer.h>
 #include <sqlite3.h>
@@ -368,6 +369,40 @@ int32_t DataSemanticsRegistry::Control(const std::string& op, const std::string&
         if (Resolve(String(r, "exact_reference").c_str(), &snap, &e)) return Error(e, response);
         Document d;
         d.Parse(snap.document_json->c_str());
+        const auto operator_view = String(r, "view");
+        if (op == "resolve" && (operator_view == "summary" || operator_view == "resource")) {
+            if (String(d, "schema_id") != "flowsql.operator-data-contract.v1")
+                return Error({"INVALID_DOCUMENT", "resource views require an operator contract", "/view"}, response);
+            const auto pointer = operator_view == "summary" ? std::string("") : String(r, "resource_pointer");
+            if (operator_view == "resource" && (pointer.empty() || pointer.front() != '/'))
+                return Error({"INVALID_DOCUMENT", "resource_pointer must be a JSON Pointer", "/resource_pointer"},
+                             response);
+            rapidjson::Pointer selected(pointer.c_str());
+            const auto* value = selected.IsValid() ? selected.Get(d) : nullptr;
+            if (!value) return Error({"NOT_FOUND", "contract resource does not exist", "/resource_pointer"}, response);
+            Meta(data, snap, a);
+            Add(data, "view", operator_view, a);
+            Add(data, "resource_pointer", pointer, a);
+            Value resource;
+            resource.CopyFrom(*value, a);
+            if (operator_view == "summary") {
+                resource.RemoveMember("resources");
+                resource.RemoveMember("configuration");
+                Value names(rapidjson::kArrayType);
+                if (d.HasMember("resources"))
+                    for (const auto& m : d["resources"].GetObject()) names.PushBack(Value(m.name, a), a);
+                resource.AddMember("resource_names", names, a);
+            }
+            data.AddMember("resource", resource, a);
+            Value contexts(rapidjson::kArrayType);
+            // Local resources share the exact contract revision; include the complete context
+            // reference so a projected fragment cannot be mistaken for a closed standalone definition.
+            contexts.PushBack(Value(snap.exact_reference.c_str(), a), a);
+            data.AddMember("required_context_refs", contexts, a);
+            Add(data, "data_validation", "not_run", a);
+            return Finish(op, data, response);
+        }
+
         SemanticsIdentity id;
         ParseSemanticsReference(snap.exact_reference, &id);
         if (op == "export") {

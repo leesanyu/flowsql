@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include "config_content_validator.h"
 #include "data_semantics_schema.h"
+#include "operator_data_contract_model.h"
 
 namespace flowsql::channels::config {
 namespace {
@@ -103,7 +104,9 @@ bool ParseSemanticsReference(const std::string& text, SemanticsIdentity* out) {
     const auto dot = text.find('.'), at = text.rfind('@');
     if (dot == std::string::npos || at == std::string::npos || at <= dot + 1) return false;
     SemanticsIdentity id{text.substr(0, dot), text.substr(dot + 1, at - dot - 1), 0};
-    if ((id.kind != "standard" && id.kind != "dictionary" && id.kind != "binding") || !SemanticsName(id.name))
+    if ((id.kind != "standard" && id.kind != "dictionary" && id.kind != "binding" && id.kind != "operator_contract" &&
+         id.kind != "operator_use") ||
+        !SemanticsName(id.name))
         return false;
     auto rev = text.substr(at + 1);
     if (rev.empty() || rev.front() == '0') return false;
@@ -138,7 +141,8 @@ int NormalizeSemantics(const std::string& kind, const std::string& text, rapidjs
     refs->clear();
     if (text.size() > kSemanticsMaxDocument) return SemanticsFail(e, "LIMIT_EXCEEDED", "document exceeds 8 MiB");
     if (ParseSemanticsJson(text, d, e)) return -1;
-    if (!d->IsObject() || (kind != "standard" && kind != "dictionary" && kind != "binding"))
+    if (!d->IsObject() || (kind != "standard" && kind != "dictionary" && kind != "binding" &&
+                           kind != "operator_contract" && kind != "operator_use"))
         return SemanticsFail(e, "INVALID_DOCUMENT", "invalid kind or document");
     Normalize(*d, kind, d->GetAllocator());
     rapidjson::Document schema;
@@ -148,9 +152,14 @@ int NormalizeSemantics(const std::string& kind, const std::string& text, rapidjs
     if (!d->Accept(validator)) {
         rapidjson::StringBuffer path;
         validator.GetInvalidDocumentPointer().Stringify(path);
-        return SemanticsFail(e, "INVALID_DOCUMENT", "document does not match published JSON Schema", path.GetString());
+        return SemanticsFail(
+            e, kind == "operator_contract" || kind == "operator_use" ? "CONTRACT_INVALID" : "INVALID_DOCUMENT",
+            "document does not match published JSON Schema", path.GetString());
     }
-    if (Str((*d)["schema_id"]) != "flowsql.data-" + kind + ".v1" &&
+    const std::string expected_schema = kind == "operator_contract" ? "flowsql.operator-data-contract.v1"
+                                        : kind == "operator_use"    ? "flowsql.operator-data-use.v1"
+                                                                    : "flowsql.data-" + kind + ".v1";
+    if (Str((*d)["schema_id"]) != expected_schema &&
         !(kind == "binding" && Str((*d)["schema_id"]) == "flowsql.data-binding.v2"))
         return SemanticsFail(e, "INVALID_DOCUMENT", "schema_id differs from kind", "/schema_id");
     if (kind == "dictionary") {
@@ -210,6 +219,8 @@ int NormalizeSemantics(const std::string& kind, const std::string& text, rapidjs
             return SemanticsFail(e, "INVALID_REFERENCE", "binding requires an exact dictionary", "/dictionary_ref");
         refs->push_back({target, "/dictionary_ref"});
     }
+    if ((kind == "operator_contract" || kind == "operator_use") && NormalizeOperatorDocument(kind, d, refs, e))
+        return -1;
     Sort(*d);
     if (SemanticsJson(*d).size() > kSemanticsMaxDocument)
         return SemanticsFail(e, "LIMIT_EXCEEDED", "normalized document exceeds 8 MiB");

@@ -11,9 +11,14 @@
 
 #include <common/error_code.h>
 #include <common/log.h>
+#include <framework/interfaces/icpp_operator_contract_provider.h>
+#include <framework/interfaces/idataframe_metadata.h>
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <common/operator_block_contract.hpp>
+#include <common/operator_contract_execution.hpp>
+#include <common/operator_contract_observation.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -351,6 +356,9 @@ std::shared_ptr<IOperator> SchedulerPlugin::FindOperator(const std::string& cate
     if (!querier_) return nullptr;
     auto* op_registry = static_cast<IOperatorRegistry*>(querier_->First(IID_OPERATOR_REGISTRY));
 
+    // Factories and Bridge return invocation-owned configuration and component leases.
+    if (auto owned = CreateOperator(category, name)) return owned;
+
     // 1. 先查 C++ 静态算子
     IOperator* found = nullptr;
     querier_->Traverse(IID_OPERATOR, [&](void* p) -> int {
@@ -427,12 +435,14 @@ SchedulerPlugin::BlockTransformProviderRef SchedulerPlugin::FindBlockTransformOp
     if (ambiguous) *ambiguous = false;
     if (traverse_error) *traverse_error = 0;
     if (!querier_ || !dynamic_lease) return {};
+    OperatorComponentContractV1 selected_component;
 
     auto resolve_version = [&](const Guid& iid, bool is_v2, void** selected,
                                CppOperatorCapabilityLeaseV1* selected_lease, bool* version_ambiguous) {
         *selected = nullptr;
         *selected_lease = {};
         *version_ambiguous = false;
+        selected_component = {};
         size_t matches = 0;
         int traversal_rc = querier_->Traverse(iid, [&](void* value) -> int {
             if (!value) return 0;
@@ -442,6 +452,11 @@ SchedulerPlugin::BlockTransformProviderRef SchedulerPlugin::FindBlockTransformOp
                                                      : static_cast<IBlockTransformOperatorV1*>(value)->Name();
             if (!IEquals(candidate_category, category) || candidate_name != name) return 0;
             *selected = value;
+            DataSemanticsErrorV1 ignored;
+            auto* identity =
+                is_v2 ? dynamic_cast<IOperatorContractIdentityV1*>(static_cast<IBlockTransformOperatorV2*>(value))
+                      : dynamic_cast<IOperatorContractIdentityV1*>(static_cast<IBlockTransformOperatorV1*>(value));
+            if (contracts::Component(querier_, identity, category, name, &selected_component, &ignored)) return EPROTO;
             ++matches;
             return 0;
         });
@@ -454,7 +469,13 @@ SchedulerPlugin::BlockTransformProviderRef SchedulerPlugin::FindBlockTransformOp
             if (!registry) return 0;
 
             CppOperatorCapabilityLeaseV1 candidate_lease;
-            if (registry->Acquire(category.c_str(), name.c_str(), iid, &candidate_lease) != 0) {
+            OperatorComponentContractV1 candidate_component;
+            auto* contract_provider = dynamic_cast<ICppOperatorContractProviderV1*>(registry);
+            const int acquire_rc = contract_provider
+                                       ? contract_provider->AcquireContract(category.c_str(), name.c_str(), iid,
+                                                                            &candidate_lease, &candidate_component)
+                                       : registry->Acquire(category.c_str(), name.c_str(), iid, &candidate_lease);
+            if (acquire_rc != 0) {
                 return 0;
             }
             if (!candidate_lease.capability || !candidate_lease.lifetime) {
@@ -463,6 +484,12 @@ SchedulerPlugin::BlockTransformProviderRef SchedulerPlugin::FindBlockTransformOp
             }
 
             *selected = candidate_lease.capability;
+            if (!contract_provider) {
+                DataSemanticsErrorV1 ignored;
+                if (contracts::Component(querier_, nullptr, category, name, &candidate_component, &ignored))
+                    return EPROTO;
+            }
+            selected_component = std::move(candidate_component);
             ++matches;
             if (matches == 1) {
                 acquired_dynamic_lease = std::move(candidate_lease);
@@ -493,7 +520,7 @@ SchedulerPlugin::BlockTransformProviderRef SchedulerPlugin::FindBlockTransformOp
     }
     if (selected) {
         *dynamic_lease = std::move(selected_lease);
-        return {nullptr, static_cast<IBlockTransformOperatorV2*>(selected)};
+        return {nullptr, static_cast<IBlockTransformOperatorV2*>(selected), selected_component};
     }
 
     traversal_rc =
@@ -506,7 +533,7 @@ SchedulerPlugin::BlockTransformProviderRef SchedulerPlugin::FindBlockTransformOp
     }
     if (!selected) return {};
     *dynamic_lease = std::move(selected_lease);
-    return {static_cast<IBlockTransformOperatorV1*>(selected), nullptr};
+    return {static_cast<IBlockTransformOperatorV1*>(selected), nullptr, selected_component};
 }
 
 int SchedulerPlugin::ExecuteBlockOperator(IBlockStreamChannel* source, IBlockStreamOperator* op,
@@ -943,11 +970,12 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
     const std::shared_ptr<const BoundFilterExpr>& source_residual, BlockExecutionTerminal* terminal,
     int64_t* rows_affected, std::string* managed_result_json, std::string* error,
     std::shared_ptr<IDatabaseChannel> database_source, std::shared_ptr<IDataFrameChannel> dataframe_source,
-    IResultSinkWriterV1* result_sink) {
+    IResultSinkWriterV1* result_sink, std::string* contract_checks) {
     if (terminal) *terminal = BlockExecutionTerminal::kFailed;
     if (rows_affected) *rows_affected = 0;
     if (managed_result_json) managed_result_json->clear();
     if (error) error->clear();
+    if (contract_checks) *contract_checks = "[]";
     if ((!source && !database_source && !dataframe_source) || !provider || (provider.v1 && provider.v2) ||
         (int(sink != nullptr) + int(managed_sink != nullptr) + int(result_sink != nullptr) != 1) ||
         stmt.operators.size() != 1) {
@@ -996,6 +1024,70 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
         (database_source || dataframe_source) ? std::shared_ptr<arrow::Schema>{} : BlockSourceArrowSchema(source);
 
     const auto& params = !stmt.operator_with_params.empty() ? stmt.operator_with_params.front() : stmt.with_params;
+    auto contract_state = std::make_shared<contracts::BlockInvocation>();
+    contract_state->querier = querier_;
+    contract_state->invocation.component = provider.component;
+    auto& component = contract_state->invocation.component;
+    if (component.category.empty()) component.category = stmt.operators.front().category;
+    if (component.name.empty()) component.name = stmt.operators.front().name;
+    contract_state->parameters.Parse(MakeWithParamsJson(params).c_str());
+    dataset::Set(contract_state->context, "source", stmt.source, contract_state->context.GetAllocator());
+    dataset::Set(contract_state->context, "managed_output",
+                 dataset::Value(bool(managed_sink && (!managed_sink->relation || !managed_sink->relation[0]))),
+                 contract_state->context.GetAllocator());
+    auto* provider_adapter = provider.v2 ? dynamic_cast<IOperatorConfigAdapterV1*>(provider.v2)
+                                         : dynamic_cast<IOperatorConfigAdapterV1*>(provider.v1);
+    auto publish_check = [&] {
+        if (!contract_checks || !contract_state->invocation.check.IsObject()) return;
+        dataset::Json checks(rapidjson::kArrayType);
+        checks.PushBack(dataset::Copy(contract_state->invocation.check, checks.GetAllocator()), checks.GetAllocator());
+        *contract_checks = dataset::Encode(checks);
+    };
+    if (dataframe_source && component.contract_state == "declared") {
+        using namespace dataset;
+        Json locator(rapidjson::kObjectType), before, after;
+        auto& a = locator.GetAllocator();
+        Set(locator, "kind", "dataframe", a);
+        Set(locator, "name", dataframe_source->Name(), a);
+        std::string binding;
+        if (contracts::DescribeInput(querier_, locator, {}, &before, &binding, &contract_state->error)) {
+            if (error) *error = contract_state->ErrorText();
+            return EINVAL;
+        }
+        DataFrame frame;
+        if (dataframe_source->Read(&frame) != 0 || !frame.ToArrow()) {
+            if (error) *error = "SOURCE_UNAVAILABLE: cannot capture block DataFrame input";
+            return EIO;
+        }
+        if (contracts::DescribeInput(querier_, locator, frame.ToArrow()->schema(), &after, &binding,
+                                     &contract_state->error) ||
+            (Get(before, "schema_state") == "known" &&
+             (before["object_key"] != after["object_key"] || before["source_revision"] != after["source_revision"])) ||
+            FindChannel(stmt.source) != dataframe_source.get()) {
+            if (error) *error = "SOURCE_CHANGED: block DataFrame input changed during capture";
+            return EINVAL;
+        }
+        auto frozen = std::make_shared<DataFrameChannel>(dataframe_source->Category(), dataframe_source->Name());
+        if (frozen->Open() || frozen->Write(&frame)) {
+            if (error) *error = "cannot freeze block input";
+            return EIO;
+        }
+        dataframe_source = std::move(frozen);
+        auto& ia = contract_state->inputs.GetAllocator();
+        Value input(rapidjson::kObjectType);
+        Set(input, "port_id", "input", ia);
+        input.AddMember("input_index", 0, ia).AddMember("snapshot", Copy(after, ia), ia);
+        if (!binding.empty()) Set(input, "binding_ref", binding, ia);
+        contract_state->inputs.PushBack(input, ia);
+        contract_state->context.AddMember("source_row_count", static_cast<uint64_t>(frame.RowCount()),
+                                          contract_state->context.GetAllocator());
+    }
+    if (component.contract_state == "declared" && provider_adapter &&
+        contract_state->Check(nullptr, provider_adapter, source_schema)) {
+        publish_check();
+        if (error) *error = contract_state->ErrorText();
+        return EINVAL;
+    }
     std::string with_params_json = MakeWithParamsJson(params);
     auto* source_config = provider.v2 ? dynamic_cast<IBlockTransformSourceConfigProviderV1*>(provider.v2) : nullptr;
     if (source_config) {
@@ -1098,6 +1190,11 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
             return EIO;
         }
         auto probe = make_task_holder(probe_raw);
+        if (contract_state->Check(probe.get(), provider_adapter, source_schema)) {
+            publish_check();
+            if (error) *error = contract_state->ErrorText();
+            return EINVAL;
+        }
         const int input_bind_rc = BindBlockTransformInputSource(probe.get(), stmt.source, error);
         if (input_bind_rc != 0) return input_bind_rc;
 
@@ -1191,6 +1288,12 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
         return EIO;
     }
     auto execution = make_task_holder(execution_raw);
+    if (contract_state->Check(execution.get(), provider_adapter, source_schema)) {
+        publish_check();
+        if (error) *error = contract_state->ErrorText();
+        return EINVAL;
+    }
+    publish_check();
     BlockDatabaseInputV1 database_input;
     BlockDataFrameInputV1 dataframe_input;
     std::unique_ptr<void, std::function<void(void*)>> input_guard(nullptr, [](void*) {});
@@ -1363,16 +1466,17 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
         source = dataframe_input.input;
         source_schema = dataframe_input.schema;
     }
-    SchemaCheckingBlockTransformTask checked_execution(execution.get(), planned_output_schema);
+    contracts::CheckedBlockTask input_checked(execution.get(), provider_adapter, contract_state);
+    SchemaCheckingBlockTransformTask checked_execution(&input_checked, planned_output_schema);
     IBlockTransformTaskV1* runner_task =
-        planned_output_schema ? static_cast<IBlockTransformTaskV1*>(&checked_execution) : execution.get();
+        planned_output_schema ? static_cast<IBlockTransformTaskV1*>(&checked_execution) : &input_checked;
 
     BlockTransformPipelineConfig config;
     config.source = source;
     config.source_schema = source_schema;
     config.transform = runner_task;
     config.input_progress_task = dynamic_cast<IBlockTransformInputProgressTaskV1*>(execution.get());
-    config.time_transform = execution_time;
+    config.time_transform = execution_time ? &input_checked : nullptr;
     config.capture_fact_task =
         capture_reader ? dynamic_cast<IBlockTransformCaptureFactTaskV2*>(execution.get()) : nullptr;
     config.source_residual = source_residual;
@@ -1431,6 +1535,11 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
     BlockTransformPipelineResult result;
     std::string runner_error;
     const auto runner_rc = runner.Run(&result, &runner_error);
+    publish_check();
+    if (!contract_state->error.code.empty()) {
+        if (error) *error = contract_state->ErrorText();
+        return EINVAL;
+    }
     if (runner_rc == BlockTransformPipelineError::kNone &&
         result.terminal == BlockTransformPipelineTerminal::kCompleted && specified_result && !specified_table) {
         bool published = stmt.dest.empty();
@@ -1461,6 +1570,11 @@ int SchedulerPlugin::ExecuteSingleBlockTransformPipeline(
             if (error) *error = "model publication failed: " + SafeBlockTransformLastError(execution.get());
             return EIO;
         }
+        if (contract_checks && contracts::BindNamedOutput(querier_, model_name, contract_checks, &contract_state->error,
+                                                          "model_parameters")) {
+            if (error) *error = contract_state->ErrorText();
+            return EIO;
+        }
     }
     if (managed_task) {
         const auto result_json = managed_task->ManagedSinkResultJson();
@@ -1487,11 +1601,13 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     const BlockTransformManagedSinkBindingV1* managed_sink, const SqlStatement& stmt,
     const std::shared_ptr<const BoundFilterExpr>& source_residual, BlockExecutionTerminal* terminal,
     int64_t* rows_affected, std::string* managed_result_json, std::string* error,
-    std::shared_ptr<IDatabaseChannel> database_source, std::shared_ptr<IDataFrameChannel> dataframe_source) {
+    std::shared_ptr<IDatabaseChannel> database_source, std::shared_ptr<IDataFrameChannel> dataframe_source,
+    std::string* contract_checks) {
     if (providers.size() == 1) {
         return ExecuteSingleBlockTransformPipeline(source, providers.front(), sink, managed_sink, stmt, source_residual,
                                                    terminal, rows_affected, managed_result_json, error,
-                                                   std::move(database_source), std::move(dataframe_source));
+                                                   std::move(database_source), std::move(dataframe_source), nullptr,
+                                                   contract_checks);
     }
     if (database_source || dataframe_source) {
         if (error) *error = "snapshot block input requires one operator";
@@ -1638,12 +1754,34 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
         return FilterPlanError::kNone;
     };
 
+    std::vector<std::shared_ptr<contracts::BlockInvocation>> contract_states;
+    const auto contract_run = dataset::Token();
+    auto publish_checks = [&] {
+        if (!contract_checks) return;
+        dataset::Json checks(rapidjson::kArrayType);
+        for (const auto& state : contract_states)
+            if (state->invocation.check.IsObject())
+                checks.PushBack(dataset::Copy(state->invocation.check, checks.GetAllocator()), checks.GetAllocator());
+        *contract_checks = dataset::Encode(checks);
+    };
     for (size_t i = 0; i < providers.size(); ++i) {
         auto& plan = stage_plans[i];
         plan.provider = providers[i];
         plan.filter_plan.pushed_filter_plan_json = kEmptyCanonicalFilterPlanV1;
         const auto& params = i < stmt.operator_with_params.size() ? stmt.operator_with_params[i] : empty_params;
         plan.with_params_json = MakeWithParamsJson(params);
+        auto state = std::make_shared<contracts::BlockInvocation>();
+        state->querier = querier_;
+        state->invocation.component = plan.provider.component;
+        if (state->invocation.component.category.empty())
+            state->invocation.component.category = stmt.operators[i].category;
+        if (state->invocation.component.name.empty()) state->invocation.component.name = stmt.operators[i].name;
+        state->parameters.Parse(plan.with_params_json.c_str());
+        dataset::Set(state->context, "source", i == 0 ? stmt.source : "temporary", state->context.GetAllocator());
+        dataset::Set(state->context, "contract_run_id", contract_run, state->context.GetAllocator());
+        state->context.AddMember("contract_stage_index", static_cast<unsigned>(i), state->context.GetAllocator());
+        if (i) state->previous = contract_states.back();
+        contract_states.push_back(state);
 
         IBlockTransformTaskV1* probe_raw = nullptr;
         IBlockTransformTimeDrivenTaskV1* probe_time = nullptr;
@@ -1658,6 +1796,13 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
             return EIO;
         }
         auto probe = make_task_holder(plan.provider, probe_raw);
+        auto* adapter = plan.provider.v2 ? dynamic_cast<IOperatorConfigAdapterV1*>(plan.provider.v2)
+                                         : dynamic_cast<IOperatorConfigAdapterV1*>(plan.provider.v1);
+        if (state->Check(probe.get(), adapter, input_schema)) {
+            publish_checks();
+            if (error) *error = state->ErrorText();
+            return EINVAL;
+        }
         const int input_bind_rc = BindBlockTransformInputSource(probe.get(), stmt.source, error);
         if (input_bind_rc != 0) return input_bind_rc;
 
@@ -1755,6 +1900,7 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     std::vector<TaskHolder> execution_holders;
     std::vector<IBlockTransformTaskV1*> execution_tasks;
     std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks;
+    std::vector<std::unique_ptr<contracts::CheckedBlockTask>> checked_tasks;
     execution_holders.reserve(stage_plans.size());
     execution_tasks.reserve(stage_plans.size());
     time_tasks.reserve(stage_plans.size());
@@ -1788,8 +1934,12 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
                 return EINVAL;
             }
         }
-        execution_tasks.push_back(execution_raw);
-        time_tasks.push_back(execution_time);
+        auto* adapter = plan.provider.v2 ? dynamic_cast<IOperatorConfigAdapterV1*>(plan.provider.v2)
+                                         : dynamic_cast<IOperatorConfigAdapterV1*>(plan.provider.v1);
+        checked_tasks.push_back(
+            std::make_unique<contracts::CheckedBlockTask>(execution_raw, adapter, contract_states[i]));
+        execution_tasks.push_back(checked_tasks.back().get());
+        time_tasks.push_back(execution_time ? checked_tasks.back().get() : nullptr);
         execution_holders.push_back(std::move(execution));
     }
 
@@ -1826,6 +1976,12 @@ int SchedulerPlugin::ExecuteBlockTransformPipeline(
     BlockTransformPipelineResult result;
     std::string runner_error;
     const auto runner_rc = runner.Run(&result, &runner_error);
+    publish_checks();
+    for (const auto& state : contract_states)
+        if (!state->error.code.empty()) {
+            if (error) *error = state->ErrorText();
+            return EINVAL;
+        }
     if (rows_affected) *rows_affected = result.output_rows;
     if (result.terminal == BlockTransformPipelineTerminal::kCompleted) {
         if (terminal) *terminal = BlockExecutionTerminal::kCompleted;
@@ -1937,6 +2093,7 @@ int32_t SchedulerPlugin::ExecuteResultSink(IChannel* source, const SqlStatement&
                                            const std::shared_ptr<const BoundFilterExpr>& residual, std::string& rsp) {
     const auto control = SchedulerBatchRuntime::CurrentControl();
     std::unique_ptr<IResultSinkWriterV1> writer;
+    std::string contract_checks = "[]";
     ResultSinkReportV1 fallback;
     fallback.state = "failed";
     fallback.code = "SINK_RESOLVE_FAILED";
@@ -1960,6 +2117,8 @@ int32_t SchedulerPlugin::ExecuteResultSink(IChannel* source, const SqlStatement&
         w.Uint64(report.confirmed_rows);
         w.Key("result_row_count");
         w.Uint64(report.confirmed_rows);
+        w.Key("contract_checks");
+        w.RawValue(contract_checks.c_str(), contract_checks.size(), rapidjson::kArrayType);
         w.Key("result_target");
         w.String(stmt.dest.c_str());
         w.Key("result");
@@ -2066,8 +2225,9 @@ int32_t SchedulerPlugin::ExecuteResultSink(IChannel* source, const SqlStatement&
             BlockExecutionTerminal terminal = BlockExecutionTerminal::kFailed;
             int64_t rows = 0;
             std::string summary;
-            rc = ExecuteSingleBlockTransformPipeline(block, provider, nullptr, nullptr, stmt, residual, &terminal,
-                                                     &rows, &summary, &upstream_error, {}, {}, writer.get());
+            rc =
+                ExecuteSingleBlockTransformPipeline(block, provider, nullptr, nullptr, stmt, residual, &terminal, &rows,
+                                                    &summary, &upstream_error, {}, {}, writer.get(), &contract_checks);
             stopped = terminal == BlockExecutionTerminal::kStopped;
             if (terminal == BlockExecutionTerminal::kCancelled) {
                 writer->Cancel();
@@ -2125,7 +2285,7 @@ int32_t SchedulerPlugin::ExecuteResultSink(IChannel* source, const SqlStatement&
                 std::vector<IChannel*> inputs{source};
                 int64_t rows = 0;
                 rc = ExecuteWithOperatorChain(Span<IChannel*>(inputs), &result, operators, ChannelType::kDataFrame,
-                                              stmt, &rows, &upstream_error);
+                                              stmt, &rows, &upstream_error, &contract_checks);
                 if (!rc) rc = result.Read(&snapshot);
             } else {
                 rc = dataframe->Read(&snapshot);
@@ -2423,8 +2583,41 @@ int SchedulerPlugin::ExecuteWithOperator(IChannel* source, IChannel* sink, IOper
 
 int SchedulerPlugin::ExecuteWithOperatorChain(Span<IChannel*> inputs, IChannel* sink,
                                               const std::vector<IOperator*>& ops, const std::string& sink_type,
-                                              const SqlStatement& stmt, int64_t* rows_affected, std::string* error) {
+                                              const SqlStatement& stmt, int64_t* rows_affected, std::string* error,
+                                              std::string* contract_checks) {
     if (ops.empty() || inputs.empty()) return -1;
+    using namespace dataset;
+    Json checks(rapidjson::kArrayType);
+    auto fail_contract = [&](const DataSemanticsErrorV1& issue) {
+        if (error) *error = issue.code + ": " + issue.message;
+        if (contract_checks) *contract_checks = Encode(checks);
+        return -1;
+    };
+    std::vector<contracts::Invocation> invocations(ops.size());
+    const auto contract_run = Token();
+    DataSemanticsErrorV1 contract_error;
+    for (size_t i = 0; i < ops.size(); ++i)
+        if (contracts::Component(querier_, dynamic_cast<IOperatorContractIdentityV1*>(ops[i]), ops[i]->Category(),
+                                 ops[i]->Name(), &invocations[i].component, &contract_error))
+            return fail_contract(contract_error);
+    // Source descriptions are captured before filtering/loading. They are compared again
+    // after a stable Arrow snapshot has been retained for the actual Work call.
+    std::vector<Json> source_snapshots(inputs.size);
+    std::vector<std::string> source_bindings(inputs.size);
+    std::vector<Json> source_locators(inputs.size);
+    if (invocations.front().component.contract_state == "declared") {
+        for (size_t n = 0; n < inputs.size; ++n) {
+            const auto name = n < stmt.sources.size() ? stmt.sources[n] : stmt.source;
+            if (name.compare(0, 10, "dataframe.") || std::string(inputs[n]->Type()) != ChannelType::kDataFrame)
+                continue;
+            source_locators[n].SetObject();
+            Set(source_locators[n], "kind", "dataframe", source_locators[n].GetAllocator());
+            Set(source_locators[n], "name", name.substr(10), source_locators[n].GetAllocator());
+            if (contracts::DescribeInput(querier_, source_locators[n], nullptr, &source_snapshots[n],
+                                         &source_bindings[n], &contract_error))
+                return fail_contract(contract_error);
+        }
+    }
 
     Span<IChannel*> stage_inputs = inputs;
     std::shared_ptr<DataFrameChannel> tmp_in;
@@ -2472,6 +2665,90 @@ int SchedulerPlugin::ExecuteWithOperatorChain(Span<IChannel*> inputs, IChannel* 
     }
 
     for (size_t i = 0; i < ops.size(); ++i) {
+        auto& invocation = invocations[i];
+        std::vector<std::shared_ptr<DataFrameChannel>> frozen_channels;
+        std::vector<IChannel*> frozen_inputs;
+        Json input_snapshots(rapidjson::kArrayType), parameters(rapidjson::kObjectType),
+            context(rapidjson::kObjectType);
+        auto& ia = input_snapshots.GetAllocator();
+        Value shapes(rapidjson::kArrayType);
+        const auto stage_params = i < stmt.operator_with_params.size()
+                                      ? stmt.operator_with_params[i]
+                                      : (i == 0 ? stmt.with_params : std::unordered_map<std::string, std::string>{});
+        for (const auto& [key, value] : stage_params) Set(parameters, key.c_str(), value, parameters.GetAllocator());
+        if (invocation.component.contract_state == "declared") {
+            auto* service = querier_
+                                ? static_cast<IOperatorDataContractV1*>(querier_->First(IID_OPERATOR_DATA_CONTRACT_V1))
+                                : nullptr;
+            OperatorContractSnapshotV1 definition;
+            if (!service || service->Resolve(invocation.component.contract_ref.c_str(), &definition, &contract_error)) {
+                if (!service) contract_error = {"UNAVAILABLE", "declared operator contract service unavailable", ""};
+                return fail_contract(contract_error);
+            }
+            Json contract;
+            contract.Parse(definition.document_json->c_str());
+            size_t port_index = 0, port_count = 0;
+            for (size_t n = 0; n < stage_inputs.size; ++n) {
+                auto* df = dynamic_cast<IDataFrameChannel*>(stage_inputs[n]);
+                if (!df)
+                    return fail_contract(
+                        {"CONTRACT_INVALID", "declared DataFrame stage requires DataFrame inputs", ""});
+                DataFrame frame;
+                if (df->Read(&frame))
+                    return fail_contract({"SOURCE_UNAVAILABLE", "cannot retain stage input snapshot", ""});
+                auto frozen = std::make_shared<DataFrameChannel>("_contract", std::to_string(++tmp_channel_seq_));
+                if (frozen->Open() || frozen->Write(&frame))
+                    return fail_contract({"SOURCE_UNAVAILABLE", "cannot freeze stage input", ""});
+                Json snapshot;
+                std::string binding;
+                if (i == 0 && n < source_locators.size() && source_locators[n].IsObject()) {
+                    if (contracts::DescribeInput(querier_, source_locators[n], frame.ToArrow()->schema(), &snapshot,
+                                                 &binding, &contract_error))
+                        return fail_contract(contract_error);
+                    if (Get(source_snapshots[n], "schema_state") == "known" &&
+                        (source_snapshots[n]["object_key"] != snapshot["object_key"] ||
+                         Get(source_snapshots[n], "source_revision") != Get(snapshot, "source_revision")))
+                        return fail_contract({"SOURCE_CHANGED", "source changed after stage resolution", ""});
+                    if (FindChannel(n < stmt.sources.size() ? stmt.sources[n] : stmt.source) != inputs[n])
+                        return fail_contract({"SOURCE_CHANGED", "source instance was replaced", ""});
+                } else if (i && invocations[i - 1].check.HasMember("outputs") &&
+                           !invocations[i - 1].check["outputs"].Empty() &&
+                           invocations[i - 1].check["outputs"][0].HasMember("binding_ref")) {
+                    const auto& output = invocations[i - 1].check["outputs"][0];
+                    snapshot.CopyFrom(output["snapshot"], snapshot.GetAllocator());
+                    binding = Get(output, "binding_ref");
+                } else if (contracts::DescribeInput(nullptr, Value(), frame.ToArrow()->schema(), &snapshot, &binding,
+                                                    &contract_error))
+                    return fail_contract(contract_error);
+                const auto& ports = contract["inputs"];
+                while (port_index + 1 < ports.Size() && port_count >= ports[port_index]["max_count"].GetUint64()) {
+                    ++port_index;
+                    port_count = 0;
+                }
+                ++port_count;
+                Value input(rapidjson::kObjectType);
+                Set(input, "port_id", Get(ports[port_index], "port_id"), ia);
+                input.AddMember("input_index", static_cast<uint64_t>(n), ia)
+                    .AddMember("snapshot", Copy(snapshot, ia), ia);
+                if (!binding.empty()) Set(input, "binding_ref", binding, ia);
+                input_snapshots.PushBack(input, ia);
+                shapes.PushBack("dataframe", context.GetAllocator());
+                frozen_inputs.push_back(frozen.get());
+                frozen_channels.push_back(std::move(frozen));
+            }
+        }
+        context.AddMember("input_shapes", shapes, context.GetAllocator());
+        Set(context, "contract_run_id", contract_run, context.GetAllocator());
+        context.AddMember("contract_stage_index", static_cast<unsigned>(i), context.GetAllocator());
+        Set(context, "source", i == 0 ? stmt.source : "temporary", context.GetAllocator());
+        if (contracts::CheckInvocation(querier_, &invocation, dynamic_cast<IOperatorConfigAdapterV1*>(ops[i]),
+                                       parameters, input_snapshots, context, &contract_error)) {
+            if (invocation.check.IsObject())
+                checks.PushBack(Copy(invocation.check, checks.GetAllocator()), checks.GetAllocator());
+            return fail_contract(contract_error);
+        }
+        checks.PushBack(Copy(invocation.check, checks.GetAllocator()), checks.GetAllocator());
+        if (contract_checks) *contract_checks = Encode(checks);
         std::shared_ptr<DataFrameChannel> stage_out;
         IChannel* actual_sink = nullptr;
         if (i + 1 == ops.size()) {
@@ -2488,7 +2765,8 @@ int SchedulerPlugin::ExecuteWithOperatorChain(Span<IChannel*> inputs, IChannel* 
             actual_sink = stage_out.get();
         }
 
-        if (ops[i]->Work(stage_inputs, actual_sink) != 0) {
+        const auto execution_inputs = frozen_inputs.empty() ? stage_inputs : Span<IChannel*>(frozen_inputs);
+        if (ops[i]->Work(execution_inputs, actual_sink) != 0) {
             if (error && error->empty()) {
                 std::string op_error = ops[i]->LastError();
                 if (!op_error.empty()) {
@@ -2500,6 +2778,20 @@ int SchedulerPlugin::ExecuteWithOperatorChain(Span<IChannel*> inputs, IChannel* 
             return -1;
         }
 
+        if (invocation.component.contract_state == "declared") {
+            auto* observed = dynamic_cast<IDataFrameChannel*>(actual_sink);
+            DataFrame frame;
+            auto schema =
+                observed && observed->Read(&frame) == 0 && frame.ToArrow() ? frame.ToArrow()->schema() : nullptr;
+            if (contracts::ObservePrimary(querier_, &invocation, schema, schema ? frame.RowCount() : -1,
+                                          dynamic_cast<IOperatorOutputObservationV1*>(ops[i]), "complete",
+                                          &contract_error)) {
+                checks[static_cast<rapidjson::SizeType>(i)].CopyFrom(invocation.check, checks.GetAllocator());
+                return fail_contract(contract_error);
+            }
+            checks[static_cast<rapidjson::SizeType>(i)].CopyFrom(invocation.check, checks.GetAllocator());
+            if (contract_checks) *contract_checks = Encode(checks);
+        }
         if (stage_out) {
             stage_buffers.push_back(stage_out);
             stage_input_holder.clear();

@@ -2,8 +2,11 @@ project(test_config_channel)
 
 add_executable(${PROJECT_NAME}
     test_config_channel.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_contract_service.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_contract_derivation.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/channel_dictionary.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_control.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/config_channel_provider.cpp
@@ -43,6 +46,7 @@ add_test(NAME test_config_channel_e2e COMMAND ${CMAKE_BINARY_DIR}/output/test_co
 set_tests_properties(test_config_channel_e2e PROPERTIES TIMEOUT 60)
 
 add_executable(test_data_semantics test_data_semantics.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
@@ -71,6 +75,7 @@ set_tests_properties(test_data_semantics_browser PROPERTIES TIMEOUT 180 RESOURCE
 add_executable(test_channel_dictionary test_channel_dictionary.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/channel_dictionary.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_control.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
@@ -107,6 +112,7 @@ set_tests_properties(test_channel_dictionary_iid PROPERTIES TIMEOUT 60)
 add_executable(test_channel_dictionary_database test_channel_dictionary_database.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/channel_dictionary.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_control.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
@@ -125,6 +131,7 @@ set_tests_properties(test_channel_dictionary_browser PROPERTIES TIMEOUT 200 RESO
 add_executable(test_channel_dictionary_consistency test_channel_dictionary_consistency.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/channel_dictionary.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_control.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
@@ -134,3 +141,96 @@ add_thirddepen(test_channel_dictionary_consistency rapidjson sqlite yaml-cpp)
 target_link_libraries(test_channel_dictionary_consistency OpenSSL::Crypto)
 add_test(NAME test_channel_dictionary_consistency COMMAND $<TARGET_FILE:test_channel_dictionary_consistency>)
 set_tests_properties(test_channel_dictionary_consistency PROPERTIES TIMEOUT 30)
+
+add_executable(test_operator_contract_model test_operator_contract_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_control.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
+target_include_directories(test_operator_contract_model PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/channels/config)
+target_compile_options(test_operator_contract_model PRIVATE -UNDEBUG)
+add_thirddepen(test_operator_contract_model rapidjson sqlite yaml-cpp)
+target_link_libraries(test_operator_contract_model OpenSSL::Crypto)
+target_compile_definitions(test_operator_contract_model PRIVATE FLOWSQL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}/..")
+add_test(NAME test_operator_contract_model COMMAND $<TARGET_FILE:test_operator_contract_model>)
+add_test(NAME test_operator_contract_schema COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_operator_contract_schema.py ${CMAKE_SOURCE_DIR}/..)
+
+add_executable(test_baseliner_contract_schema test_baseliner_contract_schema.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
+target_include_directories(test_baseliner_contract_schema PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/channels/config)
+add_thirddepen(test_baseliner_contract_schema rapidjson yaml-cpp)
+target_link_libraries(test_baseliner_contract_schema flowsql_baseliner_contract OpenSSL::Crypto)
+target_compile_options(test_baseliner_contract_schema PRIVATE -UNDEBUG)
+target_compile_definitions(test_baseliner_contract_schema PRIVATE FLOWSQL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}/..")
+add_test(NAME test_baseliner_contract_schema COMMAND $<TARGET_FILE:test_baseliner_contract_schema>)
+set_tests_properties(test_baseliner_contract_schema PROPERTIES TIMEOUT 30)
+
+add_executable(test_operator_contract_check test_operator_contract_check.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_contract_service.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_contract_derivation.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/channel_dictionary.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
+target_include_directories(test_operator_contract_check PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/channels/config)
+target_compile_options(test_operator_contract_check PRIVATE -UNDEBUG)
+add_thirddepen(test_operator_contract_check rapidjson sqlite yaml-cpp)
+target_link_libraries(test_operator_contract_check OpenSSL::Crypto)
+add_test(NAME test_operator_contract_check COMMAND $<TARGET_FILE:test_operator_contract_check>)
+
+add_executable(test_baseliner_contract_invocation test_baseliner_contract_invocation.cpp)
+target_include_directories(test_baseliner_contract_invocation PRIVATE ${CMAKE_SOURCE_DIR})
+add_thirddepen(test_baseliner_contract_invocation arrow rapidjson)
+target_link_libraries(test_baseliner_contract_invocation flowsql_common flowsql_baseliner_contract OpenSSL::Crypto)
+target_compile_options(test_baseliner_contract_invocation PRIVATE -UNDEBUG)
+target_compile_definitions(test_baseliner_contract_invocation PRIVATE FLOWSQL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}/..")
+foreach(component IN ITEMS config_channel builtin catalog database baseliner)
+    string(TOUPPER ${component} upper)
+    if(component STREQUAL "config_channel")
+        set(upper CONFIG)
+    endif()
+    target_compile_definitions(test_baseliner_contract_invocation PRIVATE ${upper}_PLUGIN_PATH="$<TARGET_FILE:flowsql_${component}>")
+    add_dependencies(test_baseliner_contract_invocation flowsql_${component})
+endforeach()
+add_test(NAME test_baseliner_contract_invocation COMMAND $<TARGET_FILE:test_baseliner_contract_invocation>)
+set_tests_properties(test_baseliner_contract_invocation PROPERTIES TIMEOUT 60)
+
+add_executable(test_operator_contract_output test_operator_contract_output.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_contract_service.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_contract_derivation.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
+target_include_directories(test_operator_contract_output PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/channels/config)
+target_compile_options(test_operator_contract_output PRIVATE -UNDEBUG)
+add_thirddepen(test_operator_contract_output rapidjson sqlite yaml-cpp)
+target_link_libraries(test_operator_contract_output OpenSSL::Crypto)
+add_test(NAME test_operator_contract_output COMMAND $<TARGET_FILE:test_operator_contract_output>)
+
+add_executable(test_operator_contract_host operator_contract_host.cpp)
+target_include_directories(test_operator_contract_host PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_operator_contract_host PRIVATE -UNDEBUG -Wno-type-limits)
+add_thirddepen(test_operator_contract_host arrow rapidjson)
+target_link_libraries(test_operator_contract_host flowsql_common OpenSSL::Crypto ${CMAKE_DL_LIBS})
+add_dependencies(test_operator_contract_host flowsql_gateway flowsql_router flowsql_config_channel flowsql_builtin
+    flowsql_catalog flowsql_binaddon flowsql_bridge flowsql_database flowsql_baseline flowsql_scheduler flowsql_web
+    fixture_contract_output flowsql_baseliner flowsql_task)
+target_compile_definitions(test_operator_contract_host PRIVATE FIXTURE_OUTPUT_PATH="$<TARGET_FILE:fixture_contract_output>" BASELINER_PATH="$<TARGET_FILE:flowsql_baseliner>")
+set_target_properties(test_operator_contract_host PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_operator_contract_api COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_operator_contract_api.py $<TARGET_FILE:test_operator_contract_host>)
+set_tests_properties(test_operator_contract_api PROPERTIES TIMEOUT 180 RESOURCE_LOCK semantics_http)
+
+add_test(NAME test_operator_contract_preflight COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_operator_contract_api.py $<TARGET_FILE:test_operator_contract_host> --local)
+set_tests_properties(test_operator_contract_preflight PROPERTIES TIMEOUT 90)
+
+add_test(NAME test_operator_contract_browser COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_operator_contract_browser.py $<TARGET_FILE:test_operator_contract_host> ${FLOWSQL_SEMANTICS_NODE})
+set_tests_properties(test_operator_contract_browser PROPERTIES TIMEOUT 220 RESOURCE_LOCK "semantics_http;visualization_browser")

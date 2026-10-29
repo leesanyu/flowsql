@@ -59,8 +59,8 @@ class FixtureTransformOperator final : public flowsql::IBlockTransformOperatorV1
     ~FixtureTransformOperator() override {
         try {
             auto* registry = querier_ ? static_cast<flowsql::ICppOperatorPluginRegistryV1*>(
-                                           querier_->First(flowsql::IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1))
-                                     : nullptr;
+                                            querier_->First(flowsql::IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1))
+                                      : nullptr;
             flowsql::CppOperatorCapabilityLeaseV1 lease;
             if (registry) {
                 (void)registry->Acquire("fixture", "transform", flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V1, &lease);
@@ -94,8 +94,7 @@ class FixtureTimeDrivenTransformTask final : public flowsql::IBlockTransformTask
           with_params_json_(config.with_params_json),
           pushed_filter_plan_json_(config.pushed_filter_plan_json) {}
 
-    int Open(std::shared_ptr<arrow::Schema> input_schema,
-             std::shared_ptr<arrow::Schema>* output_schema) override {
+    int Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema>* output_schema) override {
         if (!input_schema || !output_schema || opened_) return -1;
         schema_ = std::move(input_schema);
         *output_schema = schema_;
@@ -103,8 +102,7 @@ class FixtureTimeDrivenTransformTask final : public flowsql::IBlockTransformTask
         return 0;
     }
 
-    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>&,
-                     int64_t,
+    int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>&, int64_t,
                      std::vector<flowsql::BlockTransformOutputV1>* outputs) override {
         if (!opened_ || cancelled_ || !outputs || !outputs->empty()) return -1;
         return static_cast<int>(flowsql::BlockTransformStatusV1::kContinue);
@@ -118,8 +116,7 @@ class FixtureTimeDrivenTransformTask final : public flowsql::IBlockTransformTask
     std::string LastError() const override { return ""; }
 
     int GetTimeDriveState(flowsql::BlockTransformTimeDriveStateV1* state) override {
-        if (!opened_ || cancelled_ || !state ||
-            state->struct_size < flowsql::kBlockTransformTimeDriveStateV1Size ||
+        if (!opened_ || cancelled_ || !state || state->struct_size < flowsql::kBlockTransformTimeDriveStateV1Size ||
             state->contract_version != flowsql::kBlockTransformTimeDriveVersionV1) {
             return -1;
         }
@@ -136,8 +133,7 @@ class FixtureTimeDrivenTransformTask final : public flowsql::IBlockTransformTask
                std::vector<flowsql::BlockTransformOutputV1>* outputs) override {
         if (!opened_ || cancelled_ || !outputs || !outputs->empty() ||
             event.struct_size < flowsql::kBlockTransformTimeEventV1Size ||
-            event.contract_version != flowsql::kBlockTransformTimeDriveVersionV1 ||
-            event.monotonic_now_ns < 0) {
+            event.contract_version != flowsql::kBlockTransformTimeDriveVersionV1 || event.monotonic_now_ns < 0) {
             return -1;
         }
         deadline_ns_ = event.monotonic_now_ns + 1;
@@ -162,8 +158,7 @@ class FixtureTimeDrivenTransformOperator final : public flowsql::IBlockTransform
     std::string Name() const override { return VersionPairEnabled() ? "transform" : "time_transform"; }
     std::string Description() const override { return "V2 fixture time-driven block transform operator"; }
 
-    int CreateTask(const flowsql::BlockTransformTaskConfigV2& config,
-                   flowsql::IBlockTransformTaskV2** task) override {
+    int CreateTask(const flowsql::BlockTransformTaskConfigV2& config, flowsql::IBlockTransformTaskV2** task) override {
         if (!task) return -1;
         *task = nullptr;
         if (!querier_ || config.struct_size < flowsql::kBlockTransformTaskConfigV2Size ||
@@ -258,3 +253,7 @@ void flowsql_destroy_operator_capability(int index, void* capability) {
 }
 
 }  // extern "C"
+
+extern "C" const char* flowsql_operator_data_contract_v1(int index) {
+    return index == 2 && std::getenv("FLOWSQL_FIXTURE_PAIRED_INVALID_CONTRACT") ? "{invalid" : nullptr;
+}

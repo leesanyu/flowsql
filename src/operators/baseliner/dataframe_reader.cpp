@@ -161,14 +161,12 @@ void HashCell(Hash& hash, const arrow::Array& array, int64_t row) {
             throw std::runtime_error("unsupported DataFrame snapshot column type: " + array.type()->ToString());
     }
 }
-bool Integer(arrow::Type::type type) { return type >= arrow::Type::UINT8 && type <= arrow::Type::INT64; }
 std::shared_ptr<arrow::Array> Convert(const std::shared_ptr<arrow::Array>& array, LogicalType logical,
                                       arrow::compute::ExecContext* context) {
     auto target = ArrowType(logical);
     if (array->type()->Equals(target)) return array;
     if (array->length() == 0) return Value(arrow::MakeArrayOfNull(target, 0, context->memory_pool()));
-    if (((logical == LogicalType::kInt64 || logical == LogicalType::kUInt64) && Integer(array->type_id())) ||
-        (logical == LogicalType::kFloat64 && array->type_id() == arrow::Type::FLOAT))
+    if (CanConvertDataFrameType(array->type()->ToString(), logical, false))
         return Value(arrow::compute::Cast(*array, target, arrow::compute::CastOptions::Safe(), context));
     throw std::runtime_error("unsupported DataFrame conversion: " + array->type()->ToString() + " to " +
                              target->ToString());
@@ -231,6 +229,14 @@ bool Matches(const arrow::Array& array, int64_t row, const Predicate& predicate)
     throw std::runtime_error("unsupported filter operator");
 }
 }  // namespace
+bool CanConvertDataFrameType(std::string_view physical, LogicalType logical, bool empty) {
+    if (empty || physical == ArrowType(logical)->ToString()) return true;
+    if (logical == LogicalType::kFloat64) return physical == "float";
+    if (logical != LogicalType::kInt64 && logical != LogicalType::kUInt64) return false;
+    for (const char* type : {"int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"})
+        if (physical == type) return true;
+    return false;
+}
 struct DataFrameReader::Impl {
     TaskConfig config;
     std::string error;

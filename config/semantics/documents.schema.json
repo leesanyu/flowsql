@@ -2472,6 +2472,570 @@
         "confirmation"
       ],
       "additionalProperties": false
+    },
+    "operatorIdentity": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "category",
+        "name",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "operatorSchema": {
+      "type": [
+        "object",
+        "boolean"
+      ]
+    },
+    "operatorSelector": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "column",
+            "parameter",
+            "config"
+          ]
+        },
+        "column": {
+          "type": "string",
+          "minLength": 1
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scope": {
+          "enum": [
+            "root",
+            "input_item",
+            "role_item"
+          ]
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "cardinality": {
+          "enum": [
+            "one",
+            "many"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "operatorRole": {
+      "type": "object",
+      "properties": {
+        "role_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "types": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/type"
+          }
+        },
+        "nullable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "semantic_requirements": {
+          "type": "object"
+        },
+        "selector": {
+          "$ref": "#/%24defs/operatorSelector"
+        }
+      },
+      "required": [
+        "role_id",
+        "required",
+        "types",
+        "nullable",
+        "semantic_requirements",
+        "selector"
+      ],
+      "additionalProperties": false
+    },
+    "operatorRoleTemplate": {
+      "type": "object",
+      "properties": {
+        "repeat_from_pointer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "item_key_pointer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "discriminator_pointer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cases": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "roles": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/%24defs/operatorRole"
+                }
+              },
+              "role_templates": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/%24defs/operatorRoleTemplate"
+                }
+              }
+            },
+            "required": [
+              "roles"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "repeat_from_pointer",
+        "item_key_pointer",
+        "cases"
+      ],
+      "additionalProperties": false
+    },
+    "operatorInput": {
+      "type": "object",
+      "properties": {
+        "port_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "min_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "max_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "shape": {
+          "enum": [
+            "dataframe",
+            "record_batch",
+            "stream_batch",
+            "opaque"
+          ]
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorRole"
+          }
+        },
+        "repeat_from_config_pointer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "item_key_pointer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role_templates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorRoleTemplate"
+          }
+        }
+      },
+      "required": [
+        "port_id",
+        "min_count",
+        "max_count",
+        "shape",
+        "roles"
+      ],
+      "additionalProperties": false
+    },
+    "operatorDerivation": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "copy",
+            "rename",
+            "unit_convert",
+            "aggregate",
+            "unknown"
+          ]
+        },
+        "output_field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_port": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "all_fields": {
+          "type": "boolean"
+        },
+        "unit_rule": {
+          "type": "object"
+        },
+        "aggregation_rule": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "operatorCondition": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "enum": [
+            "config",
+            "execution_context",
+            "row"
+          ]
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "equals": {},
+        "exists": {
+          "type": "boolean"
+        },
+        "all": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorCondition"
+          }
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "operatorRowCase": {
+      "type": "object",
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "when": {
+          "$ref": "#/%24defs/operatorCondition"
+        },
+        "field_rules": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "case_id",
+        "when",
+        "field_rules"
+      ],
+      "additionalProperties": false
+    },
+    "operatorOutput": {
+      "type": "object",
+      "properties": {
+        "port_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "shape": {
+          "enum": [
+            "dataframe",
+            "record_batch",
+            "stream_batch",
+            "opaque"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "fixed",
+            "derived",
+            "configured",
+            "unknown"
+          ]
+        },
+        "structure_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dictionary_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorDerivation"
+          }
+        },
+        "variants": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "availability": {
+          "$ref": "#/%24defs/operatorCondition"
+        },
+        "row_cases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorRowCase"
+          }
+        },
+        "context_semantics": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "port_id",
+        "shape",
+        "mode",
+        "rules"
+      ],
+      "additionalProperties": false
+    },
+    "operatorConfiguration": {
+      "type": "object",
+      "properties": {
+        "invocation_schema": {
+          "$ref": "#/%24defs/operatorSchema"
+        },
+        "normalized_config_schema": {
+          "$ref": "#/%24defs/operatorSchema"
+        },
+        "decoded_parameters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string",
+                "minLength": 1
+              },
+              "encoding": {
+                "enum": [
+                  "json"
+                ]
+              },
+              "schema_ref": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "key",
+              "encoding",
+              "schema_ref"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "affects": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      },
+      "required": [
+        "invocation_schema",
+        "affects"
+      ],
+      "additionalProperties": false
+    },
+    "operatorContract": {
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "enum": [
+            "flowsql.operator-data-contract.v1"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operator": {
+          "$ref": "#/%24defs/operatorIdentity"
+        },
+        "configuration": {
+          "$ref": "#/%24defs/operatorConfiguration"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorInput"
+          },
+          "minItems": 1
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorOutput"
+          },
+          "minItems": 1
+        },
+        "resources": {
+          "type": "object"
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "schema_id",
+        "title",
+        "operator",
+        "configuration",
+        "inputs",
+        "outputs",
+        "limitations"
+      ],
+      "additionalProperties": false
+    },
+    "operatorUse": {
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "enum": [
+            "flowsql.operator-data-use.v1"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stage_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "operator_ref": {
+          "$ref": "#/%24defs/operatorIdentity"
+        },
+        "component_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contract_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "input_snapshots": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "role_map": {
+          "type": "object"
+        },
+        "effective_parameters": {
+          "type": "object"
+        },
+        "normalized_config": {
+          "type": "object"
+        },
+        "config_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "execution_context": {
+          "type": "object"
+        },
+        "checks": {
+          "type": "object"
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "outcome": {
+          "enum": [
+            "complete",
+            "partial",
+            "failed"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "title",
+        "run_id",
+        "stage_index",
+        "operator_ref",
+        "component_revision",
+        "contract_ref",
+        "input_snapshots",
+        "role_map",
+        "effective_parameters",
+        "config_refs",
+        "execution_context",
+        "checks",
+        "outputs",
+        "outcome"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -2486,6 +3050,12 @@
     },
     {
       "$ref": "#/%24defs/channelBinding"
+    },
+    {
+      "$ref": "#/%24defs/operatorContract"
+    },
+    {
+      "$ref": "#/%24defs/operatorUse"
     }
   ]
 }

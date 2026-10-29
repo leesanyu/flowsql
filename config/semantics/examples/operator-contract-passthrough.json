@@ -1,0 +1,50 @@
+{
+  "schema_id": "flowsql.operator-data-contract.v1",
+  "title": "Passthrough",
+  "operator": {
+    "category": "builtin",
+    "name": "passthrough",
+    "version": "1"
+  },
+  "configuration": {
+    "invocation_schema": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "affects": {}
+  },
+  "inputs": [
+    {
+      "port_id": "input",
+      "min_count": 1,
+      "max_count": 1,
+      "shape": "dataframe",
+      "roles": []
+    },
+    {
+      "port_id": "ignored",
+      "min_count": 0,
+      "max_count": 65536,
+      "shape": "dataframe",
+      "roles": []
+    }
+  ],
+  "outputs": [
+    {
+      "port_id": "output",
+      "shape": "dataframe",
+      "mode": "derived",
+      "rules": [
+        {
+          "kind": "copy",
+          "source_port": "input",
+          "all_fields": true
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Declared field semantics do not prove row data quality.",
+    "Only the first input contributes to the output; additional inputs retain the historical ignored-input behavior."
+  ]
+}

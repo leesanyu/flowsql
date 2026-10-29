@@ -19,7 +19,7 @@ import uvicorn
 
 from .arrow_codec import decode_arrow_ipc, encode_arrow_ipc, decode_arrow_ipc_file, encode_arrow_ipc_file
 from .config import WorkerConfig
-from .operator_registry import OperatorRegistry
+from .operator_registry import OperatorRegistry, ComponentChanged
 
 app = FastAPI(title="FlowSQL Python Worker")
 registry = OperatorRegistry()
@@ -51,17 +51,60 @@ async def list_operators():
 async def reload_operators():
     """重新扫描算子目录"""
     loop = asyncio.get_event_loop()
-    added, removed = await loop.run_in_executor(None, _do_reload)
-    return {"added": list(added), "removed": list(removed)}
+    try:
+        added, removed = await loop.run_in_executor(None, _do_reload)
+        return {"added": list(added), "removed": list(removed)}
+    except ComponentChanged as error:
+        return JSONResponse(status_code=409, content={'error': {'code': 'COMPONENT_CHANGED', 'message': str(error)}})
+    except Exception as error:
+        return JSONResponse(status_code=400, content={'error': {'code': 'CONTRACT_INVALID', 'message': str(error)}})
+
+
+@app.post("/operators/python/source/stage")
+async def stage_source(request: Request):
+    body = await request.json()
+    try:
+        return registry.stage_source(body['filename'], body['source'], body.get('expected_component_revision', ''))
+    except ComponentChanged as error:
+        return JSONResponse(status_code=409, content={'error': {'code': 'COMPONENT_CHANGED', 'message': str(error)}})
+    except Exception as error:
+        return JSONResponse(status_code=400, content={'error': {'code': 'CONTRACT_INVALID', 'message': str(error)}})
+
+
+@app.post("/operators/python/source/read")
+async def read_source(request: Request):
+    body = await request.json()
+    try:
+        return registry.read_source(body['category'], body['name'])
+    except Exception as error:
+        return JSONResponse(status_code=404, content={'error': {'code': 'NOT_FOUND', 'message': str(error)}})
+
+
+@app.post("/operators/python/source/{action}")
+async def source_transition(action: str, request: Request):
+    body = await request.json()
+    try:
+        registry.transition(body['token'], action)
+        return {'status': 'ok'}
+    except ComponentChanged as error:
+        return JSONResponse(status_code=409, content={'error': {'code': 'COMPONENT_CHANGED', 'message': str(error)}})
+    except Exception as error:
+        return JSONResponse(status_code=400, content={'error': {'code': 'CONTRACT_INVALID', 'message': str(error)}})
 
 
 @app.post("/operators/python/work/{category}/{name}")
 async def work(category: str, name: str, request: Request):
-    op = registry.get(category, name)
+    body = await request.json()
+    if 'invocation_token' in body:
+        try:
+            op = registry.take_invocation(category, name, body.get('component_revision', ''), body['invocation_token'])
+        except ComponentChanged as error:
+            return JSONResponse(status_code=409, content={'error': {'code': 'COMPONENT_CHANGED', 'message': str(error)}})
+    else:
+        op = registry.get(category, name)
     if not op:
         raise HTTPException(status_code=404, detail=f"Operator {category}.{name} not found")
 
-    body = await request.json()
     input_path = body.get("input")
     if not input_path:
         raise HTTPException(status_code=400, detail="Missing 'input' field in request body")
@@ -84,6 +127,26 @@ async def work(category: str, name: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Failed to encode Arrow IPC file: {e}")
 
     return JSONResponse(content={"output": output_path})
+
+
+@app.post("/operators/python/invocations/prepare/{category}/{name}")
+async def prepare_invocation(category: str, name: str, request: Request):
+    body = await request.json()
+    try:
+        return registry.prepare(category, name, body.get('component_revision', ''),
+                                body.get('parameters', {}), body.get('inputs', []),
+                                body.get('execution_context', {}))
+    except ComponentChanged as error:
+        return JSONResponse(status_code=409, content={'error': {'code': 'COMPONENT_CHANGED', 'message': str(error)}})
+    except Exception as error:
+        return JSONResponse(status_code=400, content={'error': {'code': 'CONTRACT_INVALID', 'message': str(error)}})
+
+
+@app.post("/operators/python/invocations/release")
+async def release_invocation(request: Request):
+    body = await request.json()
+    registry.release_invocation(body.get('invocation_token', ''))
+    return {'status': 'ok'}
 
 
 @app.post("/operators/python/configure/{category}/{name}")
@@ -140,7 +203,7 @@ def main():
         local_addr = f"{config.host}:{config.port}"
         prefixes = ["/operators/python/health", "/operators/python/list",
                     "/operators/python/reload", "/operators/python/work",
-                    "/operators/python/configure"]
+                    "/operators/python/configure", "/operators/python/source", "/operators/python/invocations"]
         _register_with_gateway(gateway_addr, "pyworker", local_addr, prefixes)
 
         # Gateway 通过重复注册刷新每条路由的 TTL。

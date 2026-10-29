@@ -12,3 +12,6 @@ target_compile_options(${PROJECT_NAME} PRIVATE -UNDEBUG)
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
+
+add_test(NAME test_task COMMAND $<TARGET_FILE:test_task>)
+set_tests_properties(test_task PROPERTIES TIMEOUT 120 RESOURCE_LOCK task_store)

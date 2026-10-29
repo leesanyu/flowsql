@@ -15,6 +15,8 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <common/channel_dataset.hpp>
+#include <common/operator_contract_observation.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -61,6 +63,33 @@
 
 namespace flowsql {
 namespace scheduler {
+
+static int ContractExecutionError(const std::string& text, const std::string& checks, std::string* response) {
+    using namespace dataset;
+    const auto colon = text.find(": ");
+    const auto code = text.substr(0, colon);
+    if (code != "CONTRACT_INCOMPATIBLE" && code != "CONTRACT_INVALID" && code != "COMPONENT_CHANGED" &&
+        code != "SOURCE_CHANGED" && code != "UNAVAILABLE" && code != "NOT_FOUND" && code != "OUTPUT_SCHEMA_MISMATCH" &&
+        code != "METADATA_PUBLICATION_FAILED")
+        return 0;
+    Json result(rapidjson::kObjectType), details;
+    auto& a = result.GetAllocator();
+    Value issue(rapidjson::kObjectType), detail(rapidjson::kObjectType);
+    Set(issue, "code", code, a);
+    Set(issue, "message", colon == std::string::npos ? text : text.substr(colon + 2), a);
+    Set(issue, "field_path", "", a);
+    details.Parse(checks.empty() ? "[]" : checks.c_str());
+    detail.AddMember("checks", Copy(details, a), a);
+    issue.AddMember("details", detail, a);
+    result.AddMember("error", issue, a);
+    *response = Encode(result);
+    if (code == "OUTPUT_SCHEMA_MISMATCH" || code == "METADATA_PUBLICATION_FAILED") return error::INTERNAL_ERROR;
+    if (code == "UNAVAILABLE") return error::UNAVAILABLE;
+    if (code == "CONTRACT_INCOMPATIBLE") return error::UNPROCESSABLE_ENTITY;
+    if (code == "SOURCE_CHANGED" || code == "COMPONENT_CHANGED") return error::CONFLICT;
+    if (code == "NOT_FOUND") return error::NOT_FOUND;
+    return error::BAD_REQUEST;
+}
 
 static std::shared_ptr<IChannel> MakeNonOwningChannelHolder(IChannel* ch) {
     if (!ch) return nullptr;
@@ -238,6 +267,9 @@ static std::shared_ptr<IStreamChannel> MakeStreamOwner(IStreamChannel* stream_ch
 }
 
 void SchedulerPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
+    cb({"POST", "/semantics/v1/operators/check", [this](const auto& u, const auto& req, auto& rsp) {
+        return HandleOperatorContractCheck(u, req, rsp);
+    }});
     // 任务执行
     cb({"POST", "/scheduler/batch/execute",
         [this](const std::string& u, const std::string& req, std::string& rsp) { return HandleExecute(u, req, rsp); }});
@@ -1143,7 +1175,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             }
 
             int64_t rows = 0;
-            std::string transform_error;
+            std::string transform_error, contract_checks;
             std::string managed_result_json;
             BlockExecutionTerminal transform_terminal = BlockExecutionTerminal::kFailed;
             int transform_rc = 0;
@@ -1154,7 +1186,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                         : source_resolved.block_channels.front().get(),
                     transform_providers, dataframe_sink.get(), managed_result ? &managed_binding : nullptr, stmt,
                     block_source_residual, &transform_terminal, &rows, &managed_result_json, &transform_error,
-                    std::move(database_input_source), std::move(dataframe_input_source));
+                    std::move(database_input_source), std::move(dataframe_input_source), &contract_checks);
             } catch (const std::exception& ex) {
                 transform_error = std::string("block transform execution threw: ") + ex.what();
                 transform_rc = EFAULT;
@@ -1164,6 +1196,8 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             }
             if (transform_terminal == BlockExecutionTerminal::kFailed ||
                 (transform_terminal != BlockExecutionTerminal::kCancelled && transform_rc != 0)) {
+                const int contract_rc = ContractExecutionError(transform_error, contract_checks, &rsp);
+                if (contract_rc) return contract_rc;
                 rsp = BuildExecutionErrorJson(
                     transform_error.empty() ? "block transform execution failed" : transform_error,
                     transform_rc == EINVAL ? ErrorCodeId::kSqlTextInvalid : ErrorCodeId::kOpExecFail,
@@ -1211,6 +1245,12 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                 }
             }
 
+            if (named_result) {
+                DataSemanticsErrorV1 issue;
+                if (contracts::BindNamedOutput(querier_, dataframe_name, &contract_checks, &issue)) {
+                    return ContractExecutionError(issue.code + ": " + issue.message, contract_checks, &rsp);
+                }
+            }
             const char* status = "completed";
             if (transform_terminal == BlockExecutionTerminal::kStopped) {
                 status = "stopped";
@@ -1225,6 +1265,9 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             rapidjson::StringBuffer transform_buf;
             rapidjson::Writer<rapidjson::StringBuffer> transform_writer(transform_buf);
             transform_writer.StartObject();
+            transform_writer.Key("contract_checks");
+            transform_writer.RawValue(contract_checks.empty() ? "[]" : contract_checks.c_str(),
+                                      contract_checks.empty() ? 2 : contract_checks.size(), rapidjson::kArrayType);
             transform_writer.Key("status");
             transform_writer.String(status);
             transform_writer.Key("rows");
@@ -1355,7 +1398,10 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                                          ? stmt.operator_with_params[i]
                                          : (i == 0 ? stmt.with_params : std::unordered_map<std::string, std::string>{});
                 for (const auto& kv : params) {
-                    op_chain[i]->Configure(kv.first.c_str(), kv.second.c_str());
+                    if (op_chain[i]->Configure(kv.first.c_str(), kv.second.c_str())) {
+                        rsp = BuildErrorJson("operator configuration failed");
+                        return error::BAD_REQUEST;
+                    }
                 }
             }
         }
@@ -1397,6 +1443,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         int rc = 0;
         int64_t affected_rows = 0;
         std::string exec_error;
+        std::string contract_checks;
         std::string sink_type(sink->Type());
 
         if (input_channels.size() > 1 && op_chain.empty()) {
@@ -1427,13 +1474,15 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                                  &exec_error);
         } else {
             rc = ExecuteWithOperatorChain(Span<IChannel*>(input_channels), sink, op_chain, sink_type, stmt,
-                                          &affected_rows, &exec_error);
+                                          &affected_rows, &exec_error, &contract_checks);
         }
 
         if (rc != 0) {
             std::string err = exec_error;
             if (err.empty() && !op_chain.empty()) err = op_chain.back()->LastError();
             if (err.empty()) err = "execution failed";
+            const int contract_rc = ContractExecutionError(err, contract_checks, &rsp);
+            if (contract_rc) return contract_rc;
             std::string stage = ExtractStageFromExecutionError(err);
             if (stage.empty()) stage = "execute";
             rsp = BuildExecutionErrorJson(err, ErrorCodeId::kOpExecFail, stage);
@@ -1449,6 +1498,10 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             if (ch_registry->Register(df_name.c_str(), std::static_pointer_cast<IChannel>(named_df_sink)) != 0) {
                 rsp = BuildErrorJson("failed to register dataframe channel: " + df_name);
                 return error::INTERNAL_ERROR;
+            }
+            DataSemanticsErrorV1 issue;
+            if (contracts::BindNamedOutput(querier_, df_name, &contract_checks, &issue)) {
+                return ContractExecutionError(issue.code + ": " + issue.message, contract_checks, &rsp);
             }
             auto registered = ch_registry->Get(df_name.c_str());
             if (!registered) {
@@ -1487,6 +1540,10 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         w.Int64(row_count);
         w.Key("result_target");
         w.String(stmt.dest.c_str());
+        if (!contract_checks.empty()) {
+            w.Key("contract_checks");
+            w.RawValue(contract_checks.c_str(), contract_checks.size(), rapidjson::kArrayType);
+        }
         if (!named_dataframe_result) {
             w.Key("data");
             w.RawValue(result_json.c_str(), result_json.size(), rapidjson::kArrayType);

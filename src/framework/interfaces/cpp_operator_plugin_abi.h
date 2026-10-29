@@ -42,6 +42,9 @@ struct CppOperatorDescriptorV2 {
 
 constexpr uint32_t kCppOperatorDescriptorV2Size = static_cast<uint32_t>(sizeof(CppOperatorDescriptorV2));
 
+// Optional metadata export, independent of descriptor.contract_iid and its ABI.
+inline constexpr const char* kOperatorDataContractV1Symbol = "flowsql_operator_data_contract_v1";
+using OperatorDataContractV1Fn = const char* (*)(int index);
 using CppOperatorPluginAbiVersionFn = int (*)();
 using CppOperatorPluginCountFn = int (*)();
 using CppOperatorPluginCreateV1Fn = IOperator* (*)(int index);
@@ -59,6 +62,9 @@ using CppOperatorPluginDestroyCapabilityV2Fn = void (*)(int index, void* capabil
 // The version selects either the V1 create/destroy pair or the V2
 // describe/create-capability/destroy-capability group. The count is the sole
 // index space for every operator in this .so. No exception may cross an export.
+// Optional: immutable borrowed JSON document/{contract_ref}; null/empty = undeclared.
+// The host copies at most 8 MiB while holding the library lifetime. Must not throw.
+EXPORT_API const char* flowsql_operator_data_contract_v1(int index);
 EXPORT_API int flowsql_abi_version();
 EXPORT_API int flowsql_operator_count();
 EXPORT_API flowsql::IOperator* flowsql_create_operator(int index);

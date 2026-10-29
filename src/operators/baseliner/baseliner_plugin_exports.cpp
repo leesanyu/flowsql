@@ -3,7 +3,11 @@
 #include <framework/interfaces/cpp_operator_plugin_abi.h>
 #include <cerrno>
 #include "baseliner_operator.h"
+#include "operator_contract_package.h"
 
+extern "C" const char* flowsql_operator_data_contract_v1(int index) {
+    return index == 0 ? flowsql::contracts::kBaselinerContract : nullptr;
+}
 extern "C" int flowsql_abi_version() { return flowsql::kCppOperatorPluginAbiVersionV2; }
 extern "C" int flowsql_operator_count() { return 1; }
 extern "C" int flowsql_describe_operator(int index, flowsql::CppOperatorDescriptorV2* output) {
@@ -16,6 +20,7 @@ extern "C" void* flowsql_create_operator_capability(int index, flowsql::IQuerier
     if (index != 0 || !querier) return nullptr;
     try {
         auto provider = std::make_unique<flowsql::baseliner::BaselinerOperator>();
+        provider->SetHostManagedContract();
         if (provider->Load(querier) != 0 || provider->Start() != 0) return nullptr;
         return static_cast<flowsql::IBlockTransformOperatorV2*>(provider.release());
     } catch (...) {

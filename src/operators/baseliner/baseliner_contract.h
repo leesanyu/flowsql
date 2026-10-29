@@ -185,6 +185,9 @@ ConfigStatus ParseConfig(std::string_view json, ConfigSnapshot* output);
 ConfigStatus NormalizeInlineConfig(std::string_view json, std::string_view sql_source, ConfigSnapshot* output);
 ConfigStatus ResolveConfig(std::string_view with_json, std::string_view sql_source, IConfigChannelRegistryV1* registry,
                            ConfigSnapshot* output);
+// Serializes an already parsed production configuration, including effective
+// defaults. Does not alter the original JSON, reference, or execution hash.
+std::string EffectiveConfigJson(const TaskConfig& config);
 
 // Length-delimited, type-tagged binary identity. Epoch/run are deliberately outside model identity.
 ConfigStatus EncodeIdentity(std::string_view source_namespace, std::string_view dataset, std::string_view metric,

@@ -733,7 +733,7 @@ void EngineClose() {
     std::cout << "PASS repeated engine Close releases usage\n";
 }
 }  // namespace
-int main() {
+int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     char path[] = "/tmp/baseliner-lifecycle-XXXXXX";
     int fd = mkstemp(path);
@@ -755,5 +755,8 @@ int main() {
     database.Stop();
     database.Unload();
     unlink(path);
-    RealDatabaseCancellation();
+    if (argc == 1)
+        RealDatabaseCancellation();
+    else
+        assert(argc == 2 && std::string(argv[1]) == "--contract-local");
 }

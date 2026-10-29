@@ -7,6 +7,8 @@
 #include <framework/interfaces/iblock_transform_operator.h>
 #include <framework/interfaces/iblock_transform_result_output.h>
 #include <framework/interfaces/iblock_transform_source_config.h>
+#include <framework/interfaces/ioperator_contract_catalog.h>
+#include <framework/interfaces/ioperator_data_contract.h>
 #include "evaluation.h"
 namespace flowsql::baseliner {
 class BaselinerOperator final : public IPlugin,
@@ -14,8 +16,13 @@ class BaselinerOperator final : public IPlugin,
                                 public IBlockTransformExecutionPolicyProviderV1,
                                 public IBlockTransformSourceConfigProviderV1,
                                 public IBlockTransformDataFrameInputProviderV1,
-                                public IBlockTransformResultOutputProviderV1 {
+                                public IBlockTransformResultOutputProviderV1,
+                                public IOperatorContractIdentityV1,
+                                public IOperatorConfigAdapterV1 {
  public:
+    void SetHostManagedContract() { host_managed_contract_ = true; }
+    OperatorComponentContractV1 ContractIdentity() const override { return contract_identity_; }
+    int ResolveInvocation(const char* request, std::string* result, DataSemanticsErrorV1* error) override;
     int Load(IQuerier* querier) override;
     int Unload() override;
     int Start() override;
@@ -32,7 +39,9 @@ class BaselinerOperator final : public IPlugin,
                               std::string* error) const override;
 
  private:
+    OperatorComponentContractV1 contract_identity_;
     IQuerier* querier_ = nullptr;
     bool started_ = false;
+    bool host_managed_contract_ = false;
 };
 }  // namespace flowsql::baseliner

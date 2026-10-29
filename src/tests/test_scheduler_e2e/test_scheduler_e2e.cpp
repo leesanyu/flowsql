@@ -1982,8 +1982,9 @@ int main() {
     loader->Regist(IID_FLOW_LABELING_PROVIDER_V1, static_cast<IFlowLabelingProviderV1*>(&http1_labeling));
     loader->Regist(IID_CONFIG_CHANNEL_REGISTRY_V1, static_cast<IConfigChannelRegistryV1*>(&http1_labeling));
     const char* libs[] = {
-        "libflowsql_database.so", "libflowsql_builtin.so",   "libflowsql_catalog.so",  "libflowsql_npi.so",
-        "libflowsql_pcapfile.so", "libflowsql_scheduler.so", "libflowsql_binaddon.so", "libflowsql_stream.so",
+        "libflowsql_config_channel.so", "libflowsql_database.so", "libflowsql_builtin.so",
+        "libflowsql_catalog.so",        "libflowsql_npi.so",      "libflowsql_pcapfile.so",
+        "libflowsql_scheduler.so",      "libflowsql_binaddon.so", "libflowsql_stream.so",
     };
     std::string db_opt = "type=sqlite;name=local;path=" + db_path.string();
     std::string catalog_opt = "data_dir=" + data_dir.string() + ";operator_db_path=" + operator_db_path.string();
@@ -1991,9 +1992,11 @@ int main() {
     std::string binaddon_opt =
         "operator_db_path=" + operator_db_path.string() + ";upload_dir=" + binaddon_upload_dir.string();
     std::string stream_opt = "config_file=" + stream_cfg.string() + ";db_path=" + stream_meta_db.string();
-    const char* opts[] = {db_opt.c_str(), nullptr, catalog_opt.c_str(),  npi_opt.c_str(),
-                          nullptr,        nullptr, binaddon_opt.c_str(), stream_opt.c_str()};
-    ASSERT_EQ(loader->Load(get_absolute_process_path(), libs, opts, 8), 0);
+    std::string config_opt = "db_path=" + (data_dir / "contract_config.db").string();
+    const char* opts[] = {config_opt.c_str(), db_opt.c_str(), nullptr, catalog_opt.c_str(),
+                          npi_opt.c_str(),    nullptr,        nullptr, binaddon_opt.c_str(),
+                          stream_opt.c_str()};
+    ASSERT_EQ(loader->Load(get_absolute_process_path(), libs, opts, 9), 0);
     std::puts("[INFO] plugins loaded");
 
     IProtocol* npi_protocol = nullptr;
@@ -2445,7 +2448,13 @@ int main() {
         rapidjson::Document completed;
         completed.Parse(rsp.c_str());
         ASSERT_TRUE(!completed.HasParseError() && completed.IsObject());
-        ASSERT_EQ(completed.MemberCount(), rapidjson::SizeType(4));
+        ASSERT_EQ(completed.MemberCount(), rapidjson::SizeType(5));
+        ASSERT_TRUE(completed["contract_checks"].IsArray());
+        ASSERT_EQ(completed["contract_checks"].Size(), rapidjson::SizeType(2));
+        for (const auto& check : completed["contract_checks"].GetArray()) {
+            ASSERT_EQ(std::string(check["state"].GetString()), "undetermined");
+            ASSERT_EQ(std::string(check["output_check"].GetString()), "not_observed");
+        }
         ASSERT_TRUE(!completed.HasMember("data"));
         ASSERT_TRUE(completed.HasMember("status") && completed["status"].IsString());
         ASSERT_EQ(std::string(completed["status"].GetString()), "completed");

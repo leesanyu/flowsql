@@ -173,3 +173,17 @@ set_target_properties(test_baseliner_output_cost PROPERTIES RUNTIME_OUTPUT_DIREC
 # Large repeated performance runs are explicit; CTest checks the same real Scheduler path on a small prefix.
 add_test(NAME test_baseliner_output_cost COMMAND $<TARGET_FILE:test_baseliner_output_cost> --sql 32)
 set_tests_properties(test_baseliner_output_cost PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output LABELS "baseliner;cost;production" TIMEOUT 90 RESOURCE_LOCK baseliner_output_cost)
+
+# A9 observes real published SQLite entities without selecting the external backend matrix.
+add_test(NAME test_baseliner_maintenance_contract COMMAND $<TARGET_FILE:test_baseliner_maintenance> --sqlite-contract)
+set_tests_properties(test_baseliner_maintenance_contract PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output LABELS "baseliner;contract" TIMEOUT 120)
+
+# The output contract fixture exercises the same transactional metadata service after real Publish.
+add_dependencies(test_baseliner_maintenance flowsql_config_channel)
+target_compile_definitions(test_baseliner_maintenance PRIVATE FLOWSQL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}/..")
+
+add_test(NAME test_baseliner_lifecycle_contract COMMAND $<TARGET_FILE:test_baseliner_lifecycle> --contract-local)
+set_tests_properties(test_baseliner_lifecycle_contract PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output LABELS "baseliner;lifecycle;contract" TIMEOUT 45)
+
+# loader.hpp includes the pre-existing toolkit.hpp unsigned comparison (outside this task).
+target_compile_options(test_baseliner_maintenance PRIVATE -Wno-type-limits)

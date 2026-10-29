@@ -151,7 +151,7 @@ int DataSemanticsRegistry::ValidateLinks(const std::string& kind, const rapidjso
             rapidjson::Document td;
             td.Parse(target.document_json->c_str());
             if (CheckSemanticsBinding(d, td, check, e)) return -1;
-        } else if (ref.target.compare(0, 11, "dictionary.") == 0) {
+        } else if (kind == "dictionary" && ref.target.compare(0, 11, "dictionary.") == 0) {
             rapidjson::Document td;
             td.Parse(target.document_json->c_str());
             std::unordered_set<std::string> target_ids;
@@ -175,22 +175,56 @@ int DataSemanticsRegistry::Preview(const std::string& kind, const std::string& c
     return ValidateLinks(kind, *out, refs, check, e);
 }
 int DataSemanticsRegistry::Save(const SemanticsSaveRequest& r, SemanticsSaveResult* out, DataSemanticsErrorV1* e) {
+    if (out) *out = {};
+    if (!out) return SemanticsFail(e, "INVALID_DOCUMENT", "save output required");
+    std::vector<SemanticsSaveResult> results;
+    if (WriteBatch({r}, false, &results, e)) return -1;
+    *out = std::move(results.front());
+    return 0;
+}
+int DataSemanticsRegistry::SaveBatch(const std::vector<SemanticsSaveRequest>& requests,
+                                     std::vector<SemanticsSaveResult>* out, DataSemanticsErrorV1* e) {
+    return WriteBatch(requests, true, out, e);
+}
+int DataSemanticsRegistry::WriteBatch(const std::vector<SemanticsSaveRequest>& requests, bool execution_owned,
+                                      std::vector<SemanticsSaveResult>* out, DataSemanticsErrorV1* e) {
+    if (e) *e = {};
+    if (!out) return SemanticsFail(e, "INVALID_DOCUMENT", "batch output required");
+    out->clear();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!db_) return SemanticsFail(e, "UNAVAILABLE", "semantics registry is closed");
+    if (sqlite3_exec(db_, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) return StorageError(e);
+    Rollback rollback{db_};
+    std::vector<SemanticsSaveResult> staged;
+    for (const auto& request : requests) {
+        SemanticsSaveResult result;
+        if (SaveUnlocked(request, execution_owned, &result, e)) return -1;
+        staged.push_back(std::move(result));
+    }
+    if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) return StorageError(e);
+    rollback.db = nullptr;
+    *out = std::move(staged);
+    return 0;
+}
+int DataSemanticsRegistry::SaveUnlocked(const SemanticsSaveRequest& r, bool execution_owned, SemanticsSaveResult* out,
+                                        DataSemanticsErrorV1* e) {
     if (e) *e = {};
     if (!out) return SemanticsFail(e, "INVALID_DOCUMENT", "save output required");
     *out = {};
+    if (r.kind == "operator_use" && !execution_owned)
+        return SemanticsFail(e, "CONTRACT_INVALID", "operator_use is execution-owned and cannot be saved/imported");
     if (!SemanticsName(r.name) || r.expected_current_revision > kSemanticsMaxRevision ||
         r.base_revision > kSemanticsMaxRevision || r.change_note.size() > 4096)
         return SemanticsFail(e, "INVALID_DOCUMENT", "invalid identity or revision");
     rapidjson::Document d;
     std::vector<SemanticsReference> refs;
     if (NormalizeSemantics(r.kind, r.document_json, &d, &refs, e)) return -1;
+    if (r.kind == "operator_contract" &&
+        r.name != std::string(d["operator"]["category"].GetString()) + "." + d["operator"]["name"].GetString())
+        return SemanticsFail(e, "CONTRACT_INVALID", "contract name must match its operator identity", "/operator");
     if (r.source_observed && (r.kind != "binding" || !d.HasMember("source_snapshot")))
         return SemanticsFail(e, "INVALID_DOCUMENT", "observed binding required");
     const auto content = SemanticsJson(d), digest = Digest(content);
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!db_) return SemanticsFail(e, "UNAVAILABLE", "semantics registry is closed");
-    if (sqlite3_exec(db_, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) return StorageError(e);
-    Rollback rollback{db_};
     std::string binding_check;
     if (ValidateLinks(r.kind, d, refs, &binding_check, e)) return -1;
     uint64_t current = 0;
@@ -220,8 +254,6 @@ int DataSemanticsRegistry::Save(const SemanticsSaveRequest& r, SemanticsSaveResu
         }
         if (*previous.document_json == content) {
             if (!MarkObserved(db_, previous.exact_reference, r.source_observed)) return StorageError(e);
-            if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) return StorageError(e);
-            rollback.db = nullptr;
             out->snapshot = previous;
             out->structure_check = binding_check;
             return 0;
@@ -288,8 +320,6 @@ int DataSemanticsRegistry::Save(const SemanticsSaveRequest& r, SemanticsSaveResu
         if (sqlite3_step(s.get()) != SQLITE_DONE) return StorageError(e);
     }
     if (!MarkObserved(db_, exact, r.source_observed)) return StorageError(e);
-    if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) return StorageError(e);
-    rollback.db = nullptr;
     out->snapshot = {exact, d["schema_id"].GetString(), digest, std::make_shared<const std::string>(content)};
     out->created_revision = true;
     out->structure_check = binding_check;

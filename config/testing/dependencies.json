@@ -510,6 +510,145 @@
         "semantics_http",
         "visualization_browser"
       ]
+    },
+    "test_operator_contract_model": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_operator_contract_schema": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_operator_contract_registration": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_operator_contract_cpp": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_operator_contract_python": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "operator_contract_python"
+      ]
+    },
+    "test_operator_registry": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_bridge": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_operator_python_compatibility": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_baseliner_contract_schema": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_operator_contract_check": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_operator_contract_execution": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_baseliner_contract_invocation": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_operator_contract_block": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_operator_contract_output": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "operator_contract_output"
+      ]
+    },
+    "test_operator_contract_outputs": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "operator_contract_execution"
+      ]
+    },
+    "test_baseliner_maintenance_contract": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_baseliner_lifecycle_contract": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_operator_contract_api": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http"
+      ]
+    },
+    "test_operator_contract_preflight": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_operator_contract_browser": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http",
+        "visualization_browser"
+      ]
+    },
+    "test_task": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "task_store"
+      ]
     }
   }
 }

@@ -15,10 +15,14 @@
 #include <unistd.h>
 #include <cassert>
 #include <chrono>
+#include <common/loader.hpp>
+#include <common/operator_component.hpp>
+#include <common/operator_contract_observation.hpp>
 #include <cstring>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <set>
 #include <sstream>
 using namespace flowsql;
 using namespace flowsql::baseliner;
@@ -658,6 +662,109 @@ void AssertState(const StoredGeneration& saved, const ConfigSnapshot& c, uint64_
     for (auto kind : {BaselineTaskKind::kValue, BaselineTaskKind::kRatio, BaselineTaskKind::kRelation})
         assert(e.ClassifyReplay(Input(kind, 40)) == 1);
 }
+// Real task output is observed; the user-source schema remains explicitly pending.
+// Internal Observation input must never masquerade as a discovered user table.
+class OutputRecorder {
+ public:
+    PluginLoader* loader = PluginLoader::Single();
+    IDataSemanticsRegistryV1* registry = nullptr;
+    IOperatorDataContractV1* service = nullptr;
+    ~OutputRecorder() { loader->Unload(); }
+    OperatorContractSnapshotV1 use;
+    DataSemanticsErrorV1 error;
+    dataset::Json request{rapidjson::kObjectType};
+    int calls = 0;
+    OutputRecorder(const ConfigSnapshot& config, IBlockTransformTaskV2* task) {
+        using namespace dataset;
+        char path[] = "/tmp/flowsql_managed_output_semantics_XXXXXX";
+        const auto fd = mkstemp(path);
+        assert(fd >= 0);
+        close(fd);
+        const std::string option = std::string("db_path=") + path;
+        const char* libraries[] = {"libflowsql_config_channel.so"};
+        const char* options[] = {option.c_str()};
+        assert(loader->Load(".", libraries, options, 1) == 0 && loader->StartAll() == 0);
+        registry = static_cast<IDataSemanticsRegistryV1*>(loader->First(IID_DATA_SEMANTICS_REGISTRY_V1));
+        service = static_cast<IOperatorDataContractV1*>(loader->First(IID_OPERATOR_DATA_CONTRACT_V1));
+        assert(registry && service);
+        std::ifstream file(std::string(FLOWSQL_SOURCE_ROOT) +
+                           "/config/semantics/examples/operator-contract-baseliner.json");
+        std::string declaration{std::istreambuf_iterator<char>(file), {}};
+        Json save(rapidjson::kObjectType), document, saved;
+        document.Parse(declaration.c_str());
+        Set(save, "kind", "operator_contract", save.GetAllocator());
+        Set(save, "name", "explore.baseliner", save.GetAllocator());
+        save.AddMember("expected_current_revision", 0, save.GetAllocator());
+        Set(save, "document", Copy(document, save.GetAllocator()), save.GetAllocator());
+        assert(contracts::Control(loader, "save", save, &saved, &error) == 0);
+        Json invocation(rapidjson::kObjectType);
+        auto& a = invocation.GetAllocator();
+        Set(invocation, "contract_ref", Get(saved["data"], "exact_reference"), a);
+        Set(invocation, "component_revision", contracts::ComponentDigest(&typeid(*task)), a);
+        Json effective;
+        effective.Parse(With(config).c_str());
+        Set(invocation, "effective_parameters", Copy(effective, a), a);
+        Json normalized;
+        normalized.Parse(EffectiveConfigJson(config.config).c_str());
+        Set(invocation, "normalized_config", Copy(normalized, a), a);
+        invocation.AddMember("config_refs", Value(rapidjson::kArrayType), a);
+        Json context;
+        context.Parse(
+            R"({"input_shapes":["record_batch"],"managed_output":true,"model_output_enabled":false,"relation_fusion_enabled":true})");
+        Set(invocation, "execution_context", Copy(context, a), a);
+        Value inputs(rapidjson::kArrayType);
+        for (size_t i = 0; i < config.config.datasets.size(); ++i) {
+            const auto& dataset = config.config.datasets[i];
+            Json locator;
+            locator.Parse(R"({"kind":"database_table","type":"sqlite","name":"source","table":"facts"})");
+            Value metadata(rapidjson::kObjectType), fields;
+            Set(metadata, "observation", "user input structure not observed by this internal task fixture", a);
+            auto snapshot =
+                Snapshot("unobserved_operator_input", dataset.id, locator, fields, metadata, "", "unknown", "pending");
+            Value input(rapidjson::kObjectType);
+            Set(input, "port_id", "datasets", a);
+            Set(input, "item_key", dataset.id, a);
+            input.AddMember("input_index", static_cast<uint64_t>(i), a).AddMember("snapshot", Copy(snapshot, a), a);
+            inputs.PushBack(input, a);
+        }
+        Set(invocation, "inputs", std::move(inputs), a);
+        std::string checked;
+        assert(service->CheckAndDerive(Encode(invocation).c_str(), &checked, &error) == 0);
+        Json check;
+        check.Parse(checked.c_str());
+        assert(check["state"] == "undetermined");
+        auto& ra = request.GetAllocator();
+        Set(request, "name", "managed", ra);
+        request.AddMember("expected_current_revision", 0, ra);
+        document.Parse(
+            R"({"schema_id":"flowsql.operator-data-use.v1","title":"published outputs","run_id":"managed","stage_index":0,"operator_ref":{"category":"explore","name":"baseliner","version":"1"},"outputs":[],"outcome":"partial"})");
+        auto& da = document.GetAllocator();
+        for (const char* key : {"contract_ref", "component_revision", "effective_parameters", "normalized_config",
+                                "config_refs", "execution_context"})
+            Set(document, key, Copy(invocation[key], da), da);
+        Set(document, "input_snapshots", Copy(invocation["inputs"], da), da);
+        Set(document, "role_map", Copy(check["role_map"], da), da);
+        Set(document, "checks", Copy(check, da), da);
+        Set(request, "document", Copy(document, ra), ra);
+    }
+    int Record(IBlockTransformTaskV2* task) {
+        using namespace dataset;
+        Json observed;
+        if (contracts::ProducerOutputs(dynamic_cast<IOperatorOutputObservationV1*>(task), &observed, &error)) return -1;
+        dataset::Value absent(rapidjson::kObjectType);
+        Set(absent, "port_id", "model_parameters", observed.GetAllocator());
+        Set(absent, "state", "absent", observed.GetAllocator());
+        observed.PushBack(absent, observed.GetAllocator());
+        Set(request["document"], "outputs", Copy(observed, request.GetAllocator()), request.GetAllocator());
+        int rc = service->RecordUse(Encode(request).c_str(), &use, &error);
+        if (!rc) {
+            ++calls;
+            request["expected_current_revision"].SetUint64(
+                std::stoull(use.exact_reference.substr(use.exact_reference.rfind('@') + 1)));
+        }
+        return rc;
+    }
+};
 void ManagedMatrix(std::shared_ptr<IDatabaseChannel> target) {
     for (bool all : {false, true}) {
         auto c = ManagedConfiguration(all);
@@ -666,8 +773,52 @@ void ManagedMatrix(std::shared_ptr<IDatabaseChannel> target) {
         int64_t latency = 0;
         {
             auto task = ManagedTask(op, c, target.get());
+            OutputRecorder recorder(c, task.get());
+            auto* publisher = dynamic_cast<IOperatorOutputPublicationV1*>(task.get());
+            assert(publisher);
+            publisher->SetOutputPublicationObserver([&] { return recorder.Record(task.get()); });
             Feed(task.get(), true);
             Check(Expire(task.get(), &latency) == 0, task->LastError());
+            assert(recorder.calls > 0 && recorder.use.document_json);
+            dataset::Json used;
+            used.Parse(recorder.use.document_json->c_str());
+            assert(used["outputs"].Size() == 4 && used["checks"]["data_validation"] == "not_run");
+            std::set<std::string> bindings;
+            for (const auto& output : used["outputs"].GetArray()) {
+                if (dataset::Get(output, "port_id") == "model_parameters") {
+                    assert(output["state"] == "absent");
+                    continue;
+                }
+                assert(output["state"] == "observed" && output["output_check"] == "matched");
+                assert(bindings.insert(dataset::Get(output, "binding_ref")).second);
+                DataSemanticsSnapshotV1 reread;
+                assert(recorder.registry->Resolve(dataset::Get(output, "binding_ref").c_str(), &reread,
+                                                  &recorder.error) == 0);
+            }
+            assert(bindings.size() == 3);
+            DataSemanticsSnapshotV1 reread;
+            assert(recorder.registry->Resolve(recorder.use.exact_reference.c_str(), &reread, &recorder.error) == 0);
+            assert(*reread.document_json == *recorder.use.document_json);
+            publisher->SetOutputPublicationObserver({});
+            dataset::Json observations;
+            DataSemanticsErrorV1 contract_error;
+            Check(contracts::ProducerOutputs(dynamic_cast<IOperatorOutputObservationV1*>(task.get()), &observations,
+                                             &contract_error) == 0,
+                  contract_error.message);
+            for (const char* port : {"results", "relation_fusion", "maintenance"}) {
+                bool found = false;
+                for (const auto& item : observations.GetArray())
+                    if (dataset::Get(item, "port_id") == port) {
+                        found = true;
+                        assert(item["state"] == "observed" && item["row_count"].GetInt64() > 0);
+                        const auto kind = std::string(port) == "results"           ? SchemaKind::kResults
+                                          : std::string(port) == "relation_fusion" ? SchemaKind::kRelationFusion
+                                                                                   : SchemaKind::kMaintenance;
+                        assert(item["snapshot"]["fields"] ==
+                               dataset::ArrowFields(*MakeSchema(kind), observations.GetAllocator()));
+                    }
+                assert(found);
+            }
         }
         auto saved = Load(target.get(), c);
         assert(saved.generation == 2 && MaintenanceCount(target.get(), c) == 3);
@@ -680,6 +831,21 @@ void ManagedMatrix(std::shared_ptr<IDatabaseChannel> target) {
         saved = Load(target.get(), c);
         assert(saved.generation == 4 && MaintenanceCount(target.get(), c) == 6);
         AssertState(saved, c, 0, all ? 0 : 3);
+        // Metadata notification failure occurs after the durable generation commits.
+        {
+            auto task = ManagedTask(op, c, target.get());
+            Feed(task.get(), false, 43);
+            int notifications = 0;
+            auto* publisher = dynamic_cast<IOperatorOutputPublicationV1*>(task.get());
+            publisher->SetOutputPublicationObserver([&] {
+                ++notifications;
+                return -EIO;
+            });
+            assert(Expire(task.get()) != 0 && notifications == 1);
+            publisher->SetOutputPublicationObserver({});
+        }
+        saved = Load(target.get(), c);
+        assert(saved.generation > 4);  // Data publication was not rolled back by metadata failure.
         std::cout << "PASS managed maintenance " << target->Category() << " " << (all ? "AllState" : "RuntimeOnly")
                   << " idle_publish_ns=" << latency << std::endl;
     }
@@ -748,7 +914,21 @@ void ManagedDatabases() {
     db.Unload();
 }
 }  // namespace
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--sqlite-contract") {
+        char workspace[] = "/tmp/flowsql_contract_maintenance_XXXXXX";
+        assert(mkdtemp(workspace));
+        database::DatabasePlugin database;
+        const auto options = std::string("type=sqlite;name=contract;path=") + workspace + "/target.db";
+        assert(database.Option(options.c_str()) == 0 && database.Load(nullptr) == 0 && database.Start() == 0);
+        auto target = database.AcquireChannel("sqlite", "contract");
+        assert(target);
+        ManagedMatrix(target);
+        target.reset();
+        database.Stop();
+        database.Unload();
+        return 0;
+    }
     ClockAndBudget();
     Capacity();
     CheckpointWorkBudget();

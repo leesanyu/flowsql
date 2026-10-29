@@ -6,30 +6,11 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <common/database_snapshot_types.hpp>
 
 namespace flowsql::database {
 bool SnapshotPhysicalType(const std::string& backend, const std::string& physical, arrow::Type::type logical) {
-    std::string p = physical;
-    std::transform(p.begin(), p.end(), p.begin(), [](unsigned char c) { return std::tolower(c); });
-    bool integer = p.find("int") != std::string::npos;
-    bool number = integer || p.find("numeric") != std::string::npos || p.find("decimal") != std::string::npos;
-    bool real = p.find("float") != std::string::npos || p.find("double") != std::string::npos || p == "real";
-    bool text = p.find("text") != std::string::npos || p.find("char") != std::string::npos ||
-                p.find("string") != std::string::npos;
-    switch (logical) {
-        case arrow::Type::INT64:
-            return integer && p.find("unsigned") == std::string::npos && p.find("uint") == std::string::npos;
-        case arrow::Type::UINT64:
-            return number || (backend == "sqlite" && text);
-        case arrow::Type::DOUBLE:
-            return number || real;
-        case arrow::Type::BOOL:
-            return p.find("bool") != std::string::npos || integer;
-        case arrow::Type::STRING:
-            return text;
-        default:
-            return false;
-    }
+    return DatabaseSnapshotPhysicalType(backend, physical, logical);
 }
 int MakeSnapshotBatch(const std::shared_ptr<arrow::Schema>& schema, const SnapshotRows& rows, uint64_t max_bytes,
                       std::shared_ptr<arrow::RecordBatch>* output, std::string* error) {

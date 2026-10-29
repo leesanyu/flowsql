@@ -5,6 +5,7 @@
 #include <framework/core/dataframe.h>
 #include <framework/interfaces/iblock_transform_model_output.h>
 #include <framework/interfaces/iblock_transform_result_output.h>
+#include <framework/interfaces/ioperator_catalog.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -12,10 +13,14 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <common/operator_component.hpp>
+#include <common/operator_contract_observation.hpp>
 #include <cstring>
 #include <set>
+#include "baseliner_data_contract.h"
 #include "durable_store.h"
 #include "model_output.h"
+#include "operator_contract_package.h"
 #include "poll_input.h"
 #include "result_batch.h"
 #include "result_codec.h"
@@ -77,10 +82,37 @@ class BaselinerTask final : public IBlockTransformTaskV2,
                             public IBlockTransformInputProgressTaskV1,
                             public IBlockTransformManagedSinkTaskV1,
                             public IBlockTransformModelOutputTaskV1,
-                            public IBlockTransformResultOutputTaskV1 {
+                            public IBlockTransformResultOutputTaskV1,
+                            public IOperatorConfigAdapterV1,
+                            public IOperatorOutputObservationV1,
+                            public IOperatorOutputPublicationV1 {
  public:
     BaselinerTask(ConfigSnapshot config, IQuerier* querier, std::string run)
         : config_(std::move(config)), querier_(querier), run_(std::move(run)) {}
+    int ResolveInvocation(const char* request, std::string* result, DataSemanticsErrorV1* error) override {
+        return ResolveContractInvocation(querier_, &config_, request, result, error);
+    }
+    void SetOutputPublicationObserver(std::function<int()> observer) override { observer_ = std::move(observer); }
+    int OutputObservations(std::string* out) const override {
+        if (!out) return EINVAL;
+        dataset::Json observations(rapidjson::kArrayType);
+        auto& a = observations.GetAllocator();
+        for (const char* port : {"results", "model_parameters", "relation_fusion", "maintenance"}) {
+            auto found = observed_.find(port);
+            if (found != observed_.end())
+                observations.PushBack(
+                    contracts::ObservedOutput(port, found->second.first, run_ + "/" + port, found->second.second, a),
+                    a);
+            else if (std::string(port) == "results") {
+                dataset::Value item(rapidjson::kObjectType);
+                dataset::Set(item, "port_id", port, a);
+                dataset::Set(item, "state", "not_observed", a);
+                observations.PushBack(item, a);
+            }
+        }
+        *out = dataset::Encode(observations);
+        return 0;
+    }
     ~BaselinerTask() override {
         auto input = std::atomic_load(&input_);
         if (input) input->Close();
@@ -390,6 +422,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
             }
         } else
             staged.insert(staged.end(), std::make_move_iterator(next.begin()), std::make_move_iterator(next.end()));
+        for (const auto& item : staged) Capture(item.batch);
         *outputs = std::move(staged);
         return static_cast<int>(BlockTransformStatusV1::kContinue);
     }
@@ -432,6 +465,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         if (result_database_) {
             if (results_.Write(result_batches_, joint ? &models_ : nullptr, joint ? model_batch : nullptr) != 0)
                 return Fail(results_.LastError());
+            for (const auto& batch : result_batches_) Capture(batch);
             result_batches_.clear();
         } else if (result_bound_) {
             if (!result_rows_) {
@@ -444,6 +478,8 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         }
         if (model_batch && !model_dataframe_ && !joint && models_.Write(model_batch) != 0)
             return Fail(models_.LastError());
+        if (model_batch) Capture(model_batch);
+        for (const auto& item : *outputs) Capture(item.batch);
         finished_ = true;
         return 0;
     }
@@ -673,13 +709,28 @@ class BaselinerTask final : public IBlockTransformTaskV2,
             return Fail("combined task checkpoint byte limit");
         if (store_.Publish(checkpoint, progress_, pending_) != 0) return Fail(store_.LastError());
         durable_progress_ = progress_;
-        for (const auto& batch : pending_) rows_written_ += batch->num_rows();
+        for (const auto& batch : pending_) {
+            rows_written_ += batch->num_rows();
+            Capture(batch);
+        }
         pending_.clear();
         pending_bytes_ = pending_buckets_ = 0;
         dirty_ = false;
         SetDeadlines(Now());
-        return 0;
+        return observer_ ? observer_() : 0;
     }
+    std::function<int()> observer_;
+    void Capture(const std::shared_ptr<arrow::RecordBatch>& batch) {
+        const auto schema = batch->schema();
+        const char* port = schema->GetFieldIndex("parameters_json") >= 0 ? "model_parameters"
+                           : schema->GetFieldIndex("event_kind") >= 0    ? "maintenance"
+                           : schema->GetFieldIndex("fusion_score") >= 0  ? "relation_fusion"
+                                                                         : "results";
+        auto& observed = observed_[port];
+        observed.first = schema;
+        observed.second += batch->num_rows();
+    }
+    std::map<std::string, std::pair<std::shared_ptr<arrow::Schema>, int64_t>> observed_;
     int Fail(std::string error) {
         error_ = std::move(error);
         failed_ = true;
@@ -726,6 +777,26 @@ int BaselinerOperator::Load(IQuerier* querier) {
 }
 int BaselinerOperator::Start() {
     if (!querier_) return EINVAL;
+    static const char component_anchor = 0;
+    DataSemanticsErrorV1 contract_error;
+    // Direct-plugin and BinAddon paths share this immutable component declaration.
+    // BinAddon performs the final association publication after activation.
+    contract_identity_ = {"explore", "baseliner", contracts::ComponentDigest(&component_anchor), "", "", "unavailable"};
+    auto* catalog = static_cast<IOperatorContractCatalogV1*>(querier_->First(IID_OPERATOR_CONTRACT_CATALOG_V1));
+    if (catalog) {
+        std::vector<PreparedOperatorContractV1> prepared;
+        OperatorComponentContractV1 previous;
+        if (catalog->Lookup("explore", "baseliner", &previous, &contract_error) == 0 &&
+            catalog->Prepare({{"explore", "baseliner", contract_identity_.component_revision,
+                               contracts::kBaselinerContract, previous.component_revision}},
+                             &prepared, &contract_error) == 0)
+            if (host_managed_contract_ || catalog->Commit(prepared, &contract_error) == 0)
+                contract_identity_ = prepared.front().association;
+    }
+    if (!host_managed_contract_) {
+        auto* directory = static_cast<IOperatorCatalog*>(querier_->First(IID_OPERATOR_CATALOG));
+        if (directory) directory->UpsertBatch({{"explore", "baseliner", "cpp", "component", Description(), "data"}});
+    }
     started_ = true;
     return 0;
 }
@@ -754,6 +825,9 @@ int BaselinerOperator::CreateTask(const BlockTransformTaskConfigV2& config, IBlo
     return 0;
 }
 void BaselinerOperator::ReleaseTask(IBlockTransformTaskV2* task) { delete task; }
+int BaselinerOperator::ResolveInvocation(const char* request, std::string* result, DataSemanticsErrorV1* error) {
+    return ResolveContractInvocation(querier_, nullptr, request, result, error);
+}
 int BaselinerOperator::NormalizeSourceConfig(const char* with, const char* source, std::string* output,
                                              std::string* error) const {
     if (!with || !source || !output) return EINVAL;

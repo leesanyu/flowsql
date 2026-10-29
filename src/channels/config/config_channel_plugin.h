@@ -14,14 +14,19 @@
 #include "channel_dictionary.h"
 #include "config_channel_provider.h"
 #include "data_semantics_registry.h"
+#include "operator_contract_service.h"
 
 namespace flowsql::channels::config {
 
 class ConfigChannelPlugin final : public IPlugin,
                                   public ConfigChannelProvider,
                                   public DataSemanticsRegistry,
+                                  public OperatorContractService,
                                   public IRouterHandle {
  public:
+    ConfigChannelPlugin()
+        : OperatorContractService(static_cast<DataSemanticsRegistry&>(*this),
+                                  static_cast<ConfigChannelProvider*>(this)) {}
     using ConfigChannelProvider::Close;
     using ConfigChannelProvider::Open;
     using ConfigChannelProvider::Resolve;

@@ -31,19 +31,39 @@ namespace task {
 
 namespace {
 
-// Only the provider's non-secret publication report is persisted, never result data or SQL.
+// Persist publication reports and immutable contract references, never result data or SQL.
 int SavePublication(TaskStoreSqlite* store, const std::string& task_id, const rapidjson::Value& response,
                     const char* member) {
-    if (!response.IsObject() || !response.HasMember(member) || !response[member].IsObject() ||
-        !response[member].HasMember("publication"))
-        return 0;
+    if (!response.IsObject()) return 0;
+    const bool publication =
+        response.HasMember(member) && response[member].IsObject() && response[member].HasMember("publication");
+    const bool checks = response.HasMember("contract_checks") && response["contract_checks"].IsArray();
+    if (!publication && !checks) return 0;
+    std::string previous;
+    if (!store || store->GetResultSummary(task_id, &previous) != 0) return -1;
+    rapidjson::Document summary(rapidjson::kObjectType);
+    if (!previous.empty()) {
+        summary.Parse(previous.c_str());
+        if (!summary.IsObject()) return -1;
+    }
+    auto& allocator = summary.GetAllocator();
+    if (publication) {
+        if (!summary.HasMember("publication")) summary.AddMember("publication", rapidjson::Value(), allocator);
+        summary["publication"].CopyFrom(response[member]["publication"], allocator);
+    }
+    if (checks) {
+        if (!summary.HasMember("contract_checks"))
+            summary.AddMember("contract_checks", rapidjson::Value(rapidjson::kArrayType), allocator);
+        for (const auto& check : response["contract_checks"].GetArray()) {
+            rapidjson::Value copy;
+            copy.CopyFrom(check, allocator);
+            summary["contract_checks"].PushBack(copy, allocator);
+        }
+    }
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-    writer.StartObject();
-    writer.Key("publication");
-    response[member]["publication"].Accept(writer);
-    writer.EndObject();
-    return store ? store->SaveResultSummary(task_id, buffer.GetString()) : -1;
+    summary.Accept(writer);
+    return store->SaveResultSummary(task_id, buffer.GetString());
 }
 
 void WritePublication(TaskStoreSqlite* store, const std::string& task_id,
@@ -53,8 +73,17 @@ void WritePublication(TaskStoreSqlite* store, const std::string& task_id,
     rapidjson::Document doc;
     doc.Parse(result.c_str());
     if (!doc.HasParseError() && doc.IsObject()) {
-        writer.Key("result");
-        doc.Accept(writer);
+        if (doc.HasMember("contract_checks")) {
+            writer.Key("contract_checks");
+            doc["contract_checks"].Accept(writer);
+        }
+        if (doc.HasMember("publication")) {
+            writer.Key("result");
+            writer.StartObject();
+            writer.Key("publication");
+            doc["publication"].Accept(writer);
+            writer.EndObject();
+        }
     }
 }
 
@@ -856,6 +885,11 @@ int TaskPlugin::ExecuteOneTask(const std::string& task_id, std::string* execute_
             std::string err_code = "EXECUTION_FAILED";
             std::string err_stage = "execute";
             if (!d.HasParseError() && d.IsObject() && d.HasMember("error") && d["error"].IsString()) err = d["error"].GetString();
+            if (!d.HasParseError() && d.IsObject() && d.HasMember("error") && d["error"].IsObject()) {
+                const auto& issue = d["error"];
+                if (issue.HasMember("code") && issue["code"].IsString()) err_code = issue["code"].GetString();
+                if (issue.HasMember("message") && issue["message"].IsString()) err = issue["message"].GetString();
+            }
             if (!d.HasParseError() && d.IsObject() && d.HasMember("error_code") && d["error_code"].IsString()) {
                 std::string v = d["error_code"].GetString();
                 if (!v.empty()) err_code = v;
@@ -864,7 +898,7 @@ int TaskPlugin::ExecuteOneTask(const std::string& task_id, std::string* execute_
                 std::string v = d["error_stage"].GetString();
                 if (!v.empty()) err_stage = v;
             }
-            if (rc == error::UNAVAILABLE) {
+            if (rc == error::UNAVAILABLE && err_code == "EXECUTION_FAILED") {
                 err_code = "SCHEDULER_UNAVAILABLE";
                 err_stage = "dispatch";
                 if (err.empty() || err == "execution failed") {
@@ -1233,6 +1267,25 @@ int32_t TaskPlugin::HandleBatchExecute(const std::string&, const std::string& re
         return error::INTERNAL_ERROR;
     }
 
+    rapidjson::Document exec_doc;
+    exec_doc.Parse(exec_rsp.c_str());
+    int32_t response_code = error::OK;
+    const bool structured_error =
+        !exec_doc.HasParseError() && exec_doc.IsObject() && exec_doc.HasMember("error") && exec_doc["error"].IsObject();
+    if (rec.status == TaskStatus::kFailed && structured_error) {
+        if (rec.error_code == "CONTRACT_INCOMPATIBLE")
+            response_code = error::UNPROCESSABLE_ENTITY;
+        else if (rec.error_code == "COMPONENT_CHANGED" || rec.error_code == "SOURCE_CHANGED")
+            response_code = error::CONFLICT;
+        else if (rec.error_code == "UNAVAILABLE")
+            response_code = error::UNAVAILABLE;
+        else if (rec.error_code == "NOT_FOUND")
+            response_code = error::NOT_FOUND;
+        else if (rec.error_code == "CONTRACT_INVALID")
+            response_code = error::BAD_REQUEST;
+        else
+            response_code = error::INTERNAL_ERROR;
+    }
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
     w.StartObject();
@@ -1249,8 +1302,6 @@ int32_t TaskPlugin::HandleBatchExecute(const std::string&, const std::string& re
     w.Int64(rec.result_row_count);
     if (rec.status == TaskStatus::kCompleted) {
         w.Key("data");
-        rapidjson::Document exec_doc;
-        exec_doc.Parse(exec_rsp.c_str());
         if (!exec_doc.HasParseError() && exec_doc.IsObject() && exec_doc.HasMember("data") && exec_doc["data"].IsArray()) {
             exec_doc["data"].Accept(w);
         } else if (!exec_doc.HasParseError() && exec_doc.IsObject() && exec_doc.HasMember("data") && exec_doc["data"].IsObject()) {
@@ -1282,7 +1333,10 @@ int32_t TaskPlugin::HandleBatchExecute(const std::string&, const std::string& re
         }
     } else if (rec.status == TaskStatus::kFailed) {
         w.Key("error");
-        w.String(rec.error_message.empty() ? "execution failed" : rec.error_message.c_str());
+        if (structured_error)
+            exec_doc["error"].Accept(w);
+        else
+            w.String(rec.error_message.empty() ? "execution failed" : rec.error_message.c_str());
         w.Key("error_code");
         w.String(rec.error_code.c_str());
         w.Key("error_stage");
@@ -1290,7 +1344,7 @@ int32_t TaskPlugin::HandleBatchExecute(const std::string&, const std::string& re
     }
     w.EndObject();
     rsp = buf.GetString();
-    return error::OK;
+    return response_code;
 }
 
 int32_t TaskPlugin::HandleSqlClassify(const std::string&, const std::string& req, std::string& rsp) {

@@ -1,0 +1,6 @@
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
+#pragma once
+namespace flowsql::contracts {
+inline constexpr char kBaselinerContract[] = R"CONTRACT(@FLOWSQL_OPERATOR_CONTRACT@)CONTRACT";
+}

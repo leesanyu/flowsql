@@ -4,7 +4,7 @@ FlowSQL 的“标准与字典”页面与 HTTP API 管理同一份版本库。�
 并将具体数据集登记为绑定；普通程序可读取绑定的精确字典版本、未知属性和使用局限。
 
 当前能力覆盖人工录入、JSON/YAML 导入，以及 Kafka 结构化 source、CSV/命名 DataFrame、已有数据库限定表的结构生成与绑定。
-算子输入输出契约、NPM 领域字典和查询/探索中的自动接线属于后续独立 Feature。生成与核对读取来源元数据，
+算子可选声明输入输出契约，系统在执行阶段检查并记录结果依据；NPM 领域字典和查询/探索中的展示接线属于独立 Feature。生成与核对读取来源元数据，
 不会消费 Kafka 消息、扫描业务行、改写业务数据、执行单位转换或自动升级任务。
 
 ## 入口与持久化
@@ -294,3 +294,156 @@ C++ 插件通过 IQuerier 查找 [IDataSemanticsRegistryV1](../src/framework/int
 回归入口见[测试说明](testing.md)。本 Feature 验证隔离原生进程、临时 SQLite、真实控制链路和实际 Chromium 页面，
 覆盖三类入口、四库真实目录、同时应用冲突、观察记录事务回滚、重启、精确快照/标准上下文与旧配置字节保留。
 Kafka 元数据生成不运行 Consumer；本验收不覆盖外部 Kafka 数据面/认证矩阵、容器交付矩阵或全产品发布，结构匹配不等于业务数据质量验证。
+
+
+## 算子输入输出契约
+
+算子作者在注册时一次声明静态契约，使用者继续按原有 SQL 指定来源、算子、算法参数和目标。
+SQL 不需要传契约文档、版本或另一份字段角色映射。没有声明的历史算子仍能执行，显示
+`contract_state=missing`、兼容性 `undetermined`；已声明却丢失定义或服务时会报错。
+
+“算子管理”详情显示组件摘要、作者版本、不可变契约版本、参数 Schema、字段选择规则、各输出、行分支与未知项。
+C++ 插件详情中的算子按钮可以打开对应声明。切换历史版本只改变阅读视图；预检始终重新取得当前组件的关联。
+预检输入为实际来源和既有算法参数；服务端从 F2 描述器取得结构/绑定并解析角色，不读取尚未加载的 CSV 业务行。
+源码和预检输入保存在当前浏览器会话中；刷新可恢复草稿，组件版本冲突时保留原稿和原版本依据。
+核对冲突后关闭编辑框、重新打开当前版本，再合并改动并保存。
+
+### 作者创建与上传
+
+Python 装饰器新增可选的 `data_contract`，接受完整 JSON 对象或 `{contract_ref: 精确版本}`。
+创建页可以填写“静态契约 JSON”，页面将其写进现有装饰器源码；也可以直接在源码中内嵌声明。
+上传 `.py` 使用相同声明，Python 执行 API 仍为单 DataFrame 输入、单 DataFrame 输出。
+复制契约要求实际 Arrow 字段类型和可空性也一致；Polars/Pandas 的默认 Arrow 导出可能改变这些结构属性。
+若作者声明严格复制非空字段，应显式生成对应 Schema；实际结构变化会报告 `OUTPUT_SCHEMA_MISMATCH`，不会自动放宽声明。
+下面是可创建为 `demo_identity.py` 并上传的最小复制算子：
+
+```python
+from flowsql import OperatorBase, register_operator
+
+CONTRACT = {
+    "schema_id": "flowsql.operator-data-contract.v1",
+    "title": "复制实际输入字段",
+    "operator": {"category": "demo", "name": "identity", "version": "1"},
+    "configuration": {
+        "invocation_schema": {"type": "object", "additionalProperties": True},
+        "affects": {},
+    },
+    "inputs": [{"port_id": "input", "min_count": 1, "max_count": 1,
+                "shape": "dataframe", "roles": []}],
+    "outputs": [{"port_id": "output", "shape": "dataframe", "mode": "derived",
+                 "rules": [{"kind": "copy", "source_port": "input", "all_fields": True}]}],
+    "limitations": ["只检查结构，不验证业务行质量"],
+}
+
+@register_operator(category="demo", name="identity", data_contract=CONTRACT)
+class Identity(OperatorBase):
+    def work(self, df):
+        return df
+```
+
+创建或上传成功后，在目录中激活，再执行：
+
+```sql
+SELECT * FROM dataframe.input USING demo.identity INTO dataframe.identity_result;
+```
+
+其中 `dataframe.input` 是已有的实际数据集，可替换为自己的来源。参数的生产默认值来自算子共用的解析器，
+通用检查不会根据 Schema 的 `default` 擅自填值。源码编辑提交读取详情时的 `expected_component_revision`；
+变更组件或声明不会覆盖运行任务已经取得的组件租约与精确版本。
+
+C++ 插件可在现有 ABI 导出之外提供可选的 `flowsql_operator_data_contract_v1(int index)`，
+返回随库携带的完整文档或精确引用；不改变旧执行虚表和 V2 descriptor 的 `contract_iid`。
+可编译样例见 [C++ 契约输出算子](../src/tests/test_builtin/fixtures/fixture_contract_output.cpp)，
+`cmake -B build src` 后执行 `cmake --build build --target fixture_contract_output -j8`，
+将生成的 `build/output/libfixture_contract_output.so` 通过 C++ 插件页上传和激活。
+该样例提供复制、重命名、显式 ms→s、五种聚合及双输出，适合用临时数据集验证接口。
+
+### 普通 HTTP 客户端
+
+OpenAPI 的 `checkOperatorDataContract` 对应 `POST /api/semantics/v1/operators/check`：
+
+```json
+{
+  "operator": {"category": "demo", "name": "identity"},
+  "parameters": {},
+  "inputs": [{"input_index": 0, "locator": {"kind": "dataframe", "name": "input"}}],
+  "output_locator": {"kind": "dataframe", "name": "identity_result"}
+}
+```
+
+`parameters` 的值与 SQL WITH 一样为字符串。`inputs` 只包含按顺序编号的 F2 定位符；
+不接受客户端 Schema、替换契约或独立 `role_map`。F2 的数据库输入定位符指定实际限定表，
+复杂算子的生产适配器按已有配置继续展开其他 dataset；所选输入必须与配置对应。
+`output_locator` 可省略，依赖目标的输出会保持未确定；具体数据库表是普通表目标，不等同托管通道。
+
+下面的标准库客户端以已上传并激活的 `demo.identity` 和已有的 `dataframe.input` 为例，
+从概要/局部资源/闭合文档到预检、普通 SQL、精确使用依据及必要字典上下文完成读取。
+运行前设置 `FLOWSQL_SEMANTICS_URL` 为实际 Web 地址，例如 `http://127.0.0.1:8081`：
+
+```python
+import json
+import os
+import urllib.request
+
+base = os.environ["FLOWSQL_SEMANTICS_URL"].rstrip("/")
+def post(path, body):
+    req = urllib.request.Request(base + "/api/" + path,
+        data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return json.load(response)
+
+def resolve(ref, **view):
+    return post("semantics/v1/resolve", {"exact_reference": ref, **view})["data"]
+
+detail = post("operators/detail", {"name": "demo.identity"})
+ref = detail["contract_ref"]
+summary = resolve(ref, view="summary")
+input_rules = resolve(ref, view="resource", resource_pointer="/inputs")
+closed_contract = resolve(ref)["document"]
+checked = post("semantics/v1/operators/check", {
+    "operator": {"category": "demo", "name": "identity"}, "parameters": {},
+    "inputs": [{"input_index": 0, "locator": {"kind": "dataframe", "name": "input"}}],
+})["data"]
+print(checked["check"])
+if checked["check"]["state"] == "incompatible":
+    raise RuntimeError("输入不符合静态契约")
+result = post("tasks/batch/execute", {
+    "sql_text": "SELECT * FROM dataframe.input USING demo.identity INTO dataframe.identity_result",
+    "mode": "sync",
+})
+for check in result["contract_checks"]:
+    use = resolve(check["use_ref"])["document"]
+    for output in use["outputs"]:
+        print(output["port_id"], output["state"], output.get("context_state"))
+        if "dictionary_ref" in output:
+            print(resolve(output["dictionary_ref"])["document"])
+        for context_ref in output.get("required_context_refs", []):
+            print(resolve(context_ref))
+        for context in output.get("semantic_contexts", []):
+            for context_ref in context.get("required_context_refs", []):
+                print(resolve(context_ref))
+```
+
+预检的 `compatible|incompatible|undetermined` 都是 HTTP 200 的正常结果；结构未取得、身份未知、
+缺少语义绑定等情况保留缺口。普通执行明确不兼容返回 422，组件/来源冲突返回 409，服务不可用返回 503。
+真正执行会重新解析并冻结当次组件、配置、来源和契约，预检结果不是可复用的执行计划。
+输出结构不符会返回执行错误；数据已产生而元数据发布失败时会明确记录数据/元数据状态。
+
+### 多实体、行规则与未知语义
+
+输出结构实际生成后，系统才记录 `operator_use`、结果字典及绑定；这些记录共享同一事务。
+未接入观察的路径显示 `output_check=not_observed`，不会生成声称已匹配的结果绑定；
+`absent` 表示条件确定为不产生该实体，与“尚未观察”不同。
+结果同名替换会产生新的 F2 对象身份，历史任务仍可按精确 use/契约/字典引用追溯。
+普通 save/import 不能制造声称已观察的使用记录。
+
+[Baseliner 静态声明](../config/semantics/examples/operator-contract-baseliner.json) 分别描述 `results`、
+`model_parameters`、`relation_fusion` 和 `maintenance`。同一数值列可能包含 Value、Ratio 或 Relation 子指标，
+其解释必须结合 dataset/metric 身份、来源字典、模型/时间等必要上下文；`unit` 列的 value/ratio 类别不是物理单位。
+客户端应核对 `context_state` 和各 `required_context_refs`，缺引用时保持 incomplete；
+Ratio 或未知转换不会按同名字段猜测、继承物理单位。
+
+`row_cases` 说明 evaluation/forecast、未训练模型等条件下 NULL 的含义，不执行逐行数据质量验证。
+例如 forecast 的 observed/can_alert 为 NULL；冷启动 evaluation 可能没有区间，不能把同次任务的 forecast
+也一概视为没有区间。`data_validation=not_run` 始终不表示预测算法、异常判定或所有业务行已经验证。
+进一步的结果/图表就地解释属于独立的消费展示能力。

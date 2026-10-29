@@ -1,13 +1,8 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
-
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 #include "python_operator_bridge.h"
 
+#include <common/channel_dataset.hpp>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -18,9 +13,9 @@
 #include <sys/statvfs.h>
 
 #include "arrow_ipc_serializer.h"
-#include "shared_memory_guard.h"
 #include "framework/core/dataframe.h"
 #include "framework/interfaces/idataframe_channel.h"
+#include "shared_memory_guard.h"
 
 namespace {
 
@@ -74,8 +69,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     auto* df_out = dynamic_cast<IDataFrameChannel*>(out);
     if (!df_in || !df_out) {
         last_error_ = "channel type mismatch (expected IDataFrameChannel)";
-        printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
+        printf("PythonOperatorBridge[%s.%s]: %s\n", meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -83,8 +77,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     DataFrame in_frame;
     if (df_in->Read(&in_frame) != 0) {
         last_error_ = "Read from input channel failed";
-        printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
+        printf("PythonOperatorBridge[%s.%s]: %s\n", meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -92,8 +85,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     auto batch = in_frame.ToArrow();
     if (!batch) {
         last_error_ = "ToArrow() returned null";
-        printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
+        printf("PythonOperatorBridge[%s.%s]: %s\n", meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -101,8 +93,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     std::string uuid = GenerateUUID();
     if (uuid.empty()) {
         last_error_ = "Failed to generate UUID";
-        printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
+        printf("PythonOperatorBridge[%s.%s]: %s\n", meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -112,11 +103,25 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
 
     if (ArrowIpcSerializer::SerializeToFile(batch, in_path) != 0) {
         last_error_ = "Arrow IPC serialize to file failed";
-        printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
+        printf("PythonOperatorBridge[%s.%s]: %s\n", meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
+    if (invocation_token_.empty()) {
+        dataset::Json request(rapidjson::kObjectType);
+        auto& a = request.GetAllocator();
+        rapidjson::Value parameters(rapidjson::kObjectType);
+        for (const auto& [key, value] : parameters_) dataset::Set(parameters, key.c_str(), value, a);
+        request.AddMember("parameters", parameters, a)
+            .AddMember("inputs", rapidjson::Value(rapidjson::kArrayType), a)
+            .AddMember("execution_context", rapidjson::Value(rapidjson::kObjectType), a);
+        std::string resolved;
+        DataSemanticsErrorV1 error;
+        if (ResolveInvocation(dataset::Encode(request).c_str(), &resolved, &error)) {
+            last_error_ = error.code + ": " + error.message;
+            return -1;
+        }
+    }
     // 4. HTTP POST JSON 路径到 Python Worker
     std::string path = "/operators/python/work/" + meta_.category + "/" + meta_.name;
 
@@ -125,14 +130,19 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     json_writer.StartObject();
     json_writer.Key("input");
     json_writer.String(in_path.c_str());
+    json_writer.Key("component_revision");
+    json_writer.String(meta_.contract.component_revision.c_str());
+    json_writer.Key("invocation_token");
+    json_writer.String(invocation_token_.c_str());
     json_writer.EndObject();
 
     auto res = client_->Post(path, sb.GetString(), "application/json");
+    // Work consumes the token. A transport error leaves cleanup to ReleaseInvocation.
+    if (res) invocation_token_.clear();
 
     if (!res) {
         last_error_ = "HTTP POST to Python Worker failed (connection error)";
-        printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
+        printf("PythonOperatorBridge[%s.%s]: %s\n", meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -147,8 +157,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
                 last_error_ += ": " + res->body;
             }
         }
-        printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
+        printf("PythonOperatorBridge[%s.%s]: %s\n", meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -158,8 +167,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     if (res_doc.HasParseError() || !res_doc.IsObject() || !res_doc.HasMember("output") ||
         !res_doc["output"].IsString()) {
         last_error_ = "Invalid JSON response from Python Worker: " + res->body;
-        printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
+        printf("PythonOperatorBridge[%s.%s]: %s\n", meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -167,8 +175,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
     std::shared_ptr<arrow::RecordBatch> result_batch;
     if (ArrowIpcSerializer::DeserializeFromFile(output_path, &result_batch) != 0) {
         last_error_ = "Deserialize Arrow IPC from file failed: " + output_path;
-        printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
+        printf("PythonOperatorBridge[%s.%s]: %s\n", meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
@@ -177,26 +184,69 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
 
     if (df_out->Write(&out_frame) != 0) {
         last_error_ = "Write to output channel failed";
-        printf("PythonOperatorBridge[%s.%s]: %s\n",
-               meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
+        printf("PythonOperatorBridge[%s.%s]: %s\n", meta_.category.c_str(), meta_.name.c_str(), last_error_.c_str());
         return -1;
     }
 
     return 0;
 }
 
+void PythonOperatorBridge::ReleaseInvocation() {
+    if (invocation_token_.empty()) return;
+    dataset::Json request(rapidjson::kObjectType);
+    dataset::Set(request, "invocation_token", invocation_token_, request.GetAllocator());
+    (void)client_->Post("/operators/python/invocations/release", dataset::Encode(request), "application/json");
+    invocation_token_.clear();
+}
+PythonOperatorBridge::~PythonOperatorBridge() { ReleaseInvocation(); }
 int PythonOperatorBridge::Configure(const char* key, const char* value) {
     if (!key || !value) return -1;
-
-    std::string path = "/operators/python/configure/" + meta_.category + "/" + meta_.name;
-    std::string body = std::string("{\"key\":\"") + key + "\",\"value\":\"" + value + "\"}";
-    auto res = client_->Post(path, body, "application/json");
-
-    if (!res || res->status != 200) {
-        printf("PythonOperatorBridge[%s.%s]: Configure failed\n",
-               meta_.category.c_str(), meta_.name.c_str());
-        return -1;
+    ReleaseInvocation();
+    parameters_[key] = value;
+    return 0;
+}
+int PythonOperatorBridge::ResolveInvocation(const char* text, std::string* out, DataSemanticsErrorV1* error) {
+    using namespace dataset;
+    if (out) out->clear();
+    if (error) *error = {};
+    if (!out) return Fail(error, "CONTRACT_INVALID", "adapter result required");
+    Json request;
+    const std::string input = text ? text : "";
+    if (input.size() > 12 * 1024 * 1024 || !JsonNestingWithin(input, 64))
+        return Fail(error, "LIMIT_EXCEEDED", "adapter request limit");
+    request.Parse(input.c_str());
+    if (!request.IsObject() || !request.HasMember("parameters") || !request["parameters"].IsObject() ||
+        !request.HasMember("inputs") || !request["inputs"].IsArray() || !request.HasMember("execution_context") ||
+        !request["execution_context"].IsObject())
+        return Fail(error, "CONTRACT_INVALID", "invalid adapter request");
+    // Configure and metadata must describe the same invocation, including escaped values.
+    Json configured(rapidjson::kObjectType);
+    for (const auto& [key, value] : parameters_) Set(configured, key.c_str(), value, configured.GetAllocator());
+    if (request["parameters"] != configured)
+        return Fail(error, "COMPONENT_CHANGED", "parameters differ from configured invocation");
+    ReleaseInvocation();
+    Set(request, "component_revision", meta_.contract.component_revision, request.GetAllocator());
+    auto response = client_->Post("/operators/python/invocations/prepare/" + meta_.category + "/" + meta_.name,
+                                  Encode(request), "application/json");
+    if (!response) return Fail(error, "UNAVAILABLE", "Python invocation adapter unavailable");
+    if (response->body.size() > 12 * 1024 * 1024 || !JsonNestingWithin(response->body, 64))
+        return Fail(error, "LIMIT_EXCEEDED", "adapter response limit");
+    Json result;
+    result.Parse(response->body.c_str());
+    if (response->status != 200) {
+        const auto& issue = result.IsObject() && result.HasMember("error") ? result["error"] : result;
+        return Fail(error, Get(issue, "code", "UNAVAILABLE"), Get(issue, "message", "Python adapter failed"));
     }
+    if (!result.IsObject() || Get(result, "invocation_token").empty() ||
+        Get(result, "component_revision") != meta_.contract.component_revision ||
+        !result.HasMember("effective_parameters") || !result["effective_parameters"].IsObject() ||
+        !result.HasMember("inputs") || !result["inputs"].IsArray() || !result.HasMember("config_refs") ||
+        !result["config_refs"].IsArray())
+        return Fail(error, "UNAVAILABLE", "invalid Python adapter response");
+    invocation_token_ = Get(result, "invocation_token");
+    result.RemoveMember("invocation_token");
+    result.RemoveMember("component_revision");
+    *out = Encode(result);
     return 0;
 }
 

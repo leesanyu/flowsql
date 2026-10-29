@@ -1,0 +1,2470 @@
+{
+  "schema_id": "flowsql.operator-data-contract.v1",
+  "title": "Baseliner representative contract",
+  "operator": {
+    "category": "explore",
+    "name": "baseliner",
+    "version": "1"
+  },
+  "configuration": {
+    "invocation_schema": {
+      "type": "object",
+      "properties": {
+        "config": {
+          "type": "string",
+          "pattern": "^config\\.[a-z][a-z0-9_.-]*@[1-9][0-9]*$"
+        },
+        "parameters": {
+          "type": "string"
+        },
+        "model_output": {
+          "type": "string"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "config"
+          ],
+          "not": {
+            "required": [
+              "parameters"
+            ]
+          }
+        },
+        {
+          "required": [
+            "parameters"
+          ],
+          "not": {
+            "required": [
+              "config"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "normalized_config_schema": {
+      "$ref": "#/resources/task_config"
+    },
+    "decoded_parameters": [
+      {
+        "key": "parameters",
+        "encoding": "json",
+        "schema_ref": "#/resources/inline_config"
+      }
+    ],
+    "affects": {
+      "config": [
+        "#/inputs",
+        "#/outputs"
+      ],
+      "parameters": [
+        "#/inputs",
+        "#/outputs"
+      ],
+      "model_output": [
+        "#/outputs/1"
+      ]
+    }
+  },
+  "inputs": [
+    {
+      "port_id": "datasets",
+      "min_count": 1,
+      "max_count": 64,
+      "shape": "record_batch",
+      "repeat_from_config_pointer": "/datasets",
+      "item_key_pointer": "/id",
+      "roles": [
+        {
+          "role_id": "bucket",
+          "required": true,
+          "types": [
+            {
+              "system": "arrow",
+              "name": "int64",
+              "parameters": {}
+            }
+          ],
+          "nullable": null,
+          "semantic_requirements": {},
+          "selector": {
+            "kind": "config",
+            "scope": "input_item",
+            "pointer": "/bucket/column",
+            "cardinality": "one"
+          }
+        },
+        {
+          "role_id": "series_keys",
+          "required": false,
+          "types": [],
+          "nullable": null,
+          "semantic_requirements": {},
+          "selector": {
+            "kind": "config",
+            "scope": "input_item",
+            "pointer": "/series_keys",
+            "cardinality": "many"
+          }
+        },
+        {
+          "role_id": "deduplicate_keys",
+          "required": true,
+          "types": [],
+          "nullable": null,
+          "semantic_requirements": {},
+          "selector": {
+            "kind": "config",
+            "scope": "input_item",
+            "pointer": "/deduplicate/keys",
+            "cardinality": "many"
+          }
+        }
+      ],
+      "role_templates": [
+        {
+          "repeat_from_pointer": "/metrics",
+          "item_key_pointer": "/id",
+          "discriminator_pointer": "/kind",
+          "cases": {
+            "value": {
+              "roles": [
+                {
+                  "role_id": "value",
+                  "required": false,
+                  "types": [],
+                  "nullable": null,
+                  "semantic_requirements": {},
+                  "selector": {
+                    "kind": "config",
+                    "scope": "role_item",
+                    "pointer": "/column",
+                    "cardinality": "one"
+                  }
+                },
+                {
+                  "role_id": "sample_count",
+                  "required": false,
+                  "types": [],
+                  "nullable": null,
+                  "semantic_requirements": {},
+                  "selector": {
+                    "kind": "config",
+                    "scope": "role_item",
+                    "pointer": "/sample_count/column",
+                    "cardinality": "one"
+                  }
+                }
+              ]
+            },
+            "ratio": {
+              "roles": [
+                {
+                  "role_id": "numerator",
+                  "required": false,
+                  "types": [],
+                  "nullable": null,
+                  "semantic_requirements": {},
+                  "selector": {
+                    "kind": "config",
+                    "scope": "role_item",
+                    "pointer": "/numerator/column",
+                    "cardinality": "one"
+                  }
+                },
+                {
+                  "role_id": "denominator",
+                  "required": false,
+                  "types": [],
+                  "nullable": null,
+                  "semantic_requirements": {},
+                  "selector": {
+                    "kind": "config",
+                    "scope": "role_item",
+                    "pointer": "/denominator/column",
+                    "cardinality": "one"
+                  }
+                }
+              ]
+            },
+            "relation": {
+              "roles": [
+                {
+                  "role_id": "group",
+                  "required": true,
+                  "types": [],
+                  "nullable": null,
+                  "semantic_requirements": {},
+                  "selector": {
+                    "kind": "config",
+                    "scope": "role_item",
+                    "pointer": "/group_space/column",
+                    "cardinality": "one"
+                  }
+                }
+              ],
+              "role_templates": [
+                {
+                  "repeat_from_pointer": "/metrics",
+                  "item_key_pointer": "/id",
+                  "cases": {
+                    "default": {
+                      "roles": [
+                        {
+                          "role_id": "relation_value",
+                          "required": false,
+                          "types": [],
+                          "nullable": null,
+                          "semantic_requirements": {},
+                          "selector": {
+                            "kind": "config",
+                            "scope": "role_item",
+                            "pointer": "/column",
+                            "cardinality": "one"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "port_id": "results",
+      "shape": "record_batch",
+      "mode": "unknown",
+      "rules": [],
+      "availability": {
+        "all": []
+      },
+      "structure_ref": "#/resources/results_structure",
+      "row_cases": [
+        {
+          "case_id": "evaluation",
+          "when": {
+            "scope": "row",
+            "pointer": "/result_kind",
+            "equals": "evaluation"
+          },
+          "field_rules": {
+            "observed": {
+              "description": "Current bucket observation; expected band may be NULL during cold start."
+            },
+            "expected": {
+              "null_meaning": "No valid expected band during cold start or non-ready status; interpret status before using expected/lower/upper."
+            }
+          }
+        },
+        {
+          "case_id": "forecast",
+          "when": {
+            "scope": "row",
+            "pointer": "/result_kind",
+            "equals": "forecast"
+          },
+          "field_rules": {
+            "observed": {
+              "description": "NULL for forecast rows.",
+              "must_be_null": true
+            },
+            "can_alert": {
+              "description": "NULL for forecast rows.",
+              "must_be_null": true
+            }
+          }
+        }
+      ],
+      "context_semantics": {
+        "repeat_from_config_pointer": "/datasets",
+        "item_key_pointer": "/id",
+        "metric_pointer": "/metrics",
+        "identity_columns": [
+          "dataset_id",
+          "metric_id"
+        ],
+        "description": "Resolve each metric against its own input dictionary; the unit column is a metric category, not a physical unit.",
+        "input_port": "datasets",
+        "metric_key_pointer": "/id",
+        "submetrics_pointer": "/metrics",
+        "include_submetrics": true
+      }
+    },
+    {
+      "port_id": "model_parameters",
+      "shape": "record_batch",
+      "mode": "unknown",
+      "rules": [],
+      "availability": {
+        "scope": "execution_context",
+        "pointer": "/model_output_enabled",
+        "equals": true
+      },
+      "structure_ref": "#/resources/model_parameters_structure",
+      "context_semantics": {
+        "repeat_from_config_pointer": "/datasets",
+        "item_key_pointer": "/id",
+        "metric_pointer": "/metrics",
+        "identity_columns": [
+          "dataset_id",
+          "metric_id"
+        ],
+        "description": "Resolve each metric against its own input dictionary; the unit column is a metric category, not a physical unit.",
+        "input_port": "datasets",
+        "metric_key_pointer": "/id",
+        "submetrics_pointer": "/metrics",
+        "include_submetrics": false
+      },
+      "row_cases": [
+        {
+          "case_id": "untrained",
+          "when": {
+            "scope": "row",
+            "pointer": "/status",
+            "equals": 1
+          },
+          "field_rules": {
+            "parameters_json": {
+              "null_meaning": "NULL when status is NotTrained; not a recoverable checkpoint.",
+              "must_be_null": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "port_id": "relation_fusion",
+      "shape": "record_batch",
+      "mode": "unknown",
+      "rules": [],
+      "availability": {
+        "scope": "execution_context",
+        "pointer": "/relation_fusion_enabled",
+        "equals": true
+      },
+      "structure_ref": "#/resources/relation_fusion_structure",
+      "context_semantics": {
+        "repeat_from_config_pointer": "/datasets",
+        "item_key_pointer": "/id",
+        "metric_pointer": "/metrics",
+        "identity_columns": [
+          "dataset_id",
+          "metric_id"
+        ],
+        "description": "Resolve each metric against its own input dictionary; the unit column is a metric category, not a physical unit.",
+        "input_port": "datasets",
+        "metric_key_pointer": "/id",
+        "submetrics_pointer": "/metrics",
+        "include_submetrics": false
+      }
+    },
+    {
+      "port_id": "maintenance",
+      "shape": "record_batch",
+      "mode": "unknown",
+      "rules": [],
+      "availability": {
+        "scope": "execution_context",
+        "pointer": "/managed_output",
+        "equals": true
+      },
+      "structure_ref": "#/resources/maintenance_structure"
+    }
+  ],
+  "limitations": [
+    "Representative template: production adapters supply effective configuration and actual input associations.",
+    "Unknown field/business semantics remain unknown; no algorithm or row validation is implied."
+  ],
+  "resources": {
+    "task_config": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "task_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "enum": [
+            "snapshot",
+            "poll"
+          ]
+        },
+        "datasets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/resources/dataset"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "clock": {
+          "type": "object",
+          "properties": {
+            "bucket_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "bucket_seconds",
+            "timezone"
+          ],
+          "additionalProperties": false
+        },
+        "calendar": {
+          "type": "object",
+          "properties": {
+            "calendar_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "calendar_version": {
+              "type": "string",
+              "minLength": 1,
+              "not": {
+                "const": "latest"
+              }
+            }
+          },
+          "required": [
+            "calendar_id",
+            "calendar_version"
+          ],
+          "additionalProperties": false
+        },
+        "bootstrap": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "cold"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "history"
+                },
+                "begin_bucket": {
+                  "type": "integer"
+                },
+                "end_bucket": {
+                  "type": "integer"
+                },
+                "min_observations": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 10000000
+                },
+                "insufficient": {
+                  "enum": [
+                    "fail",
+                    "cold"
+                  ]
+                }
+              },
+              "required": [
+                "mode",
+                "begin_bucket",
+                "end_bucket",
+                "min_observations",
+                "insufficient"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "forecast": {
+          "type": "object",
+          "properties": {
+            "horizon_buckets": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "read_policy": {
+          "type": "object",
+          "properties": {
+            "page_rows": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536,
+              "default": 4096
+            },
+            "poll_interval_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60000,
+              "default": 1000
+            },
+            "max_pending_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1073741824,
+              "default": 16777216
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "state_policy": {
+          "type": "object",
+          "properties": {
+            "max_runtime_identities": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "default": 1024
+            },
+            "max_model_identities": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "default": 1024
+            },
+            "max_basis_versions": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64,
+              "default": 2
+            },
+            "capacity": {
+              "enum": [
+                "reject",
+                "evict_idle"
+              ],
+              "default": "reject"
+            },
+            "release_scope": {
+              "enum": [
+                "RuntimeOnly",
+                "AllState"
+              ],
+              "default": "RuntimeOnly"
+            },
+            "idle_timeout_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 31536000000,
+              "default": 0
+            },
+            "maintenance_max_releases": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "default": 16
+            },
+            "maintenance_max_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1073741824,
+              "default": 16777216
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "checkpoint_every_buckets": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "default": 1
+            },
+            "checkpoint_interval_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600000,
+              "default": 1000
+            },
+            "lease_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400000,
+              "default": 30000
+            },
+            "renew_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400000,
+              "default": 10000
+            },
+            "operation_timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600000,
+              "default": 5000
+            },
+            "max_checkpoint_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1073741824,
+              "default": 16777216
+            },
+            "retain_generations": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64,
+              "default": 2
+            },
+            "restore": {
+              "enum": [
+                "require",
+                "if_exists",
+                "fresh"
+              ],
+              "default": "if_exists"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "task_key",
+        "source",
+        "mode",
+        "datasets",
+        "clock",
+        "calendar"
+      ],
+      "additionalProperties": false
+    },
+    "inline_config": {
+      "oneOf": [
+        {
+          "$ref": "#/resources/task_config"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "task_key": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1
+            },
+            "mode": {
+              "enum": [
+                "snapshot",
+                "poll"
+              ]
+            },
+            "clock": {
+              "type": "object",
+              "properties": {
+                "bucket_seconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 86400
+                },
+                "timezone": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "bucket_seconds",
+                "timezone"
+              ],
+              "additionalProperties": false
+            },
+            "calendar": {
+              "type": "object",
+              "properties": {
+                "calendar_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "calendar_version": {
+                  "type": "string",
+                  "minLength": 1,
+                  "not": {
+                    "const": "latest"
+                  }
+                }
+              },
+              "required": [
+                "calendar_id",
+                "calendar_version"
+              ],
+              "additionalProperties": false
+            },
+            "bootstrap": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "const": "cold"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "const": "history"
+                    },
+                    "begin_bucket": {
+                      "type": "integer"
+                    },
+                    "end_bucket": {
+                      "type": "integer"
+                    },
+                    "min_observations": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 10000000
+                    },
+                    "insufficient": {
+                      "enum": [
+                        "fail",
+                        "cold"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "begin_bucket",
+                    "end_bucket",
+                    "min_observations",
+                    "insufficient"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "forecast": {
+              "type": "object",
+              "properties": {
+                "horizon_buckets": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4096,
+                  "default": 0
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "read_policy": {
+              "type": "object",
+              "properties": {
+                "page_rows": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65536,
+                  "default": 4096
+                },
+                "poll_interval_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 60000,
+                  "default": 1000
+                },
+                "max_pending_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1073741824,
+                  "default": 16777216
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "state_policy": {
+              "type": "object",
+              "properties": {
+                "max_runtime_identities": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000000,
+                  "default": 1024
+                },
+                "max_model_identities": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000000,
+                  "default": 1024
+                },
+                "max_basis_versions": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 64,
+                  "default": 2
+                },
+                "capacity": {
+                  "enum": [
+                    "reject",
+                    "evict_idle"
+                  ],
+                  "default": "reject"
+                },
+                "release_scope": {
+                  "enum": [
+                    "RuntimeOnly",
+                    "AllState"
+                  ],
+                  "default": "RuntimeOnly"
+                },
+                "idle_timeout_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 31536000000,
+                  "default": 0
+                },
+                "maintenance_max_releases": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4096,
+                  "default": 16
+                },
+                "maintenance_max_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1073741824,
+                  "default": 16777216
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "persistence": {
+              "type": "object",
+              "properties": {
+                "checkpoint_every_buckets": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000000,
+                  "default": 1
+                },
+                "checkpoint_interval_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600000,
+                  "default": 1000
+                },
+                "lease_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 86400000,
+                  "default": 30000
+                },
+                "renew_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 86400000,
+                  "default": 10000
+                },
+                "operation_timeout_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600000,
+                  "default": 5000
+                },
+                "max_checkpoint_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1073741824,
+                  "default": 16777216
+                },
+                "retain_generations": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 64,
+                  "default": 2
+                },
+                "restore": {
+                  "enum": [
+                    "require",
+                    "if_exists",
+                    "fresh"
+                  ],
+                  "default": "if_exists"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "dataset": {
+              "$ref": "#/resources/dataset_inline"
+            }
+          },
+          "required": [
+            "task_key",
+            "dataset",
+            "clock",
+            "calendar"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "description": "Single dataset shorthand is normalized by the production parser against SQL FROM. Schema defaults are annotations only."
+    },
+    "results_structure": {
+      "fields": [
+        {
+          "name": "task_key",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "dataset_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "metric_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "series_key",
+          "type": {
+            "system": "arrow",
+            "name": "binary",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "source_epoch",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "target_bucket",
+          "type": {
+            "system": "arrow",
+            "name": "int64",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "config_hash",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "published_generation",
+          "type": {
+            "system": "arrow",
+            "name": "uint64",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "result_kind",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "summary_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "basis_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "issued_after_bucket",
+          "type": {
+            "system": "arrow",
+            "name": "int64",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "model_basis_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "bucket_seconds",
+          "type": {
+            "system": "arrow",
+            "name": "int64",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "timezone",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "unit",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "observed",
+          "type": {
+            "system": "arrow",
+            "name": "double",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "expected",
+          "type": {
+            "system": "arrow",
+            "name": "double",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "lower",
+          "type": {
+            "system": "arrow",
+            "name": "double",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "upper",
+          "type": {
+            "system": "arrow",
+            "name": "double",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "status",
+          "type": {
+            "system": "arrow",
+            "name": "int32",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "band_kind",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "confidence",
+          "type": {
+            "system": "arrow",
+            "name": "double",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "maturity",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "score",
+          "type": {
+            "system": "arrow",
+            "name": "double",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "is_outside_band",
+          "type": {
+            "system": "arrow",
+            "name": "bool",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "can_score",
+          "type": {
+            "system": "arrow",
+            "name": "bool",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "can_update",
+          "type": {
+            "system": "arrow",
+            "name": "bool",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "update_weight",
+          "type": {
+            "system": "arrow",
+            "name": "double",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "can_alert",
+          "type": {
+            "system": "arrow",
+            "name": "bool",
+            "parameters": {}
+          },
+          "nullable": true
+        }
+      ]
+    },
+    "model_parameters_structure": {
+      "fields": [
+        {
+          "name": "task_key",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "dataset_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "metric_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "series_key",
+          "type": {
+            "system": "arrow",
+            "name": "binary",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "source_epoch",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "config_hash",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "model_kind",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "model_basis_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "as_of_bucket",
+          "type": {
+            "system": "arrow",
+            "name": "int64",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "status",
+          "type": {
+            "system": "arrow",
+            "name": "int32",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "maturity",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "parameters_version",
+          "type": {
+            "system": "arrow",
+            "name": "uint32",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "parameters_json",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": true
+        }
+      ]
+    },
+    "relation_fusion_structure": {
+      "fields": [
+        {
+          "name": "task_key",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "dataset_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "metric_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "series_key",
+          "type": {
+            "system": "arrow",
+            "name": "binary",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "source_epoch",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "target_bucket",
+          "type": {
+            "system": "arrow",
+            "name": "int64",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "config_hash",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "published_generation",
+          "type": {
+            "system": "arrow",
+            "name": "uint64",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "status",
+          "type": {
+            "system": "arrow",
+            "name": "int32",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "fusion_score",
+          "type": {
+            "system": "arrow",
+            "name": "double",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "basis_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": true
+        },
+        {
+          "name": "can_alert",
+          "type": {
+            "system": "arrow",
+            "name": "bool",
+            "parameters": {}
+          },
+          "nullable": true
+        }
+      ]
+    },
+    "maintenance_structure": {
+      "fields": [
+        {
+          "name": "task_key",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "dataset_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "metric_id",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "series_key",
+          "type": {
+            "system": "arrow",
+            "name": "binary",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "source_epoch",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "target_bucket",
+          "type": {
+            "system": "arrow",
+            "name": "int64",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "config_hash",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "published_generation",
+          "type": {
+            "system": "arrow",
+            "name": "uint64",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "event_kind",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "reason",
+          "type": {
+            "system": "arrow",
+            "name": "string",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "runtime_identities",
+          "type": {
+            "system": "arrow",
+            "name": "uint64",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "model_identities",
+          "type": {
+            "system": "arrow",
+            "name": "uint64",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "routed_states",
+          "type": {
+            "system": "arrow",
+            "name": "uint64",
+            "parameters": {}
+          },
+          "nullable": false
+        },
+        {
+          "name": "retained_basis_versions",
+          "type": {
+            "system": "arrow",
+            "name": "uint64",
+            "parameters": {}
+          },
+          "nullable": false
+        }
+      ]
+    },
+    "expression": {
+      "type": "object",
+      "properties": {
+        "column": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aggregate": {
+          "enum": [
+            "column",
+            "sum",
+            "count",
+            "mean",
+            "min",
+            "max"
+          ],
+          "default": "column"
+        },
+        "scale": {
+          "type": "number",
+          "default": 1.0
+        },
+        "divisor": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.0
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "aggregate": {
+                "const": "count"
+              }
+            },
+            "required": [
+              "aggregate"
+            ]
+          },
+          "then": {},
+          "else": {
+            "required": [
+              "column"
+            ]
+          }
+        }
+      ]
+    },
+    "group_space": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "const": "latest"
+          }
+        },
+        "column": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dictionary": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "number",
+                  "string"
+                ]
+              },
+              "group_idx": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            },
+            "required": [
+              "key",
+              "group_idx"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 65536
+        },
+        "unknown": {
+          "enum": [
+            "reject",
+            "other"
+          ],
+          "default": "reject"
+        },
+        "other_group_idx": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "column"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "unknown": {
+                "const": "other"
+              }
+            },
+            "required": [
+              "unknown"
+            ]
+          },
+          "then": {
+            "required": [
+              "other_group_idx"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "other_group_idx"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "metric": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": {
+              "const": "value"
+            },
+            "feature_type": {
+              "enum": [
+                "value_basic",
+                "value_sampled"
+              ]
+            },
+            "profile": {
+              "type": "string",
+              "minLength": 1
+            },
+            "null_policy": {
+              "enum": [
+                "fail",
+                "skip"
+              ],
+              "default": "fail"
+            },
+            "invalid_policy": {
+              "enum": [
+                "fail",
+                "skip"
+              ],
+              "default": "fail"
+            },
+            "column": {
+              "type": "string",
+              "minLength": 1
+            },
+            "aggregate": {
+              "enum": [
+                "column",
+                "sum",
+                "count",
+                "mean",
+                "min",
+                "max"
+              ],
+              "default": "column"
+            },
+            "scale": {
+              "type": "number",
+              "default": 1.0
+            },
+            "divisor": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1.0
+            },
+            "sample_count": {
+              "$ref": "#/resources/expression"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "feature_type",
+            "profile"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "aggregate": {
+                    "const": "count"
+                  }
+                },
+                "required": [
+                  "aggregate"
+                ]
+              },
+              "then": {},
+              "else": {
+                "required": [
+                  "column"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "feature_type": {
+                    "const": "value_sampled"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "sample_count"
+                ]
+              },
+              "else": {
+                "properties": {
+                  "profile": {
+                    "const": "default"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": {
+              "const": "ratio"
+            },
+            "feature_type": {
+              "const": "ratio"
+            },
+            "profile": {
+              "type": "string",
+              "minLength": 1
+            },
+            "null_policy": {
+              "enum": [
+                "fail",
+                "skip"
+              ],
+              "default": "fail"
+            },
+            "invalid_policy": {
+              "enum": [
+                "fail",
+                "skip"
+              ],
+              "default": "fail"
+            },
+            "numerator": {
+              "$ref": "#/resources/expression"
+            },
+            "denominator": {
+              "$ref": "#/resources/expression"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "feature_type",
+            "profile",
+            "numerator",
+            "denominator"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": {
+              "const": "relation"
+            },
+            "feature_type": {
+              "const": "relation"
+            },
+            "profile": {
+              "const": "default"
+            },
+            "null_policy": {
+              "enum": [
+                "fail",
+                "skip"
+              ],
+              "default": "fail"
+            },
+            "invalid_policy": {
+              "enum": [
+                "fail",
+                "skip"
+              ],
+              "default": "fail"
+            },
+            "group_space": {
+              "$ref": "#/resources/group_space"
+            },
+            "metrics": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "column": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "aggregate": {
+                    "enum": [
+                      "column",
+                      "sum",
+                      "count",
+                      "mean",
+                      "min",
+                      "max"
+                    ],
+                    "default": "column"
+                  },
+                  "scale": {
+                    "type": "number",
+                    "default": 1.0
+                  },
+                  "divisor": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "default": 1.0
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "additionalProperties": false,
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "aggregate": {
+                          "const": "count"
+                        }
+                      },
+                      "required": [
+                        "aggregate"
+                      ]
+                    },
+                    "then": {},
+                    "else": {
+                      "required": [
+                        "column"
+                      ]
+                    }
+                  }
+                ]
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "support_policy": {
+              "type": "object",
+              "properties": {
+                "k_support": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65536,
+                  "default": 2
+                },
+                "min_hist_share": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "default": 0.01
+                },
+                "min_active_ratio": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "default": 0.1
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "summary_policy": {
+              "type": "object",
+              "properties": {
+                "k_head": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65536,
+                  "default": 2
+                },
+                "k_stable": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65536,
+                  "default": 1
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "feature_type",
+            "profile",
+            "group_space",
+            "metrics"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "description": "Structure follows the production parser. Field existence, lossless samples, profile and cross-field numeric relations remain production checks."
+    },
+    "dataset": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "table": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "enum": [
+              "boolean",
+              "int64",
+              "uint64",
+              "float64",
+              "utf8"
+            ]
+          }
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "run_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "maxItems": 1024,
+              "uniqueItems": true
+            },
+            "begin_bucket": {
+              "type": "integer"
+            },
+            "end_bucket": {
+              "type": "integer"
+            },
+            "consistency": {
+              "enum": [
+                "dataframe_snapshot",
+                "npm_completed",
+                "consistent_snapshot",
+                "immutable_range"
+              ]
+            }
+          },
+          "required": [],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "begin_bucket"
+                ]
+              },
+              "then": {
+                "required": [
+                  "end_bucket"
+                ]
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "end_bucket"
+                ]
+              },
+              "then": {
+                "required": [
+                  "begin_bucket"
+                ]
+              }
+            }
+          ]
+        },
+        "series_keys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "row_semantics": {
+          "enum": [
+            "immutable",
+            "latest_revision",
+            "npm_period_increment"
+          ],
+          "default": "immutable"
+        },
+        "revision_column": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deduplicate": {
+          "type": "object",
+          "properties": {
+            "keys": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "uniqueItems": true
+            },
+            "on_duplicate": {
+              "const": "require_equal"
+            }
+          },
+          "required": [
+            "keys",
+            "on_duplicate"
+          ],
+          "additionalProperties": false
+        },
+        "bucket": {
+          "type": "object",
+          "properties": {
+            "column": {
+              "type": "string",
+              "minLength": 1
+            },
+            "unit": {
+              "enum": [
+                "bucket_id",
+                "ns",
+                "us",
+                "ms",
+                "s"
+              ]
+            }
+          },
+          "required": [
+            "column",
+            "unit"
+          ],
+          "additionalProperties": false
+        },
+        "filter": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "column": {
+                "type": "string",
+                "minLength": 1
+              },
+              "op": {
+                "enum": [
+                  "eq",
+                  "ne",
+                  "lt",
+                  "le",
+                  "gt",
+                  "ge"
+                ]
+              },
+              "value": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "number",
+                  "string"
+                ]
+              }
+            },
+            "required": [
+              "column",
+              "op",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 256
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/resources/metric"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        },
+        "fill_missing_zero": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "id",
+        "fields",
+        "series_keys",
+        "deduplicate",
+        "bucket",
+        "metrics"
+      ],
+      "additionalProperties": false
+    },
+    "dataset_inline": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "default": "source"
+        },
+        "table": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "enum": [
+              "boolean",
+              "int64",
+              "uint64",
+              "float64",
+              "utf8"
+            ]
+          }
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "run_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "maxItems": 1024,
+              "uniqueItems": true
+            },
+            "begin_bucket": {
+              "type": "integer"
+            },
+            "end_bucket": {
+              "type": "integer"
+            },
+            "consistency": {
+              "enum": [
+                "dataframe_snapshot",
+                "npm_completed",
+                "consistent_snapshot",
+                "immutable_range"
+              ]
+            }
+          },
+          "required": [],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "begin_bucket"
+                ]
+              },
+              "then": {
+                "required": [
+                  "end_bucket"
+                ]
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "end_bucket"
+                ]
+              },
+              "then": {
+                "required": [
+                  "begin_bucket"
+                ]
+              }
+            }
+          ]
+        },
+        "series_keys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "row_semantics": {
+          "enum": [
+            "immutable",
+            "latest_revision",
+            "npm_period_increment"
+          ],
+          "default": "immutable"
+        },
+        "revision_column": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deduplicate": {
+          "type": "object",
+          "properties": {
+            "keys": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "uniqueItems": true
+            },
+            "on_duplicate": {
+              "const": "require_equal"
+            }
+          },
+          "required": [
+            "keys",
+            "on_duplicate"
+          ],
+          "additionalProperties": false
+        },
+        "bucket": {
+          "type": "object",
+          "properties": {
+            "column": {
+              "type": "string",
+              "minLength": 1
+            },
+            "unit": {
+              "enum": [
+                "bucket_id",
+                "ns",
+                "us",
+                "ms",
+                "s"
+              ]
+            }
+          },
+          "required": [
+            "column",
+            "unit"
+          ],
+          "additionalProperties": false
+        },
+        "filter": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "column": {
+                "type": "string",
+                "minLength": 1
+              },
+              "op": {
+                "enum": [
+                  "eq",
+                  "ne",
+                  "lt",
+                  "le",
+                  "gt",
+                  "ge"
+                ]
+              },
+              "value": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "number",
+                  "string"
+                ]
+              }
+            },
+            "required": [
+              "column",
+              "op",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 256
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/resources/metric"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        },
+        "fill_missing_zero": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "fields",
+        "series_keys",
+        "deduplicate",
+        "bucket",
+        "metrics"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

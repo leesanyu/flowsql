@@ -7,16 +7,17 @@
 #include <common/log.h>
 #include <framework/interfaces/iblock_transform_operator.h>
 #include <framework/interfaces/istream_operator.h>
+#include <common/operator_component.hpp>
 
 #include <openssl/evp.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
-#include <cctype>
-#include <cstring>
-#include <cstdio>
 #include <dlfcn.h>
+#include <cctype>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -38,8 +39,7 @@ bool EqualsIgnoreCase(const std::string& a, const char* b) {
     const size_t n = a.size();
     if (n != std::strlen(b)) return false;
     for (size_t i = 0; i < n; ++i) {
-        if (std::tolower(static_cast<unsigned char>(a[i])) !=
-            std::tolower(static_cast<unsigned char>(b[i]))) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) {
             return false;
         }
     }
@@ -239,8 +239,15 @@ int BinAddonHostPlugin::Stop() {
 
 int BinAddonHostPlugin::Acquire(const char* category, const char* name, const Guid& contract_iid,
                                 CppOperatorCapabilityLeaseV1* lease) {
-    if (!lease) return -1;
-    *lease = {};
+    OperatorComponentContractV1 component;
+    return AcquireContract(category, name, contract_iid, lease, &component);
+}
+
+int BinAddonHostPlugin::AcquireContract(const char* category, const char* name, const Guid& contract_iid,
+                                        CppOperatorCapabilityLeaseV1* lease, OperatorComponentContractV1* component) {
+    if (lease) *lease = {};
+    if (component) *component = {};
+    if (!lease || !component) return -1;
     if (!category || !*category || !name || !*name) return -1;
 
     std::lock_guard<std::mutex> lock(mu_);
@@ -261,6 +268,12 @@ int BinAddonHostPlugin::Acquire(const char* category, const char* name, const Gu
                 return -1;
             }
             lease->capability = capability.instance;
+            for (const auto& identity : loaded->data_contracts) {
+                if (identity.category == capability.category && identity.name == capability.name) {
+                    *component = identity;
+                    break;
+                }
+            }
             return lease->capability && lease->lifetime ? 0 : -1;
         }
     }
@@ -269,7 +282,8 @@ int BinAddonHostPlugin::Acquire(const char* category, const char* name, const Gu
 
 int BinAddonHostPlugin::EnsureOperatorDbDir() const {
     try {
-        fs::path path = operator_db_path_.empty() ? fs::path(operator_db_dir_) : fs::path(operator_db_path_).parent_path();
+        fs::path path =
+            operator_db_path_.empty() ? fs::path(operator_db_dir_) : fs::path(operator_db_path_).parent_path();
         if (path.empty()) return 0;
         std::error_code ec;
         fs::create_directories(path, ec);
@@ -340,12 +354,14 @@ int BinAddonHostPlugin::EnsureSchemaLocked() {
         sqlite3_finalize(info);
     }
     if (!has_category) {
-        if (sqlite3_exec(operator_db_, "ALTER TABLE operator_catalog ADD COLUMN category TEXT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        if (sqlite3_exec(operator_db_, "ALTER TABLE operator_catalog ADD COLUMN category TEXT;", nullptr, nullptr,
+                         nullptr) != SQLITE_OK) {
             return -1;
         }
     }
     if (!has_plugin_id) {
-        if (sqlite3_exec(operator_db_, "ALTER TABLE operator_catalog ADD COLUMN plugin_id TEXT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        if (sqlite3_exec(operator_db_, "ALTER TABLE operator_catalog ADD COLUMN plugin_id TEXT;", nullptr, nullptr,
+                         nullptr) != SQLITE_OK) {
             return -1;
         }
     }
@@ -405,11 +421,8 @@ bool BinAddonHostPlugin::QueryPluginByIdLocked(const std::string& plugin_id, Plu
     return true;
 }
 
-int BinAddonHostPlugin::UpdatePluginStatusLocked(const std::string& plugin_id,
-                                                 const std::string& status,
-                                                 const std::string& last_error,
-                                                 int abi_version,
-                                                 int operator_count,
+int BinAddonHostPlugin::UpdatePluginStatusLocked(const std::string& plugin_id, const std::string& status,
+                                                 const std::string& last_error, int abi_version, int operator_count,
                                                  const std::string& operators_json) {
     if (!operator_db_) return -1;
     sqlite3_stmt* stmt = nullptr;
@@ -447,7 +460,8 @@ int BinAddonHostPlugin::MarkPluginBrokenLocked(const std::string& plugin_id, con
     return 0;
 }
 
-int BinAddonHostPlugin::UpsertCppOperatorsLocked(const std::string& plugin_id, const std::vector<OperatorMeta>& operators) {
+int BinAddonHostPlugin::UpsertCppOperatorsLocked(const std::string& plugin_id,
+                                                 const std::vector<OperatorMeta>& operators) {
     if (!operator_db_) return -1;
     sqlite3_stmt* stmt = nullptr;
     const char* sql =
@@ -551,11 +565,15 @@ int BinAddonHostPlugin::ListCppPlugins(std::string& rsp) {
         w.Key("status");
         w.String(status.c_str());
         w.Key("abi_version");
-        if (has_abi) w.Int(sqlite3_column_int(stmt, 7));
-        else w.Null();
+        if (has_abi)
+            w.Int(sqlite3_column_int(stmt, 7));
+        else
+            w.Null();
         w.Key("operator_count");
-        if (has_op_count) w.Int(sqlite3_column_int(stmt, 8));
-        else w.Null();
+        if (has_op_count)
+            w.Int(sqlite3_column_int(stmt, 8));
+        else
+            w.Null();
         w.Key("operators");
         if (!operators.empty()) {
             w.StartArray();
@@ -628,8 +646,8 @@ int BinAddonHostPlugin::UploadCppPlugin(const std::string& filename, const std::
         }
 
         sqlite3_stmt* q = nullptr;
-        if (sqlite3_prepare_v2(operator_db_, "SELECT 1 FROM operator_plugin_store WHERE plugin_id=?1 LIMIT 1;",
-                               -1, &q, nullptr) != SQLITE_OK) {
+        if (sqlite3_prepare_v2(operator_db_, "SELECT 1 FROM operator_plugin_store WHERE plugin_id=?1 LIMIT 1;", -1, &q,
+                               nullptr) != SQLITE_OK) {
             fs::remove(dst, ec);
             rsp = R"({"error":"failed to query plugin store"})";
             return error::INTERNAL_ERROR;
@@ -654,7 +672,8 @@ int BinAddonHostPlugin::UploadCppPlugin(const std::string& filename, const std::
         sqlite3_stmt* ins = nullptr;
         const char* ins_sql =
             "INSERT INTO operator_plugin_store("
-            "plugin_id, so_file, file_path, size_bytes, sha256, status, last_error, abi_version, operator_count, operators_json, created_at, updated_at"
+            "plugin_id, so_file, file_path, size_bytes, sha256, status, last_error, abi_version, operator_count, "
+            "operators_json, created_at, updated_at"
             ") VALUES (?1, ?2, ?3, ?4, ?5, 'uploaded', '', NULL, NULL, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);";
         if (sqlite3_prepare_v2(operator_db_, ins_sql, -1, &ins, nullptr) != SQLITE_OK) {
             fs::remove(dst, ec);
@@ -787,10 +806,12 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
         dlsym(handle, kCppOperatorPluginCreateCapabilityV2Symbol));
     auto* destroy_capability_fn = reinterpret_cast<CppOperatorPluginDestroyCapabilityV2Fn>(
         dlsym(handle, kCppOperatorPluginDestroyCapabilityV2Symbol));
+    auto* data_contract_fn = reinterpret_cast<OperatorDataContractV1Fn>(dlsym(handle, kOperatorDataContractV1Symbol));
     auto* stream_abi_fn = reinterpret_cast<FnStreamAbiVersion>(dlsym(handle, "flowsql_stream_abi_version"));
     auto* stream_count_fn = reinterpret_cast<FnStreamOperatorCount>(dlsym(handle, "flowsql_stream_operator_count"));
     auto* stream_create_fn = reinterpret_cast<FnCreateStreamOperator>(dlsym(handle, "flowsql_create_stream_operator"));
-    auto* stream_destroy_fn = reinterpret_cast<FnDestroyStreamOperator>(dlsym(handle, "flowsql_destroy_stream_operator"));
+    auto* stream_destroy_fn =
+        reinterpret_cast<FnDestroyStreamOperator>(dlsym(handle, "flowsql_destroy_stream_operator"));
     if (!abi_fn || !count_fn) return mark_broken(error::BAD_REQUEST, "missing required symbols", -1);
 
     int abi = -1;
@@ -809,8 +830,7 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
     loaded->abi_version = abi;
     loaded->count_fn = count_fn;
 
-    const bool has_any_stream_symbols =
-        stream_abi_fn || stream_count_fn || stream_create_fn || stream_destroy_fn;
+    const bool has_any_stream_symbols = stream_abi_fn || stream_count_fn || stream_create_fn || stream_destroy_fn;
 
     int stream_count = 0;
     if (abi == kCppOperatorPluginAbiVersionV1) {
@@ -880,6 +900,7 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
         }
     }
 
+    std::vector<OperatorContractDeclarationV1> declarations;
     std::vector<OperatorMeta> metas;
     std::vector<std::string> keys;
     std::vector<std::string> names;
@@ -989,6 +1010,20 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
             return mark_broken(error::BAD_REQUEST, "empty category/name in plugin operator", abi);
         }
 
+        std::string declaration;
+        if (data_contract_fn) {
+            try {
+                const char* text = data_contract_fn(i);
+                if (text) {
+                    const size_t length = strnlen(text, 8 * 1024 * 1024 + 1);
+                    if (length > 8 * 1024 * 1024)
+                        return mark_broken(error::PAYLOAD_TOO_LARGE, "contract declaration exceeds 8 MiB", abi);
+                    declaration.assign(text, length);
+                }
+            } catch (...) {
+                return mark_broken(error::BAD_REQUEST, "data contract export threw an exception", abi);
+            }
+        }
         const std::string key = meta.category + "." + meta.name;
         if (!local_keys.insert(ToLowerAscii(key)).second) {
             bool version_pair = abi == kCppOperatorPluginAbiVersionV2;
@@ -1003,8 +1038,25 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
                 version_pair = version_pair && (v1_v2 || v2_v1);
             }
             if (!version_pair) return mark_broken(error::CONFLICT, "duplicate operators inside plugin", abi);
+            auto existing = std::find_if(declarations.begin(), declarations.end(), [&](const auto& d) {
+                return ToLowerAscii(d.category + "." + d.name) == ToLowerAscii(key);
+            });
+            if (!declaration.empty()) {
+                rapidjson::Document next;
+                next.Parse(declaration.c_str());
+                if (next.HasParseError()) return mark_broken(error::BAD_REQUEST, "invalid paired contract", abi);
+                if (!existing->declaration_json.empty()) {
+                    rapidjson::Document first;
+                    first.Parse(existing->declaration_json.c_str());
+                    if (first.HasParseError() || first != next)
+                        return mark_broken(error::BAD_REQUEST, "conflicting paired contracts", abi);
+                } else {
+                    existing->declaration_json = declaration;
+                }
+            }
             continue;
         }
+        declarations.push_back({meta.category, meta.name, current_sha256, declaration, ""});
         keys.push_back(key);
         names.push_back(meta.name);
         metas.push_back(std::move(meta));
@@ -1012,6 +1064,31 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
 
     loaded->operator_keys = keys;
     loaded->operator_names = names;
+    auto* contract_catalog =
+        querier_ ? static_cast<IOperatorContractCatalogV1*>(querier_->First(IID_OPERATOR_CONTRACT_CATALOG_V1))
+                 : nullptr;
+    std::vector<PreparedOperatorContractV1> prepared_contracts;
+    DataSemanticsErrorV1 contract_error;
+    const bool declared = std::any_of(declarations.begin(), declarations.end(),
+                                      [](const auto& d) { return !d.declaration_json.empty(); });
+    if (!contract_catalog && declared)
+        return mark_broken(error::UNAVAILABLE, "declared contract catalog unavailable", abi);
+    if (contract_catalog) {
+        for (auto& d : declarations) {
+            OperatorComponentContractV1 previous;
+            if (contract_catalog->Lookup(d.category.c_str(), d.name.c_str(), &previous, &contract_error))
+                return mark_broken(error::UNAVAILABLE, "component contract lookup failed", abi);
+            d.expected_component_revision = previous.component_revision;
+        }
+        if (contract_catalog->Prepare(declarations, &prepared_contracts, &contract_error)) {
+            return mark_broken(contract_error.code == "UNAVAILABLE" ? error::UNAVAILABLE : error::BAD_REQUEST,
+                               "component contract preparation failed", abi);
+        }
+        for (const auto& p : prepared_contracts) loaded->data_contracts.push_back(p.association);
+    } else {
+        for (const auto& d : declarations)
+            loaded->data_contracts.push_back({d.category, d.name, current_sha256, "", "", "missing"});
+    }
 
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -1151,9 +1228,18 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
             rsp = R"({"error":"failed to commit activation"})";
             return error::INTERNAL_ERROR;
         }
-
-        loaded->pending_unload.store(false, std::memory_order_seq_cst);
     }
+    // Do not expose factories/capabilities until the semantic association CAS succeeds.
+    // The host transaction has ended; no catalog callback runs under the host lock.
+    if (contract_catalog && contract_catalog->Commit(prepared_contracts, &contract_error)) {
+        std::lock_guard<std::mutex> lock(mu_);
+        loaded_plugins_.erase(plugin_id);
+        for (const auto& key : keys) (void)registry_->RemoveFactory(key.c_str());
+        (void)MarkPluginBrokenLocked(plugin_id, "component contract association failed", abi);
+        rsp = R"({"error":"component contract association failed","definition_saved":true,"associated":false})";
+        return contract_error.code == "COMPONENT_CHANGED" ? error::CONFLICT : error::UNAVAILABLE;
+    }
+    loaded->pending_unload.store(false, std::memory_order_seq_cst);
 
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
@@ -1284,7 +1370,8 @@ int BinAddonHostPlugin::DeleteCppPlugin(const std::string& plugin_id, std::strin
             return error::INTERNAL_ERROR;
         }
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(operator_db_, "DELETE FROM operator_plugin_store WHERE plugin_id=?1;", -1, &stmt, nullptr) != SQLITE_OK) {
+        if (sqlite3_prepare_v2(operator_db_, "DELETE FROM operator_plugin_store WHERE plugin_id=?1;", -1, &stmt,
+                               nullptr) != SQLITE_OK) {
             rsp = R"({"error":"failed to delete plugin metadata"})";
             return error::INTERNAL_ERROR;
         }
@@ -1315,6 +1402,7 @@ int BinAddonHostPlugin::GetCppPluginDetail(const std::string& plugin_id, std::st
 
     PluginStoreRow row;
     std::vector<std::pair<std::string, std::string>> operator_details;
+    std::vector<OperatorComponentContractV1> data_contracts;
     {
         std::lock_guard<std::mutex> lock(mu_);
         if (EnsureOperatorDbLocked() != 0 || !operator_db_) {
@@ -1327,6 +1415,7 @@ int BinAddonHostPlugin::GetCppPluginDetail(const std::string& plugin_id, std::st
         }
         const auto loaded = loaded_plugins_.find(plugin_id);
         if (loaded != loaded_plugins_.end() && loaded->second) {
+            data_contracts = loaded->second->data_contracts;
             operator_details.reserve(loaded->second->capabilities.size());
             for (const auto& capability : loaded->second->capabilities) {
                 operator_details.emplace_back(capability.category + "." + capability.name,
@@ -1358,11 +1447,15 @@ int BinAddonHostPlugin::GetCppPluginDetail(const std::string& plugin_id, std::st
     w.Key("last_error");
     w.String(row.last_error.c_str());
     w.Key("abi_version");
-    if (row.abi_version >= 0) w.Int(row.abi_version);
-    else w.Null();
+    if (row.abi_version >= 0)
+        w.Int(row.abi_version);
+    else
+        w.Null();
     w.Key("operator_count");
-    if (row.operator_count >= 0) w.Int(row.operator_count);
-    else w.Null();
+    if (row.operator_count >= 0)
+        w.Int(row.operator_count);
+    else
+        w.Null();
     w.Key("operators");
     if (!operators.empty()) {
         w.StartArray();
@@ -1371,6 +1464,25 @@ int BinAddonHostPlugin::GetCppPluginDetail(const std::string& plugin_id, std::st
     } else {
         w.Null();
     }
+    w.Key("data_contracts");
+    w.StartArray();
+    for (const auto& c : data_contracts) {
+        w.StartObject();
+        w.Key("category");
+        w.String(c.category.c_str());
+        w.Key("name");
+        w.String(c.name.c_str());
+        w.Key("component_revision");
+        w.String(c.component_revision.c_str());
+        w.Key("operator_version");
+        w.String(c.operator_version.c_str());
+        w.Key("contract_ref");
+        w.String(c.contract_ref.c_str());
+        w.Key("contract_state");
+        w.String(c.contract_state.c_str());
+        w.EndObject();
+    }
+    w.EndArray();
     w.Key("operator_details");
     w.StartArray();
     for (const auto& detail : operator_details) {
@@ -1394,7 +1506,8 @@ int BinAddonHostPlugin::RecoverActivatedPlugins() {
         std::lock_guard<std::mutex> lock(mu_);
         if (EnsureOperatorDbLocked() != 0 || !operator_db_) return -1;
         sqlite3_stmt* stmt = nullptr;
-        const char* sql = "SELECT plugin_id FROM operator_plugin_store WHERE status='activated' ORDER BY plugin_id ASC;";
+        const char* sql =
+            "SELECT plugin_id FROM operator_plugin_store WHERE status='activated' ORDER BY plugin_id ASC;";
         if (sqlite3_prepare_v2(operator_db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return -1;
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const unsigned char* v = sqlite3_column_text(stmt, 0);

@@ -1,0 +1,335 @@
+{
+  "value": {
+    "source": "dataframe.input",
+    "config": {
+      "schema_version": 1,
+      "task_key": "contract-example",
+      "source": "dataframe.input",
+      "mode": "snapshot",
+      "clock": {
+        "bucket_seconds": 60,
+        "timezone": "UTC"
+      },
+      "calendar": {
+        "calendar_id": "default",
+        "calendar_version": "1"
+      },
+      "datasets": [
+        {
+          "id": "source",
+          "fields": {
+            "bucket": "int64",
+            "series": "utf8",
+            "value": "float64",
+            "total": "uint64",
+            "group": "uint64"
+          },
+          "series_keys": [
+            "series"
+          ],
+          "deduplicate": {
+            "keys": [
+              "bucket",
+              "series"
+            ],
+            "on_duplicate": "require_equal"
+          },
+          "bucket": {
+            "column": "bucket",
+            "unit": "bucket_id"
+          },
+          "scope": {
+            "consistency": "dataframe_snapshot"
+          },
+          "metrics": [
+            {
+              "id": "latency",
+              "kind": "value",
+              "feature_type": "value_basic",
+              "profile": "default",
+              "column": "value"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "shorthand": {
+    "source": "dataframe.input",
+    "config": {
+      "task_key": "contract-example",
+      "clock": {
+        "bucket_seconds": 60,
+        "timezone": "UTC"
+      },
+      "calendar": {
+        "calendar_id": "default",
+        "calendar_version": "1"
+      },
+      "dataset": {
+        "fields": {
+          "bucket": "int64",
+          "series": "utf8",
+          "value": "float64",
+          "total": "uint64",
+          "group": "uint64"
+        },
+        "series_keys": [
+          "series"
+        ],
+        "deduplicate": {
+          "keys": [
+            "bucket",
+            "series"
+          ],
+          "on_duplicate": "require_equal"
+        },
+        "bucket": {
+          "column": "bucket",
+          "unit": "bucket_id"
+        },
+        "metrics": [
+          {
+            "id": "latency",
+            "kind": "value",
+            "feature_type": "value_basic",
+            "profile": "default",
+            "column": "value"
+          }
+        ]
+      }
+    }
+  },
+  "multi": {
+    "source": "sqlite.example",
+    "config": {
+      "schema_version": 1,
+      "task_key": "contract-example",
+      "source": "sqlite.example",
+      "mode": "snapshot",
+      "clock": {
+        "bucket_seconds": 60,
+        "timezone": "UTC"
+      },
+      "calendar": {
+        "calendar_id": "default",
+        "calendar_version": "1"
+      },
+      "datasets": [
+        {
+          "id": "source",
+          "fields": {
+            "bucket": "int64",
+            "series": "utf8",
+            "value": "float64",
+            "total": "uint64",
+            "group": "uint64"
+          },
+          "series_keys": [
+            "series"
+          ],
+          "deduplicate": {
+            "keys": [
+              "bucket",
+              "series"
+            ],
+            "on_duplicate": "require_equal"
+          },
+          "bucket": {
+            "column": "bucket",
+            "unit": "bucket_id"
+          },
+          "scope": {
+            "consistency": "immutable_range",
+            "begin_bucket": 0,
+            "end_bucket": 100
+          },
+          "metrics": [
+            {
+              "id": "latency",
+              "kind": "value",
+              "feature_type": "value_basic",
+              "profile": "default",
+              "column": "value"
+            }
+          ],
+          "table": "one"
+        },
+        {
+          "id": "ratio",
+          "fields": {
+            "bucket": "int64",
+            "series": "utf8",
+            "value": "float64",
+            "total": "uint64",
+            "group": "uint64"
+          },
+          "series_keys": [
+            "series"
+          ],
+          "deduplicate": {
+            "keys": [
+              "bucket",
+              "series"
+            ],
+            "on_duplicate": "require_equal"
+          },
+          "bucket": {
+            "column": "bucket",
+            "unit": "bucket_id"
+          },
+          "scope": {
+            "consistency": "immutable_range",
+            "begin_bucket": 0,
+            "end_bucket": 100
+          },
+          "metrics": [
+            {
+              "id": "utilization",
+              "kind": "ratio",
+              "feature_type": "ratio",
+              "profile": "rate_core",
+              "numerator": {
+                "column": "value",
+                "aggregate": "sum"
+              },
+              "denominator": {
+                "column": "total",
+                "aggregate": "sum"
+              }
+            }
+          ],
+          "table": "two"
+        }
+      ]
+    }
+  },
+  "relation": {
+    "source": "sqlite.example",
+    "config": {
+      "schema_version": 1,
+      "task_key": "contract-example",
+      "source": "sqlite.example",
+      "mode": "snapshot",
+      "clock": {
+        "bucket_seconds": 60,
+        "timezone": "UTC"
+      },
+      "calendar": {
+        "calendar_id": "default",
+        "calendar_version": "1"
+      },
+      "datasets": [
+        {
+          "id": "source",
+          "fields": {
+            "bucket": "int64",
+            "series": "utf8",
+            "value": "float64",
+            "total": "uint64",
+            "group": "uint64"
+          },
+          "series_keys": [
+            "series"
+          ],
+          "deduplicate": {
+            "keys": [
+              "bucket",
+              "series"
+            ],
+            "on_duplicate": "require_equal"
+          },
+          "bucket": {
+            "column": "bucket",
+            "unit": "bucket_id"
+          },
+          "scope": {
+            "consistency": "immutable_range",
+            "begin_bucket": 0,
+            "end_bucket": 100
+          },
+          "metrics": [
+            {
+              "id": "distribution",
+              "kind": "relation",
+              "feature_type": "relation",
+              "profile": "default",
+              "group_space": {
+                "id": "groups",
+                "version": "1",
+                "column": "group"
+              },
+              "metrics": [
+                {
+                  "id": "bytes",
+                  "column": "value",
+                  "aggregate": "sum"
+                }
+              ]
+            }
+          ],
+          "table": "one"
+        }
+      ]
+    }
+  },
+  "sampled": {
+    "source": "dataframe.input",
+    "config": {
+      "schema_version": 1,
+      "task_key": "contract-example",
+      "source": "dataframe.input",
+      "mode": "snapshot",
+      "clock": {
+        "bucket_seconds": 60,
+        "timezone": "UTC"
+      },
+      "calendar": {
+        "calendar_id": "default",
+        "calendar_version": "1"
+      },
+      "datasets": [
+        {
+          "id": "source",
+          "fields": {
+            "bucket": "int64",
+            "series": "utf8",
+            "value": "float64",
+            "total": "uint64",
+            "group": "uint64"
+          },
+          "series_keys": [
+            "series"
+          ],
+          "deduplicate": {
+            "keys": [
+              "bucket",
+              "series"
+            ],
+            "on_duplicate": "require_equal"
+          },
+          "bucket": {
+            "column": "bucket",
+            "unit": "bucket_id"
+          },
+          "scope": {
+            "consistency": "dataframe_snapshot"
+          },
+          "metrics": [
+            {
+              "id": "latency",
+              "kind": "value",
+              "feature_type": "value_sampled",
+              "profile": "cont_core",
+              "column": "value",
+              "sample_count": {
+                "column": "total",
+                "aggregate": "sum"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -706,6 +706,80 @@ class MockSchedulerControlService : public ISchedulerControlService {
 
 int main() {
     {
+        const auto directory = MakeTempDir("operator_contract_summary");
+        int invocation = 0;
+        MockRouterHandle scheduler({
+            MakeSqlClassifyRoute(),
+            {"POST", "/scheduler/batch/execute",
+             [&](const std::string&, const std::string&, std::string& rsp) {
+                 ++invocation;
+                 rsp = "{\"status\":\"completed\",\"data\":[],\"contract_checks\":[{\"use_ref\":\"operator_use.task@" +
+                       std::to_string(invocation) + "\",\"output_check\":\"matched\"}]}";
+                 return error::OK;
+             }},
+        });
+        MockQuerier querier;
+        querier.AddHandle(&scheduler);
+        TaskPlugin plugin;
+        ASSERT_EQ(plugin.Option(("db_dir=" + directory).c_str()), 0);
+        ASSERT_EQ(plugin.Load(&querier), 0);
+        ASSERT_EQ(plugin.Start(), 0);
+        auto routes = CollectRoutes(&plugin);
+        std::string response;
+        ASSERT_EQ(
+            routes["POST:/tasks/batch/execute"]("", R"({"sql_text":"SELECT 1; SELECT 2","mode":"sync"})", response),
+            error::OK);
+        rapidjson::Document submitted;
+        submitted.Parse(response.c_str());
+        ASSERT_TRUE(submitted.HasMember("contract_checks"));
+        ASSERT_EQ(submitted["contract_checks"].Size(), 2u);
+        ASSERT_EQ(std::string(submitted["contract_checks"][0]["use_ref"].GetString()), "operator_use.task@1");
+        const std::string request = std::string("{\"task_id\":\"") + submitted["task_id"].GetString() + "\"}";
+        ASSERT_EQ(plugin.Stop(), 0);
+        ASSERT_EQ(plugin.Start(), 0);
+        ASSERT_EQ(routes["POST:/tasks/detail"]("", request, response), error::OK);
+        rapidjson::Document detail;
+        detail.Parse(response.c_str());
+        ASSERT_TRUE(detail.HasMember("contract_checks"));
+        ASSERT_EQ(detail["contract_checks"].Size(), 2u);
+        ASSERT_EQ(std::string(detail["contract_checks"][1]["use_ref"].GetString()), "operator_use.task@2");
+        ASSERT_EQ(plugin.Stop(), 0);
+    }
+    {
+        MockRouterHandle scheduler({
+            MakeSqlClassifyRoute(),
+            {"POST", "/scheduler/batch/execute",
+             [](const std::string&, const std::string&, std::string& rsp) {
+                 rsp =
+                     R"({"error":{"code":"CONTRACT_INCOMPATIBLE","message":"missing latency","field_path":"/inputs/0","details":{"checks":[]}}})";
+                 return error::UNPROCESSABLE_ENTITY;
+             }},
+        });
+        MockQuerier querier;
+        querier.AddHandle(&scheduler);
+        TaskPlugin plugin;
+        const auto directory = MakeTempDir("operator_contract_error");
+        ASSERT_EQ(plugin.Option(("db_dir=" + directory).c_str()), 0);
+        ASSERT_EQ(plugin.Load(&querier), 0);
+        ASSERT_EQ(plugin.Start(), 0);
+        auto routes = CollectRoutes(&plugin);
+        std::string response;
+        ASSERT_EQ(routes["POST:/tasks/batch/execute"]("", R"({"sql_text":"SELECT 1","mode":"sync"})", response),
+                  error::UNPROCESSABLE_ENTITY);
+        rapidjson::Document error;
+        error.Parse(response.c_str());
+        ASSERT_EQ(std::string(error["error"]["code"].GetString()), "CONTRACT_INCOMPATIBLE");
+        ASSERT_EQ(std::string(error["error"]["field_path"].GetString()), "/inputs/0");
+        ASSERT_EQ(std::string(error["status"].GetString()), "failed");
+        const std::string request = std::string("{\"task_id\":\"") + error["task_id"].GetString() + "\"}";
+        ASSERT_EQ(routes["POST:/tasks/detail"]("", request, response), error::OK);
+        rapidjson::Document detail;
+        detail.Parse(response.c_str());
+        ASSERT_EQ(std::string(detail["error_code"].GetString()), "CONTRACT_INCOMPATIBLE");
+        ASSERT_EQ(std::string(detail["error_message"].GetString()), "missing latency");
+        ASSERT_EQ(plugin.Stop(), 0);
+    }
+    {
         const std::string policy_dir = MakeTempDir("execution_policy");
         MockRouterHandle scheduler({
             MakeSqlClassifyRoute(),

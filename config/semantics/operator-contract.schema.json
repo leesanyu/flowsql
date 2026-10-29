@@ -1,0 +1,5 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flowsql.local/semantics/v1/operator-contract.schema.json",
+  "$ref": "./documents.schema.json#/$defs/operatorContract"
+}

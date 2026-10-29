@@ -3,6 +3,9 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Dict
+from contextvars import ContextVar
+import copy
+import json
 
 import polars as pl
 
@@ -44,12 +47,22 @@ class OperatorBase(ABC):
     def get_config(self, key: str, default: str = "") -> str:
         return self._config.get(key, default)
 
+    def resolve_invocation(self, inputs, execution_context):
+        """Describe this configured instance without executing work or loading rows.
+
+        Authors with parsed defaults override this method using the same production
+        parser/state consumed by work. JSON Schema defaults never configure an instance.
+        Return only non-secret effective values and exact configuration references.
+        """
+        return dict(effective_parameters=dict(self._config), config_refs=[], inputs=inputs)
+
 
 # 装饰器注册表（模块级）
 _registered_operators: Dict[str, type] = {}
+_registration_target = ContextVar('flowsql_registration_target', default=None)
 
 
-def register_operator(category: str, name: str, description: str = "", position: str = "DATA"):
+def register_operator(category: str, name: str, description: str = "", position: str = "DATA", data_contract=None):
     """装饰器：注册算子类
 
     用法:
@@ -62,7 +75,20 @@ def register_operator(category: str, name: str, description: str = "", position:
             raise TypeError(f"{cls.__name__} must inherit from OperatorBase")
 
         key = f"{category}.{name}"
-        _registered_operators[key] = cls
+        declaration = copy.deepcopy(data_contract)
+        if isinstance(declaration, str):
+            declaration = {'contract_ref': declaration}
+        if declaration is not None:
+            if not isinstance(declaration, dict):
+                raise TypeError('data_contract must be a JSON object or an exact reference')
+            json.dumps(declaration, allow_nan=False)
+        target = _registration_target.get()
+        if target is None:
+            target = _registered_operators
+        if key in target and target[key].__module__ == cls.__module__:
+            raise ValueError(f'duplicate operator {key}')
+        target[key] = cls
+        cls._data_contract = declaration
 
         # 注入默认 attribute 实现
         cls._decorator_attr = OperatorAttribute(

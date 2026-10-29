@@ -15,6 +15,8 @@ add_thirddepen(${PROJECT_NAME} arrow httplib rapidjson)
 
 add_dependencies(${PROJECT_NAME} flowsql_common)
 target_link_libraries(${PROJECT_NAME} flowsql_common)
+find_package(OpenSSL REQUIRED)
+target_link_libraries(${PROJECT_NAME} OpenSSL::Crypto)
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output

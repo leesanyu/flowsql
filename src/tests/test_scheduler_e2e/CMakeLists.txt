@@ -23,6 +23,7 @@ add_executable(test_scheduler_mutation_guard
     ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_stream_executor.cpp
     ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_stream_shared_source.cpp
     ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_routes.cpp
+    ${CMAKE_SOURCE_DIR}/services/scheduler/operator_contract_preflight.cpp
     ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_packet_sink.cpp
     ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_json_codec.cpp
     ${CMAKE_SOURCE_DIR}/services/scheduler/scheduler_stream_group.cpp
@@ -46,6 +47,8 @@ add_thirddepen(test_scheduler_mutation_guard arrow httplib rapidjson)
 
 add_dependencies(${PROJECT_NAME}
     flowsql_common
+    flowsql_config_channel
+    flowsql_builtin
     flowsql_catalog
     flowsql_binaddon
     flowsql_scheduler
@@ -79,6 +82,47 @@ set_target_properties(test_scheduler_mutation_guard PROPERTIES
 add_test(NAME test_scheduler_e2e COMMAND ${CMAKE_BINARY_DIR}/output/test_scheduler_e2e)
 add_test(NAME test_scheduler_mutation_guard COMMAND ${CMAKE_BINARY_DIR}/output/test_scheduler_mutation_guard)
 
+find_package(OpenSSL REQUIRED)
+# New shared contract code uses the same SHA256 source identity as F2.
+target_link_libraries(test_scheduler_mutation_guard OpenSSL::Crypto)
+add_executable(test_operator_contract_execution test_operator_contract_execution.cpp)
+target_include_directories(test_operator_contract_execution PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_operator_contract_execution PRIVATE -UNDEBUG)
+add_thirddepen(test_operator_contract_execution arrow rapidjson)
+target_link_libraries(test_operator_contract_execution flowsql_common OpenSSL::Crypto)
+foreach(component IN ITEMS config_channel builtin catalog binaddon scheduler)
+    string(TOUPPER ${component} upper)
+    if(component STREQUAL "config_channel")
+        set(upper CONFIG)
+    endif()
+    target_compile_definitions(test_operator_contract_execution PRIVATE ${upper}_PLUGIN_PATH="$<TARGET_FILE:flowsql_${component}>")
+    add_dependencies(test_operator_contract_execution flowsql_${component})
+endforeach()
+target_compile_definitions(test_operator_contract_execution PRIVATE FIXTURE_EXECUTION_PATH="$<TARGET_FILE:fixture_contract_execution>")
+add_dependencies(test_operator_contract_execution fixture_contract_execution)
+add_test(NAME test_operator_contract_execution COMMAND $<TARGET_FILE:test_operator_contract_execution>)
+set_tests_properties(test_operator_contract_execution PROPERTIES TIMEOUT 60)
+
+add_executable(test_operator_contract_block test_operator_contract_block.cpp)
+target_include_directories(test_operator_contract_block PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_operator_contract_block PRIVATE -UNDEBUG)
+add_thirddepen(test_operator_contract_block arrow rapidjson)
+target_link_libraries(test_operator_contract_block flowsql_common OpenSSL::Crypto)
+foreach(component IN ITEMS config_channel builtin catalog binaddon scheduler database baseline baseliner)
+    string(TOUPPER ${component} upper)
+    if(component STREQUAL "config_channel")
+        set(upper CONFIG)
+    endif()
+    target_compile_definitions(test_operator_contract_block PRIVATE ${upper}_PLUGIN_PATH="$<TARGET_FILE:flowsql_${component}>")
+    add_dependencies(test_operator_contract_block flowsql_${component})
+endforeach()
+target_compile_definitions(test_operator_contract_block PRIVATE FIXTURE_BLOCK_PATH="$<TARGET_FILE:fixture_contract_block>")
+add_dependencies(test_operator_contract_block fixture_contract_block)
+add_test(NAME test_operator_contract_block COMMAND $<TARGET_FILE:test_operator_contract_block>)
+set_tests_properties(test_operator_contract_block PROPERTIES TIMEOUT 60)
+
+target_compile_definitions(test_operator_contract_block PRIVATE FLOWSQL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}/..")
+
 add_executable(test_pcap_web_e2e test_pcap_web_e2e.cpp)
 target_include_directories(test_pcap_web_e2e PUBLIC ${CMAKE_SOURCE_DIR})
 add_thirddepen(test_pcap_web_e2e arrow httplib rapidjson)
@@ -111,3 +155,21 @@ target_link_libraries(test_netadapter_web_e2e flowsql_common)
 target_compile_options(test_netadapter_web_e2e PRIVATE -UNDEBUG)
 set_target_properties(test_netadapter_web_e2e PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_netadapter_web_e2e COMMAND ${CMAKE_BINARY_DIR}/output/test_netadapter_web_e2e)
+
+add_executable(test_operator_contract_outputs test_operator_contract_outputs.cpp)
+target_include_directories(test_operator_contract_outputs PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(test_operator_contract_outputs PRIVATE -UNDEBUG)
+add_thirddepen(test_operator_contract_outputs arrow rapidjson sqlite)
+target_link_libraries(test_operator_contract_outputs flowsql_common OpenSSL::Crypto)
+foreach(component IN ITEMS config_channel builtin catalog binaddon scheduler)
+    string(TOUPPER ${component} upper)
+    if(component STREQUAL "config_channel")
+        set(upper CONFIG)
+    endif()
+    target_compile_definitions(test_operator_contract_outputs PRIVATE ${upper}_PLUGIN_PATH="$<TARGET_FILE:flowsql_${component}>")
+    add_dependencies(test_operator_contract_outputs flowsql_${component})
+endforeach()
+target_compile_definitions(test_operator_contract_outputs PRIVATE FIXTURE_OUTPUT_PATH="$<TARGET_FILE:fixture_contract_output>")
+add_dependencies(test_operator_contract_outputs fixture_contract_output)
+add_test(NAME test_operator_contract_outputs COMMAND $<TARGET_FILE:test_operator_contract_outputs>)
+set_tests_properties(test_operator_contract_outputs PROPERTIES TIMEOUT 60)

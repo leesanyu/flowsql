@@ -19,10 +19,11 @@
         <button v-if="nextCursor" :disabled="busy" @click="run(() => list(true))">更多定义</button>
       </aside>
       <article v-if="document">
-        <div class="toolbar"><strong>{{ kinds[kind] }} · {{ exact || '尚未保存' }}</strong><span>{{ editing ? '编辑中' : '只读版本' }}</span>
-          <button v-if="!editing" :disabled="busy" @click="run(editCurrent)">编辑当前版本</button>
-          <button v-if="!editing" :disabled="busy" @click="run(restore)">复制为新修订</button>
-          <button v-if="!editing" :disabled="busy" @click="copyNew">另存新名称</button>
+        <section v-if="!kinds[kind]" data-testid="operator-semantics-readonly"><p>算子契约和使用依据为只读精确记录。静态声明通过算子注册或上传维护。</p><pre>{{ json(document) }}</pre></section>
+        <div class="toolbar"><strong>{{ kinds[kind] || kind }} · {{ exact || '尚未保存' }}</strong><span>{{ editing ? '编辑中' : '只读版本' }}</span>
+          <button v-if="!editing && kinds[kind]" :disabled="busy" @click="run(editCurrent)">编辑当前版本</button>
+          <button v-if="!editing && kinds[kind]" :disabled="busy" @click="run(restore)">复制为新修订</button>
+          <button v-if="!editing && kinds[kind]" :disabled="busy" @click="copyNew">另存新名称</button>
         </div>
         <label>名称 <input v-model="name" aria-label="名称" :disabled="!editing || revision > 0" placeholder="app.requests" /></label>
         <label>{{ kind === 'binding' ? '对象标签' : '标题' }} <input v-if="kind !== 'binding'" v-model="document.title" aria-label="标题" :disabled="!editing" /><input v-else v-model="document.object_label" aria-label="对象标签" :disabled="!editing" /></label>
@@ -126,7 +127,7 @@ async function all(op, payload) { const result = []; let cursor = ''; do { const
 async function choices() {
   const listed = await all('list', {})
   const standardRefs = [], dictionaryRefs = []
-  for (const item of listed.filter(x => x.kind !== 'binding')) {
+  for (const item of listed.filter(x => x.kind === 'standard' || x.kind === 'dictionary')) {
     const versions = await all('history', { kind: item.kind, name: item.name })
     ;(item.kind === 'standard' ? standardRefs : dictionaryRefs).push(...versions.map(v => v.exact_reference))
   }

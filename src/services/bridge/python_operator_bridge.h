@@ -1,18 +1,15 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
-
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 #ifndef _FLOWSQL_BRIDGE_PYTHON_OPERATOR_BRIDGE_H_
 #define _FLOWSQL_BRIDGE_PYTHON_OPERATOR_BRIDGE_H_
 
+#include <framework/interfaces/ioperator_contract_catalog.h>
+#include <framework/interfaces/ioperator_data_contract.h>
 #include <httplib.h>
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 #include "framework/interfaces/ioperator.h"
 
@@ -25,14 +22,22 @@ struct OperatorMeta {
     std::string name;
     std::string description;
     OperatorPosition position = OperatorPosition::DATA;
+    OperatorComponentContractV1 contract;
 };
 
 // PythonOperatorBridge — 实现 IOperator，将 Work() 转发给 Python Worker
 // Work() 内部 dynamic_cast 到 IDataFrameChannel，完成 Read/Write + Arrow IPC 序列化
-class PythonOperatorBridge : public IOperator {
+class PythonOperatorBridge : public IOperator, public IOperatorContractIdentityV1, public IOperatorConfigAdapterV1 {
  public:
     PythonOperatorBridge(const OperatorMeta& meta, const std::string& host, int port);
-    ~PythonOperatorBridge() override = default;
+    ~PythonOperatorBridge() override;
+
+    std::shared_ptr<PythonOperatorBridge> NewInvocation() const {
+        return std::make_shared<PythonOperatorBridge>(meta_, host_, port_);
+    }
+    int ResolveInvocation(const char*, std::string*, DataSemanticsErrorV1*) override;
+
+    OperatorComponentContractV1 ContractIdentity() const override { return meta_.contract; }
 
     // IOperator 元数据
     std::string Category() override { return meta_.category; }
@@ -55,6 +60,9 @@ class PythonOperatorBridge : public IOperator {
     std::string host_;
     int port_;
     std::string last_error_;
+    std::unordered_map<std::string, std::string> parameters_;
+    std::string invocation_token_;
+    void ReleaseInvocation();
 };
 
 }  // namespace bridge

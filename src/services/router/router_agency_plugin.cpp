@@ -59,8 +59,8 @@ int RouterAgencyPlugin::Option(const char* arg) {
 
 int RouterAgencyPlugin::Load(IQuerier* querier) {
     querier_ = querier;
-    LOG_INFO("RouterAgencyPlugin::Load: host=%s, port=%d, gateway=%s:%d",
-             host_.c_str(), port_, gateway_host_.c_str(), gateway_port_);
+    LOG_INFO("RouterAgencyPlugin::Load: host=%s, port=%d, gateway=%s:%d", host_.c_str(), port_, gateway_host_.c_str(),
+             gateway_port_);
     return 0;
 }
 
@@ -76,8 +76,7 @@ int RouterAgencyPlugin::Unload() {
 int RouterAgencyPlugin::Start() {
     // 1. 收集所有业务插件声明的路由
     CollectRoutes(querier_);
-    LOG_INFO("RouterAgencyPlugin::Start: collected %zu routes, %zu prefixes",
-             route_table_.size(), prefixes_.size());
+    LOG_INFO("RouterAgencyPlugin::Start: collected %zu routes, %zu prefixes", route_table_.size(), prefixes_.size());
 
     // 2. 启动 HTTP 服务线程
     running_ = true;
@@ -152,9 +151,7 @@ void RouterAgencyPlugin::HttpThread() {
     server_.set_payload_max_length(12 * 1024 * 1024);
 
     // catch-all：所有方法统一走 Dispatch
-    auto dispatch = [this](const httplib::Request& req, httplib::Response& res) {
-        Dispatch(req, res);
-    };
+    auto dispatch = [this](const httplib::Request& req, httplib::Response& res) { Dispatch(req, res); };
     server_.Get(R"(/.*)", dispatch);
     server_.Post(R"(/.*)", dispatch);
     server_.Put(R"(/.*)", dispatch);
@@ -218,20 +215,30 @@ void RouterAgencyPlugin::Dispatch(const httplib::Request& req, httplib::Response
 
 int RouterAgencyPlugin::HttpStatus(int32_t rc) {
     switch (rc) {
-        case error::OK:             return 200;
+        case error::OK:
+            return 200;
         case error::ACCEPTED:
             return 202;
         case error::TOO_MANY_REQUESTS:
             return 429;
-        case error::BAD_REQUEST:    return 400;
-        case error::NOT_FOUND:      return 404;
-        case error::CONFLICT:       return 409;
-        case error::PAYLOAD_TOO_LARGE: return 413;
-        case error::UNAVAILABLE:    return 503;
+        case error::BAD_REQUEST:
+            return 400;
+        case error::NOT_FOUND:
+            return 404;
+        case error::CONFLICT:
+            return 409;
+        case error::UNPROCESSABLE_ENTITY:
+            return 422;
+        case error::PAYLOAD_TOO_LARGE:
+            return 413;
+        case error::UNAVAILABLE:
+            return 503;
         case error::TIMEOUT:
             return 504;
-        case error::INTERNAL_ERROR: return 500;
-        default:                    return (rc >= 0) ? 200 : 500;
+        case error::INTERNAL_ERROR:
+            return 500;
+        default:
+            return (rc >= 0) ? 200 : 500;
     }
 }
 
@@ -246,17 +253,17 @@ void RouterAgencyPlugin::RegisterOnce() {
         rapidjson::StringBuffer buf;
         rapidjson::Writer<rapidjson::StringBuffer> w(buf);
         w.StartObject();
-        w.Key("prefix");  w.String(prefix.c_str());
-        w.Key("address"); w.String(local_addr.c_str());
+        w.Key("prefix");
+        w.String(prefix.c_str());
+        w.Key("address");
+        w.String(local_addr.c_str());
         w.EndObject();
 
         auto result = cli.Post("/gateway/register", buf.GetString(), "application/json");
         if (!result) {
-            LOG_WARN("RouterAgencyPlugin: failed to register prefix %s (gateway unreachable)",
-                     prefix.c_str());
+            LOG_WARN("RouterAgencyPlugin: failed to register prefix %s (gateway unreachable)", prefix.c_str());
         } else {
-            LOG_INFO("RouterAgencyPlugin: registered prefix %s -> %s",
-                     prefix.c_str(), local_addr.c_str());
+            LOG_INFO("RouterAgencyPlugin: registered prefix %s -> %s", prefix.c_str(), local_addr.c_str());
         }
     }
 }
@@ -270,8 +277,10 @@ void RouterAgencyPlugin::UnregisterOnce() {
         rapidjson::StringBuffer buf;
         rapidjson::Writer<rapidjson::StringBuffer> w(buf);
         w.StartObject();
-        w.Key("prefix");  w.String(prefix.c_str());
-        w.Key("address"); w.String(local_addr.c_str());
+        w.Key("prefix");
+        w.String(prefix.c_str());
+        w.Key("address");
+        w.String(local_addr.c_str());
         w.EndObject();
 
         cli.Post("/gateway/unregister", buf.GetString(), "application/json");
