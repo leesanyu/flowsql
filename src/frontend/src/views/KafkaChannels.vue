@@ -11,8 +11,8 @@
       <el-tab-pane label="通道" name="channels" />
       <el-tab-pane label="连接配置" name="connections" />
     </el-tabs>
-    <el-table :data="filteredRows" row-key="name">
-      <el-table-column prop="name" label="名称" min-width="140" />
+    <el-table :data="filteredRows" row-key="name" class="kafka-list">
+      <el-table-column prop="name" label="名称" min-width="180" show-overflow-tooltip />
       <el-table-column v-if="tab === 'channels'" prop="role" label="角色" width="90" />
       <el-table-column v-if="tab === 'channels'" prop="topic" label="Topic" min-width="130" />
       <el-table-column v-if="tab === 'channels'" prop="connection_name" label="连接" min-width="130" />
@@ -25,10 +25,9 @@
       <el-table-column v-if="tab === 'channels'" label="数据能力" min-width="180">
         <template #default="{ row }"><div v-for="(state, direction) in row.adapter_status" :key="direction">{{ direction }}：{{ ({ not_installed: '适配器未安装', configuration_required: '待配置', ready: '已就绪' })[state] || state }}</div></template>
       </el-table-column>
-      <el-table-column label="操作" min-width="350">
+      <el-table-column label="操作" width="310" fixed="right">
         <template #default="{ row }">
           <el-button text @click="detail = row">详情</el-button>
-          <el-button v-if="tab === 'channels' && row.payload_kind === 'structured' && row.role !== 'sink'" text @click="dictionary(row)">数据字典</el-button>
           <el-button text :disabled="!!blockedReason(row, tab)" :title="blockedReason(row, tab)" @click="tab === 'channels' ? openChannel(row) : openConnection(row)">编辑</el-button>
           <el-button text :disabled="testing" @click="verifySaved(row)">验证</el-button>
           <el-button v-if="tab === 'channels'" text @click="copyReference(row)">复制引用</el-button>
@@ -157,8 +156,14 @@
       <p v-if="error" role="alert">{{ error }}</p>
       <template #footer><el-button @click="closeChannel">取消</el-button><el-button :disabled="testing" @click="verifyDraft('channel')">验证草稿</el-button><el-button type="primary" :loading="saving" @click="saveChannel">保存通道</el-button></template>
     </el-dialog>
-    <el-drawer :model-value="!!detail" title="Kafka 配置详情" size="60%" @close="detail = null">
-      <template v-if="detail"><p v-if="detail.references?.length">引用通道：{{ detail.references.join('、') }}</p><pre>{{ JSON.stringify(detail, null, 2) }}</pre></template>
+    <el-drawer :model-value="!!detail" title="Kafka 配置详情" size="85%" destroy-on-close @close="detail = null">
+      <template v-if="detail">
+        <h3>{{ detail.name }}</h3>
+        <ChannelDescriptionPanel v-if="tab === 'channels' && detail.payload_kind === 'structured' && detail.role !== 'sink'" :key="detail.name" :locator="{ kind: 'kafka_source', name: detail.name }" />
+        <section v-else><h3>数据说明</h3><p>unsupported：{{ tab === 'connections' ? '连接配置仅提供连接身份和表目录，不是结构化来源。' : '当前 packet 或仅发布通道不提供字段说明。' }}</p></section>
+        <p v-if="detail.references?.length">引用通道：{{ detail.references.join('、') }}</p>
+        <details><summary>配置详情</summary><pre>{{ JSON.stringify(detail, null, 2) }}</pre></details>
+      </template>
     </el-drawer>
     <div class="verification" role="status">
       <el-input-number v-model="timeoutSeconds" :min="1" :max="30" :precision="0" /><span>验证预算（秒）</span>
@@ -169,13 +174,11 @@
   </div>
 </template>
 <script setup>
+import ChannelDescriptionPanel from '../components/ChannelDescriptionPanel.vue'
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
 import { connectionDraft, channelDraft, buildConnection, buildChannel, usesTls, usesSasl, secretFields, blockedReason, kafkaError, verificationLabel } from '../utils/kafkaChannel.js'
-const router = useRouter()
-function dictionary(row) { router.push({ path: '/semantics', query: { dataset: JSON.stringify({ kind: 'kafka_source', name: row.name }) } }) }
 const props = defineProps({ searchText: { type: String, default: '' } })
 const emit = defineEmits(['count-change'])
 const tab = ref('channels'), connections = ref([]), channels = ref([]), definitions = ref({})
@@ -234,6 +237,10 @@ onMounted(load)
 onBeforeUnmount(() => { alive = false; clearTimeout(timer); void cancelTest(); clearConnection(); clearChannel() })
 </script>
 <style scoped>
+.kafka-channels { min-width: 0; max-width: 100%; }
+.kafka-list :deep(.cell) { white-space: nowrap; }
+.kafka-list :deep(.el-button + .el-button) { margin-left: 4px; }
+pre, h3 { overflow-wrap: anywhere; white-space: pre-wrap; }
 .toolbar, .verification { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0; }
 .toolbar [role="alert"], [role="alert"] { color: var(--el-color-danger); }
 .hint { color: var(--el-text-color-secondary); font-size: 13px; }

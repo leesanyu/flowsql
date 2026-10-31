@@ -74,7 +74,9 @@
           <div class="section-title">{{ sectionTitle }}</div>
 
           <el-table v-if="activeChannelType === 'dataframe'" :data="filteredDfChannels" style="width: 100%" v-loading="loadingDf">
-            <el-table-column prop="name" label="名称" min-width="220" />
+            <el-table-column prop="name" label="名称" min-width="180" show-overflow-tooltip>
+              <template #default="{ row }"><button class="object-name" :title="row.name" @click="descriptionLocator = { kind: 'dataframe', name: row.name }">{{ row.name }}</button></template>
+            </el-table-column>
             <el-table-column label="行数" width="100">
               <template #default="scope">{{ scope.row.rows === null ? '未知' : scope.row.rows }}</template>
             </el-table-column>
@@ -85,7 +87,7 @@
                 </el-tooltip>
               </template>
             </el-table-column>
-            <el-table-column label="Schema" min-width="260">
+            <el-table-column label="Schema" min-width="180">
               <template #default="scope">
                 <span v-if="scope.row.schema === null">首次访问后确定</span>
                 <el-popover v-else placement="top" :width="420" trigger="hover">
@@ -101,10 +103,9 @@
                 </el-popover>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="260">
+            <el-table-column label="操作" width="200" fixed="right">
               <template #default="scope">
                 <el-button type="primary" size="small" text @click="previewDf(scope.row)">预览</el-button>
-                <el-button size="small" text @click="dictionary({ kind: 'dataframe', name: scope.row.name })">数据字典</el-button>
                 <el-button type="warning" size="small" text @click="renameDf(scope.row)">重命名</el-button>
                 <el-button type="danger" size="small" text @click="removeDf(scope.row)">删除</el-button>
               </template>
@@ -112,12 +113,11 @@
           </el-table>
 
           <el-table v-else-if="activeChannelType === 'database'" :data="filteredDbChannels" style="width: 100%" v-loading="loadingDb">
-            <el-table-column prop="name" label="名称" width="180" />
+            <el-table-column prop="name" label="名称" min-width="180" show-overflow-tooltip />
             <el-table-column prop="type" label="类型" width="140" />
-            <el-table-column prop="schema" label="Schema" min-width="200" />
-            <el-table-column label="操作" width="160">
+            <el-table-column prop="schema" label="Schema" min-width="200" show-overflow-tooltip />
+            <el-table-column label="操作" width="140" fixed="right">
               <template #default="scope">
-                <el-button size="small" text @click="tableDictionary(scope.row)">表字典</el-button>
                 <el-button type="primary" size="small" text @click="openDbBrowser(scope.row)">浏览</el-button>
                 <el-button type="danger" size="small" text @click="handleRemoveDb(scope.row)">删除</el-button>
               </template>
@@ -194,8 +194,9 @@
     <el-drawer
       v-model="drawerVisible"
       :title="drawerTitle"
-      size="60%"
+      size="85%"
       direction="rtl"
+      @closed="closeBrowser"
     >
       <div v-if="drawerMode === 'df'" class="browser-content" style="padding: 0">
         <el-table
@@ -254,7 +255,10 @@
         </div>
 
         <div class="browser-content">
-          <el-tabs v-model="activeTab" v-if="selectedTable">
+          <el-tabs v-model="activeTab" v-if="selectedTable" @tab-change="onBrowserTab">
+            <el-tab-pane label="数据说明" name="description">
+              <ChannelDescriptionPanel v-if="tableLocator" :key="JSON.stringify(tableLocator)" :locator="tableLocator" />
+            </el-tab-pane>
             <el-tab-pane label="表结构" name="describe">
               <el-table
                 v-if="describeData.rows && describeData.rows.length > 0"
@@ -302,11 +306,8 @@
       </div>
     </el-drawer>
 
-    <el-dialog :model-value="!!dictionaryConnection" title="限定表数据字典" @close="dictionaryConnection = null">
-      <label>表名 <input v-model="dictionaryTable" aria-label="字典表名" /></label>
-      <label>Database（空则使用连接配置）<input v-model="dictionaryDatabase" aria-label="字典 Database" /></label>
-      <label>Schema（PostgreSQL）<input v-model="dictionarySchema" aria-label="字典 Schema" /></label>
-      <button :disabled="!dictionaryTable" @click="openTableDictionary">打开表字典</button>
+    <el-dialog :model-value="!!descriptionLocator" title="通道详情" width="85%" destroy-on-close @close="descriptionLocator = null; loadDfChannels()">
+      <ChannelDescriptionPanel v-if="descriptionLocator" :key="JSON.stringify(descriptionLocator)" :locator="descriptionLocator" />
     </el-dialog>
     <el-dialog v-model="showAddDialog" title="新增数据库通道" width="500px" @close="resetForm">
       <el-form :model="form" label-width="100px" ref="formRef">
@@ -353,6 +354,7 @@
     </el-dialog>
 
     <el-dialog v-model="showStreamConfig" title="通道配置" width="620px">
+      <p>字段数据说明 unsupported：该流通道的当前接口不提供 F2 结构化数据集说明；基础身份与原配置如下。</p>
       <el-descriptions :column="1" border>
         <el-descriptions-item v-for="field in streamConfigFields" :key="field.key" :label="field.label">
           {{ field.value }}
@@ -512,7 +514,6 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
 import { Search, Loading } from '@element-plus/icons-vue'
 import api, {
   PCAP_REPLAY_SPEEDS,
@@ -525,13 +526,14 @@ import api, {
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ConfigChannels from './ConfigChannels.vue'
 import KafkaChannels from './KafkaChannels.vue'
+import ChannelDescriptionPanel from '../components/ChannelDescriptionPanel.vue'
 import { normalizeStreamOptions as buildStreamOptions } from '../utils/streamChannel.js'
 
-const router = useRouter()
-const dictionary = locator => router.push({ path: '/semantics', query: { dataset: JSON.stringify(locator) } })
-const dictionaryConnection = ref(null), dictionaryTable = ref(''), dictionarySchema = ref(''), dictionaryDatabase = ref('')
-function tableDictionary(row) { dictionaryConnection.value = row; dictionaryTable.value = ''; dictionarySchema.value = row.type === 'postgres' ? 'public' : ''; dictionaryDatabase.value = '' }
-function openTableDictionary() { const row = dictionaryConnection.value; dictionary({ kind: 'database_table', type: row.type, name: row.name, table: dictionaryTable.value, ...(dictionarySchema.value ? { schema: dictionarySchema.value } : {}), ...(dictionaryDatabase.value ? { database: dictionaryDatabase.value } : {}) }) }
+const descriptionLocator = ref(null)
+const tableLocator = computed(() => selectedTable.value ? {
+  kind: 'database_table', type: browserChannel.value.type, name: browserChannel.value.name, table: selectedTable.value,
+  ...(browserChannel.value.type === 'postgres' ? { schema: 'public' } : {})
+} : null)
 const searchText = ref('')
 const activeChannelType = ref('dataframe')
 const showAddDialog = ref(false)
@@ -1173,9 +1175,11 @@ const openDbBrowser = async (row) => {
   previewData.value = { columns: [], rows: [] }
   drawerVisible.value = true
 
+  const token = ++tableRequest
   tablesLoading.value = true
   try {
     const res = await api.listDbTables(row.type, row.name)
+    if (token !== tableRequest || !drawerVisible.value) return
     tableList.value = res.data.tables || []
     if (tableList.value.length > 0) await selectTable(tableList.value[0])
   } catch (e) {
@@ -1185,41 +1189,44 @@ const openDbBrowser = async (row) => {
   }
 }
 
+let tableRequest = 0
+function closeBrowser() { ++tableRequest; selectedTable.value = ''; dfPreviewName.value = '' }
 const selectTable = async (table) => {
+  const token = ++tableRequest
   selectedTable.value = table
-  activeTab.value = 'describe'
+  activeTab.value = 'description'
   describeData.value = { columns: [], rows: [] }
   previewData.value = { columns: [], rows: [] }
-
   const { type, name } = browserChannel.value
-
   describeLoading.value = true
-  previewLoading.value = true
-
   try {
     const res = await api.describeDbTable(type, name, table)
-    describeData.value = { columns: res.data.columns || [], rows: toRows(res.data) }
+    if (token === tableRequest) describeData.value = { columns: res.data.columns || [], rows: toRows(res.data) }
   } catch (e) {
-    ElMessage.error('获取表结构失败: ' + (e.response?.data?.error || e.message))
-  } finally {
-    describeLoading.value = false
-  }
-
+    if (token === tableRequest) ElMessage.error('获取表结构失败: ' + (e.response?.data?.error || e.message))
+  } finally { if (token === tableRequest) describeLoading.value = false }
+}
+const onBrowserTab = async (tab) => {
+  if (tab !== 'preview' || !selectedTable.value) return
+  const token = tableRequest, table = selectedTable.value
+  const { type, name } = browserChannel.value
+  previewLoading.value = true
   try {
     const res = await api.previewDbTable(type, name, table)
-    previewData.value = { columns: res.data.columns || [], rows: toRows(res.data) }
+    if (token === tableRequest && table === selectedTable.value) previewData.value = { columns: res.data.columns || [], rows: toRows(res.data) }
   } catch (e) {
-    ElMessage.error('获取数据预览失败: ' + (e.response?.data?.error || e.message))
-  } finally {
-    previewLoading.value = false
-  }
+    if (token === tableRequest) ElMessage.error('获取数据预览失败: ' + (e.response?.data?.error || e.message))
+  } finally { if (token === tableRequest) previewLoading.value = false }
 }
 
 onMounted(() => { reloadAll() })
 </script>
 
 <style scoped>
-.channels { }
+.channels { min-width: 0; }
+.object-name { color: var(--accent); border: 0; background: transparent; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.channel-main :deep(.el-table .cell) { white-space: nowrap; }
+.channel-main :deep(.el-table .el-button + .el-button) { margin-left: 6px; }
 .page-title { font-size: 24px; font-weight: 600; margin-bottom: 20px; color: var(--text-primary); }
 .card-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .header-left { display: flex; align-items: center; }
@@ -1301,6 +1308,7 @@ onMounted(() => { reloadAll() })
 }
 
 .browser-content {
+  min-width: 0;
   flex: 1;
   overflow: auto;
   padding: 0 16px;

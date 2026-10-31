@@ -1,6 +1,7 @@
 project(flowsql_config_channel)
 
 add_library(${PROJECT_NAME} SHARED
+    metadata_description.cpp
     channel_dictionary.cpp
     data_semantics_control.cpp
     operator_data_contract_model.cpp

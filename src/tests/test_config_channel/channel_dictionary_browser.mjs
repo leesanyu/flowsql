@@ -13,7 +13,9 @@ const raw = async (path,payload) => {const r=await fetch(base+path,{method:'POST
 const frame={kind:'dataframe',name:'sample'}, kafka={kind:'kafka_source',name:'events'}, table={kind:'database_table',type:'sqlite',name:'sample',table:'empty_table'}
 const navigate=async url=>{await ev('window.__navMarker=true');await send('Page.navigate',{url:base+url});await wait(()=>ev('window.__navMarker!==true'),'new navigation');await text(url.startsWith('/semantics')?'通道数据字典':'通道管理');await idle();await ev('window.confirm=()=>true')}
 const reload=async()=>{await ev('window.__reloadMarker=true');await send('Page.reload');await wait(()=>ev('window.__reloadMarker!==true'),'new document');await text('通道数据字典');await idle();await wait(()=>ev('!!document.querySelector(\'[aria-label=通道字典标题]\')'),'dictionary loaded')}
-const enter=async kind=>{await navigate('/channels');if(kind==='dataframe'){await text('数据字典');await click('数据字典')}else if(kind==='kafka'){await ev('[...document.querySelectorAll(".channel-type-item")].find(e=>e.textContent.includes("Kafka"))?.click()');await text('新建 Kafka 通道');await text('数据字典');await click('数据字典')}else{await ev('[...document.querySelectorAll(".channel-type-item")].find(e=>e.textContent.includes("数据库"))?.click()');await text('表字典');await click('表字典');await set('字典表名','empty_table');await click('打开表字典')}await text('通道数据字典');await idle();await ev('window.confirm=()=>true')}
+// Historical direct links remain supported after object entry points move into details.
+const enter=async kind=>{const locator=kind==='dataframe'?frame:kind==='kafka'?kafka:table;await navigate('/semantics?dataset='+encodeURIComponent(JSON.stringify(locator)));await text('通道数据字典');await idle();await ev('window.confirm=()=>true')}
+
 const confirm=async()=>{await idle();const items=await ev('[...document.querySelectorAll("[data-testid=channel-dictionary] input[type=checkbox]")].map(e=>e.value)');for(const item of items){await ev(`(async()=>{const e=[...document.querySelectorAll('[data-testid=channel-dictionary] input[type=checkbox]')].find(e=>e.value===${JSON.stringify(item)});if(!e.checked)e.click();await new Promise(r=>setTimeout(r,0))})()`)}assert.equal(await ev('[...document.querySelectorAll("[data-testid=channel-dictionary] input[type=checkbox]")].every(e=>e.checked)'),true)}
 const supplement=async name=>{await set('通道字典名称','ui.'+name);await set('通道绑定名称','ui.'+name);await set('通道字典标题',name+' 字典');await ev('document.querySelector("[data-channel-field=\\"0\\"]").open=true');await set('定义状态','declared','[data-channel-field="0"] ');await set('定义','人工字段说明','[data-channel-field="0"] ');await set('标准版本状态','declared','[data-channel-field="0"] ');await set('标准版本','standard.ui.channel@1','[data-channel-field="0"] ');await confirm();await click('保存字典并应用');await text('绑定已应用：binding.ui.'+name+'@1')}
 try {
@@ -36,7 +38,7 @@ try {
   assert.equal((await api('resolve',{exact_reference:'binding.ui.frame@2'})).document.dictionary_ref,'dictionary.ui.frame@1')
   assert.equal(await ev('document.querySelector("[aria-label=通道字典标题]").value'),'保存成功但应用冲突')
   await click('从来源生成候选');await set('已有字典精确版本','dictionary.ui.frame@3');await click('选择已有版本');await confirm();await click('应用已保存版本');await text('binding.ui.frame@3')
-  // All three real entry points permit generation, semantics, standards and precise binding.
+  // All three historical direct links permit generation, semantics, standards and precise binding.
   await enter('database');await supplement('table');await reload();await text('matched')
   await enter('kafka');await supplement('kafka')
   // Producer/type change leaves the old dictionary intact and requires explicit confirmation.
@@ -54,5 +56,5 @@ try {
   await click('刷新核对');await text('unbound');await click('从来源生成候选');await text('同名对象已替换');await text('复用旧字典 dictionary.ui.kafka@2')
   assert.equal(b.exceptions.length,0,JSON.stringify(b.exceptions))
   const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});await writeFile(evidence+'/page.png',Buffer.from(shot.data,'base64'))
-  console.log('PASS A6: actual three-source entry points, pending/load, defaults, manual semantics, standards, precise reuse/mapping, refresh, conflicts, partial success, producer/type confirmation and source failure')
+  console.log('PASS A6: three-source legacy direct links, pending/load, defaults, manual semantics, standards, precise reuse/mapping, refresh, conflicts, partial success, producer/type confirmation and source failure')
 } catch(e) { await writeFile(evidence+'/failure.txt',String(e.stack)+'\n'+await body());throw e } finally {await b.close()}

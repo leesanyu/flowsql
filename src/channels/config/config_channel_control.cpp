@@ -256,7 +256,55 @@ int ConfigChannelPlugin::DescribeDataset(const ChannelDatasetRequestV1& request,
     return 0;
 }
 
+MetadataDescriptionService ConfigChannelPlugin::DescriptionService() {
+    return MetadataDescriptionService(
+        *this, *this, [this](const auto& req, auto* out, auto* e) { return DescribeDataset(req, out, e); },
+        [this](const auto& name, uint32_t ms, auto* out, auto* e) {
+            return LookupDescriptionOperator(name, ms, out, e);
+        });
+}
+int ConfigChannelPlugin::LookupDescriptionOperator(const std::string& name, uint32_t ms,
+                                                   OperatorComponentContractV1* out, DataSemanticsErrorV1* e) {
+    using namespace dataset;
+    if (!ms) return Fail(e, "SOURCE_TIMEOUT", "metadata deadline exceeded");
+    const auto dot = name.find('.');
+    if (auto* catalog =
+            querier_ ? static_cast<IOperatorContractCatalogV1*>(querier_->First(IID_OPERATOR_CONTRACT_CATALOG_V1))
+                     : nullptr) {
+        const auto rc = catalog->Lookup(name.substr(0, dot).c_str(), name.substr(dot + 1).c_str(), out, e);
+        if (rc) return rc;
+        return out->component_revision.empty() ? Fail(e, "NOT_FOUND", "operator not found") : 0;
+    }
+    Json req(rapidjson::kObjectType);
+    Set(req, "name", name, req.GetAllocator());
+    httplib::Client client(gateway_host_, gateway_port_);
+    client.set_connection_timeout(std::chrono::milliseconds(ms));
+    client.set_read_timeout(std::chrono::milliseconds(ms));
+    client.set_write_timeout(std::chrono::milliseconds(ms));
+    const auto deadline = MetadataNow() + ms;
+    MetadataHttpBudget budget(client, deadline);
+    auto result = client.Post("/operators/detail", Encode(req), "application/json");
+    if (!result)
+        return Fail(e, MetadataNow() >= deadline ? "SOURCE_TIMEOUT" : "SOURCE_UNAVAILABLE",
+                    "operator catalog unreachable");
+    if (result->status == 404) return Fail(e, "NOT_FOUND", "operator not found");
+    if (result->status != 200) return Fail(e, "SOURCE_UNAVAILABLE", "operator catalog unavailable");
+    Json value;
+    value.Parse(result->body.c_str());
+    if (!value.IsObject() || Get(value, "component_revision").empty())
+        return Fail(e, "SOURCE_UNAVAILABLE", "invalid component identity");
+    *out = {Get(value, "category"),         Get(value, "name"),         Get(value, "component_revision"),
+            Get(value, "operator_version"), Get(value, "contract_ref"), Get(value, "contract_state")};
+    return 0;
+}
+
 void ConfigChannelPlugin::EnumRoutes(std::function<void(const RouteItem&)> callback) {
+    callback({"POST", "/semantics/v1/describe",
+              [this](const auto&, const auto& req, auto& rsp) { return Describe(req.c_str(), &rsp); }});
+    callback({"POST", "/semantics/v1/channels/save-description",
+              [this](const auto&, const auto& req, auto& rsp) { return SaveChannel(req.c_str(), &rsp); }});
+    callback({"POST", "/semantics/v1/operators/save-description",
+              [this](const auto&, const auto& req, auto& rsp) { return SaveOperator(req.c_str(), &rsp); }});
     for (const char* operation : {"describe", "preview", "check", "apply"}) {
         const std::string op(operation);
         callback({"POST", "/semantics/v1/channels/" + op, [this, op](const auto&, const auto& request, auto& response) {

@@ -2,6 +2,7 @@ project(test_config_channel)
 
 add_executable(${PROJECT_NAME}
     test_config_channel.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/metadata_description.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/operator_contract_service.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/operator_contract_derivation.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/channel_dictionary.cpp
@@ -234,3 +235,39 @@ set_tests_properties(test_operator_contract_preflight PROPERTIES TIMEOUT 90)
 add_test(NAME test_operator_contract_browser COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_operator_contract_browser.py $<TARGET_FILE:test_operator_contract_host> ${FLOWSQL_SEMANTICS_NODE})
 set_tests_properties(test_operator_contract_browser PROPERTIES TIMEOUT 220 RESOURCE_LOCK "semantics_http;visualization_browser")
+
+add_executable(test_metadata_description test_metadata_description.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/metadata_description.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/channel_dictionary.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_control.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/config_channel_provider.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
+target_include_directories(test_metadata_description PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/channels/config)
+target_compile_options(test_metadata_description PRIVATE -UNDEBUG)
+add_thirddepen(test_metadata_description rapidjson sqlite yaml-cpp)
+target_link_libraries(test_metadata_description OpenSSL::Crypto)
+add_test(NAME test_metadata_description COMMAND $<TARGET_FILE:test_metadata_description>)
+add_test(NAME test_metadata_description_api COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_metadata_description_api.py $<TARGET_FILE:test_operator_contract_host>)
+set_tests_properties(test_metadata_description_api PROPERTIES TIMEOUT 180 RESOURCE_LOCK semantics_http)
+
+add_test(NAME test_metadata_channel_browser COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_metadata_channel_browser.py $<TARGET_FILE:test_channel_dictionary_host> ${FLOWSQL_SEMANTICS_NODE})
+set_tests_properties(test_metadata_channel_browser PROPERTIES TIMEOUT 300 RESOURCE_LOCK "semantics_http;visualization_browser")
+
+add_library(fixture_description_cpp SHARED fixtures/description_cpp.cpp)
+target_include_directories(fixture_description_cpp PRIVATE ${CMAKE_SOURCE_DIR})
+add_thirddepen(fixture_description_cpp arrow rapidjson)
+target_link_libraries(fixture_description_cpp flowsql_common OpenSSL::Crypto)
+set_target_properties(fixture_description_cpp PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_dependencies(test_operator_contract_host fixture_description_cpp)
+add_test(NAME test_metadata_operator_browser COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_metadata_operator_browser.py $<TARGET_FILE:test_operator_contract_host> ${FLOWSQL_SEMANTICS_NODE} $<TARGET_FILE:fixture_description_cpp>)
+set_tests_properties(test_metadata_operator_browser PROPERTIES TIMEOUT 300 RESOURCE_LOCK "semantics_http;visualization_browser")
+
+add_test(NAME test_metadata_description_client COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_metadata_description_client.py $<TARGET_FILE:test_operator_contract_host> ${FLOWSQL_SEMANTICS_NODE})
+set_tests_properties(test_metadata_description_client PROPERTIES TIMEOUT 240 RESOURCE_LOCK "semantics_http;visualization_browser")

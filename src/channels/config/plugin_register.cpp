@@ -12,4 +12,5 @@ ____INTERFACE(flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1, flowsql::IConfigChannelRe
 ____INTERFACE(flowsql::IID_DATA_SEMANTICS_REGISTRY_V1, flowsql::IDataSemanticsRegistryV1)
 ____INTERFACE(flowsql::IID_OPERATOR_DATA_CONTRACT_V1, flowsql::IOperatorDataContractV1)
 ____INTERFACE(flowsql::IID_ROUTER_HANDLE, flowsql::IRouterHandle)
+____INTERFACE(flowsql::IID_METADATA_DESCRIPTION_V1, flowsql::IMetadataDescriptionV1)
 END_PLUGIN_REGIST()

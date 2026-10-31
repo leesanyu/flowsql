@@ -13,7 +13,7 @@ Linux 网卡与 Kafka 数据通道，提供 `npm.basic` 网络会话和协议分
 常用入口：[快速开始](#快速开始) · [SQL 采集、分析与输出指引](docs/sql-workflow.md) · [SQL 与阶段过滤](#sql-过滤能力) ·
 [实时网卡采集](#netadapter-实时网卡采集) · [Kafka 接入与发布](#kafka-接入与发布) ·
 [NPM 分析](#npmbasic-网络会话与协议分析) · [基线分析](#explorebaseliner-基线分析) ·
-[标准与字典](docs/data-semantics.md) · [任务能力与入口](#sql-任务能力矩阵当前) · [测试](#测试) · [文档索引](#文档)
+[通道与算子说明](docs/data-semantics.md) · [任务能力与入口](#sql-任务能力矩阵当前) · [测试](#测试) · [文档索引](#文档)
 
 ## 核心特性
 
@@ -27,7 +27,7 @@ Linux 网卡与 Kafka 数据通道，提供 `npm.basic` 网络会话和协议分
 - **离线与网卡采集**：PCAP/PCAPNG 上传、持久化通道与离线过滤；NetAdapter 在同一观测域采集多张网卡，支持 AF_PACKET、PF_RING Classic、AF_XDP copy/generic-SKB
 - **网络会话与协议分析**：`npm.basic` 统一 Basic 周期统计、Session 性能分析、DNS/HTTP/1/TLS/ICMP 分析与可选流量标签，离线和实时来源共用会话与周期语义
 - **NPM 分族结果存储与查询**：IPv4/IPv6 独立实体与物理表，SQLite、MySQL、PostgreSQL、ClickHouse 托管全部启用实体，按运行查询 history/latest/final；ClickHouse 使用 ArrowStream 列式批量写入
-- **标准与字典管理**：人工标准、实体/字段语义和数据对象绑定共用不可变版本库，支持精确引用、缺口、历史/引用追溯及 JSON/YAML 交换；[管理页面与 HTTP 使用说明](docs/data-semantics.md)
+- **通道与算子说明**：在具体通道内查看结构并一次保存含义，在算子详情阅读契约、维护补充说明及显式预检；Web 与普通 HTTP 客户端共用精确版本与未知状态，保留原标准/字典及历史接口；[对象入口与客户端使用说明](docs/data-semantics.md)
 - **配置资源版本化**：JSON/YAML/XML 配置通道持久化，消费者通过精确 revision 冻结任务配置
 - **在线基线检测**：Baseline 插件通过 `IBaselineService` 提供 `Optional Bootstrap`、在线 rolling、基线 band、maturity / score trust 和 Relation fusion 能力
 - **SQL 基线分析**：`explore.baseliner` 分析数据库或 DataFrame/CSV 快照，支持 Value/Ratio/Relation 评估、未来预测、预算受控的批量结果和独立模型参数输出；托管数据库出口支持模型、消费位置与结果联合恢复
@@ -1426,7 +1426,7 @@ flowsql/
 
 ## 文档
 
-- [标准与字典管理](docs/data-semantics.md) — 定义、未知信息、版本/绑定、页面与 HTTP 导入导出
+- [通道与算子说明](docs/data-semantics.md) — 对象内保存、契约与声明维护、HTTP 客户端；兼容标准/字典、版本/绑定与导入导出
 
 - [SQL 采集、分析与输出：能力发现、执行入口与可复现示例](docs/sql-workflow.md)
 - [四库数据探索：启动、Web 入口、Compose 与独立升级](docs/exploration.md)

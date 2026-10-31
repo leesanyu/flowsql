@@ -86,6 +86,7 @@
 
     <el-dialog v-model="showPreview" :title="`纯文本预览：${previewReference}`" width="720px">
       <div v-loading="previewLoading" class="preview-body">
+        <p data-testid="config-description-status">配置资源 {{ previewReference }}；字段数据说明 unsupported：配置内容不作为结构化业务行，仍可使用原预览和版本管理。</p>
         <pre v-text="previewText" class="preview-plain-text" />
       </div>
       <template #footer>

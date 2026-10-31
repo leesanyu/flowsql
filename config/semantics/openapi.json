@@ -1258,6 +1258,301 @@
           }
         }
       }
+    },
+    "/describe": {
+      "post": {
+        "operationId": "describe",
+        "summary": "describe",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/%24defs/describeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/describeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict or confirmation required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Source unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Source timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/channels/save-description": {
+      "post": {
+        "operationId": "channels_save_description",
+        "summary": "channels/save-description",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/%24defs/channels_save-descriptionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/channels_save-descriptionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict or confirmation required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Source unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Source timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          }
+        },
+        "description": "Save object-local channel descriptions with captured basis. Supply exactly one of legacy changes or editor_changes. Omitted edit keys preserve existing semantics; null or blank text clears a manual declaration to unknown. The editor supports text, units and typed time edits (Unix, native datetime, duration). describe context.editor_fields supplies read-only source facts and conflicts without writes. Relation arrays replace the object relation set; omission preserves it and [] removes it. Source names are mapped to stable IDs; each exact target dictionary and its fields must resolve, with no repeated source or target per relation. No target description is implicitly created."
+      }
+    },
+    "/operators/save-description": {
+      "post": {
+        "operationId": "operators_save_description",
+        "summary": "operators/save-description",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./api.schema.json#/%24defs/operators_save-descriptionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/%24defs/operators_save-descriptionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict or confirmation required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Source unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Source timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./api.schema.json#/$defs/error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

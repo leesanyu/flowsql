@@ -29,6 +29,9 @@
 | [x] | 标准与字典管理 (`data-semantics-registry`) | P1 | 让数据维护者和程序调用方集中创建、查询、补充与复用数据标准和字典，获得持久化、精确版本、历史及引用关系可追溯的统一定义；交付统一管理页面和符合 JSON Schema / OpenAPI 的 HTTP 契约，使人工编辑与程序读取使用同一份内容。 | [规格](archive/feat-data-semantics-registry.md)；[拆分边界](specs/epic-data-semantics-dictionary.md#data-semantics-registry) |
 | [x] | 通道数据字典生成与绑定 (`channel-data-dictionary`) | P1 | 让接入 Kafka 结构化数据、CSV/DataFrame 和已有数据库表的用户，从实际字段配置或结构自动获得默认字典，并能补充语义、引用标准及按数据集绑定版本；结构变化时保留人工说明并显式核验差异，减少重复填写和错误沿用。 | [规格](archive/feat-channel-data-dictionary.md)；[拆分边界](specs/epic-data-semantics-dictionary.md#channel-data-dictionary) |
 | [x] | 算子输入输出契约 (`operator-data-contract`) | P1 | 让内置及扩展算子的作者和使用者明确输入要求、参数影响与输出含义，通过注册或上传携带契约、调用时绑定字段角色及已声明的转换规则产生结果字典；输出版本可追溯，无法推导的语义明确保留为未知，避免中间数据失去含义。 | [规格](archive/feat-operator-data-contract.md)；[拆分边界](specs/epic-data-semantics-dictionary.md#operator-data-contract) |
+| [x] | 通道与算子说明管理 (`metadata-description-query`) | P1 | 让使用者在具体通道实例上直接查看和补充数据说明、在具体算子上查看契约和维护调用说明，未来模型通过同一结构化接口发现对象并正确调用；移除独立“标准与字典”主导航，系统处理内部字典与绑定，复用已有执行契约和版本依据，使日常使用无需建立标准或手填内部身份。 | [规格](archive/feat-metadata-description-query.md) |
+| [x] | 通道说明配置重构与精简 (`channel-description-refinement`) | P1 | 让维护数据库表、DataFrame 和结构化 Kafka 通道说明的用户，以紧凑字段表填写说明、必要单位、时间解释和可选关联，消除高级状态与来源表单的填写负担；系统维护内部映射并保留既有语义与精确版本，使未来程序和模型能读取明确的时间与关联信息，暂不包含复杂指标自动计算。 | [规格](archive/feat-channel-description-refinement.md) |
+| [x] | 通道说明默认初始化 (`channel-description-default-initialization`) | P1 | 让配置通道字段关联的用户直接选择已知结构目标，系统建立默认说明并提供精确目标字段；已有关联优先展示管理列表，字段设置和辅助说明分别对齐，减少页面切换及误操作。 | [规格](archive/feat-channel-description-default-initialization.md) |
 
 ---
 

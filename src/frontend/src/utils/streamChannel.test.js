@@ -72,7 +72,7 @@ test('Channels page loads capture defaults, preserves failed drafts and saves on
     if (name === 'vue') return vue
     if (name === '../api') return mockApi
     if (name === '../utils/streamChannel.js') return utils
-    if (name === './ConfigChannels.vue' || name === './KafkaChannels.vue') return {}
+    if (name === './ConfigChannels.vue' || name === './KafkaChannels.vue' || name === '../components/ChannelDescriptionPanel.vue') return {}
     if (name === '@element-plus/icons-vue') return {}
     if (name === 'element-plus') return { ElMessage: Object.fromEntries(
       ['error', 'warning', 'success'].map(key => [key, text => messages.push([key, text])])),

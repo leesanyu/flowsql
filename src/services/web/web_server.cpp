@@ -792,7 +792,8 @@ int WebServer::Init(const std::string& db_path) {
     }
     for (const char* operation :
          {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export", "channels/describe",
-          "channels/preview", "channels/check", "channels/apply", "operators/check"}) {
+          "channels/preview", "channels/check", "channels/apply", "operators/check", "describe",
+          "channels/save-description", "operators/save-description"}) {
         const std::string target = std::string("/semantics/v1/") + operation;
         server_.Post("/api" + target, [this, target](const httplib::Request& req, httplib::Response& res) {
             std::string response;
@@ -1208,7 +1209,8 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
     }
     for (const char* operation :
          {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export", "channels/describe",
-          "channels/preview", "channels/check", "channels/apply", "operators/check"}) {
+          "channels/preview", "channels/check", "channels/apply", "operators/check", "describe",
+          "channels/save-description", "operators/save-description"}) {
         const std::string target = std::string("/semantics/v1/") + operation;
         cb({"POST", "/api" + target, [this, target](const auto&, const auto& request, auto& response) {
                 return ProxySemanticsPost(scheduler_host_, scheduler_port_, target, request, &response);

@@ -5134,6 +5134,644 @@
         "execution_context"
       ],
       "additionalProperties": false
+    },
+    "descriptionBasis": {
+      "type": "object",
+      "properties": {
+        "object_key": {
+          "oneOf": [
+            {
+              "$ref": "#/%24defs/object_key"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "binding_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dictionary_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "component_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contract_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "object_key",
+        "source_revision",
+        "schema_fingerprint",
+        "binding_ref",
+        "dictionary_ref",
+        "component_revision",
+        "contract_ref",
+        "description_ref"
+      ],
+      "additionalProperties": false
+    },
+    "descriptionNotes": {
+      "type": "object",
+      "properties": {
+        "purpose": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "usage_notes": {
+          "type": "string",
+          "maxLength": 30000
+        },
+        "examples": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "string",
+            "maxLength": 10000
+          }
+        }
+      },
+      "required": [
+        "purpose",
+        "usage_notes",
+        "examples"
+      ],
+      "additionalProperties": false
+    },
+    "descriptionTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "channel"
+              ]
+            },
+            "locator": {
+              "$ref": "#/%24defs/datasetLocator"
+            }
+          },
+          "required": [
+            "kind",
+            "locator"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "operator"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[^.]+\\..+$"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "describeRequest": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "$ref": "#/%24defs/descriptionTarget"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "additionalProperties": false
+    },
+    "metadataDescription": {
+      "type": "object",
+      "properties": {
+        "subject": {
+          "$ref": "#/%24defs/descriptionTarget"
+        },
+        "basis": {
+          "$ref": "#/%24defs/descriptionBasis"
+        },
+        "structure": {
+          "type": "object"
+        },
+        "description": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "enum": [
+                "present",
+                "missing",
+                "needs_review"
+              ]
+            },
+            "origin": {
+              "type": "string"
+            },
+            "document": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "notes": {
+              "oneOf": [
+                {
+                  "$ref": "#/%24defs/descriptionNotes"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "origin",
+            "document",
+            "notes"
+          ],
+          "additionalProperties": false
+        },
+        "contract": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "enum": [
+                "declared",
+                "missing"
+              ]
+            },
+            "document": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "document"
+          ],
+          "additionalProperties": false
+        },
+        "checks": {
+          "type": "object"
+        },
+        "gaps": {
+          "type": "array"
+        },
+        "context": {
+          "type": "object",
+          "properties": {
+            "editor_fields": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/%24defs/descriptionEditorFieldFacts"
+              }
+            }
+          }
+        }
+      },
+      "required": [
+        "subject",
+        "basis",
+        "structure",
+        "description",
+        "contract",
+        "checks",
+        "gaps",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "describeResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/%24defs/metadataDescription"
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "descriptionFieldChanges": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "definition": {},
+        "role": {},
+        "measure_kind": {},
+        "unit": {},
+        "time_semantics": {},
+        "null_meaning": {},
+        "validity": {},
+        "aggregation": {},
+        "value_domain": {},
+        "standard_refs": {}
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "channelDescriptionChanges": {
+      "type": "object",
+      "properties": {
+        "description": {},
+        "entity": {
+          "type": "object",
+          "properties": {
+            "row_meaning": {},
+            "row_semantics": {},
+            "identity_fields": {},
+            "revision_field": {},
+            "time_fields": {},
+            "relations": {},
+            "limitations": {}
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/%24defs/descriptionFieldChanges"
+          }
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "channels_save-descriptionRequest": {
+      "type": "object",
+      "properties": {
+        "locator": {
+          "$ref": "#/%24defs/datasetLocator"
+        },
+        "basis": {
+          "$ref": "#/%24defs/descriptionBasis"
+        },
+        "changes": {
+          "$ref": "#/%24defs/channelDescriptionChanges"
+        },
+        "confirmations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        },
+        "editor_changes": {
+          "$ref": "#/%24defs/channelDescriptionEditorChanges"
+        }
+      },
+      "required": [
+        "locator",
+        "basis"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "changes"
+          ]
+        },
+        {
+          "required": [
+            "editor_changes"
+          ]
+        }
+      ]
+    },
+    "channels_save-descriptionResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "applied",
+                "definition_saved_not_applied"
+              ]
+            },
+            "dictionary_ref": {
+              "type": "string"
+            },
+            "binding_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "basis": {
+              "$ref": "#/%24defs/descriptionBasis"
+            },
+            "error": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "dictionary_ref",
+            "binding_ref",
+            "basis",
+            "error"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operators_save-descriptionRequest": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[^.]+\\..+$"
+        },
+        "expected_component_revision": {
+          "type": "string"
+        },
+        "expected_description_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notes": {
+          "$ref": "#/%24defs/descriptionNotes"
+        }
+      },
+      "required": [
+        "name",
+        "expected_component_revision",
+        "expected_description_ref",
+        "notes"
+      ],
+      "additionalProperties": false
+    },
+    "operators_save-descriptionResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "description_ref": {
+              "type": "string"
+            },
+            "component_revision": {
+              "type": "string"
+            },
+            "created_revision": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "description_ref",
+            "component_revision",
+            "created_revision"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "descriptionTextEdit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "descriptionTimeEdit": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "unix_timestamp"
+              ]
+            },
+            "unit": {
+              "enum": [
+                "s",
+                "ms",
+                "us",
+                "ns"
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "unit"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "datetime"
+              ]
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "duration"
+              ]
+            },
+            "unit": {
+              "enum": [
+                "s",
+                "ms",
+                "us",
+                "ns"
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "unit"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "descriptionRelationEdit": {
+      "type": "object",
+      "properties": {
+        "dictionary_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "field_map": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "dictionary_ref",
+        "field_map"
+      ],
+      "additionalProperties": false
+    },
+    "descriptionFieldEdit": {
+      "type": "object",
+      "properties": {
+        "definition": {
+          "$ref": "#/%24defs/descriptionTextEdit"
+        },
+        "unit": {
+          "$ref": "#/%24defs/descriptionTextEdit"
+        },
+        "time": {
+          "$ref": "#/%24defs/descriptionTimeEdit"
+        }
+      },
+      "additionalProperties": false
+    },
+    "channelDescriptionEditorChanges": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "$ref": "#/%24defs/descriptionTextEdit"
+        },
+        "row_meaning": {
+          "$ref": "#/%24defs/descriptionTextEdit"
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/%24defs/descriptionFieldEdit"
+          }
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/descriptionRelationEdit"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "descriptionEditorFieldFacts": {
+      "type": "object",
+      "properties": {
+        "modes": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "unix_timestamp",
+              "datetime",
+              "duration"
+            ]
+          }
+        },
+        "unit": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "time_semantics": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "conflict": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "modes",
+        "unit",
+        "time_semantics",
+        "conflict"
+      ],
+      "additionalProperties": false
     }
   }
 }

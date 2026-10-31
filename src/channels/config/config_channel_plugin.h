@@ -14,6 +14,7 @@
 #include "channel_dictionary.h"
 #include "config_channel_provider.h"
 #include "data_semantics_registry.h"
+#include "metadata_description.h"
 #include "operator_contract_service.h"
 
 namespace flowsql::channels::config {
@@ -22,7 +23,8 @@ class ConfigChannelPlugin final : public IPlugin,
                                   public ConfigChannelProvider,
                                   public DataSemanticsRegistry,
                                   public OperatorContractService,
-                                  public IRouterHandle {
+                                  public IRouterHandle,
+                                  public IMetadataDescriptionV1 {
  public:
     ConfigChannelPlugin()
         : OperatorContractService(static_cast<DataSemanticsRegistry&>(*this),
@@ -85,6 +87,15 @@ class ConfigChannelPlugin final : public IPlugin,
         return 0;
     }
 
+    int Describe(const char* request, std::string* response) override {
+        return DescriptionService().Describe(request, response);
+    }
+    int SaveChannel(const char* request, std::string* response) override {
+        return DescriptionService().SaveChannel(request, response);
+    }
+    int SaveOperator(const char* request, std::string* response) override {
+        return DescriptionService().SaveOperator(request, response);
+    }
     void EnumRoutes(std::function<void(const RouteItem&)> callback) override;
 
  private:
@@ -93,6 +104,8 @@ class ConfigChannelPlugin final : public IPlugin,
     int32_t HandleHistory(const std::string& uri, const std::string& request, std::string& response);
     int32_t HandleResolve(const std::string& uri, const std::string& request, std::string& response);
 
+    MetadataDescriptionService DescriptionService();
+    int LookupDescriptionOperator(const std::string&, uint32_t, OperatorComponentContractV1*, DataSemanticsErrorV1*);
     int DescribeDataset(const ChannelDatasetRequestV1&, ChannelDatasetSnapshotV1*, DataSemanticsErrorV1*);
     IQuerier* querier_ = nullptr;
     std::string gateway_host_ = "127.0.0.1";

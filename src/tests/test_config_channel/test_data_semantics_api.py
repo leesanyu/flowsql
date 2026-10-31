@@ -127,7 +127,8 @@ def main():
             api = request(base + '/api/semantics/v1/openapi.json')[1]
             assert api['openapi'].startswith('3.1.')
             ids = [entry['post']['operationId'] for entry in api['paths'].values()]
-            assert len(ids) == len(set(ids)) == 13
+            assert len(ids) == len(set(ids)) == 16
+            assert {'describe', 'channels_save_description', 'operators_save_description'} <= set(ids)
             for path, entry in api['paths'].items():
                 assert entry['post']['requestBody']['content']['application/json']['schema']['$ref'].endswith(path[1:].replace('/', '_') + 'Request')
             legacy = json.dumps({'legacy': '原配置\n保留'}, ensure_ascii=False).encode()

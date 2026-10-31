@@ -75,7 +75,7 @@ async function mountPage(api) {
   const { descriptor } = parse(readFileSync(new URL('../views/KafkaChannels.vue', import.meta.url), 'utf8'))
   const output = await transform(compileScript(descriptor, { id: 'kafka-test', inlineTemplate: true }).content, { format: 'cjs' })
   const module = { exports: {} }, messages = []
-  const require = (name) => name === 'vue' ? vue : name === '../api' ? api : name === '../utils/kafkaChannel.js' ? utils : name === 'element-plus'
+  const require = (name) => name === '../components/ChannelDescriptionPanel.vue' ? {} : name === 'vue' ? vue : name === '../api' ? api : name === '../utils/kafkaChannel.js' ? utils : name === 'element-plus'
     ? { ElMessage: Object.fromEntries(['error', 'success', 'warning'].map((k) => [k, (v) => messages.push(v)])), ElMessageBox: { confirm: async () => {} } }
     : assert.fail(name)
   new Function('require', 'module', 'exports', output.code)(require, module, module.exports)

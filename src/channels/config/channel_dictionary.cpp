@@ -143,13 +143,17 @@ int LoadDictionary(DataSemanticsRegistry& registry, const std::string& ref, Json
 }  // namespace
 int32_t ChannelDictionaryService::Control(const std::string& op, const std::string& text, std::string& response) {
     using namespace dataset;
+    const auto started = std::chrono::steady_clock::now();
     DataSemanticsErrorV1 e;
     Json r;
     if (ParseSemanticsJson(text, &r, &e) || Validate("channels_" + op + "Request", r, &e)) return Error(e, response);
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(r.HasMember("timeout_ms") ? r["timeout_ms"].GetUint() : 5000);
+    const auto deadline =
+        started + std::chrono::milliseconds(r.HasMember("timeout_ms") ? r["timeout_ms"].GetUint() : 5000);
     ChannelDatasetSnapshotV1 snapshot;
-    ChannelDatasetRequestV1 request{Encode(r["locator"]), r.HasMember("timeout_ms") ? r["timeout_ms"].GetUint() : 5000};
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+    if (remaining <= 0) return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
+    ChannelDatasetRequestV1 request{Encode(r["locator"]), static_cast<uint32_t>(remaining)};
     if (!describe_) return Error({"UNAVAILABLE", "dataset descriptor unavailable", ""}, response);
     if (describe_(request, &snapshot, &e)) return Error(e, response);
     if (std::chrono::steady_clock::now() >= deadline)
@@ -370,6 +374,8 @@ int32_t ChannelDictionaryService::Control(const std::string& op, const std::stri
     if (response.size() > 12 * 1024 * 1024) return Error({"LIMIT_EXCEEDED", "response exceeds 12 MiB", ""}, response);
     if (Validate("channels_" + op + "Response", envelope, &e))
         return Error({"STORAGE_ERROR", "response contract mismatch", e.field_path}, response);
+    if (std::chrono::steady_clock::now() >= deadline)
+        return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
     return error::OK;
 }
 }  // namespace flowsql::channels::config

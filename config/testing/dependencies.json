@@ -649,6 +649,47 @@
       "resources": [
         "task_store"
       ]
+    },
+    "test_metadata_description": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_metadata_description_api": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http"
+      ]
+    },
+    "test_metadata_channel_browser": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http",
+        "visualization_browser"
+      ]
+    },
+    "test_metadata_operator_browser": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http",
+        "visualization_browser"
+      ]
+    },
+    "test_metadata_description_client": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http",
+        "visualization_browser"
+      ]
     }
   }
 }

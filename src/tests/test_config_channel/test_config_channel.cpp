@@ -1,10 +1,10 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 
-#include <channels/config/config_channel_provider.h>
 #include <channels/config/config_channel_plugin.h>
-#include <common/loader.hpp>
+#include <channels/config/config_channel_provider.h>
 #include <common/error_code.h>
+#include <common/loader.hpp>
 
 #include <rapidjson/document.h>
 #include <sqlite3.h>
@@ -22,8 +22,8 @@
 #include <unistd.h>
 
 using flowsql::ConfigChannelSnapshot;
-using flowsql::channels::config::ConfigChannelProvider;
 using flowsql::channels::config::ConfigChannelListItem;
+using flowsql::channels::config::ConfigChannelProvider;
 using flowsql::channels::config::ConfigPublishRequest;
 using flowsql::channels::config::ConfigPublishResult;
 using flowsql::channels::config::ConfigRevisionListItem;
@@ -42,9 +42,7 @@ std::string NestedJson(size_t depth) {
     return value;
 }
 
-std::string NestedYaml(size_t depth) {
-    return std::string(depth, '[') + "0" + std::string(depth, ']');
-}
+std::string NestedYaml(size_t depth) { return std::string(depth, '[') + "0" + std::string(depth, ']'); }
 
 std::string NestedXml(size_t depth) {
     std::string value;
@@ -185,12 +183,16 @@ int main() {
     sqlite3* reader = nullptr;
     assert(sqlite3_open_v2(path.c_str(), &reader, SQLITE_OPEN_READWRITE, nullptr) == SQLITE_OK);
     sqlite3_stmt* base = nullptr;
-    assert(sqlite3_prepare_v2(reader, "SELECT base_revision FROM config_channel_revision WHERE name='rules' "
-                                      "AND revision=3", -1, &base, nullptr) == SQLITE_OK);
+    assert(sqlite3_prepare_v2(reader,
+                              "SELECT base_revision FROM config_channel_revision WHERE name='rules' "
+                              "AND revision=3",
+                              -1, &base, nullptr) == SQLITE_OK);
     assert(sqlite3_step(base) == SQLITE_ROW && sqlite3_column_int(base, 0) == 1);
     sqlite3_finalize(base);
-    assert(sqlite3_exec(reader, "CREATE TRIGGER deny_revision BEFORE INSERT ON config_channel_revision "
-                                "BEGIN SELECT RAISE(ABORT,'denied'); END", nullptr, nullptr, nullptr) == SQLITE_OK);
+    assert(sqlite3_exec(reader,
+                        "CREATE TRIGGER deny_revision BEFORE INSERT ON config_channel_revision "
+                        "BEGIN SELECT RAISE(ABORT,'denied'); END",
+                        nullptr, nullptr, nullptr) == SQLITE_OK);
     request.expected_current_revision = 3;
     request.base_revision = 0;
     request.content = "{\"failed\":true}";
@@ -200,8 +202,8 @@ int main() {
     sqlite3_close(reader);
 
     ConfigChannelSnapshot snapshot;
-    for (const char* invalid : {"rules@1", "config.rules", "config.rules@latest", "config.rules@0",
-                                "config.rules@01", "config.rules@-1", "config.rules@1x"}) {
+    for (const char* invalid : {"rules@1", "config.rules", "config.rules@latest", "config.rules@0", "config.rules@01",
+                                "config.rules@-1", "config.rules@1x"}) {
         assert(provider.Resolve(invalid, &snapshot, &error) == EINVAL);
     }
     assert(provider.Resolve("config.rules@9", &snapshot, &error) == ENOENT);
@@ -328,16 +330,24 @@ int main() {
     const char* options[] = {option.c_str()};
     assert(loader->Load(".", libraries, options, 1) == 0);
     assert(loader->StartAll() == 0);
-    auto* registry = static_cast<flowsql::IConfigChannelRegistryV1*>(
-        loader->First(flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1));
+    auto* registry =
+        static_cast<flowsql::IConfigChannelRegistryV1*>(loader->First(flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1));
     assert(registry);
+    auto* descriptions =
+        static_cast<flowsql::IMetadataDescriptionV1*>(loader->First(flowsql::IID_METADATA_DESCRIPTION_V1));
+    assert(descriptions);
+    std::string description_response;
+    assert(descriptions->Describe(R"({"target":{"kind":"channel","locator":{"kind":"dataframe","name":"absent"}}})",
+                                  &description_response) != 0);
+    assert(description_response.find("error") != std::string::npos);
     auto* route_registry = static_cast<flowsql::IRouterHandle*>(loader->First(flowsql::IID_ROUTER_HANDLE));
     assert(route_registry);
     std::unordered_map<std::string, flowsql::fnRouterHandler> discovered_routes;
-    route_registry->EnumRoutes([&](const flowsql::RouteItem& item) {
-        discovered_routes.emplace(item.uri, item.handler);
-    });
-    assert(discovered_routes.size() == 16);
+    route_registry->EnumRoutes(
+        [&](const flowsql::RouteItem& item) { discovered_routes.emplace(item.uri, item.handler); });
+    assert(discovered_routes.size() == 19);
+    for (const char* op : {"describe", "channels/save-description", "operators/save-description"})
+        assert(discovered_routes.count(std::string("/semantics/v1/") + op) == 1);
     for (const char* op : {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export"})
         assert(discovered_routes.count(std::string("/semantics/v1/") + op) == 1);
     for (const char* op : {"list", "publish", "history", "resolve"})
@@ -359,7 +369,9 @@ int main() {
         assert(item.method == "POST");
         routes.emplace(item.uri, item.handler);
     });
-    assert(routes.size() == 16);
+    assert(routes.size() == 19);
+    for (const char* op : {"describe", "channels/save-description", "operators/save-description"})
+        assert(routes.count(std::string("/semantics/v1/") + op) == 1);
     for (const char* op : {"describe", "preview", "check", "apply"})
         assert(routes.count(std::string("/semantics/v1/channels/") + op) == 1);
     std::string response;
@@ -374,8 +386,7 @@ int main() {
     assert(std::string(reply["content_base64"].GetString()) == "e30=");
     assert(call("/channels/config/resolve", R"({"exact_reference":"config.rules@latest"})") ==
            flowsql::error::BAD_REQUEST);
-    assert(call("/channels/config/resolve", R"({"exact_reference":"config.rules@9"})") ==
-           flowsql::error::NOT_FOUND);
+    assert(call("/channels/config/resolve", R"({"exact_reference":"config.rules@9"})") == flowsql::error::NOT_FOUND);
     assert(call("/channels/config/history", R"({"name":"missing"})") == flowsql::error::NOT_FOUND);
     assert(call("/channels/config/list", R"({"limit":1})") == flowsql::error::OK);
     reply.Parse(response.c_str());
@@ -393,16 +404,13 @@ int main() {
     assert(call("/channels/config/list", std::string(kMaxControlRequestBytes + 1, ' ')) ==
            flowsql::error::PAYLOAD_TOO_LARGE);
     assert(call("/channels/config/list", NestedJson(10000)) == flowsql::error::BAD_REQUEST);
-    assert(call("/channels/config/history", R"({"name":"rules","cursor":"01"})") ==
-           flowsql::error::BAD_REQUEST);
-    assert(call("/channels/config/publish",
-                R"({"name":"wire","expected_current_revision":0,"format":"json",)"
-                R"("schema_id":"wire-v1","content_base64":"e30="})") == flowsql::error::OK);
+    assert(call("/channels/config/history", R"({"name":"rules","cursor":"01"})") == flowsql::error::BAD_REQUEST);
+    assert(call("/channels/config/publish", R"({"name":"wire","expected_current_revision":0,"format":"json",)"
+                                            R"("schema_id":"wire-v1","content_base64":"e30="})") == flowsql::error::OK);
     reply.Parse(response.c_str());
     assert(!reply.HasParseError() && reply["revision"].GetUint64() == 1);
-    assert(call("/channels/config/publish",
-                R"({"name":"wire","expected_current_revision":0,"format":"json",)"
-                R"("schema_id":"wire-v1","content_base64":"e30="})") == flowsql::error::OK);
+    assert(call("/channels/config/publish", R"({"name":"wire","expected_current_revision":0,"format":"json",)"
+                                            R"("schema_id":"wire-v1","content_base64":"e30="})") == flowsql::error::OK);
     reply.Parse(response.c_str());
     assert(!reply["created_revision"].GetBool() && reply["revision"].GetUint64() == 1);
     assert(call("/channels/config/publish",
@@ -418,9 +426,8 @@ int main() {
                                             R"("schema_id":"wire-v1","content_base64":")" +
                                                 std::string(((kMaxContentBytes + 2) / 3) * 4, 'A') + R"("})") ==
            flowsql::error::PAYLOAD_TOO_LARGE);
-    assert(call("/channels/config/publish",
-                R"({"name":"bad","expected_current_revision":0,"format":"json",)"
-                R"("schema_id":"wire-v1","content_base64":"e30="})") == flowsql::error::OK);
+    assert(call("/channels/config/publish", R"({"name":"bad","expected_current_revision":0,"format":"json",)"
+                                            R"("schema_id":"wire-v1","content_base64":"e30="})") == flowsql::error::OK);
     assert(control.Unload() == 0);
 
     assert(unlink(path.c_str()) == 0);

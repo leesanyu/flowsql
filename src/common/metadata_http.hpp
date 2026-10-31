@@ -16,7 +16,8 @@
 namespace flowsql {
 inline constexpr const char* kMetadataDeadlineHeader = "X-FlowSQL-Metadata-Deadline-Ms";
 inline bool MetadataPath(const std::string& path) {
-    return path.find("/semantics/v1/channels/") != std::string::npos ||
+    return path.find("/semantics/v1/describe") != std::string::npos ||
+           path.find("/semantics/v1/channels/") != std::string::npos ||
            path.find("/dataset/describe") != std::string::npos;
 }
 inline int64_t MetadataNow() {

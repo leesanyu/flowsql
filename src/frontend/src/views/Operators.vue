@@ -76,7 +76,7 @@
           </div>
 
           <el-table v-if="operatorType !== 'cpp'" :data="filteredOperators" style="width: 100%" v-loading="loading">
-            <el-table-column prop="name" label="名称" width="250" />
+            <el-table-column prop="name" label="名称" width="250" show-overflow-tooltip />
             <el-table-column label="类别" width="150">
               <template #default="scope">
                 {{ scope.row.category }}
@@ -103,7 +103,7 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="320">
+            <el-table-column label="操作" width="320" fixed="right">
               <template #default="scope">
                 <template v-if="scope.row.active">
                   <div class="operator-action-group">
@@ -164,7 +164,7 @@
           </el-table>
 
           <el-table v-else :data="filteredOperators" style="width: 100%" v-loading="loading">
-            <el-table-column prop="plugin.so_file" label="插件名" min-width="180" />
+            <el-table-column prop="plugin.so_file" label="插件名" min-width="180" show-overflow-tooltip />
             <el-table-column prop="plugin.size_bytes" label="大小(bytes)" width="130" />
             <el-table-column label="状态" width="120">
               <template #default="scope">
@@ -192,7 +192,7 @@
                 <span v-else>-</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="300">
+            <el-table-column label="操作" width="300" fixed="right">
               <template #default="scope">
                 <template v-if="scope.row.plugin?.status === 'activated'">
                   <div class="operator-action-group">
@@ -402,13 +402,13 @@
               <span v-if="!Array.isArray(cppDetail.operators) || cppDetail.operators.length === 0">-</span>
             </div>
           </el-form-item>
-          <OperatorContractPanel v-if="componentContractName" :key="componentContractName" :full-name="componentContractName" />
+          <OperatorContractPanel v-if="componentContractName" :key="componentContractName" :full-name="componentContractName" declaration-mode="cpp" @maintain-declaration="triggerFileInput" />
           <el-form-item label="错误信息">
             <el-input :model-value="cppDetail.last_error || '-'" type="textarea" :rows="3" disabled />
           </el-form-item>
         </template>
         <template v-else>
-          <OperatorContractPanel v-if="detailDialogVisible" :key="detailForm.fullName" :full-name="detailForm.fullName" />
+          <OperatorContractPanel v-if="detailDialogVisible" :key="detailForm.fullName" :full-name="detailForm.fullName" :declaration-mode="detailForm.type" @maintain-declaration="openDetail(detailForm.fullName, 'edit')" />
           <p v-if="detailMode === 'edit'" data-testid="component-edit-basis">编辑依据：{{ detailForm.component_revision || 'unknown' }}。版本冲突会保留草稿，请核对当前版本后再编辑。</p>
           <p v-if="editError" role="alert" data-testid="operator-edit-error">{{ editError }}</p>
           <el-form-item v-if="showDetailMeta" label="算子名称">

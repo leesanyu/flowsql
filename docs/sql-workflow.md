@@ -10,7 +10,7 @@ Web「通道管理」「算子管理」提供当前部署的资源入口。API �
 
 | 对象 | 发现入口 | 如何判断 |
 | --- | --- | --- |
-| DataFrame / CSV | `GET /api/channels/list`，以及通道管理的 DataFrame 页 | 主要查询 DataFrame，失败时可回退本地记录，不能当作所有通道的实时清单。冷启动 CSV 可以未加载，rows/schema 未知不等于零行；首次实际读取才加载。 |
+| DataFrame / CSV | `GET /api/channels/dataframe` 查询实际 DataFrame 目录，以及通道管理的 DataFrame 页；旧 `/api/channels/list` 保留 | 旧入口失败时可回退本地记录，不能当作所有通道的实时清单。冷启动 CSV 可以未加载，rows/schema 未知不等于零行；首次实际读取才加载。 |
 | 数据库 | `POST /api/channels/database/query`，同前缀的 `tables`、`describe` | 连接名与表分别查。已保存配置不证明真实认证、读写权限或目标表就绪。 |
 | Stream / block 通道 | `POST /api/channels/stream/query` 与 `/api/channels/stream/definitions/query`，JSON body `{}` | 前者查实例，后者查可创建类型、选项、方向及提供时的 is_finite。PCAP、NetAdapter 和 Kafka block 通道出现在此管理入口，不因此使用 Stream 执行 API。 |
 | 算子 | `GET /api/operators/list?type=builtin`，type 分别为 builtin、python、cpp | 按类型查询；category.name 是 SQL 名称。三类响应结构可不同。active 只说明激活，仍需对应插件、来源和依赖可用。 |
@@ -23,6 +23,22 @@ NPM 需要同进程的 NPI、协议词典及来源插件；DNS/HTTP/TLS 还依�
 PCAP 当前可通过上传或 stream/add 创建并在实例查询中发现，未提供类型定义描述；定义清单不是所有插件的全集。
 通过 stream/add 创建 block 来源时显式填 `role=source`、`options` 对象；省略 role 的默认 both 不适用于只读来源。
 NetAdapter 配置保存不打开设备，但仍要求已加载所选后端 provider、合法网卡名称和足够缓冲预算。
+
+发现对象后，点击 DataFrame 名称、在数据库“浏览”中选定明确表，或打开 Kafka“详情”，即可查看和补充数据说明。
+数据库选表只读元数据，进入“数据预览”才读业务行。算子详情按组展示输入、参数、输出和必要上下文，
+可保存补充说明；Python 静态声明随源码维护，C++ 声明随所属插件更新。
+旧 `/semantics` 入口保留，日常路径无需先建标准/字典或手写绑定。
+通道说明以文本和必要单位为主，字段行可按需解释时间点/时长或配置精确关联；关联选择已知结构目标时只创建对象本地默认说明和精确绑定，不执行 SQL。
+时间及关联供预检和输出派生读取，关联不会生成 JOIN；未填写这些可选说明仍可按相应执行契约使用 SQL，具体操作见[通道与算子说明](data-semantics.md#在通道中查看和保存说明)。
+
+程序调用 `POST /api/semantics/v1/describe` 按通道 locator 或算子名取得相同内容。
+结构 pending 需先从通道入口显式加载；字段缺少说明时仍返回已知结构。
+需要判断本次输入时，显式调用 `POST /api/semantics/v1/operators/check`，再使用下文原任务入口执行 SQL。
+描述、预检和实际执行分别进行，说明已保存或结构匹配都不表示业务数据已验证。
+
+可直接使用[标准库对象说明客户端](../examples/metadata_description/client.py)：默认只读，
+增加 `--execute` 后才执行预检与 `builtin.passthrough` SQL，并读取结果的精确 use/dictionary 依据及必要上下文。
+准备输入、激活算子与选择新输出名的步骤见[通道与算子说明](data-semantics.md#普通客户端发现描述与显式执行)。
 
 ## 语句结构与结果出口
 

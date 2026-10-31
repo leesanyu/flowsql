@@ -78,25 +78,43 @@ int main(int argc, char** argv) {
         assert(host);
         for (const auto& fixture :
              {std::make_pair(FIXTURE_OUTPUT_PATH, "output.so"), std::make_pair(BASELINER_PATH, "baseliner.so")}) {
-            std::filesystem::copy_file(fixture.first, root + "/" + fixture.second);
-            std::string response;
-            assert(host->UploadCppPlugin(fixture.second, root + "/" + fixture.second, response) == 0);
-            dataset::Json uploaded;
-            uploaded.Parse(response.c_str());
-            assert(host->ActivateCppPlugin(dataset::Get(uploaded, "plugin_id"), response) == 0);
+            std::string response, plugin_id;
+            bool activated = false;
+            assert(host->ListCppPlugins(response) == 0);
+            dataset::Json installed;
+            installed.Parse(response.c_str());
+            for (const auto& item : installed["operators"].GetArray()) {
+                if (dataset::Get(item["plugin"], "so_file") == fixture.second) {
+                    plugin_id = dataset::Get(item, "plugin_id");
+                    activated = dataset::Get(item["plugin"], "status") == "activated";
+                }
+            }
+            if (plugin_id.empty()) {
+                std::filesystem::copy_file(fixture.first, root + "/" + fixture.second,
+                                           std::filesystem::copy_options::overwrite_existing);
+                assert(host->UploadCppPlugin(fixture.second, root + "/" + fixture.second, response) == 0);
+                dataset::Json uploaded;
+                uploaded.Parse(response.c_str());
+                plugin_id = dataset::Get(uploaded, "plugin_id");
+            }
+            if (!activated) assert(host->ActivateCppPlugin(plugin_id, response) == 0);
         }
         assert(catalog->SetActive("contractdemo", "output", true) == 0);
         assert(catalog->SetActive("explore", "baseliner", true) == 0);
     }
+    const bool fresh_database = !std::filesystem::exists(root + "/input.db");
     auto* databases = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
-    assert(databases && databases->AddChannel(("type=sqlite;name=example;path=" + root + "/input.db").c_str()) == 0);
+    assert(databases);
+    if (!databases->Get("sqlite", "example"))
+        assert(databases->AddChannel(("type=sqlite;name=example;path=" + root + "/input.db").c_str()) == 0);
     auto* database = databases->Get("sqlite", "example");
     assert(database);
     for (const char* table : {"one", "two"}) {
-        assert(database->ExecuteSql((std::string("CREATE TABLE ") + table +
+        assert(database->ExecuteSql((std::string("CREATE TABLE IF NOT EXISTS ") + table +
                                      "(bucket INTEGER,series TEXT,value REAL,total INTEGER,\"group\" INTEGER)")
                                         .c_str()) == 0);
-        assert(database->ExecuteSql((std::string("INSERT INTO ") + table + " VALUES(1,'a',2.5,4,1)").c_str()) >= 0);
+        if (fresh_database)
+            assert(database->ExecuteSql((std::string("INSERT INTO ") + table + " VALUES(1,'a',2.5,4,1)").c_str()) >= 0);
     }
     std::cout << "CONTRACT_HOST_READY" << std::endl;
     std::string line;
