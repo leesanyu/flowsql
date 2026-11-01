@@ -1,0 +1,477 @@
+{
+  "schema_id": "flowsql.operator-data-contract.v1",
+  "title": "网络报文分析",
+  "operator": {
+    "category": "npm",
+    "name": "basic",
+    "version": "1"
+  },
+  "description": "分析捕获的网络报文，按启用模块产生会话统计、性能指标和 DNS / HTTP / TLS / ICMP 事件。",
+  "configuration": {
+    "description": "features 选择分析模块，默认 basic；observing 选择一个具体实体作为主输出，例如 basic_ipv4 或 dns_transaction_ipv6。\nparameters 可传 V1 JSON 配置（schema_version=1，core 及各模块节点），只编码一次为字符串；使用它时不能同时填写旧调优参数。WITH 的所有值均为字符串。",
+    "invocation_schema": {
+      "type": "object",
+      "properties": {
+        "run_mode": {
+          "type": "string",
+          "description": "与 parameters 互斥；范围与默认值见对应的已解码配置资源。",
+          "enum": [
+            "offline",
+            "realtime"
+          ]
+        },
+        "result_mode": {
+          "type": "string",
+          "description": "与 parameters 互斥；范围与默认值见对应的已解码配置资源。",
+          "enum": [
+            "final",
+            "periodic_snapshot"
+          ]
+        },
+        "overload_policy": {
+          "type": "string",
+          "description": "与 parameters 互斥；范围与默认值见对应的已解码配置资源。",
+          "enum": [
+            "fail"
+          ]
+        },
+        "output_interval_ns": {
+          "type": "string",
+          "description": "与 parameters 互斥；范围与默认值见对应的已解码配置资源。"
+        },
+        "payload_sample_packets": {
+          "type": "string",
+          "description": "与 parameters 互斥；范围与默认值见对应的已解码配置资源。"
+        },
+        "tcp_idle_timeout_ns": {
+          "type": "string",
+          "description": "与 parameters 互斥；范围与默认值见对应的已解码配置资源。"
+        },
+        "udp_idle_timeout_ns": {
+          "type": "string",
+          "description": "与 parameters 互斥；范围与默认值见对应的已解码配置资源。"
+        },
+        "out_of_order_tolerance_ns": {
+          "type": "string",
+          "description": "与 parameters 互斥；范围与默认值见对应的已解码配置资源。"
+        },
+        "max_active_sessions": {
+          "type": "string",
+          "description": "与 parameters 互斥；范围与默认值见对应的已解码配置资源。"
+        },
+        "max_tracked_bytes": {
+          "type": "string",
+          "description": "与 parameters 互斥；范围与默认值见对应的已解码配置资源。"
+        },
+        "max_pending_output_bytes": {
+          "type": "string",
+          "description": "与 parameters 互斥；范围与默认值见对应的已解码配置资源。"
+        },
+        "session_max_tcp_ranges_per_direction": {
+          "type": "string",
+          "description": "与 parameters 互斥；范围与默认值见对应的已解码配置资源。"
+        },
+        "features": {
+          "type": "string",
+          "description": "逗号分隔的模块名；去除ASCII空白，拒绝重复/未知名；至少一个结果模块。labeling 本身不产生结果。",
+          "default": "basic"
+        },
+        "observing": {
+          "type": "string",
+          "description": "选中已启用模块的一个具体 IPv4/IPv6 实体；无托管输出时必填。有托管输出时可省略，此时主输出零列零行。"
+        },
+        "input_namespace": {
+          "type": "string",
+          "description": "输入命名空间；省略时取调用方的数据来源身份。"
+        },
+        "source_domains": {
+          "type": "string",
+          "description": "all 表示 observation_domain_id=source_id；显式映射格式 source_id:domain_id，以分号分隔，不接受重复source_id或未知来源。",
+          "default": "all"
+        },
+        "parameters": {
+          "type": "string",
+          "description": "V1 JSON对象编码一次为字符串；最多65536字节，最大嵌套深度64。",
+          "maxLength": 65536
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "parameters",
+              "run_mode"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parameters",
+              "result_mode"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parameters",
+              "overload_policy"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parameters",
+              "output_interval_ns"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parameters",
+              "payload_sample_packets"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parameters",
+              "tcp_idle_timeout_ns"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parameters",
+              "udp_idle_timeout_ns"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parameters",
+              "out_of_order_tolerance_ns"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parameters",
+              "max_active_sessions"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parameters",
+              "max_tracked_bytes"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parameters",
+              "max_pending_output_bytes"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parameters",
+              "session_max_tcp_ranges_per_direction"
+            ]
+          }
+        }
+      ]
+    },
+    "decoded_parameters": [
+      {
+        "key": "parameters",
+        "encoding": "json",
+        "schema_ref": "#/resources/parameters"
+      }
+    ],
+    "affects": {
+      "features": [
+        "#/outputs"
+      ],
+      "observing": [
+        "#/outputs/0"
+      ],
+      "parameters": [
+        "#/inputs",
+        "#/outputs",
+        "#/resources/module_parameters"
+      ]
+    }
+  },
+  "inputs": [
+    {
+      "port_id": "packets",
+      "min_count": 1,
+      "max_count": 1,
+      "shape": "record_batch",
+      "roles": [],
+      "description": "接受报文流，支持标准 Packet 批次、IPv4/IPv6 分族批次，以及 Capture V2 报文块与来源进度。\n输入须保留捕获时间、来源身份、原始报文长度及内容；普通业务表不能直接替代报文输入。来源是否有限及其时间推进能力会影响运行模式。",
+      "structure_ref": "#/resources/packet_inputs"
+    }
+  ],
+  "outputs": [
+    {
+      "port_id": "foreground",
+      "shape": "record_batch",
+      "mode": "configured",
+      "rules": [],
+      "description": "主输出为 observing 选中的一个实体，字段随实体及 IPv4/IPv6 改变；它只返回该实体。有托管目标且省略 observing 时，主输出为零列零行。",
+      "variants": [
+        {
+          "when": {
+            "all": [
+              {
+                "scope": "config",
+                "pointer": "/observing",
+                "exists": false
+              },
+              {
+                "scope": "execution_context",
+                "pointer": "/managed_output",
+                "equals": true
+              }
+            ]
+          },
+          "mode": "fixed",
+          "structure_ref": "#/resources/empty_foreground"
+        }
+      ]
+    },
+    {
+      "port_id": "managed_results",
+      "shape": "opaque",
+      "mode": "configured",
+      "rules": [],
+      "description": "配置托管目标时，保存所有已启用模块的 IPv4/IPv6 结果。各实体分别具有 history / latest / final 视图；累计快照不能直接相加。",
+      "availability": {
+        "scope": "execution_context",
+        "pointer": "/managed_output",
+        "equals": true
+      },
+      "structure_ref": "#/resources/managed_results"
+    }
+  ],
+  "resources": {
+    "packet_inputs": {
+      "description": "生产报文结构及来源能力",
+      "batch_structures": [],
+      "capture_v2": {
+        "interface": "ICaptureBlockStreamReaderV1",
+        "data": "raw packet blocks with capture timestamp, source_id, link type, captured and original length",
+        "source_identity": "capture source set / queue identity; source_domains maps source_id to observation_domain_id",
+        "progress": "confirmed capture progress and source backlog/idle facts; a poll timeout is not event-time progress"
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "enum": [
+            1
+          ]
+        },
+        "core": {
+          "$ref": "#/resources/core_parameters"
+        }
+      },
+      "additionalProperties": {
+        "type": "object"
+      },
+      "required": [
+        "schema_version"
+      ],
+      "not": {
+        "required": [
+          "framework"
+        ]
+      },
+      "description": "core 总是由框架消费；其余顶层模块节点必须为对象。仅启用的消费者检查其模块内部字段；未启用模块的对象保持未消费，不提前拒绝其内容。各模块有效规则见 resources.module_parameters；模块间依赖由生产准备流程验证。"
+    },
+    "core_parameters": {
+      "type": "object",
+      "properties": {
+        "run_mode": {
+          "type": "string",
+          "enum": [
+            "offline",
+            "realtime"
+          ],
+          "description": "省略时由有限或持续来源的时间能力决定。"
+        },
+        "result_mode": {
+          "type": "string",
+          "enum": [
+            "final",
+            "periodic_snapshot"
+          ],
+          "default": "periodic_snapshot"
+        },
+        "overload_policy": {
+          "type": "string",
+          "enum": [
+            "fail"
+          ],
+          "default": "fail"
+        },
+        "labeling": {
+          "description": "仅启用labeling时消费：精确config引用，必须存在且提供标签规则。"
+        },
+        "labeling_memory_mib": {
+          "description": "仅启用labeling时消费：8..256 MiB，默认64；max_tracked_bytes至少为其两倍。"
+        },
+        "result": {
+          "type": "object",
+          "properties": {
+            "retention_days": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3650
+            }
+          },
+          "additionalProperties": false
+        },
+        "tcp_stream": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "module_parameters": {
+      "basic": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "session": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "dns": {
+        "type": "object",
+        "properties": {
+          "primary_label_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "primary_label_ids"
+        ]
+      },
+      "http1": {
+        "type": "object",
+        "properties": {
+          "primary_label_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "primary_label_ids"
+        ]
+      },
+      "tls": {
+        "type": "object",
+        "properties": {
+          "primary_label_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "primary_label_ids"
+        ]
+      },
+      "icmp": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "managed_results": {
+      "description": "所有启用实体分别路由；不作为多个主输出端口。",
+      "entities": []
+    },
+    "output_selection": {
+      "description": "variants 按解析后的 normalized_config.observing 选择；缺少有效配置时通用静态检查保持未确定，实际Open始终使用生产解析器校验。",
+      "raw_parameter": "observing",
+      "normalized_config_pointer": "/observing",
+      "no_observing": "只允许托管输出；主输出零列零行"
+    },
+    "empty_foreground": {
+      "fields": [],
+      "description": "托管输出且省略observing：主输出零列零行。"
+    },
+    "result_semantics": {
+      "scope": "single_capture_observed_packets；A/B为规范化方向，不自动等于客户端/服务端；缺失值不能解释为0。",
+      "identity": "Basic/Session由任务run、输入命名空间、观测域与session_id识别；协议实例使用各自entity_instance_id，不能把协议行数当作连接数或包数。",
+      "revisions": "revision为实例的递增修订；is_final只表示生命周期结束，不能推断协议成功。history保存修订，latest为最新修订，final为终态。",
+      "period": "Basic周期按捕获时间UTC epoch对齐的[k*P,(k+1)*P)；安全水位确认跨越右边界才完整。final模式周期字段为NULL。period_complete与is_final分别判断。",
+      "cumulative": "packets_*和wire_bytes_*截至周期边界的会话累计；wire字节计数来自wire_len，包含重传，单位byte。不能跨revision求和；interval_*是非重叠周期增量。",
+      "session_rates": "duration_ns=last_ns-first_ns；bps=bytes*8*1000000000/duration_ns，为累计平均bit/s，不是最近周期速率。时长不足/证据不足用状态及NULL表达。",
+      "tcp": "握手、RTT、重传由可见TCP报文和可判定的序列/ACK证据产生；测量状态和measurement_flags必须与数值一起读，不输出网络丢包率。",
+      "protocols": "DNS为UDP/TCP事务；HTTP仅明文HTTP/1；TLS仅可见初始协商，ServerHello不代表完整成功；ICMP/ICMPv6控制消息不强制归入端口会话。",
+      "time": "所有timestamp/时长为纳秒；observed_at为观察/交付参考时间，不替代first_ns/last_ns、周期边界或协议请求/响应的捕获时间。"
+    }
+  },
+  "limitations": [
+    "支持 basic、session、dns、http1、tls、icmp 结果模块及 labeling；features 至少包含一个结果模块，observing 必须属于已启用模块。",
+    "DNS、HTTP/1、TLS 需要 labeling 和明确的 primary_label_ids；HTTP/1、TLS 以及 DNS 的 TCP 分析依赖共享 TCP 流能力。缺少依赖时失败，不自动启用模块。",
+    "有限来源使用离线推进；持续来源要求 realtime 时间能力、来源进度与积压/空闲确认，并必须提供托管结果目标。普通轮询超时不能视作事件时间推进。",
+    "时间戳和时长单位为纳秒；IP家族分别声明。IPv4使用uint32，IPv6使用16字节固定二进制；统计仅描述单点捕获到的报文，不等同于完整链路真相。",
+    "basic/session 为累计修订，按任务run、实体、身份列与revision解释；协议实体为事件结果。basic 的累计范围为 session_until_period_boundary，interval_* 为不重叠周期，累计快照禁止直接SUM。",
+    "正常EOF或Stop可产生终态；Cancel或失败不伪造正常终态。nullable 表示物理可空，协议状态、完整性与缺失原因仍需一同解释。",
+    "parameters 与12个旧调优字段互斥；最大65536字节/64层，拒绝重复键。只校验已启用消费者的模块内部配置，不能把未消费模块误判为有效业务配置。",
+    "托管结果的 history 保留修订，latest 取最新修订，final 取终态；无observing时不允许结果WHERE或字段投影。"
+  ],
+  "examples": [
+    "SELECT * FROM pcapfile.capture USING npm.basic WITH features = 'basic', observing = 'basic_ipv4'\n-- 前提：pcapfile.capture 为已配置的有限报文来源。",
+    "SELECT * FROM pcapfile.capture USING npm.basic WITH features = 'basic,session', observing = 'session_ipv6', parameters = '{\"schema_version\":1,\"core\":{\"result_mode\":\"final\"}}'\n-- 前提：来源包含IPv6报文；启用模块决定结果集合，observing只选择主输出。"
+  ]
+}

@@ -523,6 +523,12 @@
       "location": "native",
       "resources": []
     },
+    "test_chisquare_contract_audit": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
     "test_operator_contract_registration": {
       "services": [],
       "role": "source",
@@ -690,6 +696,12 @@
         "semantics_http",
         "visualization_browser"
       ]
+    },
+    "test_npm_data_contract": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
     }
   }
 }

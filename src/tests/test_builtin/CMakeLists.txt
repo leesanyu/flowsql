@@ -64,8 +64,8 @@ add_test(NAME test_builtin COMMAND ${CMAKE_BINARY_DIR}/output/test_builtin)
 
 add_executable(test_operator_contract_registration test_operator_contract_registration.cpp)
 target_include_directories(test_operator_contract_registration PRIVATE ${CMAKE_SOURCE_DIR})
-add_thirddepen(test_operator_contract_registration rapidjson)
-target_link_libraries(test_operator_contract_registration OpenSSL::Crypto ${CMAKE_DL_LIBS})
+add_thirddepen(test_operator_contract_registration rapidjson arrow)
+target_link_libraries(test_operator_contract_registration flowsql_common OpenSSL::Crypto ${CMAKE_DL_LIBS})
 target_compile_options(test_operator_contract_registration PRIVATE -UNDEBUG)
 target_compile_definitions(test_operator_contract_registration PRIVATE
     FLOWSQL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}/.."

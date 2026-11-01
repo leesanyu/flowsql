@@ -32,6 +32,7 @@
 | [x] | 通道与算子说明管理 (`metadata-description-query`) | P1 | 让使用者在具体通道实例上直接查看和补充数据说明、在具体算子上查看契约和维护调用说明，未来模型通过同一结构化接口发现对象并正确调用；移除独立“标准与字典”主导航，系统处理内部字典与绑定，复用已有执行契约和版本依据，使日常使用无需建立标准或手填内部身份。 | [规格](archive/feat-metadata-description-query.md) |
 | [x] | 通道说明配置重构与精简 (`channel-description-refinement`) | P1 | 让维护数据库表、DataFrame 和结构化 Kafka 通道说明的用户，以紧凑字段表填写说明、必要单位、时间解释和可选关联，消除高级状态与来源表单的填写负担；系统维护内部映射并保留既有语义与精确版本，使未来程序和模型能读取明确的时间与关联信息，暂不包含复杂指标自动计算。 | [规格](archive/feat-channel-description-refinement.md) |
 | [x] | 通道说明默认初始化 (`channel-description-default-initialization`) | P1 | 让配置通道字段关联的用户直接选择已知结构目标，系统建立默认说明并提供精确目标字段；已有关联优先展示管理列表，字段设置和辅助说明分别对齐，减少页面切换及误操作。 | [规格](archive/feat-channel-description-default-initialization.md) |
+| [x] | 算子契约说明重构与精简 (`operator-description-refinement`) | P1 | 让 Python、内置及 C++ 算子的使用者和未来模型依据与真实实现核对后的契约，通过同一精简接口理解用途、输入、参数、输出、限制与示例，并在简洁页面直接维护说明；纠正有证据的声明错误，完整机器契约与本地文字分别保存，复杂规则按需读取、未知保持明确，Python 源码在前、契约入口在后，本次重构不要求向后兼容。 | [规格](archive/feat-operator-description-refinement.md) |
 
 ---
 

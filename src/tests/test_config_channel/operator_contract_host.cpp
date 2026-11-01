@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
     const bool provider = argc == 6 || local;
     std::vector<std::string> options{"host=127.0.0.1;port=" + std::string(argv[2]),
                                      "host=127.0.0.1;port=" + std::string(argv[3]) + ";gateway=" + gateway,
-                                     "db_path=" + root + "/config.db",
+                                     "db_path=" + root + "/config.db;gateway=" + gateway,
                                      "",
                                      "data_dir=" + root + "/frames;operator_db_path=" + root + "/catalog.db",
                                      "operator_db_path=" + root + "/catalog.db;upload_dir=" + root + "/uploads",
@@ -49,13 +49,17 @@ int main(int argc, char** argv) {
                                          ";db_path=" + root + "/web.db;upload_dir=" + root + "/uploads"};
     options[7] = "config_file=" + root + "/database.yml";
     options[11] += ";worker_host=127.0.0.1;worker_port=" + std::string(argv[5]);
+    dataset::Json npi(rapidjson::kObjectType);
+    dataset::Set(npi, "ldfile", NPI_PROTOCOLS_PATH, npi.GetAllocator());
+    options.push_back(dataset::Encode(npi));
     const char* libraries[]{"libflowsql_gateway.so",   "libflowsql_router.so",   "libflowsql_config_channel.so",
                             "libflowsql_builtin.so",   "libflowsql_catalog.so",  "libflowsql_binaddon.so",
                             "libflowsql_bridge.so",    "libflowsql_database.so", "libflowsql_baseline.so",
-                            "libflowsql_scheduler.so", "libflowsql_task.so",     "libflowsql_web.so"};
+                            "libflowsql_scheduler.so", "libflowsql_task.so",     "libflowsql_web.so",
+                            "libflowsql_npi.so"};
     std::vector<const char*> selected, pointers;
     for (size_t i = 0; i < options.size(); ++i) {
-        if ((!provider && i == 2) || (local && (i < 2 || i == 6 || i == 10 || i == 11))) continue;
+        if ((!provider && (i == 2 || i == 12)) || (local && (i < 2 || i == 6 || i == 10 || i == 11))) continue;
         selected.push_back(libraries[i]);
         pointers.push_back(options[i].c_str());
     }
@@ -77,7 +81,8 @@ int main(int argc, char** argv) {
         auto* host = static_cast<IBinAddonHost*>(loader->First(IID_BINADDON_HOST));
         assert(host);
         for (const auto& fixture :
-             {std::make_pair(FIXTURE_OUTPUT_PATH, "output.so"), std::make_pair(BASELINER_PATH, "baseliner.so")}) {
+             {std::make_pair(FIXTURE_OUTPUT_PATH, "output.so"), std::make_pair(BASELINER_PATH, "baseliner.so"),
+              std::make_pair(NPM_PATH, "npm.so")}) {
             std::string response, plugin_id;
             bool activated = false;
             assert(host->ListCppPlugins(response) == 0);
@@ -101,6 +106,7 @@ int main(int argc, char** argv) {
         }
         assert(catalog->SetActive("contractdemo", "output", true) == 0);
         assert(catalog->SetActive("explore", "baseliner", true) == 0);
+        assert(catalog->SetActive("npm", "basic", true) == 0);
     }
     const bool fresh_database = !std::filesystem::exists(root + "/input.db");
     auto* databases = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));

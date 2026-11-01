@@ -1,5 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
+#include <arrow/api.h>
+#include <framework/core/dataframe_channel.h>
+#include <framework/interfaces/ibuiltin_registry.h>
 #include <framework/interfaces/ioperator_catalog.h>
 #include <framework/interfaces/ioperator_contract_catalog.h>
 #include <unistd.h>
@@ -39,6 +42,63 @@ std::string Contract() {
     Set(doc["operator"], "name", "copy", doc.GetAllocator());
     return Encode(doc);
 }
+void VerifyPassthrough(Runtime& runtime) {
+    auto* registry = static_cast<IBuiltinRegistry*>(runtime.loader->First(IID_BUILTIN_REGISTRY));
+    assert(registry);
+    std::unique_ptr<IOperator> op(registry->CreateBuiltinOperator("builtin", "passthrough"));
+    auto* identity = dynamic_cast<IOperatorContractIdentityV1*>(op.get());
+    assert(identity && op->Category() == "builtin" && op->Name() == "passthrough");
+    const auto component = identity->ContractIdentity();
+    assert(component.contract_state == "declared" && component.component_revision.size() == 64);
+    Json request(rapidjson::kObjectType), response;
+    Set(request, "exact_reference", component.contract_ref, request.GetAllocator());
+    DataSemanticsErrorV1 error;
+    assert(contracts::Control(runtime.loader, "resolve", request, &response, &error) == 0);
+    const auto& schema = response["data"]["document"]["configuration"]["invocation_schema"];
+    assert(schema.HasMember("properties"));
+    assert(schema["properties"]["force_fail"]["type"] == "string");
+    assert(schema["properties"]["force_fail"]["default"] == "false");
+    assert(schema["properties"]["delay_ms"]["type"] == "string");
+    assert(schema["properties"]["delay_ms"]["default"] == "0");
+    assert(schema["additionalProperties"].IsTrue());
+
+    arrow::Int32Builder values;
+    assert(values.Append(7).ok() && values.AppendNull().ok());
+    auto original = arrow::RecordBatch::Make(arrow::schema({arrow::field("sample", arrow::int32(), true)}), 2,
+                                             {values.Finish().ValueOrDie()});
+    DataFrame frame;
+    frame.FromArrow(original);
+    DataFrameChannel input("dataframe", "input"), output("dataframe", "output");
+    assert(input.Open() == 0 && output.Open() == 0 && input.Write(&frame) == 0);
+    auto copy = [&] {
+        // A null second input proves that only the first one is consumed.
+        IChannel* inputs[]{&input, nullptr};
+        assert(op->Work(Span<IChannel*>(inputs, 2), &output) == 0);
+        DataFrame actual;
+        assert(output.Read(&actual) == 0 && actual.ToArrow()->Equals(*original, true));
+        assert(input.Read(&actual) == 0 && actual.ToArrow()->Equals(*original, true));
+    };
+    copy();  // Actual instance defaults agree with the declared defaults.
+    for (const char* enabled : {"1", "true"}) {
+        assert(op->Configure("force_fail", enabled) == 0);
+        assert(op->Work(&input, &output) != 0);
+        assert(op->Configure("force_fail", "false") == 0);
+        copy();
+    }
+    for (const char* disabled : {"0", "", "TRUE", "other"}) {
+        assert(op->Configure("force_fail", disabled) == 0);
+        copy();
+    }
+    for (const char* delay : {"-1", "0", "invalid", ""}) {
+        assert(op->Configure("delay_ms", delay) == 0);
+        copy();
+    }
+    assert(op->Configure("unknown", "ignored") == 0);
+    copy();
+    assert(op->Work(Span<IChannel*>(), &output) != 0);
+    std::cout << "PASS: published passthrough identity/defaults, real string configuration, first-input copy, "
+                 "Arrow type/NULL preservation and forced failure/recovery\n";
+}
 }  // namespace
 int main() {
     char path[] = "/tmp/flowsql_contract_registration_XXXXXX";
@@ -46,6 +106,7 @@ int main() {
     OperatorComponentContractV1 held;
     {
         Runtime runtime(path);
+        VerifyPassthrough(runtime);
         auto* catalog =
             static_cast<IOperatorContractCatalogV1*>(runtime.loader->First(IID_OPERATOR_CONTRACT_CATALOG_V1));
         assert(catalog);

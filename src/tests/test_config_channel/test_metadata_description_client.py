@@ -12,7 +12,7 @@ from test_metadata_description_api import describe, call
 
 
 def main():
-    evidence = ROOT / "evidence/channel-description-refinement/t5-workflow"
+    evidence = ROOT / "evidence/operator-description-refinement/flat-fields/client-workflow"
     evidence.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="flowsql-description-client-") as temporary:
         with running_contract_host(Path(sys.argv[1]).resolve(), Path(temporary)) as (base, _, log):

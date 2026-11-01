@@ -1,11 +1,14 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 #include <channels/config/metadata_description.h>
+#include <rapidjson/pointer.h>
 #include <unistd.h>
 #include <atomic>
 #include <cassert>
 #include <common/channel_dataset.hpp>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <thread>
 using namespace flowsql;
 using namespace flowsql::dataset;
@@ -375,7 +378,139 @@ void TestRelationEditor() {
     unlink(file);
 }
 
+void TestUsage() {
+    auto read = [](const std::string& name) {
+        std::ifstream file(std::string(FLOWSQL_SOURCE_ROOT) + "/" + name);
+        assert(file);
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        Json d;
+        d.Parse(buffer.str().c_str());
+        assert(!d.HasParseError());
+        return d;
+    };
+    char file[] = "/tmp/flowsql-usage-XXXXXX";
+    close(mkstemp(file));
+    DataSemanticsRegistry registry;
+    ConfigChannelProvider configs;
+    DataSemanticsErrorV1 e;
+    std::string detail;
+    assert(!registry.Open(file, &e) && !configs.Open(file, &detail));
+    auto cases = read("config/semantics/examples/operator-usage.json");
+    for (const auto& item : cases["cases"].GetArray()) {
+        if (Get(item, "name") == "chisquare") continue;  // Actual Python publication is exercised over HTTP.
+        auto document = read(Get(item, "contract_source"));
+        SemanticsSaveResult saved;
+        const auto name = Get(document["operator"], "category") + "." + Get(document["operator"], "name");
+        assert(!registry.Save({"operator_contract", name, Encode(document)}, &saved, &e));
+        OperatorComponentContractV1 association{Get(document["operator"], "category"),
+                                                Get(document["operator"], "name"),
+                                                "component-one",
+                                                "1",
+                                                saved.snapshot.exact_reference,
+                                                "declared"};
+        bool changed = false, slow = false;
+        int calls = 0;
+        MetadataDescriptionService service(registry, configs, {}, [&](const auto&, auto ms, auto* out, auto*) {
+            assert(ms > 0);
+            *out = association;
+            if (++calls % 2 == 0) {
+                if (changed) out->contract_ref = "operator_contract.changed@1";
+                if (slow) std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            }
+            return 0;
+        });
+        Json req(rapidjson::kObjectType);
+        req.AddMember("target", Copy(item["request"]["target"], req.GetAllocator()), req.GetAllocator());
+        std::string response;
+        assert(!service.Describe(Encode(req).c_str(), &response));
+        Json result;
+        result.Parse(response.c_str());
+        const auto& data = result["data"];
+        const auto& actual = data["usage"];
+        const auto& expected = item["response"]["data"]["usage"];
+        assert(actual["identity"] == expected["identity"]);
+        assert(actual["inputs"] == expected["inputs"]);
+        auto same_named_items = [](const Value& actual_items, const Value& expected_items) {
+            assert(actual_items.Size() == expected_items.Size());
+            for (const auto& wanted : expected_items.GetArray()) {
+                const Value* found = nullptr;
+                for (const auto& candidate : actual_items.GetArray())
+                    if (Get(candidate, "name") == Get(wanted, "name")) {
+                        assert(!found);
+                        found = &candidate;
+                    }
+                assert(found && *found == wanted);
+            }
+        };
+        same_named_items(actual["parameters"]["items"], expected["parameters"]["items"]);
+        assert(actual["parameters"]["additional_parameters"] == expected["parameters"]["additional_parameters"]);
+        assert(actual["outputs"].Size() == expected["outputs"].Size());
+        for (rapidjson::SizeType i = 0; i < actual["outputs"].Size(); ++i) {
+            const auto& output = actual["outputs"][i];
+            const auto& wanted = expected["outputs"][i];
+            for (const auto* key :
+                 {"port_id", "shape", "mode", "fields_state", "row_cases", "availability", "context_semantics"})
+                if (wanted.HasMember(key)) assert(output[key] == wanted[key]);
+            if (!wanted["fields"].Empty() && Get(wanted["fields"][0], "format") == "json_schema")
+                same_named_items(output["fields"], wanted["fields"]);
+            else
+                assert(output["fields"] == wanted["fields"]);
+        }
+        for (const auto& d : data["details"].GetArray()) {
+            assert(Get(d, "exact_reference") == saved.snapshot.exact_reference);
+            rapidjson::Pointer pointer(Get(d, "resource_pointer").c_str());
+            assert(pointer.IsValid() && pointer.Get(document));
+        }
+        assert(!data.HasMember("contract") && !data.HasMember("context"));
+        Set(req, "view", "usage", req.GetAllocator());
+        std::string explicit_usage;
+        assert(!service.Describe(Encode(req).c_str(), &explicit_usage) && explicit_usage == response);
+        Set(req, "view", "full", req.GetAllocator());
+        assert(!service.Describe(Encode(req).c_str(), &response));
+        result.Parse(response.c_str());
+        assert(result["data"]["contract"]["document"] == document);
+        Set(req, "view", "usage", req.GetAllocator());
+        changed = true;
+        calls = 0;
+        assert(service.Describe(Encode(req).c_str(), &response) == error::CONFLICT);
+        changed = false;
+        slow = true;
+        calls = 0;
+        req.AddMember("timeout_ms", 100, req.GetAllocator());
+        assert(service.Describe(Encode(req).c_str(), &response) == error::TIMEOUT);
+        if (name == "builtin.passthrough") {
+            // These accepted, operator-owned resource shapes are metadata fixtures, not algorithm declarations.
+            slow = false;
+            req.RemoveMember("timeout_ms");
+            uint64_t revision = 1;
+            for (const auto& shape : std::vector<std::pair<const char*, const char*>>{
+                     {R"({"result":{"fields":"operator-specific mapping"}})", "unknown"},
+                     {R"({"result":{"properties":{"value":{"type":"number"}}}})", "dynamic"}}) {
+                Json resource;
+                resource.Parse(shape.first);
+                Set(document, "resources", Copy(resource, document.GetAllocator()), document.GetAllocator());
+                auto& output = document["outputs"][0];
+                Set(output, "structure_ref", "#/resources/result", document.GetAllocator());
+                output["rules"].SetArray();
+                SemanticsSaveRequest update{"operator_contract", name, Encode(document)};
+                update.expected_current_revision = revision++;
+                assert(!registry.Save(update, &saved, &e));
+                association.contract_ref = saved.snapshot.exact_reference;
+                assert(!service.Describe(Encode(req).c_str(), &response));
+                result.Parse(response.c_str());
+                assert(Get(result["data"]["usage"]["outputs"][0], "fields_state") == shape.second);
+                assert(!result["data"]["details"].Empty());
+                if (std::string(shape.second) == "unknown") assert(!result["data"]["gaps"].Empty());
+            }
+        }
+    }
+    registry.Close();
+    configs.Close();
+    unlink(file);
+}
 int main() {
+    TestUsage();
     TestEditor();
     TestTimeEditor();
     TestRelationEditor();
@@ -594,8 +729,22 @@ int main() {
         if (replace_component && lookups % 2 == 0) out->component_revision = "component-two";
         return 0;
     });
-    const char* op = R"({"target":{"kind":"operator","name":"test.operator"}})";
+    const char* op = R"({"target":{"kind":"operator","name":"test.operator"},"view":"full"})";
     std::string response;
+    assert(!operators.Describe(R"({"target":{"kind":"operator","name":"test.operator"}})", &response));
+    Json usage;
+    usage.Parse(response.c_str());
+    assert(Get(usage["data"], "view") == "usage");
+    assert(Get(usage["data"], "contract_state") == "missing");
+    assert(usage["data"]["usage"].MemberCount() == 7 && !usage["data"]["gaps"].Empty());
+    for (const auto* key : {"inputs", "parameters", "outputs"})
+        assert(usage["data"]["usage"]["annotations"][key].IsArray() &&
+               usage["data"]["usage"]["annotations"][key].Empty());
+    assert(!usage["data"].HasMember("contract") && !usage["data"].HasMember("context"));
+    for (const char* invalid :
+         {R"({"target":{"kind":"operator","name":"test.operator"},"view":"other"})",
+          R"({"target":{"kind":"channel","locator":{"kind":"dataframe","name":"input"}},"view":"usage"})"})
+        assert(operators.Describe(invalid, &response) == error::BAD_REQUEST);
     assert(!operators.Describe(op, &response));
     Json result;
     result.Parse(response.c_str());
@@ -612,6 +761,8 @@ int main() {
         Set(notes, "purpose", purpose, a);
         Set(notes, "usage_notes", "test notes", a);
         notes.AddMember("examples", Value(rapidjson::kArrayType), a);
+        for (const auto* key : {"inputs", "parameters", "outputs"})
+            notes.AddMember(Value(key, a), Value(rapidjson::kArrayType), a);
         request.AddMember("notes", notes, a);
         const int rc = operators.SaveOperator(Encode(request).c_str(), &response);
         if (rc != status) std::cerr << response << '\n';

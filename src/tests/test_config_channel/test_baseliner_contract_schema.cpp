@@ -1,7 +1,10 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
+#include <arrow/api.h>
 #include <channels/config/operator_data_contract_model.h>
 #include <operators/baseliner/baseliner_contract.h>
+#include <operators/baseliner/result_codec.h>
+#include <rapidjson/pointer.h>
 #include <cassert>
 #include <common/channel_dataset.hpp>
 #include <fstream>
@@ -17,6 +20,96 @@ Json Read(const char* relative) {
     document.Parse(text.c_str());
     assert(!document.HasParseError());
     return document;
+}
+size_t CheckDefaults(const Value& schema, const Value* supplied, const Value& effective, const Json& contract) {
+    if (!schema.IsObject()) return 0;
+    if (schema.HasMember("$ref")) {
+        const auto ref = Get(schema, "$ref");
+        const auto* resolved = rapidjson::Pointer(ref.substr(1).c_str()).Get(contract);
+        assert(resolved);
+        return CheckDefaults(*resolved, supplied, effective, contract);
+    }
+    size_t checked = 0;
+    if (schema.HasMember("oneOf")) {
+        size_t matches = 0;
+        for (const auto& branch : schema["oneOf"].GetArray()) {
+            DataSemanticsErrorV1 error;
+            if (ValidateOperatorConfiguration(branch, effective, contract, &error) == 0) {
+                ++matches;
+                checked += CheckDefaults(branch, supplied, effective, contract);
+            }
+        }
+        assert(matches == 1);
+    }
+    if (effective.IsObject() && schema.HasMember("properties")) {
+        for (const auto& property : schema["properties"].GetObject()) {
+            const auto* original = supplied && supplied->IsObject() && supplied->HasMember(property.name)
+                                       ? &(*supplied)[property.name]
+                                       : nullptr;
+            if (!effective.HasMember(property.name)) continue;
+            const auto& actual = effective[property.name];
+            if (!original && property.value.IsObject() && property.value.HasMember("default")) {
+                if (actual != property.value["default"]) std::cerr << "Default mismatch: " << Text(property.name);
+                assert(actual == property.value["default"]);
+                ++checked;
+            }
+            checked += CheckDefaults(property.value, original, actual, contract);
+        }
+    }
+    if (effective.IsArray() && schema.HasMember("items")) {
+        for (rapidjson::SizeType i = 0; i < effective.Size(); ++i) {
+            const auto* original = supplied && supplied->IsArray() && i < supplied->Size() ? &(*supplied)[i] : nullptr;
+            checked += CheckDefaults(schema["items"], original, effective[i], contract);
+        }
+    }
+    return checked;
+}
+void CheckOutputs(const Json& contract, const baseliner::ConfigSnapshot& config) {
+    using namespace baseliner;
+    for (const auto& entry : {std::make_pair("results", SchemaKind::kResults),
+                              std::make_pair("model_parameters", SchemaKind::kModelParameters),
+                              std::make_pair("relation_fusion", SchemaKind::kRelationFusion),
+                              std::make_pair("maintenance", SchemaKind::kMaintenance)}) {
+        const auto actual = MakeSchema(entry.second);
+        const auto resource = std::string(entry.first) + "_structure";
+        const auto& fields = contract["resources"][resource.c_str()]["fields"];
+        assert(fields.Size() == actual->num_fields());
+        for (rapidjson::SizeType i = 0; i < fields.Size(); ++i) {
+            assert(Get(fields[i], "name") == actual->field(i)->name());
+            assert(Get(fields[i]["type"], "name") == actual->field(i)->type()->ToString());
+            assert(fields[i]["type"]["parameters"].ObjectEmpty());
+            assert(fields[i]["nullable"].GetBool() == actual->field(i)->nullable());
+        }
+    }
+    EvaluationRow evaluation;
+    evaluation.values.status = BaselineStatus::kNotTrained;
+    evaluation.values.observed = 42.0;
+    evaluation.values.target_bucket = evaluation.values.issued_after_bucket = 10;
+    evaluation.unit = "value";
+    EvaluationRow forecast = evaluation;
+    forecast.values.forecast = true;
+    forecast.values.target_bucket = 11;
+    forecast.values.observed.reset();
+    forecast.values.can_alert.reset();
+    std::shared_ptr<arrow::RecordBatch> batch;
+    std::string error;
+    assert(EncodeResults(config, {evaluation, forecast}, 1 << 20, &batch, &error) == 0);
+    auto kinds = std::static_pointer_cast<arrow::StringArray>(batch->GetColumnByName("result_kind"));
+    assert(kinds->GetString(0) == "evaluation" && kinds->GetString(1) == "forecast");
+    auto observed = std::static_pointer_cast<arrow::DoubleArray>(batch->GetColumnByName("observed"));
+    assert(observed->Value(0) == 42.0 && observed->IsNull(1));
+    for (const char* band : {"expected", "lower", "upper"}) assert(batch->GetColumnByName(band)->IsNull(0));
+    const auto& rules = contract["outputs"][0]["row_cases"][1]["field_rules"];
+    for (const char* name : {"observed", "confidence", "maturity", "score", "is_outside_band", "can_score",
+                             "can_update", "update_weight", "can_alert"}) {
+        assert(batch->GetColumnByName(name)->IsNull(1));
+        assert(rules.HasMember(name) && rules[name]["must_be_null"].IsTrue());
+    }
+    ModelParametersRow cold;
+    cold.parameters.status = BaselineStatus::kNotTrained;
+    assert(EncodeModelParameters(config, {cold}, 1 << 20, &batch, &error) == 0);
+    assert(batch->GetColumnByName("parameters_json")->IsNull(0));
+    assert(contract["outputs"][1]["row_cases"][0]["field_rules"]["parameters_json"]["must_be_null"].IsTrue());
 }
 int main() {
     auto contract = Read("/config/semantics/examples/operator-contract-baseliner.json");
@@ -50,6 +143,8 @@ int main() {
         assert(effective["state_policy"]["max_runtime_identities"].GetUint() == 1024);
         assert(effective["persistence"]["renew_ms"].GetUint() == 10000);
         assert(effective["datasets"][0]["metrics"][0]["null_policy"] == "fail");
+        assert(CheckDefaults(contract["resources"]["task_config"], &normalized, effective, contract) >= 20);
+        CheckOutputs(contract, production);
         baseliner::ConfigSnapshot roundtrip;
         const auto status = baseliner::ParseConfig(effective_text, &roundtrip);
         if (!status.ok()) std::cerr << status.path << " " << status.message << '\n';

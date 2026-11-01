@@ -1,198 +1,243 @@
 <template>
   <section class="operator-contract" data-testid="operator-contract">
-    <h3>输入输出契约</h3>
+    <header>
+      <div class="identity"><h3>{{ fullName }}</h3><p v-if="usage?.identity.title && usage.identity.title !== fullName">{{ usage.identity.title }}</p></div>
+      <div class="toolbar">
+        <button type="button" class="primary" :disabled="busy || !!historical || !notesBasis" @click="saveNotes">保存说明</button>
+        <button type="button" class="refresh" :disabled="busy" @click="refresh">刷新</button>
+      </div>
+    </header>
     <p v-if="error" role="alert" data-testid="contract-error">{{ error }}</p>
-    <p>声明状态：<strong>{{ component.contract_state || '加载中' }}</strong>；作者版本：{{ component.operator_version || 'unknown' }}</p>
-    <p class="identity">实际组件：{{ component.component_revision || 'unknown' }}</p>
-    <p v-if="component.contract_state === 'missing'">该历史算子未声明契约，仍可按原入口使用；兼容性保持未确定。</p>
-    <p v-if="component.contract_state === 'unavailable'">已声明的契约暂不可用，执行会报告错误。</p>
-    <label v-if="versions.length">契约精确版本
-      <select v-model="selectedReference" aria-label="契约精确版本" @change="readDefinition">
-        <option v-for="version in versions" :key="version" :value="version">{{ version }}</option>
-      </select>
-    </label>
-    <p v-if="selectedReference && selectedReference !== component.contract_ref">正在查看历史声明。预检会重新取得当前组件及其关联版本。</p>
-    <section class="notes" data-testid="operator-description">
-      <h4>补充说明</h4><p>当前组件的本地文字说明；保存不会改变执行契约、算法或默认参数。</p>
-      <p v-if="notesNotice" role="status">{{ notesNotice }}</p>
-      <label>用途<textarea v-model="notes.purpose" aria-label="算子用途" rows="2" /></label>
-      <label>使用注意<textarea v-model="notes.usage_notes" aria-label="算子使用注意" rows="3" /></label>
-      <label>调用示例（每段一个示例）<textarea v-model="examplesText" aria-label="算子调用示例" rows="4" /></label>
-      <button type="button" :disabled="busy || !notesBasis" @click="saveNotes">保存补充说明</button>
-      <details v-if="notesChanged"><summary>当前组件已保存的补充说明</summary><pre>{{ pretty(observedDescription.description.notes) }}</pre></details>
-      <button type="button" v-if="notesChanged" :disabled="busy" @click="reviewNotes">核对当前组件后继续编辑</button>
-    </section>
-    <p v-if="declarationMode === 'python'">静态声明随源码发布。激活中的算子请先从列表去激活，再进入源码编辑。</p>
-    <button type="button" v-if="declarationMode === 'python'" :disabled="busy || !!component.active" :title="component.active ? '请先去激活' : '使用原源码编辑和组件版本检查'" @click="emit('maintain-declaration')">编辑源码与静态声明</button>
-    <template v-if="declarationMode === 'cpp'"><p>声明随所属插件发布；上传新插件后按原流程去激活并删除旧插件、激活新插件，再核对当前算子的声明。</p><button type="button" :disabled="busy" @click="emit('maintain-declaration')">更新所属插件</button></template>
-    <template v-if="definition">
-      <h4>{{ definition.title }}</h4>
-      <details open><summary>参数约束、默认值与影响</summary>
-        <ContractSchemaView :schema="definition.configuration.invocation_schema" />
-        <p v-if="definition.configuration.normalized_config_schema">有效配置：{{ pretty(definition.configuration.normalized_config_schema) }}</p>
-        <p v-if="definition.configuration.decoded_parameters">参数解码：{{ pretty(definition.configuration.decoded_parameters) }}</p>
-        <p>影响范围：{{ pretty(definition.configuration.affects) }}</p>
-      </details>
-      <details open><summary>输入角色与字段选择规则</summary>
-        <section v-for="input in definition.inputs" :key="input.port_id" class="contract-group">
-          <h5>{{ input.port_id }} · {{ input.shape }} · 输入数量 {{ input.min_count }}～{{ input.max_count }}</h5>
-          <p v-if="input.repeat_from_config_pointer">按配置 {{ input.repeat_from_config_pointer }} 展开；实体键 {{ input.item_key_pointer }}</p>
-          <div class="contract-table"><table><thead><tr><th>角色</th><th>必需</th><th>类型 / 可空性</th><th>字段选择规则</th><th>语义要求</th></tr></thead><tbody>
-            <tr v-for="role in input.roles" :key="role.role_id"><td>{{ role.role_id }}</td><td>{{ role.required ? '是' : '否' }}</td><td>{{ pretty(role.types) }} / {{ role.nullable === null ? '未知' : role.nullable ? '可空' : '非空' }}</td><td>{{ pretty(role.selector) }}</td><td>{{ pretty(role.semantic_requirements) }}</td></tr>
+    <p v-if="notice" class="notice" role="status">{{ notice }}</p>
+    <p v-if="historical" role="status">正在查看历史声明：{{ historical.exact_reference }}。只读。<button type="button" @click="returnCurrent">返回当前版本</button></p>
+    <div v-if="usage" class="usage-view" data-testid="operator-usage">
+      <p v-if="historical" v-for="item in authorPurposes" :key="item.source_pointer" class="author-description" data-testid="author-purpose">{{ item.text }}</p>
+      <div v-if="!historical" data-testid="operator-description">
+        <label class="purpose">用途<textarea v-model="notes.purpose" aria-label="算子用途" rows="2" maxlength="30000" /></label>
+        <div v-if="notesChanged" class="conflict" role="status">
+          <p>组件或说明版本已变化；草稿已保留，请核对后保存。</p>
+          <details><summary>当前已保存的说明</summary><pre>{{ pretty(currentNotes()) }}</pre></details>
+          <button type="button" :disabled="busy" @click="reviewNotes">核对当前组件后继续编辑</button>
+        </div>
+      </div>
+      <section data-usage-section="inputs" class="contract-section">
+        <h4>输入</h4>
+        <label v-if="!historical" class="section-description">输入说明<textarea v-model="notes.input_description" aria-label="输入说明" rows="2" maxlength="30000" /></label>
+        <div v-if="usage.inputs.length" class="declaration">
+          <div v-for="input in usage.inputs.filter(input => historical || !input.description)" :key="input.port_id" class="input-port">
+            <p v-if="input.description" class="author-description" data-testid="author-input">{{ input.description }}</p>
+            <template v-else><h5><code>{{ input.port_id }}</code><span>{{ input.shape }} · {{ input.min_count === input.max_count ? input.min_count : input.min_count + '～' + input.max_count }} 个输入</span></h5>
+            <div v-for="role in unlinkedRoles(input)" :key="role.role_id" class="role">
+              <strong>{{ role.role_id }}</strong> · {{ role.required ? '必需' : '可选' }}<span v-if="roleText(role)"> · {{ roleText(role) }}</span>
+              <p>字段选择：{{ pretty(role.selector) }}</p>
+            </div>
+            </template>
+          </div>
+          <OperatorContractDetail v-for="d in visibleInputDetails" :key="detailKey(d)" :reference="d.exact_reference" :pointer="d.resource_pointer" :label="detailLabel(d)" />
+        </div>
+        <OperatorDescriptionTable v-if="!historical" section="inputs" v-model="notes.inputs" />
+      </section>
+      <section data-usage-section="parameters" class="contract-section">
+        <h4>参数</h4>
+        <label v-if="!historical" class="section-description">参数说明<textarea v-model="notes.parameter_description" aria-label="参数说明" rows="2" maxlength="30000" /></label>
+        <p v-if="historical && usage.parameters.description" class="author-description" data-testid="author-parameters">{{ usage.parameters.description }}</p>
+        <div v-else-if="!usage.parameters.description && (usage.parameters.items.length || detailsFor('parameters').length || usage.parameters.additional_parameters === 'forbidden')" class="declaration">
+          <div class="contract-table" v-if="usage.parameters.items.length"><table><thead><tr><th>参数</th><th>传值方式</th><th>要求与条件</th></tr></thead><tbody>
+            <tr v-for="p in usage.parameters.items" :key="p.name">
+              <td><strong>{{ p.name }}</strong><div v-for="link in p.input_roles" :key="link.port_id + link.role_id">输入 {{ link.port_id }} / {{ link.role_id }}<span v-if="roleText(findRole(link))">：{{ roleText(findRole(link)) }}</span></div></td>
+              <td>{{ p.wire_encoding === 'json' ? 'JSON 文本，作为字符串提交' : '字符串' }}<p v-if="Object.hasOwn(p.schema, 'default')">默认：{{ pretty(p.schema.default) }}<small>仅提示，调用时不自动填入</small></p></td>
+              <td><span class="requirement">{{ p.required === null ? '按组级条件必填' : p.required ? '必填' : '可省略' }}</span><ContractSchemaView :schema="p.schema" /></td>
+            </tr>
           </tbody></table></div>
-          <details v-if="input.role_templates"><summary>按配置展开的角色与条件分支</summary><pre>{{ pretty(input.role_templates) }}</pre></details>
-        </section>
+          <p v-if="usage.parameters.additional_parameters === 'forbidden'">不接受额外参数。</p>
+          <OperatorContractDetail v-for="d in detailsFor('parameters')" :key="detailKey(d)" :reference="d.exact_reference" :pointer="d.resource_pointer" :label="detailLabel(d)" />
+        </div>
+        <OperatorDescriptionTable v-if="!historical" section="parameters" v-model="notes.parameters" />
+      </section>
+      <section data-usage-section="outputs" class="contract-section">
+        <h4>输出</h4>
+        <label v-if="!historical" class="section-description">输出说明<textarea v-model="notes.output_description" aria-label="输出说明" rows="3" maxlength="30000" /></label>
+        <div v-if="usage.outputs.length" class="declaration">
+          <div v-for="output in usage.outputs.filter(o => historical && o.description)" :key="readingKey + output.port_id" :data-contract-output="output.port_id" class="author-output"><strong>{{ output.port_id }}</strong><p class="author-description">{{ output.description }}</p></div>
+          <details v-for="(output,index) in usage.outputs.filter(o => !o.description)" :key="readingKey + output.port_id" :open="index === 0" :data-contract-output="output.port_id">
+            <summary><strong>{{ output.port_id }}</strong> · {{ output.shape }}<span v-if="output.summary"> · {{ output.summary }}</span></summary>
+            <div class="contract-table" v-if="output.fields.length"><table><thead><tr><th>字段</th><th>类型</th><th>含义与条件</th></tr></thead><tbody><tr v-for="f in output.fields" :key="f.name"><td>{{ f.name }}</td><td>{{ fieldType(f.declaration) }}<small v-if="fieldNullable(f)">{{ fieldNullable(f) }}</small></td><td><ContractSchemaView v-if="f.format === 'json_schema'" :schema="f.declaration" /><template v-else>{{ f.declaration.description || '' }}<div v-for="(value,key) in fieldExtras(f.declaration)" :key="key">{{ key }}：{{ pretty(value) }}</div></template></td></tr></tbody></table></div>
+            <p v-if="output.fields_state === 'dynamic'">包含动态字段，展开结构与规则查看。</p>
+            <details v-if="output.availability"><summary>产生条件</summary><pre>{{ pretty(output.availability) }}</pre></details>
+            <details v-if="output.row_cases"><summary>不同行类别与 NULL / 有效性约束</summary><div v-for="row in output.row_cases" :key="row.case_id"><h5>{{ row.case_id }}</h5><p>条件：{{ pretty(row.when) }}</p><p v-for="(rules,field) in row.field_rules" :key="field">{{ field }}：{{ pretty(rules) }}</p></div></details>
+            <details v-if="output.context_semantics"><summary>必要解释上下文</summary><pre>{{ pretty(output.context_semantics) }}</pre></details>
+            <OperatorContractDetail v-for="d in outputDetails(output)" :key="detailKey(d)" :reference="d.exact_reference" :pointer="d.resource_pointer" :label="detailLabel(d)" />
+          </details>
+        </div>
+        <OperatorDescriptionTable v-if="!historical" section="outputs" v-model="notes.outputs" />
+      </section>
+      <details class="conditions" data-testid="usage-conditions">
+        <summary>使用限制</summary>
+        <ul v-if="historical && authorLimitations.length"><li v-for="(item,i) in authorLimitations" :key="i">{{ item.text }}</li></ul>
+        <template v-if="!historical">
+          <label>使用限制<textarea v-model="notes.usage_notes" aria-label="算子使用注意" rows="3" maxlength="30000" /></label>
+        </template>
+        <details v-if="!historical && observed.required_context_refs.length"><summary>必要语义上下文</summary><pre>{{ pretty(observed.required_context_refs) }}</pre></details>
       </details>
-      <details v-for="output in definition.outputs" :key="output.port_id" open :data-contract-output="output.port_id">
-        <summary>输出 {{ output.port_id }}（{{ output.shape }} / {{ output.mode }}）</summary>
-        <p>可用条件：{{ pretty(output.availability || '未声明') }}</p>
-        <p v-if="output.structure_ref">结构资源：{{ output.structure_ref }}</p>
-        <ContractSchemaView v-if="resource(output.structure_ref)" :schema="resource(output.structure_ref)" />
-        <div class="contract-table"><table v-if="output.rules.length"><thead><tr><th>生成规则</th><th>来源与字段</th></tr></thead><tbody><tr v-for="(rule,i) in output.rules" :key="i"><td>{{ rule.kind }}</td><td>{{ pretty(rule) }}</td></tr></tbody></table></div>
-        <details v-if="output.row_cases" open><summary>不同行类别与 NULL / 有效性约束</summary><div v-for="row in output.row_cases" :key="row.case_id"><h5>{{ row.case_id }} · {{ pretty(row.when) }}</h5><p v-for="(rules,field) in row.field_rules" :key="field">{{ field }}：{{ pretty(rules) }}</p></div></details>
-        <details v-if="output.variants?.length"><summary>条件输出变体</summary><section v-for="(variant,i) in output.variants" :key="i"><h5>变体 {{ i + 1 }}</h5><pre>{{ pretty(variant) }}</pre></section></details>
-        <p v-if="output.context_semantics">必要解释上下文：{{ pretty(output.context_semantics) }}</p>
+      <details class="conditions" data-testid="usage-examples">
+        <summary>调用示例</summary>
+        <template v-if="!historical">
+          <label>调用示例（空行分隔）<textarea v-model="examplesText" aria-label="算子调用示例" rows="3" /></label>
+        </template>
+        <button v-if="!historical && examplesText" type="button" @click="copy(examplesText)">复制示例</button>
+        <div v-if="historical" v-for="(item,i) in usage.examples" :key="i"><pre>{{ item.text }}</pre><button type="button" @click="copy(item.text)">复制示例</button></div>
       </details>
-      <details v-if="definition.resources"><summary>结构资源与嵌套配置</summary><details v-for="(schema,name) in definition.resources" :key="name"><summary>{{ name }}</summary><ContractSchemaView :schema="schema" /></details></details>
-      <h4>适用限制</h4><ul><li v-for="(limit,i) in definition.limitations" :key="i">{{ limit }}</li></ul>
-      <p>声明、结构检查和业务数据验证分别记录；Schema 中的 default 不会自动配置算法。</p>
-      <details><summary>技术详情与完整作者声明 JSON</summary>
-        <p>补充说明精确版本：{{ observedDescription?.basis.description_ref || '无' }}</p>
-        <pre data-testid="contract-configuration">{{ pretty(definition.configuration) }}</pre><pre data-testid="contract-inputs">{{ pretty(definition.inputs) }}</pre><pre>{{ pretty(definition) }}</pre>
-      </details>
-    </template>
-    <button type="button" :disabled="busy" @click="refresh">刷新声明与来源列表</button>
-    <h4>实际对象预检</h4>
-    <p>选择已有数据集并填写原有算法参数。来源结构和字段映射由服务端取得；预检不读取懒加载业务行，不保存执行计划。</p>
-    <label>选择实际数据集
-      <select v-model="selectedSource" aria-label="选择实际数据集" @change="chooseSource">
-        <option value="">手动填写 F2 定位符</option>
-        <option v-for="source in sources" :key="source" :value="source">dataframe.{{ source }}</option>
-      </select>
-    </label>
-    <label>输入来源定位符（按输入顺序的 JSON 数组）
-      <textarea v-model="draft.inputs" aria-label="输入来源定位符" rows="4" spellcheck="false" />
-    </label>
-    <label>已有算法参数（JSON 对象，值与 SQL WITH 一样为字符串）
-      <textarea v-model="draft.parameters" aria-label="已有算法参数" rows="4" spellcheck="false" />
-    </label>
-    <label>输出目标定位符（可选）
-      <textarea v-model="draft.output" aria-label="输出目标定位符" rows="2" spellcheck="false" />
-    </label>
-    <p>不指定目标时，依赖目标的副输出保持未确定。F2 的具体表目标使用普通表输出路径。</p>
-    <button type="button" :disabled="busy" @click="check">检查实际对象</button>
-    <div v-if="result" data-testid="contract-check-result">
-      <p>检查状态：<strong>{{ result.check.state }}</strong>；业务数据验证：{{ result.check.data_validation }}；输出观察：{{ result.check.output_check }}</p>
-      <p>本次契约：{{ result.component.contract_ref || 'missing' }}；组件：{{ result.component.component_revision || 'unknown' }}</p>
-      <details open><summary>系统解析的字段映射</summary><pre>{{ pretty(result.check.role_map || {}) }}</pre></details>
-      <details open><summary>缺口与判定依据</summary><pre>{{ pretty(result.check.reasons || []) }}</pre></details>
-      <details open><summary>各输出预览与精确上下文</summary><pre>{{ pretty(result.check.output_previews || []) }}</pre></details>
-      <details><summary>生产有效配置和来源快照</summary><pre>{{ pretty(result.resolved_invocation) }}</pre></details>
+      <footer class="save-actions">
+        <button type="button" :disabled="busy || !!historical" @click="cancelNotes">恢复已保存内容</button>
+      </footer>
     </div>
+    <details :key="readingKey" class="technical" data-testid="contract-technical" @toggle="readFull">
+      <summary>技术详情（已保存内容）</summary>
+      <button type="button" @click="openHistory">历史版本</button>
+      <section v-if="showHistory" class="history" data-testid="contract-history">
+        <h5>历史版本（只读）</h5>
+        <button v-for="item in versions" :key="item.exact_reference" type="button" @click="readHistory(item.exact_reference)">{{ item.exact_reference }}</button>
+        <button v-if="historyCursor" type="button" :disabled="historyBusy" @click="loadHistory">更多历史版本</button>
+        <p v-if="!versions.length && !historyBusy">没有历史记录。</p>
+        <button type="button" @click="showHistory = false">收起历史列表</button>
+      </section>
+      <template v-if="technicalDocument">
+        <pre data-testid="contract-full">{{ pretty(technicalDocument) }}</pre>
+        <button type="button" @click="copy(pretty(technicalDocument))">复制 JSON</button>
+      </template>
+    </details>
   </section>
 </template>
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import ContractSchemaView from './ContractSchemaView.vue'
+import { operatorDescriptionNotes } from '../utils/operatorDescriptionNotes.js'
+import OperatorContractDetail from './OperatorContractDetail.vue'
+import OperatorDescriptionTable from './OperatorDescriptionTable.vue'
 const props = defineProps({ fullName: { type: String, required: true }, declarationMode: { type: String, default: '' } })
-const emit = defineEmits(['maintain-declaration'])
-const notes = reactive({ purpose: '', usage_notes: '', examples: [] }), examplesText = ref(''), notesBasis = ref(null), observedDescription = ref(null), notesNotice = ref('')
-const notesKey = () => 'flowsql.operator-description.' + props.fullName
-const notesChanged = computed(() => !!notesBasis.value && !!observedDescription.value && (notesBasis.value.component_revision !== observedDescription.value.basis.component_revision || notesBasis.value.description_ref !== observedDescription.value.basis.description_ref))
-const resource = reference => reference?.startsWith('#/resources/') ? definition.value?.resources?.[reference.slice(12)] : null
-function rememberNotes() { if (notesBasis.value) sessionStorage.setItem(notesKey(), pretty({ notes, examplesText: examplesText.value, basis: notesBasis.value })) }
-watch(notes, rememberNotes); watch(examplesText, rememberNotes)
-async function readNotes() {
-  observedDescription.value = await post('semantics/v1/describe', { target: { kind: 'operator', name: props.fullName } })
-  if (!notesBasis.value) { notesBasis.value = observedDescription.value.basis; Object.assign(notes, observedDescription.value.description.notes || { purpose: '', usage_notes: '', examples: [] }); examplesText.value = notes.examples.join('\n\n') }
-  if (notesChanged.value) notesNotice.value = '组件版本已变化；旧说明和本地原稿不会自动套用，请核对后明确保存。'
+const name = props.fullName, pretty = value => JSON.stringify(value, null, 2)
+const notesKey = 'flowsql.operator-description.inline-editors.' + name
+const observed = ref(null), historical = ref(null), fullRead = ref(null)
+const busy = ref(false), error = ref(''), notice = ref('')
+const notes = reactive({ purpose: '', usage_notes: '', input_description: '', parameter_description: '', output_description: '', inputs: [], parameters: [], outputs: [] }), examplesText = ref(''), notesBasis = ref(null)
+const versions = ref([]), showHistory = ref(false), historyCursor = ref(''), historyBusy = ref(false)
+let disposed = false, readId = 0, historyId = 0, noteRevision = 0
+onBeforeUnmount(() => { disposed = true; readId++; historyId++ })
+const notesChanged = computed(() => notesBasis.value && observed.value &&
+  (notesBasis.value.component_revision !== observed.value.basis.component_revision || notesBasis.value.description_ref !== observed.value.basis.description_ref))
+const readingKey = computed(() => historical.value?.exact_reference || pretty(observed.value?.basis))
+const technicalDocument = computed(() => historical.value || fullRead.value)
+const usage = computed(() => historical.value ? historicalUsage(historical.value) : observed.value?.usage)
+const authorPurposes = computed(() => usage.value?.identity.purposes.filter(item => item.origin === 'author') || [])
+const visibleInputDetails = computed(() => detailsFor('inputs').filter(d => usage.value.inputs.some(input => !input.description && (d.resource_pointer === input.source_pointer || d.resource_pointer.startsWith(input.source_pointer + '/')))))
+const authorLimitations = computed(() => usage.value?.limitations.filter(item => item.origin === 'author') || [])
+const nullable = value => typeof value !== 'boolean' ? '' : value ? '可空' : '非空'
+const fieldNullable = f => nullable(f.format === 'physical' ? f.declaration.nullable : Array.isArray(f.declaration.type) ? f.declaration.type.includes('null') : typeof f.declaration.type === 'string' ? f.declaration.type === 'null' : null)
+const fieldType = d => d.type ? (typeof d.type === 'string' ? d.type : pretty(d.type)) : ''
+const fieldExtras = d => Object.fromEntries(Object.entries(d).filter(([k]) => !['name','type','nullable','description'].includes(k)))
+const roleText = role => [role.types.map(type => type.system + '.' + type.name + (Object.keys(type.parameters).length ? ' ' + pretty(type.parameters) : '')).join(' / '), nullable(role.nullable), Object.keys(role.semantic_requirements).length ? pretty(role.semantic_requirements) : ''].filter(Boolean).join('；')
+const findRole = link => usage.value.inputs.find(input => input.port_id === link.port_id).roles.find(role => role.role_id === link.role_id)
+const unlinkedRoles = input => input.roles.filter(role => !usage.value.parameters.items.some(p => p.input_roles.some(link => link.port_id === input.port_id && link.role_id === role.role_id)))
+const detailsFor = section => {
+  if (!historical.value) return observed.value?.details.filter(d => d.section === section) || []
+  const doc = historical.value.document
+  if (doc.schema_id !== 'flowsql.operator-data-contract.v1') return []
+  const paths = section === 'parameters' ? ['/configuration'] : section === 'inputs' ? doc.inputs.map((_, i) => '/inputs/' + i) : doc.outputs.flatMap((output,i) => ['/outputs/' + i, ...(output.structure_ref?.startsWith('#/') ? [output.structure_ref.slice(1)] : [])])
+  return paths.map(resource_pointer => ({ section, resource_pointer, exact_reference: historical.value.exact_reference, reason: '历史完整规则' }))
 }
-async function saveNotes() {
-  busy.value = true; error.value = ''; notesNotice.value = ''
-  try {
-    const result = await post('semantics/v1/operators/save-description', { name: props.fullName, expected_component_revision: notesBasis.value.component_revision, expected_description_ref: notesBasis.value.description_ref, notes: { purpose: notes.purpose, usage_notes: notes.usage_notes, examples: examplesText.value.split(/\n\s*\n/).filter(v => v.trim()) } })
-    notesBasis.value = null; sessionStorage.removeItem(notesKey()); await readNotes(); notesNotice.value = `补充说明已保存：${result.description_ref}`
-  } catch(e) { error.value = e.message; rememberNotes() } finally { busy.value = false }
+const detailKey = d => d.exact_reference + d.resource_pointer
+const detailLabel = d => d.reason + ' · ' + d.resource_pointer.split('/').at(-1)
+function outputDetails(output) {
+  return detailsFor('outputs').filter(d => d.resource_pointer === output.source_pointer || d.resource_pointer.startsWith(output.source_pointer + '/') || d.resource_pointer === output.structure_pointer || output.fields.some(f => f.source_pointer.startsWith(d.resource_pointer + '/')))
 }
-function reviewNotes() {
-  if (!window.confirm('已核对当前组件和作者声明？将保留原稿并使用当前版本作为新保存依据。')) return
-  notesBasis.value = observedDescription.value.basis; rememberNotes(); notesNotice.value = '已保留原稿，请核对后保存。'
+function currentNotes() {
+  return operatorDescriptionNotes(observed.value)
 }
-const component = ref({}), definition = ref(null), versions = ref([]), sources = ref([])
-const selectedReference = ref(''), selectedSource = ref(''), result = ref(null), error = ref(''), busy = ref(false)
-const key = () => 'flowsql.operator-check.' + props.fullName
-const draft = reactive({ inputs: '[]', parameters: '{}', output: '' })
-const pretty = value => JSON.stringify(value, null, 2)
+function resetNotes() { const { examples, ...saved } = currentNotes(); Object.assign(notes, saved); examplesText.value = examples.join('\n\n'); notesBasis.value = observed.value.basis }
+function rememberNotes() { if (notesBasis.value) sessionStorage.setItem(notesKey, pretty({ notes: { ...notes }, examplesText: examplesText.value, basis: notesBasis.value })) }
+watch([notes, examplesText], () => { noteRevision++; rememberNotes() }, { deep: true, flush: 'sync' })
 async function post(path, payload) {
   const response = await fetch('/api/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
   const body = await response.json()
   if (!response.ok) throw Error(typeof body.error === 'object' ? `${body.error.code}: ${body.error.message}` : body.error || `HTTP ${response.status}`)
   return body.data || body
 }
-async function readDefinition() {
-  error.value = ''
-  try { definition.value = (await post('semantics/v1/resolve', { exact_reference: selectedReference.value })).document }
-  catch (e) { definition.value = null; error.value = e.message }
-}
 async function refresh() {
+  const id = ++readId; busy.value = true; error.value = ''
+  try {
+    const data = await post('semantics/v1/describe', { target: { kind: 'operator', name } })
+    if (disposed || id !== readId) return
+    observed.value = data; fullRead.value = null
+    if (!notesBasis.value) resetNotes()
+  } catch (e) { if (!disposed && id === readId) error.value = e.message }
+  finally { if (!disposed && id === readId) busy.value = false }
+}
+async function saveNotes() {
+  const revision = noteRevision, basis = notesBasis.value
+  const saved = { ...JSON.parse(pretty(notes)), examples: examplesText.value.split(/\n\s*\n/).filter(v => v.trim()) }
   busy.value = true; error.value = ''
   try {
-    component.value = await post('operators/detail', { name: props.fullName })
-    await readNotes()
-    const response = await fetch('/api/channels/dataframe')
-    if (!response.ok) throw Error(`来源列表 HTTP ${response.status}`)
-    sources.value = (await response.json()).channels.map(item => item.name)
-    versions.value = []
-    if (component.value.contract_ref) {
-      let cursor = ''
-      do {
-        const page = await post('semantics/v1/history', { kind: 'operator_contract', name: props.fullName, limit: 100, cursor })
-        versions.value.push(...page.items.map(item => item.exact_reference)); cursor = page.next_cursor
-      } while (cursor)
-      if (!versions.value.includes(selectedReference.value)) selectedReference.value = component.value.contract_ref
-      await readDefinition()
-    } else definition.value = null
-  } catch (e) { error.value = e.message }
-  finally { busy.value = false }
+    const response = await post('semantics/v1/operators/save-description', { name, expected_component_revision: basis.component_revision, expected_description_ref: basis.description_ref, notes: saved })
+    if (disposed) return
+    notesBasis.value = { ...basis, description_ref: response.description_ref }; rememberNotes()
+    await refresh()
+    if (disposed) return
+    if (revision === noteRevision) resetNotes()
+    notice.value = '说明已保存。'
+  } catch (e) { if (!disposed) { await refresh(); error.value = e.message; rememberNotes() } }
+  finally { if (!disposed) busy.value = false }
 }
-function chooseSource() {
-  if (selectedSource.value) draft.inputs = pretty([{ kind: 'dataframe', name: selectedSource.value }])
+function cancelNotes() { resetNotes(); rememberNotes(); notice.value = '已恢复最近保存的说明。' }
+function reviewNotes() { notesBasis.value = observed.value.basis; rememberNotes(); notice.value = '已显式改用当前依据，原稿保留；请核对后保存。' }
+async function openHistory() { showHistory.value = true; if (!versions.value.length) await resetHistory() }
+async function resetHistory() { historyId++; versions.value = []; historyCursor.value = ''; await loadHistory() }
+async function loadHistory() {
+  const id = ++historyId; historyBusy.value = true
+  try { const page = await post('semantics/v1/history', { kind: 'operator_contract', name, limit: 10, cursor: historyCursor.value }); if (!disposed && id === historyId) { versions.value.push(...page.items); historyCursor.value = page.next_cursor } }
+  catch (e) { if (!disposed && id === historyId) error.value = e.message }
+  finally { if (!disposed && id === historyId) historyBusy.value = false }
 }
-async function check() {
-  busy.value = true; error.value = ''; result.value = null
-  try {
-    const dot = props.fullName.indexOf('.')
-    const locators = JSON.parse(draft.inputs)
-    if (!Array.isArray(locators) || !locators.length) throw Error('请选择至少一个实际数据集')
-    const parameters = JSON.parse(draft.parameters)
-    if (!parameters || Array.isArray(parameters) || typeof parameters !== 'object' || Object.values(parameters).some(value => typeof value !== 'string')) throw Error('算法参数必须是字符串值的 JSON 对象')
-    const payload = { operator: { category: props.fullName.slice(0, dot), name: props.fullName.slice(dot + 1) }, parameters,
-      inputs: locators.map((locator, input_index) => ({ input_index, locator })) }
-    if (draft.output.trim()) payload.output_locator = JSON.parse(draft.output)
-    result.value = await post('semantics/v1/operators/check', payload)
-  } catch (e) { error.value = e.message }
-  finally { busy.value = false }
+async function readHistory(reference) {
+  const id = ++readId; busy.value = true; error.value = ''
+  try { const data = await post('semantics/v1/resolve', { exact_reference: reference }); if (!disposed && id === readId) { historical.value = data; fullRead.value = null } }
+  catch (e) { if (!disposed && id === readId) error.value = e.message }
+  finally { if (!disposed && id === readId) busy.value = false }
 }
-function restore() {
-  result.value = null; selectedReference.value = ''; notesBasis.value = null; observedDescription.value = null; notesNotice.value = ''
-  Object.assign(notes, { purpose: '', usage_notes: '', examples: [] }); examplesText.value = ''
-  try { const saved = JSON.parse(sessionStorage.getItem(notesKey()) || 'null'); if (saved) { Object.assign(notes, saved.notes); examplesText.value = saved.examplesText; notesBasis.value = saved.basis } } catch {}
-  Object.assign(draft, { inputs: '[]', parameters: '{}', output: '' })
-  try { const saved = JSON.parse(sessionStorage.getItem(key()) || 'null'); if (saved) Object.assign(draft, saved) } catch {}
+async function returnCurrent() { historical.value = null; await refresh() }
+async function readFull(event) {
+  if (!event.target.open || historical.value || fullRead.value || !observed.value) return
+  const id = readId, basis = pretty(observed.value.basis)
+  try { const data = await post('semantics/v1/describe', { target: { kind: 'operator', name }, view: 'full' }); if (!disposed && id === readId) { if (pretty(data.basis) !== basis) throw Error('版本已变化，请刷新后重读完整契约。'); fullRead.value = data } }
+  catch (e) { if (!disposed && id === readId) error.value = e.message }
+}
+async function copy(text) { try { await navigator.clipboard.writeText(text); notice.value = '已复制。' } catch (e) { notice.value = '复制未完成：' + e.message } }
+function historicalUsage(record) {
+  const doc = record.document
+  return { identity: { name, title: doc.title, author_version: doc.operator.version, purposes: doc.description ? [{ text: doc.description, origin: 'author', source_pointer: '/description' }] : [] }, inputs: doc.inputs,
+    parameters: { description: doc.configuration.description, items: Object.entries(doc.configuration.invocation_schema.properties || {}).map(([key, schema]) => ({ name: key, schema, required: doc.configuration.invocation_schema.required?.includes(key) ? true : null, wire_encoding: doc.configuration.decoded_parameters?.some(p => p.key === key) ? 'json' : 'string', input_roles: [] })) },
+    outputs: doc.outputs.map((output,i) => ({ ...output, source_pointer: '/outputs/' + i, structure_pointer: output.structure_ref?.slice(1), fields: [], summary: '历史输出；完整规则可按需展开' })), limitations: doc.limitations.map(text => ({ text, origin: 'author' })), examples: (doc.examples || []).map(text => ({ text, origin: 'author' })) }
+}
+onMounted(() => {
+  const savedNotes = JSON.parse(sessionStorage.getItem(notesKey) || 'null')
+  if (savedNotes) { Object.assign(notes, savedNotes.notes); examplesText.value = savedNotes.examplesText; notesBasis.value = savedNotes.basis }
   refresh()
-}
-watch(draft, () => sessionStorage.setItem(key(), JSON.stringify(draft)))
-watch(() => props.fullName, restore)
-onMounted(restore)
+})
 </script>
 <style scoped>
-.operator-contract { margin: 16px 0; padding: 16px; border: 1px solid var(--border-color); border-radius: 6px; }
-label { display: block; margin: 12px 0; }
-textarea, select { display: block; box-sizing: border-box; width: 100%; margin-top: 6px; }
-textarea, pre, .identity { font-family: monospace; overflow-wrap: anywhere; }
-pre { white-space: pre-wrap; max-height: 320px; overflow: auto; background: var(--bg-secondary); padding: 10px; }
-textarea, select, button { color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 4px; }
-.contract-table { max-width: 100%; overflow: auto; } table { width: 100%; min-width: 600px; border-collapse: collapse; } th, td { border: 1px solid var(--border-color); text-align: left; vertical-align: top; padding: 8px; overflow-wrap: anywhere; } .contract-group { min-width: 0; } summary { cursor: pointer; }
-button { cursor: pointer; margin: 8px 8px 8px 0; padding: 6px 12px; }
-[role=alert] { color: var(--el-color-danger); }
+.operator-contract { margin: 16px 0; padding: 20px 24px; border: 1px solid var(--border-color); border-radius: 10px; min-width: 0; color: var(--text-primary); background: var(--bg-primary); font-size: 14px; line-height: 1.6; }
+.toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex-shrink: 0; } .toolbar button { margin: 0; font-size: 13px; }
+header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+h3 { margin: 0; font-size: 17px; line-height: 1.5; } .identity p { margin: 4px 0 0; color: var(--text-secondary); font-size: 13px; }
+h4 { margin: 0 0 14px; font-size: 16px; font-weight: 600; } h5 { margin: 0 0 8px; font-size: 14px; } .input-port + .input-port { margin-top: 12px; } .input-port h5 { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; } .input-port h5 span { color: var(--text-secondary); font-weight: 400; }
+.usage-view { margin-top: 20px; }
+.section-description { margin-bottom: 14px; }
+.author-description { white-space: pre-line; margin: 0 0 12px; } .author-output + .author-output { margin-top: 16px; } .author-output > p { margin: 4px 0 0; }
+.contract-section { padding: 20px 0; border-top: 1px solid var(--border-color); } .declaration { margin-bottom: 12px; } .purpose { margin-bottom: 20px; } .role { padding: 6px 0; } .role p { margin: 4px 0; }
+label { display: block; font-size: 13px; color: var(--text-secondary); } textarea { display: block; box-sizing: border-box; width: 100%; min-height: 40px; margin: 6px 0 0; padding: 9px 12px; resize: vertical; font: inherit; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 6px; }
+textarea:focus { outline: 2px solid var(--el-color-primary-light-7); border-color: var(--el-color-primary); } label + label { margin-top: 14px; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 340px; overflow: auto; background: var(--bg-secondary); padding: 12px; border-radius: 6px; }
+.contract-table { max-width: 100%; overflow: auto; } table { width: 100%; min-width: 500px; border-collapse: collapse; font-size: 13px; } th, td { border-bottom: 1px solid var(--border-color); text-align: left; vertical-align: top; padding: 10px 12px; overflow-wrap: anywhere; } th { color: var(--text-secondary); background: var(--bg-secondary); font-weight: 500; } td p { margin: 6px 0; } small { display: block; font-size: 12px; color: var(--text-secondary); }
+section, details, .identity { min-width: 0; overflow-wrap: anywhere; } details { padding: 8px 0; } summary { cursor: pointer; } .conditions { border-top: 1px solid var(--border-color); padding: 12px 0; } .conditions > label:first-of-type { margin-top: 12px; } .technical { border-top: 1px solid var(--border-color); padding: 14px 0 0; margin-top: 16px; font-size: 13px; color: var(--text-secondary); } .history button { display: block; text-align: left; max-width: 100%; overflow-wrap: anywhere; }
+button { cursor: pointer; margin: 4px 8px 4px 0; padding: 7px 14px; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 5px; font: inherit; line-height: 1.4; } button:disabled { cursor: default; opacity: .5; } .refresh { margin: 0; font-size: 13px; } .primary { background: var(--el-color-primary); border-color: var(--el-color-primary); color: white; } .save-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; padding-top: 12px; } [role=alert] { color: var(--el-color-danger); } .notice { color: var(--el-color-success); font-size: 13px; } .conflict { padding: 12px; margin-bottom: 16px; background: var(--bg-secondary); border-radius: 6px; }
+@media (max-width: 700px) { .operator-contract { padding: 16px; } }
 </style>

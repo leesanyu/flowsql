@@ -1,7 +1,7 @@
 # 通道与算子说明
 
 在“通道管理”打开具体数据对象，即可查看结构、补充含义并保存说明；在“算子管理”打开具体算子，
-可阅读作者声明的输入输出契约、维护补充说明并显式预检。Web 与普通 HTTP 客户端读取同一份对象说明。
+可按输入、参数、输出阅读作者声明，直接维护说明并显式检查调用。Web 与普通 HTTP 客户端默认读取同一份精简说明，复杂规则按需展开。
 日常使用由系统处理字典名称、字段身份和绑定，无需先建立标准或填写内部映射。
 
 字段说明支持 CSV/命名 DataFrame、Kafka 结构化 source/both，以及 SQLite/MySQL/PostgreSQL/ClickHouse 的明确限定表。
@@ -109,22 +109,48 @@ DataFrame 首次加载期间显示进度，完成前不能编辑或保存；加�
 ## 在算子中阅读和维护说明
 
 从 Python/内置算子的“查看”或“编辑”进入详情；C++ 先打开插件详情，再选具体算子。
-用途、使用注意和调用示例可在“补充说明”中编辑并保存；参数、输入角色及 selector、输出实体、
-行分支/NULL 规则和必要上下文按组阅读，完整 JSON 和精确引用放在技术详情中。
-例如普通 `explore.chisquare` 可查看参数和输入角色；`explore.baseliner` 位于 C++ 插件中，保留嵌套配置及
-results、model_parameters、relation_fusion、maintenance 四个输出实体，不合并成单张字段表。
+Python 详情顺序为基本信息、源码、“说明与契约”入口、按需面板、保存/关闭；每次打开默认收起说明，
+源码可最大化，退出后恢复说明展开状态。内置算子也通过“说明与契约”打开；C++ 必须选择插件内的具体算子，不能把插件当作一个算子。
 
-补充说明与作者执行契约分别保存。文字保存不改变算法、参数默认值或契约检查；预检参数也不会写回全局配置。
-组件版本变化后，旧说明保留为旧组件依据，不自动套用到新组件。冲突时先保留原稿，核对当前作者声明后再明确保存。
+面板顶部直接编辑用途；输入、参数、输出各有一个整体说明框和一张字段表，已有作者文字预填到对应说明框：
 
-- Python：先从列表去激活，再从详情“编辑源码与静态声明”进入原源码编辑流程；上传 `.py` 同样随组件更新声明。
-  提交使用读取时的组件版本，冲突保留草稿。
-- C++：通过“更新所属插件”上传新 `.so`，按原管理流程去激活并删除旧插件，再激活新插件，重新打开具体算子核对声明。
-  在线补充文字不会改变二进制能力。
-- 需要判断实际输入时，在“实际对象预检”中选择来源、填写本次参数并点击“检查实际对象”。执行仍使用原 SQL 入口，
-  执行时重新取得当前组件和来源，预检不冻结执行计划。
+| 表格 | 列（每列对应一个配置项） |
+| --- | --- |
+| 输入 | 字段名、类型、填写要求、说明、操作 |
+| 参数 | 参数名、类型、必填、默认值、说明、操作 |
+| 输出 | 字段名、类型、允许空值、说明、操作 |
+
+点击“添加输入字段”“添加参数”“添加输出字段”新增行，行尾“删除”移除该行。
+输入、输出各维护一张字段表，字段连续排列；在行说明里写清归属，例如“订单数据中的订单金额，单位元”“预测结果中的预测值”。
+多个输入或输出中存在同名字段时，可以分别添加行并在说明中区分来源或结果；名称、类型、行序和说明原样保存。
+字段说明同时填写含义、单位、取值限制、字段选择关系和局部产生条件；输入排序等整体使用前提写入“使用限制”。
+输入“填写要求”为必填非空、必填可空、可选；空白表示未声明。可选只说明字段可缺失，不自动表示字段值允许NULL。
+参数类型为字符串、整数、数值、布尔或JSON；JSON内容仍由现有调用接口以字符串传递，本地说明不会改变调用编码或生产解析器。
+默认值直接编辑：留空表示未声明，`""` 表示明确的空字符串；其他内容按填写文本保存，不解析或自动应用。
+输出“允许空值”为是/否，空白表示未声明；何时为空、哪些行有效等条件写入说明。
+用途、三个区域的整体说明、使用限制和示例都在原位置直接编辑，不另行重复显示作者文字。
+复杂参数规则、输出产生条件、行类别、NULL规则和解释上下文保留在技术详情中按需读取。
+本地表格是补充使用说明，与作者执行契约分别保存，不会重写作者结构化规则或改变算法、调用符合性判定。
+
+页面下方“使用限制”填写适用于整个算子的前提和限制，例如统计结果不能用于推断因果关系；
+特定字段或参数的要求放在相应表格行。“调用示例”单独折叠，示例之间空行分隔。
+点击顶部“保存说明”统一保存用途、表格、使用限制及示例；“恢复已保存内容”恢复最近读取的说明，独立于源码保存。
+页面底部“技术详情（已保存内容）”只展示一份完整 JSON，点击“复制 JSON”复制相同内容。
+当前版本按需读取完整响应，其中包含契约、已保存说明和精确依据；查看历史时展示所选版本的完整精确记录，
+不混入当前本地表格或未保存编辑。“历史版本”保留按需分页；历史只读，返回当前后才能保存说明。
+
+当前浏览器会话按对象保留源码和说明草稿，支持刷新、切换对象和关闭后重开；会话草稿不能代替服务端保存。
+组件或说明版本变化时保留原稿和原依据；核对当前版本后点击“核对当前组件后继续编辑”并明确保存，普通刷新不会静默替换草稿依据。
+已有说明只关联对应组件版本，新组件不会自动套用旧说明。
+
+- Python：从列表去激活后进入原“编辑”流程，修改源码内的静态声明；上传 `.py` 同样随组件更新声明。提交核对组件版本，冲突保留草稿。
+- C++：从原“上传算子”入口上传 `.so`，按原管理流程替换插件，再打开具体算子核对声明。
 
 作者发布声明、预检及多实体结果的详细规则见下文[算子输入输出契约](#算子输入输出契约)。
+
+契约页面不选择本次输入来源、不填写调用参数值，也不执行调用检查；具体调用继续通过 SQL 工作流组织和执行。
+底层 `operators/check` 接口保留，供程序按需预检输入结构、参数与已声明语义；预检不会执行算法，
+也不证明业务数据质量或实际输出正确。接口与执行边界见下文[算子输入输出契约](#算子输入输出契约)。
 
 ## 普通客户端：发现、描述与显式执行
 
@@ -136,7 +162,8 @@ python3 examples/metadata_description/client.py \
   --web-url http://127.0.0.1:8081 --input samples
 ```
 
-默认只查询 DataFrame/算子目录及对象说明，不加载来源、激活算子或创建任务。返回 source、operator 和 `executed=false`。
+默认只查询 DataFrame/算子目录及对象说明，不加载来源、激活算子或创建任务。返回 source、operator 和 `executed=false`；
+`operator.view=usage`，结构化约定与补充说明位于 `operator.usage`。默认不读取完整契约或全部详情；显式执行分支才按精确引用补读详情并检查调用。
 若输入结构 pending，先在通道详情显式加载；需要执行时，先在算子管理激活 `builtin.passthrough`，再选择未使用的输出名：
 
 ```bash
@@ -329,11 +356,11 @@ v2 绑定保留 source_snapshot 和 confirmation；只有 channels/apply 重取�
 
 | POST 操作 | 用途 |
 | --- | --- |
-| describe | `target` 为明确通道 locator 或算子 category.name；返回同一对象的结构、说明、契约、核对与精确依据 |
+| describe | `target` 为明确通道 locator 或算子 category.name；通道返回完整对象说明，算子默认 usage，显式 `view:"full"` 读取全文 |
 | channels/save-description | `locator`、完整 `basis`、`changes` 及人工确认项；系统生成内部身份/映射并保存当前对象说明 |
 | operators/save-description | `name`、`expected_component_revision`、`expected_description_ref`、`notes`；只保存当前组件的补充文字 |
 | list | kind/q 筛选 current 摘要，返回精确引用与缺口数量 |
-| resolve | exact_reference 读取完整文档，或 view=fields 读取明确标记的字段投影 |
+| resolve | exact_reference 读取完整文档；`view:"fields"` 读取字段投影，`view:"resource"` 配合 resource_pointer 读取算子局部规则 |
 | history | kind/name 的修订历史，按 revision 降序 |
 | save | kind/name/document、expected_current_revision；可选 base_revision/change_note |
 | references | 查询目标精确版本的 current/history 引用 |
@@ -356,10 +383,24 @@ v2 绑定保留 source_snapshot 和 confirmation；只有 channels/apply 重取�
 {"target":{"kind":"operator","name":"builtin.passthrough"},"timeout_ms":5000}
 ```
 
-成功数据包含 `subject`、`basis`、`structure`、`description`、`contract`、`checks`、`gaps` 和 `context`。
+通道或显式 full 算子的成功数据包含 `subject`、`basis`、`structure`、`description`、`contract`、`checks`、`gaps` 和 `context`。
 `structure` 表达当前来源，`description` 区分作者声明/绑定字典与本地补充，`contract` 保留作者执行契约。
+算子说明保存沿用 `operators/save-description` 的组件与说明版本校验。`notes` 必需提供
+`purpose`、`usage_notes`、`examples`、`inputs`、`parameters`、`outputs`；inputs/outputs直接保存字段行，parameters保存参数行，三个数组各最多100项。
+默认usage的 `annotations.inputs/parameters/outputs` 原样返回这些数组；没有本地说明时返回空数组。
+`notes` 还可提供 `input_description`、`parameter_description`、`output_description`，分别保存三个区域的整体说明，
+每项最多30000字符，usage.annotations按原文返回；空字符串表示明确清空，缺少键时页面使用作者对应说明。
+用途和单项示例同样最多30000字符。首次打开时，已有本地文本优先；没有维护过的用途、限制和示例以作者原文初始化，
+原字段表内容保留。本版保存三个整体说明后，文本明确清空也保持空白，不再将作者原文另行显示在框外。
+它们保留字段/参数顺序及说明中的归属和规则，不从文字推断机器规则；保存说明后未知执行契约仍保持未知。
+
 `basis` 包含当前对象身份、source revision、结构摘要及 binding/dictionary/component/contract/description 精确引用，
 不适用项为 null。保存通道说明时原样回传完整 basis，不能自行构造或只取定义库的最新版本。
+
+算子默认或显式 `view:"usage"` 的成功数据为
+`{subject,view,basis,contract_state,usage,gaps,details,required_context_refs}`；
+`usage` 固定含 `identity,inputs,parameters,outputs,limitations,examples,annotations`，不携带完整契约、全部 resources 或归一配置 Schema。
+完整阅读指引见下文[普通 HTTP 客户端](#普通-http-客户端)。通道不接受算子 usage/full 视图，未知 view 同样返回 `INVALID_DOCUMENT`。
 
 `channels/save-description` 的 `changes` 只提交已编辑属性：对象 `description`、`entity` 中的行/时间/关联等语义，
 以及按来源字段名索引的 `fields`。各属性沿用下文 SemanticValue 的 state/value/origin 结构；
@@ -368,8 +409,28 @@ v2 绑定保留 source_snapshot 和 confirmation；只有 channels/apply 重取�
 当前 `binding_ref`、`basis` 与具体 `error`。部分成功也可以是 HTTP 200，客户端必须检查 status，并保留草稿与精确引用。
 来源变化、并发修订或缺少必要确认返回 409；相同内容重试复用已保存依据。
 
-`operators/save-description` 的 notes 固定为
-`{"purpose":"用途","usage_notes":"使用注意","examples":["调用示例"]}`。
+`operators/save-description` 的 notes 示例：
+
+```json
+{
+  "purpose": "分析输入数据",
+  "input_description": "由配置指定输入数据集及字段",
+  "parameter_description": "参数按声明的字符串或JSON编码传入",
+  "output_description": "结果须结合产生条件与单位解释",
+  "usage_notes": "输入按时间升序；结果不用于推断因果关系",
+  "examples": [],
+  "inputs": [{"name":"category","type":"string","requirement":"required_non_null","description":"输入数据中的分类字段"}],
+  "parameters": [{"name":"column","type":"string","required":null,"default":"","description":"输入列名，需在输入中存在"}],
+  "outputs": [{"name":"result","type":"double","nullable":null,"description":"results 输出中的统计结果，仅在计算成功时产生"}]
+}
+```
+
+输入行的name/type/requirement/description、参数行的name/type/required/default/description、输出行的name/type/nullable/description均必需，额外属性拒绝。不接受包含fields的分组格式，也不迁移旧说明或旧草稿。
+名称与输入/输出类型最多256字符，说明和默认值文本最多30000字符。
+输入requirement为空、`required_non_null`、`required_nullable`或`optional`；参数type为空、`string`、`integer`、`number`、`boolean`或`json`。
+参数required、输出nullable用null表示未声明。参数default为直接填写的文本：`"default":""`表示未声明，`"default":"\"\""`表示明确空字符串。
+字段归属、约束、动态字段规则及产生条件写入对应行的description，整体使用前提写入usage_notes；这些说明不会转换为可执行规则。精确输入/输出标识继续由作者执行契约提供。
+本格式直接替代旧分组格式及更早的文字说明，不提供旧字段、旧会话草稿或历史说明迁移。
 expected 字段使用 describe 的 `basis.component_revision` 与 `basis.description_ref`，首次后者为 null。
 保存返回精确 `description_ref`、`component_revision` 和 `created_revision`；内容相同可返回原修订。
 notes 复用 Config 版本资源，`schema_id=flowsql.operator-description.v1`，按具体组件关联。
@@ -496,12 +557,40 @@ DataFrame/CSV、保存的 Kafka 配置、真实 Python/C++ 组件、普通客户
 SQL 不需要传契约文档、版本或另一份字段角色映射。没有声明的历史算子仍能执行，显示
 `contract_state=missing`、兼容性 `undetermined`；已声明却丢失定义或服务时会报错。
 
-“算子管理”详情按组显示组件摘要、作者版本、不可变契约版本、参数约束与嵌套分支、字段选择规则、各输出、行分支与未知项；
-补充文字在同一详情维护，完整作者 JSON 在技术详情中读取。
-C++ 插件详情中的算子按钮可以打开对应声明。切换历史版本只改变阅读视图；预检始终重新取得当前组件的关联。
-预检输入为实际来源和既有算法参数；服务端从 F2 描述器取得结构/绑定并解析角色，不读取尚未加载的 CSV 业务行。
-源码和预检输入保存在当前浏览器会话中；刷新可恢复草稿，组件版本冲突时保留原稿和原版本依据。
-核对冲突后关闭编辑框、重新打开当前版本，再合并改动并保存。
+页面按前文[说明阅读与维护](#在算子中阅读和维护说明)阅读，精简视图由完整契约确定性整理，
+没有第二份可执行契约。精确引用、组件身份和原始文档保留在技术详情；普通阅读无需手工填写这些内部依据。
+历史只读；检查调用时重新取得当前组件关联，并通过来源描述器读取结构/绑定，不加载尚未加载的 CSV 业务行。
+
+作者契约可在顶层 `description` 声明用途，并在 `inputs[*].description`、`configuration.description`、
+`outputs[*].description` 写简短的输入、传参和结果说明；`examples` 声明调用示例。
+输入还可通过 `structure_ref` 指向同一不可变文档内的完整结构资源。
+这些字段直接投影到共享 usage 结果，保留作者来源及所属精确契约；文字不会被解析为执行校验规则。
+
+页面将作者短说明直接填入用途、输入说明、参数说明和输出说明编辑框，输入、参数、输出各保留一张字段表；
+使用限制与示例直接填入已有折叠区域的编辑框，技术详情按需展开。保存后读取本地维护内容，清空也会保留。
+作者完整声明随源码发布，本地文字独立保存，空白不产生缺失提示；页面不按算子名称定制。
+Baseliner 保留数据集/指标展开、四类输出及 NULL 规则；NPM 的 `foreground` 是 `observing` 选中的一个具体实体，
+`managed_results` 描述托管集合，不能当作同时返回的十二个主输出端口。
+NPM 的完整结构由生产 descriptor 生成后随 `.so` 发布；模板本身不包含生成后的字段清单。
+没有解析后的有效配置时，通用静态检查仍将 NPM 输出分支保留为未确定；实际调用由生产解析器验证。
+
+### 随仓库交付算子的核查边界
+
+核查以仓库注册/导出、生产参数解析和实际输出构造为依据；Schema 或调用检查通过不能单独证明作者声明正确。
+当前核查覆盖 9 个产品算子身份、1 个仓库提供的 Python 样例，另用卡方测试组件验证复杂行语义。
+
+| 算子或来源 | 已核实的行为与保留缺口 |
+| --- | --- |
+| `builtin.passthrough` | 已补齐 `force_fail`、`delay_ms` 字符串参数及实际默认行为；只复制首个输入，保留类型和 NULL，其余输入不参与输出。声明见[完整样例](../config/semantics/examples/operator-contract-passthrough.json) |
+| `explore.baseliner` | 已核对生产配置解析、默认行为、输入适配、四类输出、产生条件和 forecast NULL 规则；业务单位/可空性未声明时保持未知。配置见[Baseliner 使用说明](baseliner.md)，声明见[完整样例](../config/semantics/examples/operator-contract-baseliner.json) |
+| `builtin.dataframe_dispatch_stream`、`builtin.concat`、`builtin.hstack`、`builtin.passthrough_stream`、`builtin.count_window_stream`、`builtin.tcp_service_merge_stream` | 未发布结构化作者契约；登记身份与缺口，不据执行能力推断输入、参数或输出语义 |
+| `npm.basic` | 两个执行 ABI 发布同一作者契约；包含报文输入、WITH/JSON 参数、12 种 IPv4/IPv6 实体结构及主输出/托管结果区别。字段、类型、可空性、元数据和数值默认/范围取自生产定义。基础声明见[随算子嵌入的模板](../src/operators/npm_basic/npm_data_contract.json)，运行语义见[NPM 说明](npm.md) |
+| `explore.link_timestamp` | [仓库 Python 样例](../samples/python_operator/explore_link_timestamp.py)，未发布结构化作者契约，也不等于自动注册的生产算子 |
+| `explore.chisquare` | [仅测试组件](../src/tests/test_config_channel/fixtures/description_chisquare.py)，验证显式/默认字段、独立 2×2 样本、混合行 NULL、动态分类列和 error 行；不计为生产算子覆盖，不保证其他统计异常或字段名冲突 |
+
+无声明不等于声明不可读取：前者返回 `contract_state=missing` 和缺口，后者明确报错。
+已有声明的身份/输入、参数/解码、输出/限制分别由注册、真实解析及最小执行断言验证；
+没有扫描私有上传或任意第三方插件，也不承诺完整算法精度、性能或全部后端矩阵。
 
 ### 作者创建与上传
 
@@ -572,7 +661,8 @@ OpenAPI 的 `checkOperatorDataContract` 对应 `POST /api/semantics/v1/operators
 `output_locator` 可省略，依赖目标的输出会保持未确定；具体数据库表是普通表目标，不等同托管通道。
 
 下面的标准库客户端以已上传并激活的 `demo.identity` 和已有的 `dataframe.input` 为例，
-从概要/局部资源/闭合文档到预检、普通 SQL、精确使用依据及必要字典上下文完成读取。
+读取输入、参数、输出说明和同版本局部规则后，显式请求预检，完成只读流程。需要完整文档时显式请求 `view:"full"`；
+目录或 `resolve(view="summary")` 的摘要不能代替完整调用指引。
 运行前设置 `FLOWSQL_SEMANTICS_URL` 为实际 Web 地址，例如 `http://127.0.0.1:8081`：
 
 ```python
@@ -590,18 +680,47 @@ def post(path, body):
 def resolve(ref, **view):
     return post("semantics/v1/resolve", {"exact_reference": ref, **view})["data"]
 
-detail = post("operators/detail", {"name": "demo.identity"})
-ref = detail["contract_ref"]
-summary = resolve(ref, view="summary")
-input_rules = resolve(ref, view="resource", resource_pointer="/inputs")
-closed_contract = resolve(ref)["document"]
+target = {"kind": "operator", "name": "demo.identity"}
+usage = post("semantics/v1/describe", {"target": target})["data"]
+assert usage["view"] == "usage"
+for section in ("identity", "inputs", "parameters", "outputs", "limitations", "examples"):
+    print(section, usage["usage"][section])
+# 只读取本次需要的详情；始终沿用返回的同一精确引用和 JSON Pointer。
+for detail in usage["details"]:
+    if detail["section"] in {"inputs", "outputs"}:
+        rule = resolve(detail["exact_reference"], view="resource",
+                       resource_pointer=detail["resource_pointer"])
+        print(rule["resource"])
+# 用户需要完整契约时再单独执行：
+# full = post("semantics/v1/describe", {"target": target, "view": "full"})["data"]
+# closed_contract = full["contract"]["document"]
 checked = post("semantics/v1/operators/check", {
     "operator": {"category": "demo", "name": "identity"}, "parameters": {},
     "inputs": [{"input_index": 0, "locator": {"kind": "dataframe", "name": "input"}}],
 })["data"]
 print(checked["check"])
-if checked["check"]["state"] == "incompatible":
-    raise RuntimeError("输入不符合静态契约")
+```
+
+`details` 每项为 `{section,exact_reference,resource_pointer,reason}`。嵌套规则中的本地 `$ref` 继续用同一
+`exact_reference` 及对应 `resource_pointer` 读取，直到本次需要的规则闭合；不要改用 latest、网络引用或别的组件版本。
+`required_context_refs` 列出必要语义上下文，缺失时保留未知。完整/usage 形状及代表响应见
+[API Schema](../config/semantics/api.schema.json)、[OpenAPI](../config/semantics/openapi.json) 和
+[简单算子/卡方/Baseliner usage 样例](../config/semantics/examples/operator-usage.json)。
+
+参数项中的 `source_pointer`、`input_roles` 保留原字段关系；`control` 为 `text|field|select|json|advanced`，
+`wire_encoding` 为 `string|json`，`decoded_schema_pointer` 指向 JSON 文本的内层规则。
+`required=null` 表示需结合组级条件判断，不能视为可选；`parameters.constraints` 保留跨参数分支。
+例如 Baseliner 的 `config` 精确引用与 `parameters` JSON 文本互斥；使用内联配置时，将符合完整配置规则的原文本
+`task_json_text` 放入参数映射 `{"parameters": task_json_text}`，不要把解析后的对象直接放进参数值。
+JSON 序列化只编码外层信封一次，不把已有内层字符串再次 `json.dumps`；声明默认值不写入请求。
+
+确认需要实际执行后，再运行下面的独立步骤；先核对缺口、激活状态与未使用的输出名。
+也可使用前文带 `--execute` 的[对象说明客户端](#普通客户端发现描述与显式执行)：该客户端会拒绝未激活算子、pending 来源、
+已有输出及明确不兼容的调用；信息不足仍需调用者自行评估。
+
+```python
+if checked["check"]["state"] != "compatible":
+    raise RuntimeError("先处理不匹配或信息缺口，再决定是否执行")
 result = post("tasks/batch/execute", {
     "sql_text": "SELECT * FROM dataframe.input USING demo.identity INTO dataframe.identity_result",
     "mode": "sync",
@@ -639,6 +758,7 @@ for check in result["contract_checks"]:
 Ratio 或未知转换不会按同名字段猜测、继承物理单位。
 
 `row_cases` 说明 evaluation/forecast、未训练模型等条件下 NULL 的含义，不执行逐行数据质量验证。
-例如 forecast 的 observed/can_alert 为 NULL；冷启动 evaluation 可能没有区间，不能把同次任务的 forecast
+例如 forecast 的九项观测/判定字段为 NULL：`observed`、`can_alert`、`confidence`、`maturity`、`score`、
+`is_outside_band`、`can_score`、`can_update`、`update_weight`。冷启动 evaluation 可能没有区间，不能把同次任务的 forecast
 也一概视为没有区间。`data_validation=not_run` 始终不表示预测算法、异常判定或所有业务行已经验证。
 进一步的结果/图表就地解释属于独立的消费展示能力。

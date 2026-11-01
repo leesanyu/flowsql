@@ -1269,6 +1269,12 @@
             "application/json": {
               "schema": {
                 "$ref": "./api.schema.json#/%24defs/describeRequest"
+              },
+              "example": {
+                "target": {
+                  "kind": "operator",
+                  "name": "builtin.passthrough"
+                }
               }
             }
           }
@@ -1354,7 +1360,8 @@
               }
             }
           }
-        }
+        },
+        "description": "算子默认返回按输入、参数与输出组织的 usage，annotations.inputs/parameters/outputs 提供本地结构化说明条目；条目与使用限制不参与机器契约判断。显式 view=full 读取完整说明与契约；details 使用同一精确 contract_ref 和 resolve resource 视图按需读取。通道描述保持原形状且不接受 view。读取不运行算法或加载业务数据。"
       }
     },
     "/channels/save-description": {
@@ -1551,7 +1558,8 @@
               }
             }
           }
-        }
+        },
+        "description": "保存当前组件的本地使用说明。input_description、parameter_description、output_description保存三个区域的整体说明，允许明确清空；页面首次将作者原文填入编辑框，保存后使用本地内容。inputs/outputs 直接记录字段行，归属、单位与局部规则写入各行 description；整体使用前提写入 usage_notes。parameters 记录类型（含 json）、必填、默认值文本及说明。输入 requirement 为未填写、required_non_null、required_nullable 或 optional。默认值文本空白表示未声明，双引号空串文本表示明确空字符串。使用当前组件及说明精确版本做 CAS；不接受分组格式，不迁移旧格式，不修改作者执行契约。"
       }
     }
   }

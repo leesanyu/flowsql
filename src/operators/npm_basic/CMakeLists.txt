@@ -1,6 +1,7 @@
 project(flowsql_npm_basic)
 
 add_library(${PROJECT_NAME} SHARED
+    npm_data_contract.cpp
     npm_family_result_contract.cpp
     npm_family_output_contract.cpp
     npm_analysis_contract.cpp
@@ -62,3 +63,8 @@ target_link_libraries(${PROJECT_NAME} flowsql_common)
 set_target_properties(${PROJECT_NAME} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
+
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/npm_data_contract.json" FLOWSQL_NPM_DATA_CONTRACT)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/npm_data_contract.json")
+configure_file(npm_data_contract_package.h.in ${CMAKE_CURRENT_BINARY_DIR}/npm_data_contract_package.h @ONLY)
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

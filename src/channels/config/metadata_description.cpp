@@ -9,6 +9,7 @@
 #include <set>
 #include "data_semantics_api_schema.h"
 #include "metadata_description_time.h"
+#include "operator_usage.h"
 
 namespace flowsql::channels::config {
 namespace {
@@ -267,7 +268,9 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
     } else {
         OperatorComponentContractV1 c;
         if (!lookup_) return Error({"UNAVAILABLE", "operator catalog unavailable", ""}, response);
-        if (lookup_(Get(req["target"], "name"), remaining(), &c, &e)) return Error(e, response);
+        const auto lookup_budget = remaining();
+        if (!lookup_budget) return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
+        if (lookup_(Get(req["target"], "name"), lookup_budget, &c, &e)) return Error(e, response);
         Set(basis, "component_revision", c.component_revision, basis.GetAllocator());
         if (!c.contract_ref.empty()) Set(basis, "contract_ref", c.contract_ref, basis.GetAllocator());
         if (c.contract_state != "missing" && c.contract_state != "declared")
@@ -306,9 +309,18 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
                 c.contract_state == "declared" ? "component_author_and_local_notes" : "local_notes", a);
         }
         OperatorComponentContractV1 after;
-        if (lookup_(Get(req["target"], "name"), remaining(), &after, &e)) return Error(e, response);
+        const auto recheck_budget = remaining();
+        if (!recheck_budget) return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
+        if (lookup_(Get(req["target"], "name"), recheck_budget, &after, &e)) return Error(e, response);
         if (after.component_revision != c.component_revision || after.contract_ref != c.contract_ref)
             return Error({"SOURCE_CHANGED", "component changed while describing", ""}, response);
+        if (Get(req, "view", "usage") == "usage") {
+            if (!remaining()) return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
+            auto usage = operator_usage::Build(req["target"], basis, contract, notes, context);
+            const auto rc = Finish(usage, response);
+            if (!remaining()) return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
+            return rc;
+        }
         Value structure(rapidjson::kObjectType);
         Set(structure, "state", "unsupported", a);
         Set(structure, "reason", "operator structure is declared by its static contract", a);

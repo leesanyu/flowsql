@@ -28,7 +28,7 @@ def run(web_url, input_name="input", output_name="description_demo", execute=Fal
     source = request("semantics/v1/describe", {"target": {"kind": "channel", "locator": locator}})
     description = request("semantics/v1/describe", {
         "target": {"kind": "operator", "name": "builtin.passthrough"}})
-    report = {"source": source, "operator": description, "executed": False}
+    report = {"source": source, "operator": description, "operator_details": [], "executed": False}
     if not execute:
         return report
     if not all(re.fullmatch(r"[a-z_][a-z0-9_]*", name) for name in (input_name, output_name)):
@@ -39,6 +39,10 @@ def run(web_url, input_name="input", output_name="description_demo", execute=Fal
         raise ValueError("activate builtin.passthrough through the existing operator manager first")
     if source["structure"]["state"] != "known":
         raise ValueError("explicitly load the input through its existing channel entry first")
+    for detail in description["details"]:
+        report["operator_details"].append(request("semantics/v1/resolve", {
+            "exact_reference": detail["exact_reference"], "view": "resource",
+            "resource_pointer": detail["resource_pointer"]}))
     checked = request("semantics/v1/operators/check", {
         "operator": {"category": "builtin", "name": "passthrough"}, "parameters": {},
         "inputs": [{"input_index": 0, "locator": locator}],

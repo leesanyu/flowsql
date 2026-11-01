@@ -4136,6 +4136,16 @@
           "items": {
             "$ref": "#/%24defs/operatorRoleTemplate"
           }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30000
+        },
+        "structure_ref": {
+          "type": "string",
+          "pattern": "^#/",
+          "minLength": 3
         }
       },
       "required": [
@@ -4291,6 +4301,11 @@
         },
         "context_semantics": {
           "type": "object"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30000
         }
       },
       "required": [
@@ -4346,6 +4361,11 @@
               "minLength": 1
             }
           }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30000
         }
       },
       "required": [
@@ -4394,6 +4414,20 @@
           "items": {
             "type": "string",
             "minLength": 1
+          }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30000
+        },
+        "examples": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 30000
           }
         }
       },
@@ -5208,7 +5242,7 @@
       "properties": {
         "purpose": {
           "type": "string",
-          "maxLength": 10000
+          "maxLength": 30000
         },
         "usage_notes": {
           "type": "string",
@@ -5219,14 +5253,50 @@
           "maxItems": 50,
           "items": {
             "type": "string",
-            "maxLength": 10000
+            "maxLength": 30000
           }
+        },
+        "inputs": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/%24defs/operatorDescriptionInput"
+          }
+        },
+        "parameters": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/%24defs/operatorDescriptionParameter"
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/%24defs/operatorDescriptionOutput"
+          }
+        },
+        "input_description": {
+          "type": "string",
+          "maxLength": 30000
+        },
+        "parameter_description": {
+          "type": "string",
+          "maxLength": 30000
+        },
+        "output_description": {
+          "type": "string",
+          "maxLength": 30000
         }
       },
       "required": [
         "purpose",
         "usage_notes",
-        "examples"
+        "examples",
+        "inputs",
+        "parameters",
+        "outputs"
       ],
       "additionalProperties": false
     },
@@ -5272,21 +5342,43 @@
       ]
     },
     "describeRequest": {
-      "type": "object",
-      "properties": {
-        "target": {
-          "$ref": "#/%24defs/descriptionTarget"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "channel"
+                  ]
+                },
+                "locator": {
+                  "$ref": "#/%24defs/datasetLocator"
+                }
+              },
+              "required": [
+                "kind",
+                "locator"
+              ],
+              "additionalProperties": false
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "additionalProperties": false
         },
-        "timeout_ms": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 30000
+        {
+          "$ref": "#/%24defs/operatorDescribeRequest"
         }
-      },
-      "required": [
-        "target"
-      ],
-      "additionalProperties": false
+      ]
     },
     "metadataDescription": {
       "type": "object",
@@ -5391,16 +5483,52 @@
       "additionalProperties": false
     },
     "describeResponse": {
-      "type": "object",
-      "properties": {
-        "data": {
-          "$ref": "#/%24defs/metadataDescription"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "allOf": [
+                {
+                  "$ref": "#/%24defs/metadataDescription"
+                },
+                {
+                  "properties": {
+                    "subject": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "enum": [
+                            "channel"
+                          ]
+                        },
+                        "locator": {
+                          "$ref": "#/%24defs/datasetLocator"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "locator"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "$ref": "#/%24defs/operatorUsageResponse"
+        },
+        {
+          "$ref": "#/%24defs/operatorFullDescriptionResponse"
         }
-      },
-      "required": [
-        "data"
-      ],
-      "additionalProperties": false
+      ]
     },
     "descriptionFieldChanges": {
       "type": "object",
@@ -5770,6 +5898,875 @@
         "unit",
         "time_semantics",
         "conflict"
+      ],
+      "additionalProperties": false
+    },
+    "operatorDescribeRequest": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "operator"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[^.]+\\..+$"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "additionalProperties": false
+        },
+        "view": {
+          "enum": [
+            "usage",
+            "full"
+          ],
+          "default": "usage"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "additionalProperties": false
+    },
+    "operatorUsageText": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "origin": {
+          "enum": [
+            "author",
+            "local"
+          ]
+        },
+        "source_pointer": {
+          "type": "string",
+          "pattern": "^(/([^~/]|~[01])*)+$"
+        }
+      },
+      "required": [
+        "text",
+        "origin",
+        "source_pointer"
+      ],
+      "additionalProperties": false
+    },
+    "operatorUsageDetail": {
+      "type": "object",
+      "properties": {
+        "section": {
+          "enum": [
+            "identity",
+            "inputs",
+            "parameters",
+            "outputs",
+            "limitations",
+            "examples"
+          ]
+        },
+        "exact_reference": {
+          "type": "string",
+          "pattern": "^operator_contract\\.[^@]+@[1-9][0-9]*$"
+        },
+        "resource_pointer": {
+          "type": "string",
+          "pattern": "^(/([^~/]|~[01])*)+$"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "section",
+        "exact_reference",
+        "resource_pointer",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "operatorUsageRoleLink": {
+      "type": "object",
+      "properties": {
+        "port_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "port_id",
+        "role_id"
+      ],
+      "additionalProperties": false
+    },
+    "operatorUsageParameter": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_pointer": {
+          "type": "string",
+          "pattern": "^(/([^~/]|~[01])*)+$"
+        },
+        "required": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "schema": {
+          "$ref": "#/%24defs/operatorSchema"
+        },
+        "wire_encoding": {
+          "enum": [
+            "string",
+            "json"
+          ]
+        },
+        "control": {
+          "enum": [
+            "text",
+            "select",
+            "field",
+            "json",
+            "advanced"
+          ]
+        },
+        "input_roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorUsageRoleLink"
+          }
+        },
+        "decoded_schema_pointer": {
+          "type": "string",
+          "pattern": "^(/([^~/]|~[01])*)+$"
+        }
+      },
+      "required": [
+        "name",
+        "source_pointer",
+        "required",
+        "schema",
+        "wire_encoding",
+        "control",
+        "input_roles"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "wire_encoding": {
+                  "enum": [
+                    "json"
+                  ]
+                }
+              },
+              "required": [
+                "decoded_schema_pointer"
+              ]
+            },
+            {
+              "properties": {
+                "wire_encoding": {
+                  "enum": [
+                    "string"
+                  ]
+                }
+              },
+              "not": {
+                "required": [
+                  "decoded_schema_pointer"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "properties": {
+                "control": {
+                  "enum": [
+                    "field"
+                  ]
+                },
+                "input_roles": {
+                  "minItems": 1
+                }
+              }
+            },
+            {
+              "properties": {
+                "control": {
+                  "enum": [
+                    "text",
+                    "select",
+                    "json",
+                    "advanced"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "operatorUsageParameters": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorUsageParameter"
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorUsageDetail"
+          }
+        },
+        "additional_parameters": {
+          "enum": [
+            "allowed",
+            "forbidden",
+            "conditional",
+            "unknown"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30000
+        }
+      },
+      "required": [
+        "items",
+        "constraints",
+        "additional_parameters"
+      ],
+      "additionalProperties": false
+    },
+    "operatorUsageInput": {
+      "type": "object",
+      "properties": {
+        "port_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_pointer": {
+          "type": "string",
+          "pattern": "^(/([^~/]|~[01])*)+$"
+        },
+        "min_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "shape": {
+          "enum": [
+            "dataframe",
+            "record_batch",
+            "stream_batch",
+            "opaque"
+          ]
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorRole"
+          }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30000
+        }
+      },
+      "required": [
+        "port_id",
+        "source_pointer",
+        "min_count",
+        "max_count",
+        "shape",
+        "roles"
+      ],
+      "additionalProperties": false
+    },
+    "operatorUsageField": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_pointer": {
+          "type": "string",
+          "pattern": "^(/([^~/]|~[01])*)+$"
+        },
+        "format": {
+          "enum": [
+            "physical",
+            "json_schema"
+          ]
+        },
+        "declaration": {
+          "$ref": "#/%24defs/operatorSchema"
+        }
+      },
+      "required": [
+        "name",
+        "source_pointer",
+        "format",
+        "declaration"
+      ],
+      "additionalProperties": false
+    },
+    "operatorUsageOutput": {
+      "type": "object",
+      "properties": {
+        "port_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_pointer": {
+          "type": "string",
+          "pattern": "^(/([^~/]|~[01])*)+$"
+        },
+        "shape": {
+          "enum": [
+            "dataframe",
+            "record_batch",
+            "stream_batch",
+            "opaque"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "fixed",
+            "derived",
+            "configured",
+            "unknown"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "fields_state": {
+          "enum": [
+            "declared",
+            "dynamic",
+            "unknown"
+          ]
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorUsageField"
+          }
+        },
+        "availability": {
+          "$ref": "#/%24defs/operatorCondition"
+        },
+        "row_cases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorRowCase"
+          }
+        },
+        "context_semantics": {
+          "type": "object"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30000
+        }
+      },
+      "required": [
+        "port_id",
+        "source_pointer",
+        "shape",
+        "mode",
+        "summary",
+        "fields_state",
+        "fields"
+      ],
+      "additionalProperties": false
+    },
+    "operatorUsageIdentity": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string"
+        },
+        "author_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "purposes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorUsageText"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "author_version",
+        "purposes"
+      ],
+      "additionalProperties": false
+    },
+    "operatorUsageGap": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "section": {
+          "enum": [
+            "identity",
+            "inputs",
+            "parameters",
+            "outputs",
+            "limitations",
+            "examples"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_pointer": {
+          "type": "string",
+          "pattern": "^(/([^~/]|~[01])*)+$"
+        }
+      },
+      "required": [
+        "code",
+        "section",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "operatorUsage": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "$ref": "#/%24defs/operatorUsageIdentity"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorUsageInput"
+          }
+        },
+        "parameters": {
+          "$ref": "#/%24defs/operatorUsageParameters"
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorUsageOutput"
+          }
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorUsageText"
+          }
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorUsageText"
+          }
+        },
+        "annotations": {
+          "type": "object",
+          "properties": {
+            "inputs": {
+              "type": "array",
+              "maxItems": 100,
+              "items": {
+                "$ref": "#/%24defs/operatorDescriptionInput"
+              }
+            },
+            "parameters": {
+              "type": "array",
+              "maxItems": 100,
+              "items": {
+                "$ref": "#/%24defs/operatorDescriptionParameter"
+              }
+            },
+            "outputs": {
+              "type": "array",
+              "maxItems": 100,
+              "items": {
+                "$ref": "#/%24defs/operatorDescriptionOutput"
+              }
+            },
+            "input_description": {
+              "type": "string",
+              "maxLength": 30000
+            },
+            "parameter_description": {
+              "type": "string",
+              "maxLength": 30000
+            },
+            "output_description": {
+              "type": "string",
+              "maxLength": 30000
+            }
+          },
+          "required": [
+            "inputs",
+            "parameters",
+            "outputs"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "identity",
+        "inputs",
+        "parameters",
+        "outputs",
+        "limitations",
+        "examples",
+        "annotations"
+      ],
+      "additionalProperties": false
+    },
+    "operatorUsageDescription": {
+      "type": "object",
+      "properties": {
+        "subject": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "operator"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[^.]+\\..+$"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "additionalProperties": false
+        },
+        "view": {
+          "enum": [
+            "usage"
+          ]
+        },
+        "basis": {
+          "$ref": "#/%24defs/descriptionBasis"
+        },
+        "contract_state": {
+          "enum": [
+            "declared",
+            "missing"
+          ]
+        },
+        "usage": {
+          "$ref": "#/%24defs/operatorUsage"
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorUsageGap"
+          }
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "$ref": "#/%24defs/operatorUsageDetail"
+          }
+        },
+        "required_context_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z_]+\\.[^@]+@[1-9][0-9]*$"
+          }
+        }
+      },
+      "required": [
+        "subject",
+        "view",
+        "basis",
+        "contract_state",
+        "usage",
+        "gaps",
+        "details",
+        "required_context_refs"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "contract_state": {
+                  "enum": [
+                    "declared"
+                  ]
+                },
+                "basis": {
+                  "properties": {
+                    "contract_ref": {
+                      "type": "string",
+                      "pattern": "^operator_contract\\.[^@]+@[1-9][0-9]*$"
+                    },
+                    "component_revision": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "properties": {
+                "contract_state": {
+                  "enum": [
+                    "missing"
+                  ]
+                },
+                "basis": {
+                  "properties": {
+                    "contract_ref": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "operatorUsageResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/%24defs/operatorUsageDescription"
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operatorFullDescriptionResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "allOf": [
+            {
+              "$ref": "#/%24defs/metadataDescription"
+            },
+            {
+              "properties": {
+                "subject": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "operator"
+                      ]
+                    },
+                    "name": {
+                      "type": "string",
+                      "pattern": "^[^.]+\\..+$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "name"
+                  ],
+                  "additionalProperties": false
+                },
+                "contract": {
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "state": {
+                          "enum": [
+                            "declared"
+                          ]
+                        },
+                        "document": {
+                          "$ref": "#/%24defs/operatorContract"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "state": {
+                          "enum": [
+                            "missing"
+                          ]
+                        },
+                        "document": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operatorDescriptionInput": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "type": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "requirement": {
+          "enum": [
+            "",
+            "required_non_null",
+            "required_nullable",
+            "optional"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 30000
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "requirement",
+        "description"
+      ],
+      "additionalProperties": false
+    },
+    "operatorDescriptionParameter": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "type": {
+          "enum": [
+            "",
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "json"
+          ]
+        },
+        "required": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "default": {
+          "type": "string",
+          "maxLength": 30000
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 30000
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "required",
+        "default",
+        "description"
+      ],
+      "additionalProperties": false
+    },
+    "operatorDescriptionOutput": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "type": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "nullable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 30000
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "nullable",
+        "description"
       ],
       "additionalProperties": false
     }

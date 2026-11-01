@@ -1,6 +1,6 @@
 {
   "schema_id": "flowsql.operator-data-contract.v1",
-  "title": "Baseliner representative contract",
+  "title": "Baseliner",
   "operator": {
     "category": "explore",
     "name": "baseliner",
@@ -12,13 +12,17 @@
       "properties": {
         "config": {
           "type": "string",
-          "pattern": "^config\\.[a-z][a-z0-9_.-]*@[1-9][0-9]*$"
+          "pattern": "^config\\.[a-z][a-z0-9_.-]*@[1-9][0-9]*$",
+          "description": "Exact immutable config revision; exactly one of config or parameters is required. Its source must match SQL FROM."
         },
         "parameters": {
-          "type": "string"
+          "type": "string",
+          "description": "One JSON-encoded configuration object, not a JSON string encoded again. Full datasets or the single-dataset shorthand are parsed by the production parser."
         },
         "model_output": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional final model parameters destination, only in snapshot mode: DataFrame or writable database table; ClickHouse is not supported. Emitted on normal final EOF, not a recoverable checkpoint."
         }
       },
       "oneOf": [
@@ -67,7 +71,8 @@
       "model_output": [
         "#/outputs/1"
       ]
-    }
+    },
+    "description": "config 与 parameters 二选一：config 引用已发布的精确配置版本；parameters 传入一次 JSON 编码的完整任务配置。\n配置中定义数据来源、数据集、时间列、序列键和 value / ratio / relation 指标；model_output 可选，指定模型参数的输出目标。"
   },
   "inputs": [
     {
@@ -234,7 +239,8 @@
             }
           }
         }
-      ]
+      ],
+      "description": "输入由任务配置的 source 与 datasets 决定；每个数据集配置时间列、序列键、字段映射、去重和指标。\nvalue 使用数值列，ratio 使用分子与分母，relation 使用多个子指标；字段名和数据类型须符合对应数据集的声明。"
     }
   ],
   "outputs": [
@@ -261,6 +267,12 @@
             },
             "expected": {
               "null_meaning": "No valid expected band during cold start or non-ready status; interpret status before using expected/lower/upper."
+            },
+            "lower": {
+              "null_meaning": "NULL together with expected when the algorithm status has no valid prediction band."
+            },
+            "upper": {
+              "null_meaning": "NULL together with expected when the algorithm status has no valid prediction band."
             }
           }
         },
@@ -277,6 +289,34 @@
               "must_be_null": true
             },
             "can_alert": {
+              "description": "NULL for forecast rows.",
+              "must_be_null": true
+            },
+            "confidence": {
+              "description": "NULL for forecast rows.",
+              "must_be_null": true
+            },
+            "maturity": {
+              "description": "NULL for forecast rows.",
+              "must_be_null": true
+            },
+            "score": {
+              "description": "NULL for forecast rows.",
+              "must_be_null": true
+            },
+            "is_outside_band": {
+              "description": "NULL for forecast rows.",
+              "must_be_null": true
+            },
+            "can_score": {
+              "description": "NULL for forecast rows.",
+              "must_be_null": true
+            },
+            "can_update": {
+              "description": "NULL for forecast rows.",
+              "must_be_null": true
+            },
+            "update_weight": {
               "description": "NULL for forecast rows.",
               "must_be_null": true
             }
@@ -296,7 +336,8 @@
         "metric_key_pointer": "/id",
         "submetrics_pointer": "/metrics",
         "include_submetrics": true
-      }
+      },
+      "description": "基线评估与预测结果。result_kind 区分 evaluation 与 forecast；预测行的 observed、score、can_alert 等九项评估字段为 NULL。时间桶、单位和业务含义须结合原数据集及指标配置解释。"
     },
     {
       "port_id": "model_parameters",
@@ -338,7 +379,8 @@
             }
           }
         }
-      ]
+      ],
+      "description": "模型参数；仅配置 model_output 时产生。未训练模型的 parameters_json 为 NULL。"
     },
     {
       "port_id": "relation_fusion",
@@ -364,7 +406,8 @@
         "metric_key_pointer": "/id",
         "submetrics_pointer": "/metrics",
         "include_submetrics": false
-      }
+      },
+      "description": "关系指标的融合结果；仅在托管输出且启用 relation 指标时产生。"
     },
     {
       "port_id": "maintenance",
@@ -376,12 +419,18 @@
         "pointer": "/managed_output",
         "equals": true
       },
-      "structure_ref": "#/resources/maintenance_structure"
+      "structure_ref": "#/resources/maintenance_structure",
+      "description": "维护事件；仅在托管输出时产生，用于解释运行过程中的维护状态。"
     }
   ],
   "limitations": [
-    "Representative template: production adapters supply effective configuration and actual input associations.",
-    "Unknown field/business semantics remain unknown; no algorithm or row validation is implied."
+    "The production adapter supplies effective configuration and actual input associations; the structural JSON Schema alone does not replace production parsing or source validation.",
+    "Unknown field/business semantics remain unknown; no algorithm or row validation is implied.",
+    "A DataFrame or one explicitly named database relation requires exactly one dataset. Multiple datasets are resolved independently against a database channel.",
+    "Input bucket.unit explicitly selects bucket_id, ns, us, ms or s; it is independent of clock.bucket_seconds. No physical unit is inferred from a field name or from the output unit category.",
+    "forecast.horizon_buckets defaults to 0. Forecast rows target future buckets and have no observed value or evaluation/alert/update decision fields.",
+    "model_output is optional, snapshot-only and written at normal final EOF; model parameters do not constitute a recoverable checkpoint.",
+    "relation_fusion and maintenance depend on execution output context. A missing target/context keeps availability undetermined; an enabled output does not guarantee rows."
   ],
   "resources": {
     "task_config": {
@@ -663,7 +712,8 @@
         "clock",
         "calendar"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "Structural schema only. The production parser additionally checks field references/types, unique dataset/metric identities, real timezone, finite source scopes, begin < end, source/dataset consistency, snapshot TTL, Relation basis capacity, and renew_ms + operation_timeout_ms < lease_ms."
     },
     "inline_config": {
       "oneOf": [
@@ -1218,7 +1268,8 @@
           },
           "nullable": true
         }
-      ]
+      ],
+      "description": "Evaluation and forecast share this physical schema. target_bucket and issued_after_bucket are bucket IDs; bucket_seconds is the bucket width in seconds, and timezone is the configured timezone. unit is a metric category, not a physical measurement unit."
     },
     "model_parameters_structure": {
       "fields": [
@@ -1339,7 +1390,8 @@
           },
           "nullable": true
         }
-      ]
+      ],
+      "description": "Final model parameters from a normal snapshot EOF when model_output is configured. parameters_json may be NULL for an untrained model; these rows are not recoverable checkpoints."
     },
     "relation_fusion_structure": {
       "fields": [
@@ -1451,7 +1503,8 @@
           },
           "nullable": true
         }
-      ]
+      ],
+      "description": "Relation diagnostics when that output path is enabled; the port may contain no rows. can_alert is always NULL and fusion_score may be NULL before a valid fusion result."
     },
     "maintenance_structure": {
       "fields": [
@@ -1581,7 +1634,8 @@
           },
           "nullable": false
         }
-      ]
+      ],
+      "description": "Maintenance events on the managed output path, not one row per input observation; the enabled port may produce no events."
     },
     "expression": {
       "type": "object",
@@ -2466,5 +2520,9 @@
       ],
       "additionalProperties": false
     }
-  }
+  },
+  "description": "按配置对时间序列进行基线评估与预测，支持数值、比率及多指标关系分析。",
+  "examples": [
+    "SELECT * FROM dataframe.series USING explore.baseliner WITH config = 'config.baseline@1'\n-- 示例前提：该精确配置版本已发布，source 指向 dataframe.series，datasets 与其字段一致。"
+  ]
 }

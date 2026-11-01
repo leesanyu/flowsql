@@ -25,16 +25,21 @@ PCAP 当前可通过上传或 stream/add 创建并在实例查询中发现，未
 NetAdapter 配置保存不打开设备，但仍要求已加载所选后端 provider、合法网卡名称和足够缓冲预算。
 
 发现对象后，点击 DataFrame 名称、在数据库“浏览”中选定明确表，或打开 Kafka“详情”，即可查看和补充数据说明。
-数据库选表只读元数据，进入“数据预览”才读业务行。算子详情按组展示输入、参数、输出和必要上下文，
-可保存补充说明；Python 静态声明随源码维护，C++ 声明随所属插件更新。
+数据库选表只读元数据，进入“数据预览”才读业务行。算子详情填写用途，输入、参数、输出各一张表逐条编辑，每列对应一个配置项；字段归属和局部条件写入行说明，整体使用前提写入使用限制。JSON作为参数类型选择，默认值直接填写，使用限制和调用示例分别按需展开。
+Python 基本信息及源码在前，“说明与契约”按需展开；C++ 先选择插件内的具体算子。补充说明单独保存，Python 静态声明随源码维护，C++ 声明随所属插件更新。
 旧 `/semantics` 入口保留，日常路径无需先建标准/字典或手写绑定。
 通道说明以文本和必要单位为主，字段行可按需解释时间点/时长或配置精确关联；关联选择已知结构目标时只创建对象本地默认说明和精确绑定，不执行 SQL。
 时间及关联供预检和输出派生读取，关联不会生成 JOIN；未填写这些可选说明仍可按相应执行契约使用 SQL，具体操作见[通道与算子说明](data-semantics.md#在通道中查看和保存说明)。
 
-程序调用 `POST /api/semantics/v1/describe` 按通道 locator 或算子名取得相同内容。
+程序调用 `POST /api/semantics/v1/describe` 按通道 locator 或算子名取得相同内容；算子默认返回 `view:"usage"` 的六项精简说明，
+主动请求 `view:"full"` 才读取完整契约。复杂规则沿 `details` 的精确引用和 JSON Pointer 调用 resolve 的 resource 视图，不能换成 latest。
 结构 pending 需先从通道入口显式加载；字段缺少说明时仍返回已知结构。
-需要判断本次输入时，显式调用 `POST /api/semantics/v1/operators/check`，再使用下文原任务入口执行 SQL。
+具体来源、参数和目标通过 SQL 指定。程序需要预检时，可显式调用
+`POST /api/semantics/v1/operators/check`，输入支持 DataFrame、明确数据库表或结构化 Kafka source/both。参数值均为字符串，默认值仅作提示，复杂 JSON 文本保留一次编码；输出目标可省略。
+`compatible` 表示满足已声明要求，`incompatible` 表示不符合，`undetermined` 表示信息不足；HTTP 失败单独处理。
+输入、参数、目标或组件变化后重新检查，再使用下文原任务入口执行 SQL。
 描述、预检和实际执行分别进行，说明已保存或结构匹配都不表示业务数据已验证。
+调用示例、输出 NULL/必要上下文和核查缺口见[算子使用说明](data-semantics.md#在算子中阅读和维护说明)及[精简与完整 HTTP 读取](data-semantics.md#普通-http-客户端)。
 
 可直接使用[标准库对象说明客户端](../examples/metadata_description/client.py)：默认只读，
 增加 `--execute` 后才执行预检与 `builtin.passthrough` SQL，并读取结果的精确 use/dictionary 依据及必要上下文。

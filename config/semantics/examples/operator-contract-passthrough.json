@@ -9,6 +9,18 @@
   "configuration": {
     "invocation_schema": {
       "type": "object",
+      "properties": {
+        "force_fail": {
+          "type": "string",
+          "default": "false",
+          "description": "Only the exact strings 1 and true enable failure before reading or writing; every other string disables it."
+        },
+        "delay_ms": {
+          "type": "string",
+          "default": "0",
+          "description": "Delay after copying, in milliseconds. Parse as a base-10 integer and clamp to 0..60000; an empty or invalid integer string retains the instance's current delay."
+        }
+      },
       "additionalProperties": true
     },
     "affects": {}

@@ -396,6 +396,9 @@
           <el-form-item label="SHA256">
             <el-input :model-value="cppDetail.sha256 || '-'" disabled class="mono-input" />
           </el-form-item>
+          <el-form-item label="错误信息">
+            <el-input :model-value="cppDetail.last_error || '-'" type="textarea" :rows="3" disabled />
+          </el-form-item>
           <el-form-item label="算子列表">
             <div class="cpp-op-list">
               <el-button v-for="name in cppDetail.operators" :key="name" text @click="componentContractName = name">{{ name }} 契约</el-button>
@@ -403,14 +406,11 @@
             </div>
           </el-form-item>
           <OperatorContractPanel v-if="componentContractName" :key="componentContractName" :full-name="componentContractName" declaration-mode="cpp" @maintain-declaration="triggerFileInput" />
-          <el-form-item label="错误信息">
-            <el-input :model-value="cppDetail.last_error || '-'" type="textarea" :rows="3" disabled />
-          </el-form-item>
         </template>
         <template v-else>
-          <OperatorContractPanel v-if="detailDialogVisible" :key="detailForm.fullName" :full-name="detailForm.fullName" :declaration-mode="detailForm.type" @maintain-declaration="openDetail(detailForm.fullName, 'edit')" />
-          <p v-if="detailMode === 'edit'" data-testid="component-edit-basis">编辑依据：{{ detailForm.component_revision || 'unknown' }}。版本冲突会保留草稿，请核对当前版本后再编辑。</p>
+          <details v-if="detailMode === 'edit'"><summary>源码保存依据</summary><p data-testid="component-edit-basis">编辑依据：{{ detailForm.component_revision || 'unknown' }}。版本冲突会保留草稿，请核对当前版本后再编辑。</p></details>
           <p v-if="editError" role="alert" data-testid="operator-edit-error">{{ editError }}</p>
+          <el-button v-if="sourceNeedsReview || editError.includes('COMPONENT_CHANGED')" :disabled="sourceReviewBusy" @click="reviewSourceBasis">核对当前版本后保留源码草稿</el-button>
           <el-form-item v-if="showDetailMeta" label="算子名称">
             <el-input v-model="detailForm.fullName" disabled />
           </el-form-item>
@@ -479,6 +479,10 @@
               </div>
             </template>
           </el-form-item>
+          <div v-show="!detailDialogFullscreen" class="contract-entry">
+            <el-button :aria-expanded="contractExpanded" @click="toggleContract">说明与契约</el-button>
+            <OperatorContractPanel v-if="detailDialogVisible && contractMounted" v-show="contractExpanded" :key="detailForm.fullName" :full-name="detailForm.fullName" :declaration-mode="detailForm.type" @maintain-declaration="openDetail(detailForm.fullName, 'edit')" />
+          </div>
         </template>
       </el-form>
       <template #footer>
@@ -488,6 +492,7 @@
             v-if="detailMode === 'edit'"
             type="primary"
             :loading="uploading"
+            :disabled="sourceNeedsReview || sourceReviewBusy"
             @click="saveOperatorEdit"
           >
             保存
@@ -507,6 +512,9 @@ import { ElMessage } from 'element-plus'
 
 const readDraft = key => { try { return JSON.parse(sessionStorage.getItem('flowsql.operator.' + key) || 'null') } catch { return null } }
 const componentContractName = ref(''), editError = ref('')
+const contractExpanded = ref(false), contractMounted = ref(false), sourceNeedsReview = ref(false), sourceReviewBusy = ref(false)
+let detailRequest = 0, loadingDetail = false
+const toggleContract = () => { contractMounted.value = true; contractExpanded.value = !contractExpanded.value }
 const operators = ref([])
 const searchText = ref('')
 const operatorType = ref('python')
@@ -921,10 +929,13 @@ const formatPosition = (position) => {
 }
 
 const openDetail = async (fullName, mode) => {
-  const savedDraft = readDraft('detail')
-  editError.value = ''
+  const savedDraft = readDraft('detail.' + fullName) || readDraft('detail')
+  const request = ++detailRequest
+  loadingDetail = true
+  editError.value = ''; sourceNeedsReview.value = false
   try {
     const res = await api.getOperatorDetail({ type: operatorType.value, name: fullName })
+    if (request !== detailRequest) return
     const d = res.data || {}
     cppDetail.value = {
       plugin_id: '',
@@ -949,26 +960,33 @@ const openDetail = async (fullName, mode) => {
       component_revision: d.component_revision || '',
       code: d.content || ''
     }
+    if (mode === 'edit' && d.active) { mode = 'view'; ElMessage.warning('请先去激活当前算子；源码草稿已保留') }
     if (mode === 'edit' && savedDraft?.form?.fullName === fullName) detailForm.value = savedDraft.form
-    if (mode === 'edit' && !detailForm.value.editable) {
+    if (mode === 'edit' && !d.editable) {
       ElMessage.warning('该算子不支持编辑（通常是内置算子）')
       return
     }
     detailMode.value = mode
+    contractExpanded.value = false
+    contractMounted.value = false
     detailDialogFullscreen.value = false
     detailDialogVisible.value = true
     nextTick(() => {
       resetCodeScroll()
     })
   } catch (error) {
-    ElMessage.error('获取算子详情失败: ' + (error.response?.data?.error || error.message))
+    if (request === detailRequest) ElMessage.error('获取算子详情失败: ' + (error.response?.data?.error || error.message))
+  } finally {
+    if (request === detailRequest) loadingDetail = false
   }
 }
 
 const openCppDetail = async (pluginId) => {
+  const request = ++detailRequest
   componentContractName.value = ''
   try {
     const res = await api.getOperatorDetail({ type: 'cpp', plugin_id: pluginId })
+    if (request !== detailRequest) return
     const d = res.data || {}
     const p = d.plugin || {}
     cppDetail.value = {
@@ -1002,6 +1020,9 @@ const openCppDetail = async (pluginId) => {
 }
 
 const onDetailDialogClosed = () => {
+  detailRequest++
+  componentContractName.value = ''
+  contractMounted.value = false
   detailDialogFullscreen.value = false
 }
 
@@ -1040,20 +1061,48 @@ const editOperator = async (row) => {
   await openDetail(`${row.category}.${row.name}`, 'edit')
 }
 
+const reviewSourceBasis = async () => {
+  const name = detailForm.value.fullName, request = detailRequest
+  sourceReviewBusy.value = true
+  try {
+    const response = await api.getOperatorDetail({ type: 'python', name })
+    if (request !== detailRequest || !detailDialogVisible.value) return
+    if (!response.data.editable || response.data.active) { ElMessage.warning('请先去激活当前算子'); return }
+    detailForm.value.component_revision = response.data.component_revision
+    detailForm.value.editable = true
+    editError.value = ''; sourceNeedsReview.value = false
+    ElMessage.info('已保留源码草稿并改用当前组件依据，请核对后保存')
+  } catch (error) {
+    if (request === detailRequest) editError.value = error.response?.data?.error?.message || error.message
+  } finally {
+    sourceReviewBusy.value = false
+  }
+}
+
 const saveOperatorEdit = async () => {
-  if (!detailForm.value.fullName) return
+  const submitted = { ...detailForm.value }, request = detailRequest
+  if (!submitted.fullName) return
   uploading.value = true
   try {
-    await api.updateOperator(detailForm.value.fullName, {
-      description: detailForm.value.description,
-      content: detailForm.value.code,
-      expected_component_revision: detailForm.value.component_revision
+    await api.updateOperator(submitted.fullName, {
+      description: submitted.description,
+      content: submitted.code,
+      expected_component_revision: submitted.component_revision
     })
-    sessionStorage.removeItem('flowsql.operator.detail')
+    const sameDialog = request === detailRequest && detailDialogVisible.value
+    const sameDraft = sameDialog && detailForm.value.code === submitted.code && detailForm.value.description === submitted.description
+    if (sameDraft) {
+      sessionStorage.removeItem('flowsql.operator.detail')
+      sessionStorage.removeItem('flowsql.operator.detail.' + submitted.fullName)
+      detailDialogVisible.value = false
+    } else if (sameDialog) {
+      sourceNeedsReview.value = true
+      ElMessage.info('提交时的源码已保存；后续输入的草稿已保留，请核对当前依据后再次保存')
+    }
     ElMessage.success('算子更新成功')
-    detailDialogVisible.value = false
     await loadOperators()
   } catch (error) {
+    if (request !== detailRequest || !detailDialogVisible.value) return
     const issue = error.response?.data?.error
     editError.value = typeof issue === 'object' ? `${issue.code}: ${issue.message}` : issue || error.message
     ElMessage.error('更新失败: ' + editError.value)
@@ -1296,7 +1345,12 @@ const deletePythonOperator = async (row) => {
 
 watch(operatorForm, () => { if (createDialogVisible.value) sessionStorage.setItem('flowsql.operator.create', JSON.stringify(operatorForm.value)) }, { deep: true })
 watch([detailForm, detailDialogVisible], () => {
-  if (detailDialogVisible.value && detailMode.value === 'edit') sessionStorage.setItem('flowsql.operator.detail', JSON.stringify({ form: detailForm.value, mode: detailMode.value, operatorType: operatorType.value }))
+  if (loadingDetail) return
+  if (detailDialogVisible.value && detailMode.value === 'edit') {
+    const saved = JSON.stringify({ form: detailForm.value, mode: detailMode.value, operatorType: operatorType.value })
+    sessionStorage.setItem('flowsql.operator.detail', saved)
+    sessionStorage.setItem('flowsql.operator.detail.' + detailForm.value.fullName, saved)
+  }
   else if (!detailDialogVisible.value) sessionStorage.removeItem('flowsql.operator.detail')
 }, { deep: true })
 onMounted(async () => {

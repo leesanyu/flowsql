@@ -1,0 +1,1903 @@
+{
+  "fixture_kind": "contract-shape-only; not an observed HTTP response or contract audit verdict",
+  "cases": [
+    {
+      "name": "passthrough",
+      "contract_source": "config/semantics/examples/operator-contract-passthrough.json",
+      "request": {
+        "target": {
+          "kind": "operator",
+          "name": "builtin.passthrough"
+        },
+        "view": "usage"
+      },
+      "response": {
+        "data": {
+          "subject": {
+            "kind": "operator",
+            "name": "builtin.passthrough"
+          },
+          "view": "usage",
+          "basis": {
+            "object_key": null,
+            "source_revision": null,
+            "schema_fingerprint": null,
+            "binding_ref": null,
+            "dictionary_ref": null,
+            "component_revision": "shape-fixture:builtin.passthrough",
+            "contract_ref": "operator_contract.builtin.passthrough@1",
+            "description_ref": null
+          },
+          "contract_state": "declared",
+          "usage": {
+            "identity": {
+              "name": "builtin.passthrough",
+              "title": "Passthrough",
+              "author_version": "1",
+              "purposes": []
+            },
+            "inputs": [
+              {
+                "port_id": "input",
+                "min_count": 1,
+                "max_count": 1,
+                "shape": "dataframe",
+                "roles": [],
+                "source_pointer": "/inputs/0"
+              },
+              {
+                "port_id": "ignored",
+                "min_count": 0,
+                "max_count": 65536,
+                "shape": "dataframe",
+                "roles": [],
+                "source_pointer": "/inputs/1"
+              }
+            ],
+            "parameters": {
+              "items": [
+                {
+                  "name": "force_fail",
+                  "source_pointer": "/configuration/invocation_schema/properties/force_fail",
+                  "required": false,
+                  "schema": {
+                    "type": "string",
+                    "default": "false",
+                    "description": "Only the exact strings 1 and true enable failure before reading or writing; every other string disables it."
+                  },
+                  "wire_encoding": "string",
+                  "control": "text",
+                  "input_roles": []
+                },
+                {
+                  "name": "delay_ms",
+                  "source_pointer": "/configuration/invocation_schema/properties/delay_ms",
+                  "required": false,
+                  "schema": {
+                    "type": "string",
+                    "default": "0",
+                    "description": "Delay after copying, in milliseconds. Parse as a base-10 integer and clamp to 0..60000; an empty or invalid integer string retains the instance's current delay."
+                  },
+                  "wire_encoding": "string",
+                  "control": "text",
+                  "input_roles": []
+                }
+              ],
+              "constraints": [],
+              "additional_parameters": "allowed"
+            },
+            "outputs": [
+              {
+                "port_id": "output",
+                "shape": "dataframe",
+                "mode": "derived",
+                "source_pointer": "/outputs/0",
+                "summary": "复制第一个输入的全部字段；额外输入不参与输出。",
+                "fields_state": "unknown",
+                "fields": []
+              }
+            ],
+            "limitations": [
+              {
+                "text": "Declared field semantics do not prove row data quality.",
+                "origin": "author",
+                "source_pointer": "/limitations/0"
+              },
+              {
+                "text": "Only the first input contributes to the output; additional inputs retain the historical ignored-input behavior.",
+                "origin": "author",
+                "source_pointer": "/limitations/1"
+              }
+            ],
+            "examples": [],
+            "annotations": {
+              "inputs": [],
+              "parameters": [],
+              "outputs": []
+            }
+          },
+          "gaps": [],
+          "details": [
+            {
+              "section": "outputs",
+              "exact_reference": "operator_contract.builtin.passthrough@1",
+              "resource_pointer": "/outputs/0/rules",
+              "reason": "字段来源、转换与输出推导规则"
+            }
+          ],
+          "required_context_refs": []
+        }
+      },
+      "check_request": {
+        "operator": {
+          "category": "builtin",
+          "name": "passthrough"
+        },
+        "parameters": {},
+        "inputs": [
+          {
+            "input_index": 0,
+            "locator": {
+              "kind": "dataframe",
+              "name": "sample"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "chisquare",
+      "contract_source": "src/tests/test_config_channel/fixtures/description_chisquare.py",
+      "request": {
+        "target": {
+          "kind": "operator",
+          "name": "explore.chisquare"
+        },
+        "view": "usage"
+      },
+      "response": {
+        "data": {
+          "subject": {
+            "kind": "operator",
+            "name": "explore.chisquare"
+          },
+          "view": "usage",
+          "basis": {
+            "object_key": null,
+            "source_revision": null,
+            "schema_fingerprint": null,
+            "binding_ref": null,
+            "dictionary_ref": null,
+            "component_revision": "shape-fixture:explore.chisquare",
+            "contract_ref": "operator_contract.explore.chisquare@1",
+            "description_ref": null
+          },
+          "contract_state": "declared",
+          "usage": {
+            "identity": {
+              "name": "explore.chisquare",
+              "title": "卡方独立性检验",
+              "author_version": "1",
+              "purposes": []
+            },
+            "inputs": [
+              {
+                "port_id": "input",
+                "min_count": 1,
+                "max_count": 1,
+                "shape": "dataframe",
+                "roles": [
+                  {
+                    "role_id": "col1",
+                    "required": false,
+                    "types": [],
+                    "nullable": null,
+                    "semantic_requirements": {},
+                    "selector": {
+                      "kind": "parameter",
+                      "key": "col1"
+                    }
+                  },
+                  {
+                    "role_id": "col2",
+                    "required": false,
+                    "types": [],
+                    "nullable": null,
+                    "semantic_requirements": {},
+                    "selector": {
+                      "kind": "parameter",
+                      "key": "col2"
+                    }
+                  }
+                ],
+                "source_pointer": "/inputs/0"
+              }
+            ],
+            "parameters": {
+              "items": [
+                {
+                  "name": "col1",
+                  "source_pointer": "/configuration/invocation_schema/properties/col1",
+                  "required": false,
+                  "schema": {
+                    "type": "string",
+                    "default": "",
+                    "description": "分类字段；两项未同时填写时按算法原逻辑选择前两个分类列"
+                  },
+                  "wire_encoding": "string",
+                  "control": "field",
+                  "input_roles": [
+                    {
+                      "port_id": "input",
+                      "role_id": "col1"
+                    }
+                  ]
+                },
+                {
+                  "name": "col2",
+                  "source_pointer": "/configuration/invocation_schema/properties/col2",
+                  "required": false,
+                  "schema": {
+                    "type": "string",
+                    "default": "",
+                    "description": "分类字段；两项未同时填写时按算法原逻辑选择前两个分类列"
+                  },
+                  "wire_encoding": "string",
+                  "control": "field",
+                  "input_roles": [
+                    {
+                      "port_id": "input",
+                      "role_id": "col2"
+                    }
+                  ]
+                }
+              ],
+              "constraints": [],
+              "additional_parameters": "forbidden"
+            },
+            "outputs": [
+              {
+                "port_id": "results",
+                "shape": "dataframe",
+                "mode": "unknown",
+                "source_pointer": "/outputs/0",
+                "summary": "汇总行与列联表明细混合。首行为汇总：col1/col2 是选择的字段名，统计量仅此行有效，observed/expected 和动态分类字段为 NULL；后续为明细：动态字段名来自输入，observed/expected 为频数，汇总字段为 NULL。明确的缺列/不足两列输入返回仅含 error 的一行；其他统计错误仍可能抛出。pandas 混合行可能把 dof/observed 物理编码为浮点数，数值含义仍为计数/自由度。",
+                "fields_state": "dynamic",
+                "fields": [
+                  {
+                    "name": "col1",
+                    "source_pointer": "/resources/results/properties/col1",
+                    "format": "json_schema",
+                    "declaration": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "仅汇总行：第一个分类字段的名称。"
+                    }
+                  },
+                  {
+                    "name": "col2",
+                    "source_pointer": "/resources/results/properties/col2",
+                    "format": "json_schema",
+                    "declaration": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "仅汇总行：第二个分类字段的名称。"
+                    }
+                  },
+                  {
+                    "name": "chi2",
+                    "source_pointer": "/resources/results/properties/chi2",
+                    "format": "json_schema",
+                    "declaration": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    }
+                  },
+                  {
+                    "name": "p_value",
+                    "source_pointer": "/resources/results/properties/p_value",
+                    "format": "json_schema",
+                    "declaration": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    }
+                  },
+                  {
+                    "name": "dof",
+                    "source_pointer": "/resources/results/properties/dof",
+                    "format": "json_schema",
+                    "declaration": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  {
+                    "name": "observed",
+                    "source_pointer": "/resources/results/properties/observed",
+                    "format": "json_schema",
+                    "declaration": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    }
+                  },
+                  {
+                    "name": "expected",
+                    "source_pointer": "/resources/results/properties/expected",
+                    "format": "json_schema",
+                    "declaration": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    }
+                  },
+                  {
+                    "name": "significant_0.05",
+                    "source_pointer": "/resources/results/properties/significant_0.05",
+                    "format": "json_schema",
+                    "declaration": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  {
+                    "name": "error",
+                    "source_pointer": "/resources/results/properties/error",
+                    "format": "json_schema",
+                    "declaration": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                ]
+              }
+            ],
+            "limitations": [
+              {
+                "text": "检验两个分类变量的独立性；不能据此断言因果关系。",
+                "origin": "author",
+                "source_pointer": "/limitations/0"
+              },
+              {
+                "text": "未同时指定 col1/col2 时，取前两个 object/category/int64/int32 列；至少需要两个分类列。",
+                "origin": "author",
+                "source_pointer": "/limitations/1"
+              },
+              {
+                "text": "汇总与明细混合；分类列名来自输入，不承诺固定输出字段集合。",
+                "origin": "author",
+                "source_pointer": "/limitations/2"
+              },
+              {
+                "text": "预检只检查元数据，不运行卡方检验或验证频数适用条件。",
+                "origin": "author",
+                "source_pointer": "/limitations/3"
+              },
+              {
+                "text": "Python Worker 传入单个 Polars DataFrame；组件内部转 pandas，输出经 Arrow IPC 编码。卡方适用条件、缺失值处理及动态字段名冲突不由预检保证；算法异常不保证转为 error 行。",
+                "origin": "author",
+                "source_pointer": "/limitations/4"
+              }
+            ],
+            "examples": [],
+            "annotations": {
+              "inputs": [],
+              "parameters": [],
+              "outputs": []
+            }
+          },
+          "gaps": [],
+          "details": [
+            {
+              "section": "outputs",
+              "exact_reference": "operator_contract.explore.chisquare@1",
+              "resource_pointer": "/resources/results",
+              "reason": "输出声明结构；动态字段与条件仍以所属输出规则解释"
+            }
+          ],
+          "required_context_refs": []
+        }
+      },
+      "check_request": {
+        "operator": {
+          "category": "explore",
+          "name": "chisquare"
+        },
+        "parameters": {
+          "col1": "region",
+          "col2": "result"
+        },
+        "inputs": [
+          {
+            "input_index": 0,
+            "locator": {
+              "kind": "dataframe",
+              "name": "sample"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "baseliner",
+      "contract_source": "config/semantics/examples/operator-contract-baseliner.json",
+      "request": {
+        "target": {
+          "kind": "operator",
+          "name": "explore.baseliner"
+        },
+        "view": "usage"
+      },
+      "response": {
+        "data": {
+          "subject": {
+            "kind": "operator",
+            "name": "explore.baseliner"
+          },
+          "view": "usage",
+          "basis": {
+            "object_key": null,
+            "source_revision": null,
+            "schema_fingerprint": null,
+            "binding_ref": null,
+            "dictionary_ref": null,
+            "component_revision": "shape-fixture:explore.baseliner",
+            "contract_ref": "operator_contract.explore.baseliner@1",
+            "description_ref": null
+          },
+          "contract_state": "declared",
+          "usage": {
+            "identity": {
+              "name": "explore.baseliner",
+              "title": "Baseliner",
+              "author_version": "1",
+              "purposes": [
+                {
+                  "text": "按配置对时间序列进行基线评估与预测，支持数值、比率及多指标关系分析。",
+                  "origin": "author",
+                  "source_pointer": "/description"
+                }
+              ]
+            },
+            "inputs": [
+              {
+                "port_id": "datasets",
+                "min_count": 1,
+                "max_count": 64,
+                "shape": "record_batch",
+                "roles": [
+                  {
+                    "role_id": "bucket",
+                    "required": true,
+                    "types": [
+                      {
+                        "system": "arrow",
+                        "name": "int64",
+                        "parameters": {}
+                      }
+                    ],
+                    "nullable": null,
+                    "semantic_requirements": {},
+                    "selector": {
+                      "kind": "config",
+                      "scope": "input_item",
+                      "pointer": "/bucket/column",
+                      "cardinality": "one"
+                    }
+                  },
+                  {
+                    "role_id": "series_keys",
+                    "required": false,
+                    "types": [],
+                    "nullable": null,
+                    "semantic_requirements": {},
+                    "selector": {
+                      "kind": "config",
+                      "scope": "input_item",
+                      "pointer": "/series_keys",
+                      "cardinality": "many"
+                    }
+                  },
+                  {
+                    "role_id": "deduplicate_keys",
+                    "required": true,
+                    "types": [],
+                    "nullable": null,
+                    "semantic_requirements": {},
+                    "selector": {
+                      "kind": "config",
+                      "scope": "input_item",
+                      "pointer": "/deduplicate/keys",
+                      "cardinality": "many"
+                    }
+                  }
+                ],
+                "source_pointer": "/inputs/0",
+                "description": "输入由任务配置的 source 与 datasets 决定；每个数据集配置时间列、序列键、字段映射、去重和指标。\nvalue 使用数值列，ratio 使用分子与分母，relation 使用多个子指标；字段名和数据类型须符合对应数据集的声明。"
+              }
+            ],
+            "parameters": {
+              "items": [
+                {
+                  "name": "config",
+                  "source_pointer": "/configuration/invocation_schema/properties/config",
+                  "required": null,
+                  "schema": {
+                    "type": "string",
+                    "pattern": "^config\\.[a-z][a-z0-9_.-]*@[1-9][0-9]*$",
+                    "description": "Exact immutable config revision; exactly one of config or parameters is required. Its source must match SQL FROM."
+                  },
+                  "wire_encoding": "string",
+                  "control": "text",
+                  "input_roles": []
+                },
+                {
+                  "name": "parameters",
+                  "source_pointer": "/configuration/invocation_schema/properties/parameters",
+                  "required": null,
+                  "schema": {
+                    "type": "string",
+                    "description": "One JSON-encoded configuration object, not a JSON string encoded again. Full datasets or the single-dataset shorthand are parsed by the production parser."
+                  },
+                  "wire_encoding": "json",
+                  "control": "json",
+                  "input_roles": [],
+                  "decoded_schema_pointer": "/resources/inline_config"
+                },
+                {
+                  "name": "model_output",
+                  "source_pointer": "/configuration/invocation_schema/properties/model_output",
+                  "required": false,
+                  "schema": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional final model parameters destination, only in snapshot mode: DataFrame or writable database table; ClickHouse is not supported. Emitted on normal final EOF, not a recoverable checkpoint."
+                  },
+                  "wire_encoding": "string",
+                  "control": "text",
+                  "input_roles": []
+                }
+              ],
+              "constraints": [
+                {
+                  "section": "parameters",
+                  "exact_reference": "operator_contract.explore.baseliner@1",
+                  "resource_pointer": "/configuration/invocation_schema/oneOf",
+                  "reason": "config 与 parameters 必须且只能填写一项"
+                }
+              ],
+              "additional_parameters": "forbidden",
+              "description": "config 与 parameters 二选一：config 引用已发布的精确配置版本；parameters 传入一次 JSON 编码的完整任务配置。\n配置中定义数据来源、数据集、时间列、序列键和 value / ratio / relation 指标；model_output 可选，指定模型参数的输出目标。"
+            },
+            "outputs": [
+              {
+                "port_id": "results",
+                "shape": "record_batch",
+                "mode": "unknown",
+                "availability": {
+                  "all": []
+                },
+                "row_cases": [
+                  {
+                    "case_id": "evaluation",
+                    "when": {
+                      "scope": "row",
+                      "pointer": "/result_kind",
+                      "equals": "evaluation"
+                    },
+                    "field_rules": {
+                      "observed": {
+                        "description": "Current bucket observation; expected band may be NULL during cold start."
+                      },
+                      "expected": {
+                        "null_meaning": "No valid expected band during cold start or non-ready status; interpret status before using expected/lower/upper."
+                      },
+                      "lower": {
+                        "null_meaning": "NULL together with expected when the algorithm status has no valid prediction band."
+                      },
+                      "upper": {
+                        "null_meaning": "NULL together with expected when the algorithm status has no valid prediction band."
+                      }
+                    }
+                  },
+                  {
+                    "case_id": "forecast",
+                    "when": {
+                      "scope": "row",
+                      "pointer": "/result_kind",
+                      "equals": "forecast"
+                    },
+                    "field_rules": {
+                      "observed": {
+                        "description": "NULL for forecast rows.",
+                        "must_be_null": true
+                      },
+                      "can_alert": {
+                        "description": "NULL for forecast rows.",
+                        "must_be_null": true
+                      },
+                      "confidence": {
+                        "description": "NULL for forecast rows.",
+                        "must_be_null": true
+                      },
+                      "maturity": {
+                        "description": "NULL for forecast rows.",
+                        "must_be_null": true
+                      },
+                      "score": {
+                        "description": "NULL for forecast rows.",
+                        "must_be_null": true
+                      },
+                      "is_outside_band": {
+                        "description": "NULL for forecast rows.",
+                        "must_be_null": true
+                      },
+                      "can_score": {
+                        "description": "NULL for forecast rows.",
+                        "must_be_null": true
+                      },
+                      "can_update": {
+                        "description": "NULL for forecast rows.",
+                        "must_be_null": true
+                      },
+                      "update_weight": {
+                        "description": "NULL for forecast rows.",
+                        "must_be_null": true
+                      }
+                    }
+                  }
+                ],
+                "context_semantics": {
+                  "repeat_from_config_pointer": "/datasets",
+                  "item_key_pointer": "/id",
+                  "metric_pointer": "/metrics",
+                  "identity_columns": [
+                    "dataset_id",
+                    "metric_id"
+                  ],
+                  "description": "Resolve each metric against its own input dictionary; the unit column is a metric category, not a physical unit.",
+                  "input_port": "datasets",
+                  "metric_key_pointer": "/id",
+                  "submetrics_pointer": "/metrics",
+                  "include_submetrics": true
+                },
+                "source_pointer": "/outputs/0",
+                "summary": "基线评估与预测结果。result_kind 区分 evaluation 与 forecast；预测行的 observed、score、can_alert 等九项评估字段为 NULL。时间桶、单位和业务含义须结合原数据集及指标配置解释。",
+                "fields_state": "declared",
+                "fields": [
+                  {
+                    "name": "task_key",
+                    "source_pointer": "/resources/results_structure/fields/0",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "task_key",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "dataset_id",
+                    "source_pointer": "/resources/results_structure/fields/1",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "dataset_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "metric_id",
+                    "source_pointer": "/resources/results_structure/fields/2",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "metric_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "series_key",
+                    "source_pointer": "/resources/results_structure/fields/3",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "series_key",
+                      "type": {
+                        "system": "arrow",
+                        "name": "binary",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "source_epoch",
+                    "source_pointer": "/resources/results_structure/fields/4",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "source_epoch",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "target_bucket",
+                    "source_pointer": "/resources/results_structure/fields/5",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "target_bucket",
+                      "type": {
+                        "system": "arrow",
+                        "name": "int64",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "config_hash",
+                    "source_pointer": "/resources/results_structure/fields/6",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "config_hash",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "published_generation",
+                    "source_pointer": "/resources/results_structure/fields/7",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "published_generation",
+                      "type": {
+                        "system": "arrow",
+                        "name": "uint64",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "result_kind",
+                    "source_pointer": "/resources/results_structure/fields/8",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "result_kind",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "summary_id",
+                    "source_pointer": "/resources/results_structure/fields/9",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "summary_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "basis_id",
+                    "source_pointer": "/resources/results_structure/fields/10",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "basis_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "issued_after_bucket",
+                    "source_pointer": "/resources/results_structure/fields/11",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "issued_after_bucket",
+                      "type": {
+                        "system": "arrow",
+                        "name": "int64",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "model_basis_id",
+                    "source_pointer": "/resources/results_structure/fields/12",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "model_basis_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "bucket_seconds",
+                    "source_pointer": "/resources/results_structure/fields/13",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "bucket_seconds",
+                      "type": {
+                        "system": "arrow",
+                        "name": "int64",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "timezone",
+                    "source_pointer": "/resources/results_structure/fields/14",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "timezone",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "unit",
+                    "source_pointer": "/resources/results_structure/fields/15",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "unit",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "observed",
+                    "source_pointer": "/resources/results_structure/fields/16",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "observed",
+                      "type": {
+                        "system": "arrow",
+                        "name": "double",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "expected",
+                    "source_pointer": "/resources/results_structure/fields/17",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "expected",
+                      "type": {
+                        "system": "arrow",
+                        "name": "double",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "lower",
+                    "source_pointer": "/resources/results_structure/fields/18",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "lower",
+                      "type": {
+                        "system": "arrow",
+                        "name": "double",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "upper",
+                    "source_pointer": "/resources/results_structure/fields/19",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "upper",
+                      "type": {
+                        "system": "arrow",
+                        "name": "double",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "status",
+                    "source_pointer": "/resources/results_structure/fields/20",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "status",
+                      "type": {
+                        "system": "arrow",
+                        "name": "int32",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "band_kind",
+                    "source_pointer": "/resources/results_structure/fields/21",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "band_kind",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "confidence",
+                    "source_pointer": "/resources/results_structure/fields/22",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "confidence",
+                      "type": {
+                        "system": "arrow",
+                        "name": "double",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "maturity",
+                    "source_pointer": "/resources/results_structure/fields/23",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "maturity",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "score",
+                    "source_pointer": "/resources/results_structure/fields/24",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "score",
+                      "type": {
+                        "system": "arrow",
+                        "name": "double",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "is_outside_band",
+                    "source_pointer": "/resources/results_structure/fields/25",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "is_outside_band",
+                      "type": {
+                        "system": "arrow",
+                        "name": "bool",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "can_score",
+                    "source_pointer": "/resources/results_structure/fields/26",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "can_score",
+                      "type": {
+                        "system": "arrow",
+                        "name": "bool",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "can_update",
+                    "source_pointer": "/resources/results_structure/fields/27",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "can_update",
+                      "type": {
+                        "system": "arrow",
+                        "name": "bool",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "update_weight",
+                    "source_pointer": "/resources/results_structure/fields/28",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "update_weight",
+                      "type": {
+                        "system": "arrow",
+                        "name": "double",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "can_alert",
+                    "source_pointer": "/resources/results_structure/fields/29",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "can_alert",
+                      "type": {
+                        "system": "arrow",
+                        "name": "bool",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  }
+                ],
+                "description": "基线评估与预测结果。result_kind 区分 evaluation 与 forecast；预测行的 observed、score、can_alert 等九项评估字段为 NULL。时间桶、单位和业务含义须结合原数据集及指标配置解释。"
+              },
+              {
+                "port_id": "model_parameters",
+                "shape": "record_batch",
+                "mode": "unknown",
+                "availability": {
+                  "scope": "execution_context",
+                  "pointer": "/model_output_enabled",
+                  "equals": true
+                },
+                "row_cases": [
+                  {
+                    "case_id": "untrained",
+                    "when": {
+                      "scope": "row",
+                      "pointer": "/status",
+                      "equals": 1
+                    },
+                    "field_rules": {
+                      "parameters_json": {
+                        "null_meaning": "NULL when status is NotTrained; not a recoverable checkpoint.",
+                        "must_be_null": true
+                      }
+                    }
+                  }
+                ],
+                "context_semantics": {
+                  "repeat_from_config_pointer": "/datasets",
+                  "item_key_pointer": "/id",
+                  "metric_pointer": "/metrics",
+                  "identity_columns": [
+                    "dataset_id",
+                    "metric_id"
+                  ],
+                  "description": "Resolve each metric against its own input dictionary; the unit column is a metric category, not a physical unit.",
+                  "input_port": "datasets",
+                  "metric_key_pointer": "/id",
+                  "submetrics_pointer": "/metrics",
+                  "include_submetrics": false
+                },
+                "source_pointer": "/outputs/1",
+                "summary": "模型参数；仅配置 model_output 时产生。未训练模型的 parameters_json 为 NULL。",
+                "fields_state": "declared",
+                "fields": [
+                  {
+                    "name": "task_key",
+                    "source_pointer": "/resources/model_parameters_structure/fields/0",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "task_key",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "dataset_id",
+                    "source_pointer": "/resources/model_parameters_structure/fields/1",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "dataset_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "metric_id",
+                    "source_pointer": "/resources/model_parameters_structure/fields/2",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "metric_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "series_key",
+                    "source_pointer": "/resources/model_parameters_structure/fields/3",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "series_key",
+                      "type": {
+                        "system": "arrow",
+                        "name": "binary",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "source_epoch",
+                    "source_pointer": "/resources/model_parameters_structure/fields/4",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "source_epoch",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "config_hash",
+                    "source_pointer": "/resources/model_parameters_structure/fields/5",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "config_hash",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "model_kind",
+                    "source_pointer": "/resources/model_parameters_structure/fields/6",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "model_kind",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "model_basis_id",
+                    "source_pointer": "/resources/model_parameters_structure/fields/7",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "model_basis_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "as_of_bucket",
+                    "source_pointer": "/resources/model_parameters_structure/fields/8",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "as_of_bucket",
+                      "type": {
+                        "system": "arrow",
+                        "name": "int64",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "status",
+                    "source_pointer": "/resources/model_parameters_structure/fields/9",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "status",
+                      "type": {
+                        "system": "arrow",
+                        "name": "int32",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "maturity",
+                    "source_pointer": "/resources/model_parameters_structure/fields/10",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "maturity",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "parameters_version",
+                    "source_pointer": "/resources/model_parameters_structure/fields/11",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "parameters_version",
+                      "type": {
+                        "system": "arrow",
+                        "name": "uint32",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "parameters_json",
+                    "source_pointer": "/resources/model_parameters_structure/fields/12",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "parameters_json",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  }
+                ],
+                "description": "模型参数；仅配置 model_output 时产生。未训练模型的 parameters_json 为 NULL。"
+              },
+              {
+                "port_id": "relation_fusion",
+                "shape": "record_batch",
+                "mode": "unknown",
+                "availability": {
+                  "scope": "execution_context",
+                  "pointer": "/relation_fusion_enabled",
+                  "equals": true
+                },
+                "context_semantics": {
+                  "repeat_from_config_pointer": "/datasets",
+                  "item_key_pointer": "/id",
+                  "metric_pointer": "/metrics",
+                  "identity_columns": [
+                    "dataset_id",
+                    "metric_id"
+                  ],
+                  "description": "Resolve each metric against its own input dictionary; the unit column is a metric category, not a physical unit.",
+                  "input_port": "datasets",
+                  "metric_key_pointer": "/id",
+                  "submetrics_pointer": "/metrics",
+                  "include_submetrics": false
+                },
+                "source_pointer": "/outputs/2",
+                "summary": "关系指标的融合结果；仅在托管输出且启用 relation 指标时产生。",
+                "fields_state": "declared",
+                "fields": [
+                  {
+                    "name": "task_key",
+                    "source_pointer": "/resources/relation_fusion_structure/fields/0",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "task_key",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "dataset_id",
+                    "source_pointer": "/resources/relation_fusion_structure/fields/1",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "dataset_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "metric_id",
+                    "source_pointer": "/resources/relation_fusion_structure/fields/2",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "metric_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "series_key",
+                    "source_pointer": "/resources/relation_fusion_structure/fields/3",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "series_key",
+                      "type": {
+                        "system": "arrow",
+                        "name": "binary",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "source_epoch",
+                    "source_pointer": "/resources/relation_fusion_structure/fields/4",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "source_epoch",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "target_bucket",
+                    "source_pointer": "/resources/relation_fusion_structure/fields/5",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "target_bucket",
+                      "type": {
+                        "system": "arrow",
+                        "name": "int64",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "config_hash",
+                    "source_pointer": "/resources/relation_fusion_structure/fields/6",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "config_hash",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "published_generation",
+                    "source_pointer": "/resources/relation_fusion_structure/fields/7",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "published_generation",
+                      "type": {
+                        "system": "arrow",
+                        "name": "uint64",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "status",
+                    "source_pointer": "/resources/relation_fusion_structure/fields/8",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "status",
+                      "type": {
+                        "system": "arrow",
+                        "name": "int32",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "fusion_score",
+                    "source_pointer": "/resources/relation_fusion_structure/fields/9",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "fusion_score",
+                      "type": {
+                        "system": "arrow",
+                        "name": "double",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "basis_id",
+                    "source_pointer": "/resources/relation_fusion_structure/fields/10",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "basis_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  },
+                  {
+                    "name": "can_alert",
+                    "source_pointer": "/resources/relation_fusion_structure/fields/11",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "can_alert",
+                      "type": {
+                        "system": "arrow",
+                        "name": "bool",
+                        "parameters": {}
+                      },
+                      "nullable": true
+                    }
+                  }
+                ],
+                "description": "关系指标的融合结果；仅在托管输出且启用 relation 指标时产生。"
+              },
+              {
+                "port_id": "maintenance",
+                "shape": "record_batch",
+                "mode": "unknown",
+                "availability": {
+                  "scope": "execution_context",
+                  "pointer": "/managed_output",
+                  "equals": true
+                },
+                "source_pointer": "/outputs/3",
+                "summary": "维护事件；仅在托管输出时产生，用于解释运行过程中的维护状态。",
+                "fields_state": "declared",
+                "fields": [
+                  {
+                    "name": "task_key",
+                    "source_pointer": "/resources/maintenance_structure/fields/0",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "task_key",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "dataset_id",
+                    "source_pointer": "/resources/maintenance_structure/fields/1",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "dataset_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "metric_id",
+                    "source_pointer": "/resources/maintenance_structure/fields/2",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "metric_id",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "series_key",
+                    "source_pointer": "/resources/maintenance_structure/fields/3",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "series_key",
+                      "type": {
+                        "system": "arrow",
+                        "name": "binary",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "source_epoch",
+                    "source_pointer": "/resources/maintenance_structure/fields/4",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "source_epoch",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "target_bucket",
+                    "source_pointer": "/resources/maintenance_structure/fields/5",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "target_bucket",
+                      "type": {
+                        "system": "arrow",
+                        "name": "int64",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "config_hash",
+                    "source_pointer": "/resources/maintenance_structure/fields/6",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "config_hash",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "published_generation",
+                    "source_pointer": "/resources/maintenance_structure/fields/7",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "published_generation",
+                      "type": {
+                        "system": "arrow",
+                        "name": "uint64",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "event_kind",
+                    "source_pointer": "/resources/maintenance_structure/fields/8",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "event_kind",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "reason",
+                    "source_pointer": "/resources/maintenance_structure/fields/9",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "reason",
+                      "type": {
+                        "system": "arrow",
+                        "name": "string",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "runtime_identities",
+                    "source_pointer": "/resources/maintenance_structure/fields/10",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "runtime_identities",
+                      "type": {
+                        "system": "arrow",
+                        "name": "uint64",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "model_identities",
+                    "source_pointer": "/resources/maintenance_structure/fields/11",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "model_identities",
+                      "type": {
+                        "system": "arrow",
+                        "name": "uint64",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "routed_states",
+                    "source_pointer": "/resources/maintenance_structure/fields/12",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "routed_states",
+                      "type": {
+                        "system": "arrow",
+                        "name": "uint64",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  },
+                  {
+                    "name": "retained_basis_versions",
+                    "source_pointer": "/resources/maintenance_structure/fields/13",
+                    "format": "physical",
+                    "declaration": {
+                      "name": "retained_basis_versions",
+                      "type": {
+                        "system": "arrow",
+                        "name": "uint64",
+                        "parameters": {}
+                      },
+                      "nullable": false
+                    }
+                  }
+                ],
+                "description": "维护事件；仅在托管输出时产生，用于解释运行过程中的维护状态。"
+              }
+            ],
+            "limitations": [
+              {
+                "text": "The production adapter supplies effective configuration and actual input associations; the structural JSON Schema alone does not replace production parsing or source validation.",
+                "origin": "author",
+                "source_pointer": "/limitations/0"
+              },
+              {
+                "text": "Unknown field/business semantics remain unknown; no algorithm or row validation is implied.",
+                "origin": "author",
+                "source_pointer": "/limitations/1"
+              },
+              {
+                "text": "A DataFrame or one explicitly named database relation requires exactly one dataset. Multiple datasets are resolved independently against a database channel.",
+                "origin": "author",
+                "source_pointer": "/limitations/2"
+              },
+              {
+                "text": "Input bucket.unit explicitly selects bucket_id, ns, us, ms or s; it is independent of clock.bucket_seconds. No physical unit is inferred from a field name or from the output unit category.",
+                "origin": "author",
+                "source_pointer": "/limitations/3"
+              },
+              {
+                "text": "forecast.horizon_buckets defaults to 0. Forecast rows target future buckets and have no observed value or evaluation/alert/update decision fields.",
+                "origin": "author",
+                "source_pointer": "/limitations/4"
+              },
+              {
+                "text": "model_output is optional, snapshot-only and written at normal final EOF; model parameters do not constitute a recoverable checkpoint.",
+                "origin": "author",
+                "source_pointer": "/limitations/5"
+              },
+              {
+                "text": "relation_fusion and maintenance depend on execution output context. A missing target/context keeps availability undetermined; an enabled output does not guarantee rows.",
+                "origin": "author",
+                "source_pointer": "/limitations/6"
+              }
+            ],
+            "examples": [
+              {
+                "text": "SELECT * FROM dataframe.series USING explore.baseliner WITH config = 'config.baseline@1'\n-- 示例前提：该精确配置版本已发布，source 指向 dataframe.series，datasets 与其字段一致。",
+                "origin": "author",
+                "source_pointer": "/examples/0"
+              }
+            ],
+            "annotations": {
+              "inputs": [],
+              "parameters": [],
+              "outputs": []
+            }
+          },
+          "gaps": [],
+          "details": [
+            {
+              "section": "inputs",
+              "exact_reference": "operator_contract.explore.baseliner@1",
+              "resource_pointer": "/inputs/0/role_templates",
+              "reason": "按配置展开字段角色；需读取分支和作用域"
+            },
+            {
+              "section": "parameters",
+              "exact_reference": "operator_contract.explore.baseliner@1",
+              "resource_pointer": "/resources/inline_config",
+              "reason": "该参数是仅编码一次的 JSON 文本；按内部配置规则填写"
+            },
+            {
+              "section": "parameters",
+              "exact_reference": "operator_contract.explore.baseliner@1",
+              "resource_pointer": "/configuration/invocation_schema/oneOf",
+              "reason": "config 与 parameters 必须且只能填写一项"
+            },
+            {
+              "section": "parameters",
+              "exact_reference": "operator_contract.explore.baseliner@1",
+              "resource_pointer": "/resources/task_config",
+              "reason": "生产解析后的有效配置结构与条件约束"
+            },
+            {
+              "section": "outputs",
+              "exact_reference": "operator_contract.explore.baseliner@1",
+              "resource_pointer": "/resources/results_structure",
+              "reason": "输出声明结构；动态字段与条件仍以所属输出规则解释"
+            },
+            {
+              "section": "outputs",
+              "exact_reference": "operator_contract.explore.baseliner@1",
+              "resource_pointer": "/resources/model_parameters_structure",
+              "reason": "输出声明结构；动态字段与条件仍以所属输出规则解释"
+            },
+            {
+              "section": "outputs",
+              "exact_reference": "operator_contract.explore.baseliner@1",
+              "resource_pointer": "/resources/relation_fusion_structure",
+              "reason": "输出声明结构；动态字段与条件仍以所属输出规则解释"
+            },
+            {
+              "section": "outputs",
+              "exact_reference": "operator_contract.explore.baseliner@1",
+              "resource_pointer": "/resources/maintenance_structure",
+              "reason": "输出声明结构；动态字段与条件仍以所属输出规则解释"
+            }
+          ],
+          "required_context_refs": []
+        }
+      },
+      "check_request": {
+        "operator": {
+          "category": "explore",
+          "name": "baseliner"
+        },
+        "parameters": {
+          "parameters": "{\"schema_version\":1,\"task_key\":\"contract-example\",\"source\":\"dataframe.input\",\"mode\":\"snapshot\",\"clock\":{\"bucket_seconds\":60,\"timezone\":\"UTC\"},\"calendar\":{\"calendar_id\":\"default\",\"calendar_version\":\"1\"},\"datasets\":[{\"id\":\"source\",\"fields\":{\"bucket\":\"int64\",\"series\":\"utf8\",\"value\":\"float64\",\"total\":\"uint64\",\"group\":\"uint64\"},\"series_keys\":[\"series\"],\"deduplicate\":{\"keys\":[\"bucket\",\"series\"],\"on_duplicate\":\"require_equal\"},\"bucket\":{\"column\":\"bucket\",\"unit\":\"bucket_id\"},\"scope\":{\"consistency\":\"dataframe_snapshot\"},\"metrics\":[{\"id\":\"latency\",\"kind\":\"value\",\"feature_type\":\"value_basic\",\"profile\":\"default\",\"column\":\"value\"}]}]}"
+        },
+        "inputs": [
+          {
+            "input_index": 0,
+            "locator": {
+              "kind": "dataframe",
+              "name": "input"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "local_description_example": {
+    "purpose": "分析输入指标",
+    "usage_notes": "输入按时间升序；结果不用于推断因果关系",
+    "examples": [],
+    "inputs": [
+      {
+        "name": "value",
+        "type": "double",
+        "requirement": "required_non_null",
+        "description": "输入指标中的观测值，单位由输入数据说明提供"
+      }
+    ],
+    "parameters": [
+      {
+        "name": "settings",
+        "type": "json",
+        "required": null,
+        "default": "",
+        "description": "JSON对象，按算子配置结构填写"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "expected",
+        "type": "double",
+        "nullable": true,
+        "description": "results 输出中的期望值；计算成功时产生，未就绪时为 NULL"
+      }
+    ],
+    "input_description": "输入为按时间排序的观测数据",
+    "parameter_description": "参数按已声明的字符串或JSON编码传入",
+    "output_description": "结果应结合产生条件与单位解释"
+  }
+}

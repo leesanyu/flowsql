@@ -157,6 +157,9 @@ target_compile_definitions(test_operator_contract_model PRIVATE FLOWSQL_SOURCE_R
 add_test(NAME test_operator_contract_model COMMAND $<TARGET_FILE:test_operator_contract_model>)
 add_test(NAME test_operator_contract_schema COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_operator_contract_schema.py ${CMAKE_SOURCE_DIR}/..)
+add_test(NAME test_chisquare_contract_audit COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_chisquare_contract_audit.py ${CMAKE_SOURCE_DIR}/..)
+set_tests_properties(test_chisquare_contract_audit PROPERTIES TIMEOUT 30)
 
 add_executable(test_baseliner_contract_schema test_baseliner_contract_schema.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
@@ -221,8 +224,8 @@ add_thirddepen(test_operator_contract_host arrow rapidjson)
 target_link_libraries(test_operator_contract_host flowsql_common OpenSSL::Crypto ${CMAKE_DL_LIBS})
 add_dependencies(test_operator_contract_host flowsql_gateway flowsql_router flowsql_config_channel flowsql_builtin
     flowsql_catalog flowsql_binaddon flowsql_bridge flowsql_database flowsql_baseline flowsql_scheduler flowsql_web
-    fixture_contract_output flowsql_baseliner flowsql_task)
-target_compile_definitions(test_operator_contract_host PRIVATE FIXTURE_OUTPUT_PATH="$<TARGET_FILE:fixture_contract_output>" BASELINER_PATH="$<TARGET_FILE:flowsql_baseliner>")
+    fixture_contract_output flowsql_baseliner flowsql_npm_basic flowsql_npi flowsql_task test_channel_dictionary_host)
+target_compile_definitions(test_operator_contract_host PRIVATE FIXTURE_OUTPUT_PATH="$<TARGET_FILE:fixture_contract_output>" BASELINER_PATH="$<TARGET_FILE:flowsql_baseliner>" NPM_PATH="$<TARGET_FILE:flowsql_npm_basic>")
 set_target_properties(test_operator_contract_host PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_operator_contract_api COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_operator_contract_api.py $<TARGET_FILE:test_operator_contract_host>)
@@ -247,6 +250,7 @@ add_executable(test_metadata_description test_metadata_description.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
 target_include_directories(test_metadata_description PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/channels/config)
 target_compile_options(test_metadata_description PRIVATE -UNDEBUG)
+target_compile_definitions(test_metadata_description PRIVATE FLOWSQL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}/..")
 add_thirddepen(test_metadata_description rapidjson sqlite yaml-cpp)
 target_link_libraries(test_metadata_description OpenSSL::Crypto)
 add_test(NAME test_metadata_description COMMAND $<TARGET_FILE:test_metadata_description>)
@@ -263,7 +267,7 @@ target_include_directories(fixture_description_cpp PRIVATE ${CMAKE_SOURCE_DIR})
 add_thirddepen(fixture_description_cpp arrow rapidjson)
 target_link_libraries(fixture_description_cpp flowsql_common OpenSSL::Crypto)
 set_target_properties(fixture_description_cpp PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
-add_dependencies(test_operator_contract_host fixture_description_cpp)
+add_dependencies(test_operator_contract_host fixture_description_cpp fixture_cpp_operator_v2)
 add_test(NAME test_metadata_operator_browser COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_metadata_operator_browser.py $<TARGET_FILE:test_operator_contract_host> ${FLOWSQL_SEMANTICS_NODE} $<TARGET_FILE:fixture_description_cpp>)
 set_tests_properties(test_metadata_operator_browser PROPERTIES TIMEOUT 300 RESOURCE_LOCK "semantics_http;visualization_browser")
@@ -271,3 +275,29 @@ set_tests_properties(test_metadata_operator_browser PROPERTIES TIMEOUT 300 RESOU
 add_test(NAME test_metadata_description_client COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_metadata_description_client.py $<TARGET_FILE:test_operator_contract_host> ${FLOWSQL_SEMANTICS_NODE})
 set_tests_properties(test_metadata_description_client PROPERTIES TIMEOUT 240 RESOURCE_LOCK "semantics_http;visualization_browser")
+
+add_executable(test_npm_data_contract test_npm_data_contract.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
+# Compare the published shared-library ABI against real production parsers/descriptors.
+# Internal NPM symbols stay hidden; compile the same implementation into the audit test.
+get_target_property(npm_contract_sources flowsql_npm_basic SOURCES)
+foreach(npm_contract_source IN LISTS npm_contract_sources)
+    if(npm_contract_source MATCHES "(npm_data_contract|npm_basic_plugin_exports)\\.cpp$")
+        continue()
+    endif()
+    if(NOT IS_ABSOLUTE "${npm_contract_source}")
+        set(npm_contract_source "${CMAKE_SOURCE_DIR}/operators/npm_basic/${npm_contract_source}")
+    endif()
+    target_sources(test_npm_data_contract PRIVATE "${npm_contract_source}")
+endforeach()
+target_include_directories(test_npm_data_contract PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/channels/config)
+add_thirddepen(test_npm_data_contract rapidjson yaml-cpp arrow)
+target_link_libraries(test_npm_data_contract flowsql_npm_basic OpenSSL::Crypto)
+target_compile_options(test_npm_data_contract PRIVATE -UNDEBUG)
+set_target_properties(test_npm_data_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_npm_data_contract COMMAND $<TARGET_FILE:test_npm_data_contract>)
+set_tests_properties(test_npm_data_contract PROPERTIES TIMEOUT 30)
+
+target_compile_definitions(test_operator_contract_host PRIVATE NPI_PROTOCOLS_PATH="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml")
