@@ -80,6 +80,19 @@ void Backend(const std::string& dialect, const std::filesystem::path& root) {
     Json explicit_locator;
     explicit_locator.CopyFrom(first["locator"], explicit_locator.GetAllocator());
     assert(first["object_key"] == Describe(plugin, explicit_locator)["object_key"]);
+    const auto view_name = table + "_view";
+    assert(channel->ExecuteSql(("CREATE VIEW " + Quote(view_name, dialect) + " AS SELECT * FROM " + quoted).c_str()) >=
+           0);
+    {
+        Cleanup view_cleanup{channel, "DROP VIEW " + Quote(view_name, dialect)};
+        Json view_locator;
+        view_locator.CopyFrom(locator, view_locator.GetAllocator());
+        Set(view_locator, "table", view_name, view_locator.GetAllocator());
+        const auto view = Describe(plugin, view_locator);
+        assert(view["fields"].Size() == 2 && view["object_key"] != first["object_key"]);
+        assert(view["fields"][1]["type"] == first["fields"][1]["type"]);
+        assert(view["fields"][1]["nullable"].GetBool());
+    }
     const auto other =
         dialect == "postgres" ? Quote(table + "_schema", dialect) + "." + quoted : Quote(table + "_other", dialect);
     if (dialect == "postgres")

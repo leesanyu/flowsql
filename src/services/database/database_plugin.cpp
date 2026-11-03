@@ -929,12 +929,12 @@ static std::string QuoteSqlLiteral(const std::string& value) {
 
 static std::string BuildTablesSql(const std::string& db_type, const std::string& schema) {
     if (db_type == "sqlite") {
-        return "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name";
+        return "SELECT name FROM sqlite_master WHERE type IN ('table','view') ORDER BY name";
     }
     if (db_type == "postgres") {
         const std::string effective_schema = schema.empty() ? "public" : schema;
-        return "SELECT tablename FROM pg_tables WHERE schemaname=" +
-               QuoteSqlLiteral(effective_schema) + " ORDER BY tablename";
+        return "SELECT table_name FROM information_schema.tables WHERE table_schema=" +
+               QuoteSqlLiteral(effective_schema) + " ORDER BY table_name";
     }
     return "SHOW TABLES";
 }

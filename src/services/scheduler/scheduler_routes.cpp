@@ -518,6 +518,15 @@ int32_t SchedulerPlugin::HandleBatchStatus(const std::string&, const std::string
     w.Int64(snapshot.result_col_count);
     w.Key("result_target");
     w.String(snapshot.result_target.c_str());
+    // Task persists terminal checks once; running polls must not append them
+    // repeatedly to the immutable execution-reference summary.
+    if (IsTerminalBatchRuntimeStatus(snapshot.status) && !snapshot.contract_checks_json.empty()) {
+        w.Key("contract_checks");
+        w.StartArray();
+        for (const auto& check : snapshot.contract_checks_json)
+            w.RawValue(check.c_str(), check.size(), rapidjson::kObjectType);
+        w.EndArray();
+    }
     if (!snapshot.managed_result_json.empty()) {
         w.Key("managed_result");
         w.RawValue(snapshot.managed_result_json.c_str(), snapshot.managed_result_json.size(), rapidjson::kObjectType);

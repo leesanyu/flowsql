@@ -1,6 +1,7 @@
 project(test_npm_basic)
 
 find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 add_executable(test_clickhouse_columnar_write test_clickhouse_columnar_write.cpp)
 target_include_directories(test_clickhouse_columnar_write PRIVATE ${CMAKE_SOURCE_DIR})
@@ -88,6 +89,8 @@ target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/n
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_protocol_contract.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_module_catalog.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_basic_operator.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_config_adapter.cpp)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_result_semantics.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_basic_result_consumer.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/config/npm_basic_task_config.cpp)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/operators/npm_basic/config/npm_parameters.cpp)
@@ -149,7 +152,7 @@ if(TARGET flowsql_flow_labeling)
     )
     add_dependencies(${PROJECT_NAME} flowsql_flow_labeling)
 endif()
-target_link_libraries(${PROJECT_NAME} flowsql_common flowsql_npi Threads::Threads)
+target_link_libraries(${PROJECT_NAME} flowsql_common flowsql_npi Threads::Threads OpenSSL::Crypto)
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output

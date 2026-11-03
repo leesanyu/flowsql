@@ -1,61 +1,49 @@
 # 当前工作台
 
-WIP=0；operator-description-refinement 已完成；T1～T5、R1～R9 验收和本地提交审查通过。
+WIP=0；npm-data-semantics：交付与验收已完成，本地提交清单和暂存内容审查通过。
 
-- 用户授权：指出作者用途等描述应填在编辑框内，要求统一纠正框外说明与空白编辑框分离的问题；沿用此前简洁通用布局和实施授权。
-- 业务意图：打开算子时可直接阅读、修改已有用途、输入/参数/输出说明、使用限制及示例；保存/重开后保持编辑内容，不再重复显示框外作者说明。
-- Non-Goals：不改执行算法、作者机器契约、三张平铺字段表、组/调用检查/历史入口；不从自然语言生成字段规则、不将NPM数百字段自动铺进本地表；不修改常驻实例的算子安装或重启服务，不提交/推送、不处理既有无关修改。
-- 冻结数据：保留notes六项字段；新增可选input_description/parameter_description/output_description:string，最大30000，空字符串为明确清空。usage.annotations原样投影这三项，缺少键时使用作者对应说明。用途/限制/示例优先已有本地文本；旧六项记录中的空框以作者原文初始化，本版保存三个整体说明后尊重文本显式空值。purpose及单项example上限统一为30000以容纳作者原文。
-- 页面：作者用途直接预填既有用途框；输入/参数/输出各一个说明框替换原静态短说明，三张字段表不变；限制与示例预填已有折叠编辑框，无重复作者段落。历史作者声明保持只读。草稿使用新key=flowsql.operator-description.inline-editors.<name>，同版草稿/保存期间输入和版本冲突保护保留，不读取旧版空白草稿。
-- 主链路：usage→作者初值/已保存覆盖→直接编辑→CAS保存→usage/full精确往返→重开/宿主Worker重启恢复；显式清空不得被作者初值覆盖，组件变化保留草稿，技术详情仍为原始已保存记录。
-- 允许文件：
-  - tasks/active_task.md
-  - tasks/archive/feat-operator-description-refinement.md
-  - docs/data-semantics.md
-  - config/semantics/api.schema.json
-  - config/semantics/openapi.json
-  - config/semantics/examples/operator-usage.json
-  - src/channels/config/operator_usage.h
-  - src/frontend/src/components/OperatorContractPanel.vue
-  - src/frontend/src/utils/operatorDescriptionNotes.js
-  - src/frontend/src/utils/operatorDescriptionNotes.test.js
-  - src/tests/test_config_channel/test_operator_contract_schema.py
-  - src/tests/test_config_channel/test_metadata_description_api.py
-  - src/tests/test_config_channel/metadata_operator_browser.mjs
-  - src/tests/test_config_channel/test_metadata_operator_browser.py
-  - src/tests/test_config_channel/operator_contract_browser.mjs
-- 步骤：Schema/投影与有效初值测试→通用编辑框与持久化断言→主构建→按影响验收→截图/范围/diff/指纹→归档R9并WIP=0停止。
-- 构建：cmake -B build src；cmake --build build --target test_metadata_description test_operator_contract_host flowsql_runtime_config -j4；构建完成后串行重建test_npm_data_contract和flowsql_frontend（同一usage头文件审计回归及最终前端初值修正）；主build操作串行。
-- 前端：cwd=src/frontend，node --test src/api/*.test.js src/utils/*.test.js test/*.test.mjs。
-- 标准验收：tools/test.sh all --location native --filter '^(test_metadata_description|test_metadata_description_api|test_operator_contract_schema|test_metadata_operator_browser|test_operator_contract_browser|test_metadata_description_client|test_npm_data_contract)$' --jobs 1。
-- 选择依据：修改本地说明Schema、usage投影及通用页面，覆盖共享Schema/IID/HTTP/普通客户端及两算子真实浏览器；NPM契约审计回归确认作者文档不变。不改执行契约，不重复算法、外部后端或全仓测试。
-- 失败证据与范围核对：首轮20261101T130945Z-937fbb86完整执行14项，13通过、1失败、零跳过，源码/产物指纹一致。独立operator_contract_browser驱动仍断言四个框外输出节点，实际已移入输出说明框；仅将该驱动加入允许清单，改为与真实full契约逐项精确比对四份输出说明并确认框外无重复。保留首轮证据，按原14项清单复跑，不增加超时或删减必需断言。
-- 依赖：native仓库根，config/testing/{dependencies,environment}.json；services=[]，既有隔离HTTP/SQLite/Worker/NPI及Chromium/Node，资源锁沿用；无需外部数据库/Kafka/镜像。
-- 静态验证：修改C++遵循src/.clang-format；脚本语法、JSON/文档链接、git diff --check；每次patch后git diff --name-only及本轮check_scope.py，保留所有既有修改。
-- 证据：evidence/operator-description-refinement/inline-editors/，已保存全工作树baseline与允许文件before快照；标准验收前后源码/主产物指纹一致。
-- 时间盒：2026-11-01 13:03～13:33 UTC；到期只记录可验证检查点，不扩范围。
-- 停止条件：两算子作者原文直接进入编辑框，保存/清空/重开/历史/冲突与重启断言通过；冻结清单selected=executed=passed、failed=skipped=not_executed=0，截图/diff/范围/指纹审查通过，WIP=0停止。
+- 关联 Feature：tasks/archive/feat-npm-data-semantics.md，T1～T7及后续Web说明布局/时间展示已验收完成。
+- 当前 Atomic Slice：完整 Feature 的精确提交审查与本地 commit。
+- 业务意图：将已验收的NPM领域说明、真实运行关联、静态默认字典及页面优化形成可复核的本地版本。
+- Non-Goals：不修改已验收代码、不实施其他Feature、不扩大测试/部署范围、不推送/发布/重启常驻服务、不提交证据、构建产物、私有测试配置或无关规划。
+- 允许工作树修改：仅tasks/active_task.md。允许暂存：evidence/npm-data-semantics/local-commit/manifest.json冻结的49个完整文件及2个局部文件；Backlog仅NPM行，Epic仅完成状态行和F4段。无关feat-stream-recompute.md及其他规划改动原样保留。
+- 验收命令：git diff --check；源码/产物与最新验收摘要逐项比对；JSON/Python/Node语法及Node时间单测；git diff --cached --name-only、--stat、--check及暂存内容审查；提交后git show、git status和未提交文件内容比对。代码和产物摘要未变时复用既有通过的冻结验收，不重复完整回归。
+- 依赖/位置：native本地Git及现有Python/Node工具；无外部服务或秘密配置读取。Git索引和对象写入按本地提交授权执行，不改变远端。
+- 时间盒：2026-11-03 08:09:00～08:29:00 UTC，20分钟。
+- 停止条件：暂存清单/内容/空白检查及源码摘要全部通过，工作台回WIP=0后执行本地提交；提交后核对索引为空、无关工作树改动保持，即停止。
+- 基线及提交审查证据：evidence/npm-data-semantics/local-commit/，不入库。原完整工作台已快照保存。
+
+## 本轮完成证据
+
+- 精确清单51个路径：49个完整文件、Backlog的NPM完成行、Epic的完成状态行和F4段。无关stream-recompute及其他规划内容保持工作树原文。
+- 47个源码/文档与验收基线一致；最新时间展示验收的35项源码及运行产物摘要全部一致。未改已验收代码，未重复完整回归。
+- 本轮JSON解析4项、Python语法5项、Node脚本语法、时间展示单测5/5、29个C++文件版权头及暂存空白检查通过；49个完整暂存文件和2个局部文件逐字核对通过。
+- Feature完成验收沿用本地10/10、调度/Task5/5、外部12项最终逐项全通过的记录；保留ClickHouse原失败及标准入口2/2复验。后续Web布局4/4、时间编辑5业务及5夹具10/10均通过，无必需跳过或未执行。
+- 用户已明确授权本地提交；提交标识以Git日志为准。证据、构建产物及私有测试配置未暂存；不推送、部署或重启常驻服务。
+
+## 上一切片：已验收的时间说明优化
+
+- 关联 Feature：tasks/archive/feat-npm-data-semantics.md（已完成）；沿用已确认的第 4 项调整，不重开其他任务。
+- 授权：用户确认统一 NPM epoch、让新旧对象正确识别、简化时间列、业务含义归入字段说明、完整结构留技术详情、未知时间定义以不可编辑状态展示。
+- 业务意图：NPM 时间点/时长显示真实类型，避免将标准时间误认成特殊类型；编辑普通说明保留原有时间契约和历史。
+- Non-Goals：不转换业务数值、不根据名字或数值猜时间、不迁移已有字典/历史、不改公共 Schema/API、不加新时间类型或任意同义词解析、不改算法/数据库后端、不部署或重启常驻服务、不提交/推送。
+- 冻结契约：新 NPM instant epoch 使用 1970-01-01T00:00:00Z，UTC/ns 保持。读取已有 Unix epoch 仅视为同一已知基准，不写回；来源冲突比较亦认可这两个明确表达。普通正文保存保留原 time_semantics/来源/精确历史。简化时间编辑器只显示实际支持的 Unix时间戳/日期时间/时长/非时间；不支持的定义显示只读状态及按需简短摘要，不提供保留伪类型、不自动选择非时间。时间列至多显示基准/已有时区；业务 description 放在字段说明编辑区，只在正文未包含相同文字时补充，完整 JSON 保持。
+- 允许文件：tasks/active_task.md；docs/data-semantics.md；src/operators/npm_basic/npm_data_contract.json；src/channels/config/metadata_description_time.h；src/frontend/src/components/ChannelDescriptionPanel.vue；src/frontend/src/utils/channelDescriptionTime.js；src/frontend/src/utils/channelDescriptionTime.test.js；src/tests/test_config_channel/test_metadata_description.cpp；src/tests/test_config_channel/test_npm_data_contract.cpp；src/tests/test_config_channel/npm_semantics_browser.mjs。证据 evidence/npm-data-semantics/time-editor/ 不入库。
+- 实施：先用 Node/C++断言锚定新旧 epoch 识别、无推断、不支持定义、说明去重与保存保持；统一 NPM 契约并接入共享编辑器；补实际浏览器读取/保存/重读与已有字典断言，同步文档，单轮 Diff 审查。
+- 构建：cmake -B build src；cmake --build build --target test_operator_contract_host test_metadata_description test_npm_data_contract test_npm_result_semantics -j4（包含隔离 Web/插件及前端 output/static）。
+- 验收：node --test src/frontend/src/utils/channelDescriptionTime.test.js；tools/test.sh all --location native --filter '^(test_metadata_description|test_npm_data_contract|test_npm_result_semantics|test_metadata_channel_browser|test_npm_semantics_http)$' --jobs 1；node --check src/tests/test_config_channel/npm_semantics_browser.mjs；修改行clang-format、JSON/脚本语法、git diff --check、基线范围/产物摘要审查。
+- 选择依据：修改 NPM 作者时间契约、共享时间冲突比较与 Web 编辑展示；覆盖契约生成/解析/静态字典、说明保存与原时间字段行为、通用通道浏览器及 NPM 真正读写重启；不改数据库方言/调度，不重复三库/调度或全仓。
+- 依赖/位置：native，统一 config/testing/environment.json、config/testing/dependencies.json；现有 SQLite/动态插件、隔离 Python Worker/Web/Gateway、缓存 Node/Chromium、临时loopback端口，沿用 semantics_http/visualization_browser 资源锁；无外部数据库/Kafka/凭证/系统网络修改。必要本地构建及端口权限按工具审批执行。
+- 时间盒：2026-11-03 06:49:00～07:19:00 UTC，30 分钟。
+- 停止条件：冻结清单全绿、Diff及范围审查通过则WIP=0并停止；到时仅记录当前可验证检查点，续作前重新冻结，不扩大测试矩阵。
+- 基线：evidence/npm-data-semantics/time-editor/worktree-before.json、before/；前轮 48 个预存改动保留。当前源路径已核查，新增epoch一致性不改变数值/时区/单位/历史。
 
 ## 完成证据
 
-- CMake配置与test_metadata_description/test_operator_contract_host/flowsql_runtime_config主构建通过，串行重建test_npm_data_contract与最终flowsql_frontend通过；54项前端测试全部执行通过，失败/跳过/取消为0。
-- 最终标准运行20261101T131604Z-bde14316：7功能/回归与7环境入口，selected=executed=passed=14，failed=skipped=not_executed=0，CTest272.64秒。首轮驱动失败证据保存在inline-editors/first-run/，未减少必需清单、放宽行为断言或增加超时。
-- 六处说明逐项与两份真实作者契约比对，作者文字仅在对应编辑框显示；修改/清空/保存/重开和宿主/Worker重启精确恢复，保存不改变作者机器契约。18布局、6主题检查、8次真实菜单展开、草稿/期间编辑/冲突/历史/组件隔离全部通过；两份compact与代表性深浅截图已审查。
-- 1139源码和79相关主产物验收前后指纹一致，标准runner源码/产物快照也一致；修改C++格式、JS/Python语法、24处文档文件链接、7个JSON块、Diff及本轮15文件允许范围审查通过，既有其他修改保留。
-- 独立验收记录evidence/operator-description-refinement/inline-editors/acceptance.json，标准summary位于evidence/test-environment/20261101T131604Z-bde14316/summary.json，截图/日志/指纹均为本地缓存、不入库；同Feature归档已追加R9。
-- 8081实际index及入口资源与新主构建一致，npm.basic和explore.baseliner均为contract_state=declared。常驻PID1413915仍映射已删除的旧libflowsql_config_channel.so，刷新可看到新编辑框，保存新增三个整体说明需重启后端加载新Config库；无需再次上传两份算子。本轮未重启用户服务、未清理数据、未提交/推送，切片完成并停止。
-
-## 用户授权的本地提交
-
-- 用户授权：先提交代码；仅创建本地Git提交，不推送、打标签、发布或重启服务。此前“不提交”属于实现阶段约定，本次明确授权替代该限制。
-- 业务意图：将已验收的完整算子契约说明重构和R1～R9修正固化为一个可审查提交，保留其他工作区改动。
-- Non-Goals：不修改实现或扩大测试范围，不处理AGENTS.md、CLAUDE.md、语义Epic或stream-recompute规划，不纳入evidence、构建产物或私有配置。
-- 允许编辑文件：tasks/active_task.md、tasks/archive/feat-operator-description-refinement.md、tasks/product_backlog.md；只对齐本Feature完成状态和提交记录。
-- 允许暂存范围：evidence/operator-description-refinement/local-commit/baseline.json中的42个full路径，以及product_backlog.md中的operator-description-refinement一行；逐路径暂存，Backlog其他部分保持未暂存。
-- 冻结提交标题：feat: refine operator contracts and simplify description editing。
-- 验收依据：T5标准清单39/39、R8清单28/28、最终R9清单14/14和前端54/54，失败/跳过/未执行均为0。提交前核对最终1139源码和79主产物摘要，未改实现时不重复构建或执行已通过清单；全仓、外部数据库/Kafka、镜像和常驻服务加载不声明已验证。
-- 验收命令：源码/产物SHA256逐项比对、git diff --cached --name-only、git diff --cached、git diff --cached --check；提交后核对43路径、空索引及四个排除文件与Backlog非目标部分字节不变。
-- 时间盒：2026-11-01 13:24～13:44 UTC；停止条件：审查/摘要核对通过，本地提交成功，非目标改动保留，工作台WIP=0后停止。
-- 证据：evidence/operator-description-refinement/local-commit/，已保存初始HEAD、索引、全脏路径摘要和文件快照；本地缓存不入库。
-- 提交审查结果：43个暂存路径与冻结清单完全一致，Backlog只包含本Feature完成行；8个JSON解析、8个C++文件格式、版权头、暂存Diff及空白检查通过。最终验收的1139源码与79主产物逐项摘要一致，实现没有修改，沿用已执行的39/39、28/28、14/14标准清单和前端54/54，不重复构建/测试。
-- 本地提交按本次用户授权执行；提交ID、实际文件清单、空索引和无关文件/Backlog内容保留核对写入同目录本地commit-result.json。未授权远端或部署操作，完成后停止。
+- NPM契约20处epoch值统一为1970-01-01T00:00:00Z，时间点仍为UTC/ns；所有时长不补基准和时区。旧Unix epoch只在读取/比较时识别为同一基准，既有字典及历史不迁移。
+- Web删除保留伪类型和嵌套时间长文。支持的时间正常显示模式及简短基准/已有时区；不支持定义显示只读状态、单位和可展开人可读摘要。业务时间含义收入字段说明区，相同正文不重复，完整JSON保留。
+- CMake配置及test_operator_contract_host（含前端）、test_metadata_description、test_npm_data_contract、test_npm_result_semantics全部构建通过。前端Node单测5/5、C++格式/JSON/脚本语法和git diff --check通过；Vite仅有既有chunk体积提示。
+- 标准入口runner 20261103T065514Z-88a61bfd：selected=executed=passed=10，failed=skipped=not_executed=0；为冻结的5项业务及5项环境夹具。说明保存10.91秒、通用通道浏览器98.42秒、NPM契约2.14秒、结果说明52.03秒、NPM HTTP/浏览器226.23秒。
+- 浏览器真实存入旧基准写法/自定义基准及分钟单位后核对正常识别/只读状态；普通正文保存重读后完整时间语义和精确历史保持；原四列表格/搜索/主题/关联、重复运行、PCAPNG、插件重启及已有对象静态字典均通过。浏览器阅读不预览/执行数据，显式保存动作1次；fixture导入使用独立API请求。
+- 35项本轮源码及运行产物验收前后摘要一致；修改范围为冻结10文件，其他42项预存改动不变。实际截图与单轮Diff已复核，完整证据在本轮目录，不入库。
+- 未提交/推送、未重启常驻服务或部署。当前实现和隔离验收完成，不声明常驻进程已加载新NPM契约。

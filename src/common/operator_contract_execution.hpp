@@ -47,6 +47,10 @@ inline int CheckInvocation(IQuerier* querier, Invocation* invocation, IOperatorC
         Value identity(rapidjson::kObjectType);
         Set(identity, "category", component.category, ra);
         Set(identity, "name", component.name, ra);
+        if (component.contract_state == "declared") {
+            Set(identity, "contract_ref", component.contract_ref, ra);
+            Set(identity, "component_revision", component.component_revision, ra);
+        }
         request.AddMember("operator", identity, ra)
             .AddMember("parameters", Copy(parameters, ra), ra)
             .AddMember("inputs", Copy(inputs, ra), ra)

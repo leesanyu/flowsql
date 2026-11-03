@@ -9,6 +9,8 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <memory>
+#include <mutex>
 #include <string>
 
 #include "channel_dictionary.h"
@@ -82,6 +84,11 @@ class ConfigChannelPlugin final : public IPlugin,
     }
 
     int Unload() override {
+        {
+            std::lock_guard<std::mutex> lock(producer_contract_mutex_);
+            producer_contract_.reset();
+            producer_contract_ref_.clear();
+        }
         DataSemanticsRegistry::Close();
         ConfigChannelProvider::Close();
         return 0;
@@ -106,11 +113,15 @@ class ConfigChannelPlugin final : public IPlugin,
 
     MetadataDescriptionService DescriptionService();
     int LookupDescriptionOperator(const std::string&, uint32_t, OperatorComponentContractV1*, DataSemanticsErrorV1*);
+    int DescribeDatasetSource(const ChannelDatasetRequestV1&, ChannelDatasetSnapshotV1*, DataSemanticsErrorV1*);
     int DescribeDataset(const ChannelDatasetRequestV1&, ChannelDatasetSnapshotV1*, DataSemanticsErrorV1*);
     IQuerier* querier_ = nullptr;
     std::string gateway_host_ = "127.0.0.1";
     int gateway_port_ = 18800;
     std::string db_path_;
+    std::mutex producer_contract_mutex_;
+    std::string producer_contract_ref_;
+    std::shared_ptr<const rapidjson::Document> producer_contract_;
 };
 
 }  // namespace flowsql::channels::config

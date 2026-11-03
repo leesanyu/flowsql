@@ -1,7 +1,10 @@
 project(flowsql_npm_basic)
+find_package(OpenSSL REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
     npm_data_contract.cpp
+    npm_config_adapter.cpp
+    npm_result_semantics.cpp
     npm_family_result_contract.cpp
     npm_family_output_contract.cpp
     npm_analysis_contract.cpp
@@ -58,7 +61,7 @@ add_library(${PROJECT_NAME} SHARED
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR})
 add_thirddepen(${PROJECT_NAME} arrow rapidjson)
 add_dependencies(${PROJECT_NAME} flowsql_common)
-target_link_libraries(${PROJECT_NAME} flowsql_common)
+target_link_libraries(${PROJECT_NAME} flowsql_common OpenSSL::Crypto)
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output

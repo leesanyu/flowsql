@@ -28,3 +28,14 @@ for op in ['describe','preview','check','apply']:
     validator.validate(request)
     request['timeout_ms']=0;assert list(validator.iter_errors(request))
 print('PASS: published channel models, v1/v2 samples, negative cases and four OpenAPI operations')
+
+# Database products are supplied by metadata providers, not enumerated by the
+# public description protocol. An unknown provider still fails at resolution.
+locator={'kind':'database_table','type':'extension_db','name':'source','table':'events'}
+for source,definition in [(schema,'datasetLocator'),(api,'datasetLocator'),(api,'operatorOutputLocator')]:
+    validator=Draft202012Validator({'$schema':source['$schema'],'$defs':source['$defs'],'$ref':f'#/$defs/{definition}'})
+    validator.validate(locator)
+    for invalid in ['', 'bad\x00type']:
+        bad=dict(locator,type=invalid)
+        assert list(validator.iter_errors(bad))
+print('PASS: database locator types are extensible and retain boundary validation')

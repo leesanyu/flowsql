@@ -702,6 +702,72 @@
       "role": "source",
       "location": "native",
       "resources": []
+    },
+    "test_npm_result_semantics": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_npm_semantics_pipeline": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_npm_session_semantics_pipeline": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_npm_protocol_semantics_pipeline": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_npm_semantics_mysql": {
+      "services": [
+        "mysql"
+      ],
+      "role": "npm",
+      "location": "native",
+      "resources": [
+        "database_npm",
+        "semantics_http"
+      ]
+    },
+    "test_npm_semantics_postgres": {
+      "services": [
+        "postgres"
+      ],
+      "role": "npm",
+      "location": "native",
+      "resources": [
+        "database_npm",
+        "semantics_http"
+      ]
+    },
+    "test_npm_semantics_clickhouse": {
+      "services": [
+        "clickhouse"
+      ],
+      "role": "npm",
+      "location": "native",
+      "resources": [
+        "database_npm",
+        "semantics_http"
+      ]
+    },
+    "test_npm_semantics_http": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http",
+        "visualization_browser"
+      ]
     }
   }
 }

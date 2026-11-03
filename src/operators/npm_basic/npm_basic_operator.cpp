@@ -7,6 +7,7 @@
 #include <rapidjson/writer.h>
 
 #include "npm_basic_result_consumer.h"
+#include "npm_result_semantics.h"
 
 #include <operators/npm_basic/config/npm_basic_task_config.h>
 #include <operators/npm_basic/core/npm_basic_task_runtime.h>
@@ -132,7 +133,7 @@ bool MaxPacketTimestampNs(const std::shared_ptr<arrow::RecordBatch>& input, int6
 
 }  // namespace
 
-NpmBasicTask::NpmBasicTask(const BlockTransformTaskConfigV1& config, IQuerier* querier, const NpmBasicOperator* owner,
+NpmBasicTask::NpmBasicTask(const BlockTransformTaskConfigV1& config, IQuerier* querier, NpmBasicOperator* owner,
                            bool v2)
     : task_id_(config.task_id),
       with_params_json_(config.with_params_json),
@@ -533,6 +534,19 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
         }
         expected = Fail(expected, error);
         return expected == State::kCancelled ? ECANCELED : EINVAL;
+    }
+
+    if (managed_channel_ && component_.contract_state == "declared") {
+        DataSemanticsErrorV1 error;
+        if (PublishNpmResultSemantics(querier_, component_, managed_category_, managed_name_,
+                                      parsed.domains.input_namespace, next_runtime->ManagedResultJson(),
+                                      &semantics_context_, &error)) {
+            config_error_ = error.code + ": " + error.message;
+            next_runtime->Cancel();
+            expected = State::kOpening;
+            expected = Fail(expected, config_error_.c_str());
+            return expected == State::kCancelled ? ECANCELED : EINVAL;
+        }
     }
 
     try {

@@ -212,6 +212,8 @@ int32_t ChannelDictionaryService::Control(const std::string& op, const std::stri
             if (known) {
                 if (dictionary.IsObject())
                     candidate.CopyFrom(dictionary, ca);
+                else if (source["producer_metadata"].HasMember("default_dictionary"))
+                    candidate.CopyFrom(source["producer_metadata"]["default_dictionary"], ca);
                 else {
                     Set(candidate, "schema_id", "flowsql.data-dictionary.v1", ca);
                     Set(candidate, "title", Get(r["locator"], "table", Get(r["locator"], "name")), ca);

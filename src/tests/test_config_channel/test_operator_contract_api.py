@@ -49,7 +49,7 @@ def call(base, operation, payload, expected=200):
 
 
 @contextlib.contextmanager
-def running_contract_host(host, directory, provider=True):
+def running_contract_host(host, directory, provider=True, npm=False):
     used = set()
     ports = [port(used) for _ in range(4)]
     base = 'http://127.0.0.1:' + str(ports[2])
@@ -74,7 +74,7 @@ def running_contract_host(host, directory, provider=True):
             host_log = directory / 'host.log'
             with host_log.open('w') as log:
                 process = subprocess.Popen([str(host), str(directory), *map(str, ports),
-                                            *([] if provider else ['without-provider'])],
+                                            *(['--npm-http'] if npm else [] if provider else ['without-provider'])],
                                            cwd=host.parent, env=dict(os.environ, FLOWSQL_GATEWAY_ADDR=''), stdin=subprocess.PIPE, stdout=log, stderr=log, text=True)
                 try:
                     deadline = time.monotonic() + 25

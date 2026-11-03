@@ -7,6 +7,8 @@
 #include <common/iplugin.h>
 #include <framework/core/capture_progress_tracker.h>
 #include <framework/interfaces/iblock_transform_operator.h>
+#include <framework/interfaces/ioperator_contract_catalog.h>
+#include <framework/interfaces/ioperator_data_contract.h>
 
 #include <atomic>
 #include <cstdint>
@@ -22,7 +24,8 @@ class NpmBasicTaskRuntime;
 class NpmBasicTask final : public IBlockTransformTaskV2,
                            public IBlockTransformCaptureFactTaskV2,
                            public IBlockTransformManagedSinkTaskV1,
-                           public IBlockTransformInputSourceTaskV1 {
+                           public IBlockTransformInputSourceTaskV1,
+                           public IOperatorConfigAdapterV1 {
  public:
     NpmBasicTask(const NpmBasicTask&) = delete;
     NpmBasicTask& operator=(const NpmBasicTask&) = delete;
@@ -36,6 +39,7 @@ class NpmBasicTask final : public IBlockTransformTaskV2,
     void Cancel() override;
     std::string LastError() const override;
     int BindInputSource(const char* source) override;
+    int ResolveInvocation(const char* request_json, std::string* result_json, DataSemanticsErrorV1* error) override;
     int BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) override;
     std::string ManagedSinkResultJson() const override;
     int BindCaptureSources(const CaptureSourceSetV2& sources) override;
@@ -59,7 +63,7 @@ class NpmBasicTask final : public IBlockTransformTaskV2,
 
     friend class NpmBasicOperator;
 
-    NpmBasicTask(const BlockTransformTaskConfigV1& config, IQuerier* querier, const NpmBasicOperator* owner, bool v2);
+    NpmBasicTask(const BlockTransformTaskConfigV1& config, IQuerier* querier, NpmBasicOperator* owner, bool v2);
     ~NpmBasicTask() override;
 
     static int ErrorCodeForState(State state) noexcept;
@@ -77,7 +81,9 @@ class NpmBasicTask final : public IBlockTransformTaskV2,
     std::string managed_name_;
     IChannel* managed_channel_ = nullptr;
     IQuerier* querier_ = nullptr;
-    const NpmBasicOperator* owner_ = nullptr;
+    NpmBasicOperator* owner_ = nullptr;
+    OperatorComponentContractV1 component_;
+    std::string semantics_context_;
     bool v2_ = false;
     bool capture_bound_ = false;
     CaptureSourceSetV2 capture_sources_;
@@ -93,7 +99,10 @@ class NpmBasicTask final : public IBlockTransformTaskV2,
     bool has_observed_at_ = false;
 };
 
-class NpmBasicOperator final : public IPlugin, public IBlockTransformOperatorV1, public IBlockTransformOperatorV2 {
+class NpmBasicOperator final : public IPlugin,
+                               public IBlockTransformOperatorV1,
+                               public IBlockTransformOperatorV2,
+                               public IOperatorConfigAdapterV1 {
  public:
     NpmBasicOperator() noexcept = default;
     /** Creates an already-started in-process provider for focused unit tests. */
@@ -108,6 +117,7 @@ class NpmBasicOperator final : public IPlugin, public IBlockTransformOperatorV1,
     std::string Category() const override;
     std::string Name() const override;
     std::string Description() const override;
+    int ResolveInvocation(const char* request_json, std::string* result_json, DataSemanticsErrorV1* error) override;
     int CreateTask(const BlockTransformTaskConfigV1& config, IBlockTransformTaskV1** task) override;
     void ReleaseTask(IBlockTransformTaskV1* task) override;
     int CreateTask(const BlockTransformTaskConfigV2& config, IBlockTransformTaskV2** task) override;

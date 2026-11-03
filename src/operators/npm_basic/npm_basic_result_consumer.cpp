@@ -4,6 +4,7 @@
 #include "npm_basic_result_consumer.h"
 #include <framework/interfaces/idatabase_arrow_write.h>
 #include "npm_result_progress.h"
+#include "npm_result_schema.h"
 #include "output/npm_result_router.h"
 
 #include <arrow/api.h>
@@ -133,34 +134,6 @@ std::string QuoteLiteral(DatabaseBackend backend, std::string_view value) {
     }
     quoted += '\'';
     return quoted;
-}
-
-std::string MetadataCanonical(const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
-    if (!metadata) return "0:";
-    std::vector<std::pair<std::string, std::string>> entries;
-    entries.reserve(metadata->size());
-    for (int index = 0; index < metadata->size(); ++index) {
-        entries.emplace_back(metadata->key(index), metadata->value(index));
-    }
-    std::sort(entries.begin(), entries.end());
-    std::ostringstream canonical;
-    canonical << entries.size() << ':';
-    for (const auto& [key, value] : entries) {
-        canonical << key.size() << ':' << key << value.size() << ':' << value;
-    }
-    return canonical.str();
-}
-
-std::string SchemaCanonical(const arrow::Schema& schema) {
-    std::ostringstream canonical;
-    canonical << "fields=" << schema.num_fields() << ';';
-    for (const auto& field : schema.fields()) {
-        canonical << field->name().size() << ':' << field->name() << ';' << field->type()->ToString().size() << ':'
-                  << field->type()->ToString() << ';' << (field->nullable() ? '1' : '0') << ';'
-                  << MetadataCanonical(field->metadata()) << ';';
-    }
-    canonical << "schema_metadata=" << MetadataCanonical(schema.metadata());
-    return canonical.str();
 }
 
 std::string Fingerprint(std::string_view canonical) {

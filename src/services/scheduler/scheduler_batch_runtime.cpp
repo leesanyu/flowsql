@@ -4,6 +4,8 @@
 #include "scheduler_batch_runtime.h"
 
 #include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -298,6 +300,18 @@ void SchedulerBatchRuntime::ExecuteTask(const std::shared_ptr<BatchRuntimeTask>&
         current_control = task->control;
         const int32_t rc = exec_fn_(task->sqls[i], &exec_rsp);
         current_control.reset();
+        rapidjson::Document execution;
+        execution.Parse(exec_rsp.c_str());
+        if (!execution.HasParseError() && execution.IsObject() && execution.HasMember("contract_checks") &&
+            execution["contract_checks"].IsArray()) {
+            std::lock_guard<std::mutex> lock(mu_);
+            for (const auto& check : execution["contract_checks"].GetArray()) {
+                rapidjson::StringBuffer buffer;
+                rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+                check.Accept(writer);
+                task->snapshot.contract_checks_json.emplace_back(buffer.GetString(), buffer.GetSize());
+            }
+        }
         if (rc != error::OK) {
             std::string err_code;
             std::string err_message;

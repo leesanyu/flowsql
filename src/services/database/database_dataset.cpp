@@ -1,6 +1,7 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 #include <sys/stat.h>
+#include <cctype>
 #include <common/channel_dataset.hpp>
 #include <condition_variable>
 #include <set>
@@ -146,7 +147,8 @@ int DatabasePlugin::Describe(const ChannelDatasetRequestV1& request, ChannelData
         bool identity_known = false;
         if (type == "sqlite") {
             ExplorationResultV1 object;
-            if (run("SELECT rootpage,sql FROM main.sqlite_schema WHERE type='table' AND name=?", {table}, &object))
+            if (run("SELECT rootpage,sql FROM main.sqlite_schema WHERE type IN ('table','view') AND name=?", {table},
+                    &object))
                 return -1;
             if (object.rows.empty()) return Fail(error, "NOT_FOUND", "table not found");
             struct stat st {};
@@ -178,7 +180,7 @@ int DatabasePlugin::Describe(const ChannelDatasetRequestV1& request, ChannelData
                     "FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON a.attrelid=c.oid JOIN "
                     "pg_catalog.pg_namespace n ON c.relnamespace=n.oid JOIN pg_catalog.pg_type t ON t.oid=a.atttypid "
                     "JOIN pg_catalog.pg_database d ON d.datname=current_database() WHERE n.nspname=? AND c.relname=? "
-                    "AND c.relkind IN ('r','p') AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
+                    "AND c.relkind IN ('r','p','v') AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
                     {schema, table}, &columns))
                 return -1;
             if (!columns.rows.empty()) {
@@ -217,6 +219,74 @@ int DatabasePlugin::Describe(const ChannelDatasetRequestV1& request, ChannelData
                 Gap(gaps, "/fields/" + std::to_string(fields.Size()) + "/nullable", gaps.GetAllocator());
             }
             fields.PushBack(field, fa);
+        }
+        // A relation name only narrows the catalog lookup. Ownership is proved
+        // by an exact entry in the producer's managed entity directory.
+        if (table.rfind("npm_", 0) == 0) {
+            ExplorationResultV1 catalog;
+            std::string catalog_sql;
+            std::vector<std::string> catalog_values;
+            if (type == "sqlite") {
+                catalog_sql = "SELECT name FROM main.sqlite_schema WHERE type='table' AND name='npm_result_entities'";
+            } else if (type == "clickhouse") {
+                catalog_sql = "SELECT name FROM system.tables WHERE database=? AND name='npm_result_entities'";
+                catalog_values = {database};
+            } else {
+                catalog_sql =
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema=? AND "
+                    "table_name='npm_result_entities'";
+                catalog_values = {schema};
+            }
+            if (run(catalog_sql, catalog_values, &catalog)) return -1;
+            if (!catalog.rows.empty()) {
+                const auto quote = [&](const std::string& value) {
+                    const char delimiter = type == "mysql" || type == "clickhouse" ? '`' : '"';
+                    std::string quoted(1, delimiter);
+                    for (const char c : value) {
+                        quoted += c;
+                        if (c == delimiter) quoted += c;
+                    }
+                    return quoted + delimiter;
+                };
+                std::string resource, canonical;
+                if (table == "npm_result_runs" || table == "npm_result_entities") {
+                    resource = table == "npm_result_runs" ? "runs" : "entities";
+                } else {
+                    ExplorationResultV1 entry;
+                    const auto sql =
+                        "SELECT "
+                        "entity_id,schema_version,schema_canonical,data_table,history_relation,latest_relation,final_"
+                        "relation FROM " +
+                        quote(schema) + "." + quote("npm_result_entities") + (type == "clickhouse" ? " FINAL" : "") +
+                        " WHERE data_table=? OR history_relation=? OR latest_relation=? OR final_relation=?";
+                    if (run(sql, {table, table, table, table}, &entry)) return -1;
+                    if (entry.rows.size() > 1)
+                        return Fail(error, "SOURCE_CHANGED", "ambiguous producer relation catalog");
+                    if (!entry.rows.empty()) {
+                        const auto& row = entry.rows.front();
+                        const auto entity = Cell(row[0]), version = Cell(row[1]);
+                        if (entity.empty() ||
+                            !std::all_of(entity.begin(), entity.end(),
+                                         [](unsigned char c) { return std::isalnum(c) || c == '_'; }) ||
+                            version.empty() || !std::all_of(version.begin(), version.end(), [](unsigned char c) {
+                                return std::isdigit(c);
+                            }))
+                            return Fail(error, "SOURCE_CHANGED", "invalid producer entity identity");
+                        const char* views[]{"data", "history", "latest", "final"};
+                        for (size_t i = 0; i < 4; ++i)
+                            if (Cell(row[i + 3]) == table) resource = entity + "_" + views[i] + "_v" + version;
+                        canonical = Cell(row[2]);
+                    }
+                }
+                if (!resource.empty()) {
+                    auto& ma = metadata.GetAllocator();
+                    Value origin(rapidjson::kObjectType);
+                    Set(origin, "operator", "npm.basic", ma);
+                    Set(origin, "resource", "/resources/managed_dictionaries/" + resource, ma);
+                    Set(origin, "schema_canonical", canonical, ma);
+                    Set(metadata, "dictionary_source", std::move(origin), ma);
+                }
+            }
         }
         Set(metadata, "dialect", type, metadata.GetAllocator());
         Set(metadata, "identity_observation", identity_known ? "native_object_id" : "external_recreation_unobservable",

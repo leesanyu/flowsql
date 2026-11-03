@@ -2206,12 +2206,8 @@
             },
             "type": {
               "type": "string",
-              "enum": [
-                "sqlite",
-                "mysql",
-                "postgres",
-                "clickhouse"
-              ]
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
             },
             "name": {
               "type": "string",

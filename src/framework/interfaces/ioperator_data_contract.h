@@ -31,7 +31,9 @@ interface IOperatorDataContractV1 {
 
 // Optional capability independent of all execution ABIs. The component owns business
 // parsing/defaults; the caller freezes the response for both checking and execution.
-// Request: {operator:{category,name},parameters,inputs,execution_context}.
+// Request: {operator:{category,name,contract_ref?,component_revision?},parameters,inputs,execution_context}.
+// Trusted execution supplies the frozen component identity; a task adapter may
+// retain that identity and report actual source/runtime facts after Open.
 // Response: {effective_parameters,normalized_config?,config_refs,inputs,execution_context?}.
 // inputs retains port/item identity, actual object/source revision, and adaptation facts.
 // No algorithm execution, business-row loading, mutation, credentials, or latest refs.

@@ -287,6 +287,86 @@ latest 表示各运行内每个实例的最大 revision，不是“最近一次�
 它们是同一保存结果的查询视图，不要把三种查询结果相加统计事件数。
 需要基线分析时，按明确 run_id 读取 Basic history 的 interval 增量，见 [Baseliner 使用说明](baseliner.md)。
 
+### 数据库结果的默认说明与运行依据
+
+NPM 字段字典是随算子契约提供的静态产品定义。SQLite、MySQL、PostgreSQL 或 ClickHouse 中已有的受管 NPM 对象，
+在“通道管理 → 数据库通道 → 浏览”选定后即可查看默认说明，空表也适用，无需重新执行 NPM。
+系统按受管目录核验实体、结构版本和关系身份，并保留数据库实际类型及可空性；不只凭表名套用。
+使用已配置且支持 NPM 托管结果的数据库通道即可，无需先建立标准或手工填写字典、字段身份、绑定。
+Basic、Session、DNS、HTTP1、TLS、ICMP 的 IPv4/IPv6 共十二个实体包含 358 个分析字段；每个启用实体的
+history/latest/final 三个视图均可读取静态说明，真实执行时再分别形成精确字典与绑定。三个附加运行列和 `npm_result_runs` 运行目录也有必要解释。
+未启用实体不属于本次运行，说明已发布也不表示某实体一定观察到了分析行。
+
+在“通道管理 → 数据库通道”，找到目标数据库连接，点击“浏览”，选中受管对象，
+在“数据说明”查看行含义、字段、单位、时间、NULL/有效性、枚举和统计限制。选择对象与阅读说明只读元数据；
+切换“数据预览”才读取分析行。沿用原字段表和保存入口，操作详见[通道与算子说明](data-semantics.md)。
+
+普通程序通过同一对象接口读取，例如本次使用记录已明确给出下列 DNS 关系时：
+
+```json
+POST /api/semantics/v1/describe
+{
+  "target": {
+    "kind": "channel",
+    "locator": {
+      "kind": "database_table",
+      "type": "mysql",
+      "name": "npm",
+      "table": "npm_dns_transaction_ipv4_final_v1"
+    }
+  }
+}
+```
+
+将 `type`、`name` 与 `table` 替换为本次实际通道和关系。响应 `data.description.document` 包含实体与字段语义，
+`data.basis.dictionary_ref`、`binding_ref` 为精确版本；原生类型和可空性来自目标数据库的实际对象，不能拿作者契约中的
+Arrow 声明替代。读取不会执行 NPM、读取分析行、创建说明版本或更新绑定。
+没有人工保存或运行绑定时，`description.origin=producer_default`，字典和绑定引用为 null；
+`basis.contract_ref`、`component_revision` 以及 `structure.producer_metadata.dictionary_source` 给出静态定义的精确来源。
+已有绑定优先返回已保存说明；点击“保存”才持久化当前对象的补充。内部 `_v1_data` 和 `npm_result_entities` 也有静态说明，
+其存储/管理行含义与公开分析视图不同，常规分析仍优先选择 history/latest/final。
+
+运行依据来自任务响应 `contract_checks[].use_ref`。直接使用该精确引用调用
+`POST /api/semantics/v1/resolve`，请求为 `{"exact_reference":"替换为响应中的完整 use_ref","view":"document"}`。
+完整托管发布可能超过一次 HTTP 等待时间。可通过 `POST /api/tasks/batch/execute` 以 `mode="async"`
+提交并保留返回的 `task_id`，再用 `POST /api/tasks/result` 和 `{"task_id":"该任务ID"}` 查询完成状态。
+异步任务的精确 `contract_checks` 从 Gateway 的既有 `POST /tasks/detail` 读取，请求使用同一 `task_id`；
+Web 的 `/api/tasks/result` 仅返回结果摘要。请求超时后先查询原任务，避免重复提交。
+返回使用记录中的 `contract_ref`、`component_revision`、`effective_parameters`、`normalized_config` 与
+`config_refs` 对应该次执行；`execution_context.npm` 提供：
+
+| 内容 | 用途 |
+| --- | --- |
+| `run_id`、`input_namespace` | NPM 托管运行及输入范围；此 run_id 与通用使用记录自身的 run_id 不同 |
+| `run_catalog` | 运行目录的 locator、dictionary_ref、binding_ref |
+| `entities[].entity_id`、`schema_version`、`description_state` | 本次受管实体及其说明发布状态，不代替分析行是否存在的判断 |
+| `entities[].relations[]` | 每个公开 view 的实际 locator 与本次成功发布的精确 dictionary_ref/binding_ref |
+
+按记录内的精确引用继续 resolve 即可取得完整依据，不要自行拼接 revision 或改用当前最新版本。
+`managed_results` 仍是不透明集合，通用输出检查的 `not_observed` 不表示这些具体关系不存在，也不能把静态 Schema 当作逐表产出观察。
+
+共享视图可包含多个运行。查询时限定 `__npm_run_id`；共享默认说明不代表所有历史行使用当前运行参数。
+没有相应运行记录时，不能从当前配置补造历史依据。Session→同族 Basic，以及 DNS/HTTP1/TLS→同族 Session 的
+关系包含运行、session 和观测域映射；还须保持输入命名空间一致。Basic 周期和 Session 采样各自修订，不能用相同
+revision 等值拼接，也不承诺一对一；ICMP 的引用字段不强制建立会话关系。
+
+人工补充保存为当前对象的新精确版本，其他视图/实体和作者机器契约保持各自版本；后续默认初始化保留已保存的补充。
+此前使用记录和字典精确版本仍可读取。结构或作者组件来源不符时报告核对错误，不把同名对象直接认作相同来源。
+元数据发布失败会使任务明确失败；数据已提交后记录说明失败时保留数据，通过 `data_state`/`metadata_state` 和错误区分，
+不能据失败响应声称已回滚分析结果。`metadata_status=known` 只确认受管状态落库，不能证明字段含义或业务数据质量。
+
+静态说明读取和执行发布依赖经核验的受管目录及通用结构描述接口，不按数据库产品名称分支，也不在 NPM 中查询系统目录。
+新增后端须提供 NPM 托管存储与 `IChannelDatasetDescriptorV1` 结构能力；完成该适配后无需修改 NPM 领域说明或公共定位 Schema。
+字段保留原生类型，例如 UInt64 在 MySQL 为 BIGINT UNSIGNED、PostgreSQL 为 NUMERIC(20,0)、ClickHouse 为 UInt64；
+视图的可空性以数据库实际元数据为准。尚未实现的后端由结构提供者明确报错。
+
+有限来源支持 PCAP/PCAPNG，读取沿用普通 HTTP/IID 与现有页面；实时来源、Kafka、独立 DataFrame 输出和任意 SQL
+投影/聚合后的来源传播不在此交付范围。
+已有受管对象可直接读取静态字典，不需要新分析任务。静态说明不会补造旧运行的实际配置、执行版本或观测结果；
+这些事实仍须来自对应运行记录。
+加载更新后的 Config、Database 与 NPM 插件后即可读取。若 C++ 算子来自上传副本，还需在“算子管理”更新并激活
+新构建的 `libflowsql_npm_basic.so`，使其静态作者契约完成登记；无需重新执行采集或分析。
+
 ### 运行状态与结果保留期
 
 | `run_status` | 对查询的意义 |

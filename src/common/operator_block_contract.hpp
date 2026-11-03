@@ -90,8 +90,8 @@ struct BlockInvocation {
     std::string ErrorText() const { return error.code + ": " + error.message; }
 };
 
-// Keeps the unchanged execution ABI. Checks the actual stage input immediately
-// before Open; ProcessBlock/time/flush continue on that same exclusive task.
+// Checks the actual stage input before Open and freezes task-resolved runtime
+// facts after Open; ProcessBlock/time/flush use that same exclusive task.
 class CheckedBlockTask final : public IBlockTransformTaskV1, public IBlockTransformTimeDrivenTaskV1 {
  public:
     CheckedBlockTask(IBlockTransformTaskV1* task, IOperatorConfigAdapterV1* fallback,
@@ -110,8 +110,12 @@ class CheckedBlockTask final : public IBlockTransformTaskV1, public IBlockTransf
                 return Observe(state->querier, &state->invocation, actual, "partial", &state->error);
             });
         }
-        const auto rc = task_->Open(std::move(input), output);
+        const auto rc = task_->Open(input, output);
         if (rc) return rc;
+        if (dynamic_cast<IOperatorConfigAdapterV1*>(task_) && state_->Check(task_, fallback_, input)) {
+            task_->Cancel();
+            return EINVAL;
+        }
         output_schema_ = *output;
         if (ObservePrimary(state_->querier, &state_->invocation, output_schema_, -1, nullptr, "partial",
                            &state_->error))
@@ -128,10 +132,12 @@ class CheckedBlockTask final : public IBlockTransformTaskV1, public IBlockTransf
         const auto rc = task_->Flush(output);
         if (rc) return rc;
         if (Validate(output)) return EINVAL;
-        return ObservePrimary(state_->querier, &state_->invocation, output_schema_, rows_,
-                              dynamic_cast<IOperatorOutputObservationV1*>(task_), "complete", &state_->error)
-                   ? EINVAL
-                   : 0;
+        if (ObservePrimary(state_->querier, &state_->invocation, output_schema_, rows_,
+                           dynamic_cast<IOperatorOutputObservationV1*>(task_), "complete", &state_->error)) {
+            output->clear();
+            return EINVAL;
+        }
+        return 0;
     }
     int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
         auto* time = dynamic_cast<IBlockTransformTimeDrivenTaskV1*>(task_);

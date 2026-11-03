@@ -9,8 +9,11 @@
 #include <common/json_depth.hpp>
 
 #include <rapidjson/document.h>
+#include <rapidjson/pointer.h>
+#include <rapidjson/schema.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include "data_semantics_api_schema.h"
 
 #include <cerrno>
 #include <charconv>
@@ -207,8 +210,8 @@ void WriteSnapshotMeta(Writer* writer, const ConfigChannelSnapshot& snapshot) {
 
 }  // namespace
 
-int ConfigChannelPlugin::DescribeDataset(const ChannelDatasetRequestV1& request, ChannelDatasetSnapshotV1* out,
-                                         DataSemanticsErrorV1* error) {
+int ConfigChannelPlugin::DescribeDatasetSource(const ChannelDatasetRequestV1& request, ChannelDatasetSnapshotV1* out,
+                                               DataSemanticsErrorV1* error) {
     using namespace dataset;
     *out = {};
     Json locator;
@@ -253,6 +256,86 @@ int ConfigChannelPlugin::DescribeDataset(const ChannelDatasetRequestV1& request,
     if (!response.HasMember("data") || !response["data"].IsObject() || !response["data"].HasMember("snapshot"))
         return Fail(error, "SOURCE_UNAVAILABLE", "metadata response has no snapshot");
     out->document_json = std::make_shared<const std::string>(Encode(response["data"]["snapshot"]));
+    return 0;
+}
+
+int ConfigChannelPlugin::DescribeDataset(const ChannelDatasetRequestV1& request, ChannelDatasetSnapshotV1* out,
+                                         DataSemanticsErrorV1* error) {
+    using namespace dataset;
+    const auto deadline = MetadataNow() + request.timeout_ms;
+    ChannelDatasetSnapshotV1 raw;
+    *out = {};
+    if (DescribeDatasetSource(request, &raw, error)) return -1;
+    Json source;
+    if (!raw.document_json || ParseSemanticsJson(*raw.document_json, &source, error))
+        return Fail(error, "SOURCE_UNAVAILABLE", "descriptor returned an invalid source snapshot");
+    Json source_schema;
+    source_schema.Parse(kSemanticsApiSchema);
+    Set(source_schema, "$ref", "#/%24defs/datasetSnapshot", source_schema.GetAllocator());
+    rapidjson::SchemaDocument compiled(source_schema);
+    rapidjson::SchemaValidator validator(compiled);
+    if (!source.Accept(validator))
+        return Fail(error, "SOURCE_UNAVAILABLE", "descriptor returned an invalid source snapshot");
+    auto& metadata = source["producer_metadata"];
+    if (!metadata.HasMember("dictionary_source") || Get(source, "schema_state") != "known") {
+        *out = std::move(raw);
+        return 0;
+    }
+    const auto& origin = metadata["dictionary_source"];
+    if (!origin.IsObject() || Get(origin, "operator").find('.') == std::string::npos ||
+        Get(origin, "resource").rfind("/resources/", 0) != 0 || !origin.HasMember("schema_canonical") ||
+        !origin["schema_canonical"].IsString() || !source.HasMember("fields") || !source["fields"].IsArray())
+        return Fail(error, "SOURCE_UNAVAILABLE", "invalid producer dictionary source");
+    OperatorComponentContractV1 component;
+    const auto left = deadline - MetadataNow();
+    if (left <= 0) return Fail(error, "SOURCE_TIMEOUT", "metadata deadline exceeded");
+    if (LookupDescriptionOperator(Get(origin, "operator"), static_cast<uint32_t>(left), &component, error)) return -1;
+    if (component.contract_state != "declared")
+        return Fail(error, "UNAVAILABLE", "producer default dictionary contract is not declared");
+    std::shared_ptr<const Json> document;
+    {
+        std::lock_guard<std::mutex> lock(producer_contract_mutex_);
+        // Exact revisions are immutable. Retain one validated producer contract;
+        // every request still checks the current component and physical object.
+        if (!producer_contract_ || producer_contract_ref_ != component.contract_ref) {
+            DataSemanticsSnapshotV1 contract;
+            if (DataSemanticsRegistry::Resolve(component.contract_ref.c_str(), &contract, error)) return -1;
+            auto parsed = std::make_shared<Json>();
+            parsed->Parse(contract.document_json->c_str());
+            producer_contract_ref_ = component.contract_ref;
+            producer_contract_ = std::move(parsed);
+        }
+        document = producer_contract_;
+    }
+    rapidjson::Pointer pointer(Get(origin, "resource").c_str());
+    const auto* entry = pointer.IsValid() ? pointer.Get(*document) : nullptr;
+    if (!entry || !entry->IsObject() || !entry->HasMember("dictionary") ||
+        Get(*entry, "schema_canonical") != Get(origin, "schema_canonical"))
+        return Fail(error, "SOURCE_CHANGED", "producer catalog does not match its static dictionary resource");
+    Json dictionary;
+    std::vector<SemanticsReference> references;
+    if (NormalizeSemantics("dictionary", Encode((*entry)["dictionary"]), &dictionary, &references, error)) return -1;
+    auto& fields = dictionary["fields"];
+    if (fields.Size() != source["fields"].Size())
+        return Fail(error, "SOURCE_CHANGED", "producer dictionary fields do not match the physical object");
+    for (rapidjson::SizeType i = 0; i < fields.Size(); ++i) {
+        const auto& actual = source["fields"][i];
+        if (Get(fields[i], "name") != Get(actual, "name"))
+            return Fail(error, "SOURCE_CHANGED", "producer dictionary field order differs from the physical object");
+        Set(fields[i], "type", Copy(actual["type"], dictionary.GetAllocator()), dictionary.GetAllocator());
+        Set(fields[i], "nullable", Copy(actual["nullable"], dictionary.GetAllocator()), dictionary.GetAllocator());
+    }
+    Set(dictionary, "title", Get(source["locator"], "table", Get(source["locator"], "name")),
+        dictionary.GetAllocator());
+    Json normalized;
+    if (NormalizeSemantics("dictionary", Encode(dictionary), &normalized, &references, error)) return -1;
+    auto& a = source.GetAllocator();
+    Set(metadata, "default_dictionary", Copy(normalized, a), a);
+    Set(metadata, "default_contract_ref", component.contract_ref, a);
+    Set(metadata, "default_component_revision", component.component_revision, a);
+    Set(source, "source_revision", Hash(Get(source, "source_revision") + "\n" + Canonical(metadata)), a);
+    if (MetadataNow() >= deadline) return Fail(error, "SOURCE_TIMEOUT", "metadata deadline exceeded");
+    out->document_json = std::make_shared<const std::string>(Encode(source));
     return 0;
 }
 

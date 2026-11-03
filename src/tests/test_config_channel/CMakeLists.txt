@@ -224,7 +224,8 @@ add_thirddepen(test_operator_contract_host arrow rapidjson)
 target_link_libraries(test_operator_contract_host flowsql_common OpenSSL::Crypto ${CMAKE_DL_LIBS})
 add_dependencies(test_operator_contract_host flowsql_gateway flowsql_router flowsql_config_channel flowsql_builtin
     flowsql_catalog flowsql_binaddon flowsql_bridge flowsql_database flowsql_baseline flowsql_scheduler flowsql_web
-    fixture_contract_output flowsql_baseliner flowsql_npm_basic flowsql_npi flowsql_task test_channel_dictionary_host)
+    fixture_contract_output flowsql_baseliner flowsql_npm_basic flowsql_npi flowsql_task test_channel_dictionary_host
+    flowsql_pcapfile flowsql_flow_labeling)
 target_compile_definitions(test_operator_contract_host PRIVATE FIXTURE_OUTPUT_PATH="$<TARGET_FILE:fixture_contract_output>" BASELINER_PATH="$<TARGET_FILE:flowsql_baseliner>" NPM_PATH="$<TARGET_FILE:flowsql_npm_basic>")
 set_target_properties(test_operator_contract_host PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_operator_contract_api COMMAND ${Python3_EXECUTABLE}
@@ -300,4 +301,49 @@ set_target_properties(test_npm_data_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY
 add_test(NAME test_npm_data_contract COMMAND $<TARGET_FILE:test_npm_data_contract>)
 set_tests_properties(test_npm_data_contract PROPERTIES TIMEOUT 30)
 
+add_executable(test_npm_result_semantics test_npm_result_semantics.cpp
+    ${CMAKE_SOURCE_DIR}/framework/core/packet_codec.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_family_result_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/npm_analysis_contract.cpp
+    ${CMAKE_SOURCE_DIR}/operators/npm_basic/core/npm_task_budget.cpp)
+target_include_directories(test_npm_result_semantics PRIVATE ${CMAKE_SOURCE_DIR})
+add_thirddepen(test_npm_result_semantics arrow rapidjson)
+target_compile_options(test_npm_result_semantics PRIVATE -UNDEBUG)
+target_link_libraries(test_npm_result_semantics flowsql_common flowsql_npm_basic OpenSSL::Crypto)
+foreach(component IN ITEMS config_channel database npi)
+    if(component STREQUAL "config_channel")
+        set(upper CONFIG)
+    elseif(component STREQUAL "database")
+        set(upper DATABASE)
+    else()
+        set(upper NPI)
+    endif()
+    target_compile_definitions(test_npm_result_semantics PRIVATE ${upper}_PLUGIN_PATH="$<TARGET_FILE:flowsql_${component}>")
+    add_dependencies(test_npm_result_semantics flowsql_${component})
+endforeach()
+target_compile_definitions(test_npm_result_semantics PRIVATE NPI_PROTOCOLS_PATH="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml")
+add_test(NAME test_npm_result_semantics COMMAND $<TARGET_FILE:test_npm_result_semantics>)
+set_tests_properties(test_npm_result_semantics PROPERTIES TIMEOUT 180)
+
 target_compile_definitions(test_operator_contract_host PRIVATE NPI_PROTOCOLS_PATH="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml")
+add_test(NAME test_npm_semantics_pipeline COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_npm_semantics_pipeline.py $<TARGET_FILE:test_operator_contract_host>)
+set_tests_properties(test_npm_semantics_pipeline PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_npm_session_semantics_pipeline COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_npm_semantics_pipeline.py $<TARGET_FILE:test_operator_contract_host> --sessions)
+set_tests_properties(test_npm_session_semantics_pipeline PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_npm_protocol_semantics_pipeline COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_npm_semantics_pipeline.py $<TARGET_FILE:test_operator_contract_host> --protocols)
+set_tests_properties(test_npm_protocol_semantics_pipeline PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_npm_semantics_http COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_npm_semantics_http.py $<TARGET_FILE:test_operator_contract_host> ${FLOWSQL_SEMANTICS_NODE})
+set_tests_properties(test_npm_semantics_http PROPERTIES TIMEOUT 240 RESOURCE_LOCK "semantics_http;visualization_browser")
+
+foreach(backend mysql postgres clickhouse)
+    add_test(NAME test_npm_semantics_${backend} COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_npm_semantics_backends.py $<TARGET_FILE:test_operator_contract_host> ${backend})
+    set_tests_properties(test_npm_semantics_${backend} PROPERTIES TIMEOUT 240 RESOURCE_LOCK "database_npm;semantics_http")
+endforeach()

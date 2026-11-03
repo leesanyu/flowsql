@@ -229,6 +229,23 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
             binding.Parse(bound.document_json->c_str());
             Set(context, "binding", Copy(binding, a), a);
         }
+        if (checks["dictionary_ref"].IsNull() && source["producer_metadata"].HasMember("default_dictionary")) {
+            std::string preview_text;
+            const int preview_rc = service.Control("preview", Encode(r), preview_text);
+            if (preview_rc) {
+                *response = preview_text;
+                return preview_rc;
+            }
+            Json preview;
+            preview.Parse(preview_text.c_str());
+            Set(description, "document", Copy(preview["data"]["dictionary"], a), a);
+            Set(description, "state", "present", a);
+            Set(description, "origin", "producer_default", a);
+            const auto& metadata = source["producer_metadata"];
+            Set(basis, "contract_ref", Get(metadata, "default_contract_ref"), basis.GetAllocator());
+            Set(basis, "component_revision", Get(metadata, "default_component_revision"), basis.GetAllocator());
+            checks["semantic_gaps"].CopyFrom(preview["data"]["semantic_gaps"], a);
+        }
         Value editor_fields(rapidjson::kObjectType);
         if (source["fields"].IsArray())
             for (const auto& physical : source["fields"].GetArray()) {
@@ -372,6 +389,10 @@ int MetadataDescriptionService::SaveChannel(const char* text, std::string* respo
         Set(basis, k, Copy(source[k], ba), ba);
     Set(basis, "binding_ref", Copy(view["binding_ref"], ba), ba);
     Set(basis, "dictionary_ref", Copy(view["base_dictionary_ref"], ba), ba);
+    if (view["binding_ref"].IsNull() && source["producer_metadata"].HasMember("default_dictionary")) {
+        Set(basis, "contract_ref", Get(source["producer_metadata"], "default_contract_ref"), ba);
+        Set(basis, "component_revision", Get(source["producer_metadata"], "default_component_revision"), ba);
+    }
     for (const char* k : {"object_key", "source_revision", "schema_fingerprint"})
         if (req["basis"][k] != basis[k])
             return Error(
@@ -396,6 +417,8 @@ int MetadataDescriptionService::SaveChannel(const char* text, std::string* respo
     if (!view["base_dictionary_ref"].IsNull()) {
         if (registry_.Resolve(Get(view, "base_dictionary_ref").c_str(), &old, &e)) return Error(e, response);
         previous.Parse(old.document_json->c_str());
+    } else if (source["producer_metadata"].HasMember("default_dictionary")) {
+        previous.CopyFrom(source["producer_metadata"]["default_dictionary"], previous.GetAllocator());
     }
     std::set<std::string> edited, time_touched;
     for (auto& f : candidate["fields"].GetArray()) {
@@ -491,7 +514,7 @@ int MetadataDescriptionService::SaveChannel(const char* text, std::string* respo
     Json normalized;
     std::vector<SemanticsReference> refs;
     if (NormalizeSemantics("dictionary", Encode(candidate), &normalized, &refs, &e)) return Error(e, response);
-    const bool identical = previous.IsObject() && Canonical(normalized) == Canonical(previous);
+    const bool identical = old.document_json && previous.IsObject() && Canonical(normalized) == Canonical(previous);
     auto finish = [&](const std::string& status, const std::string& dictionary, const std::string& binding,
                       const Value* error) {
         Json data(rapidjson::kObjectType);
@@ -567,6 +590,8 @@ int MetadataDescriptionService::SaveChannel(const char* text, std::string* respo
     const auto next_ref = Get(applied["data"], "exact_reference");
     Set(basis, "binding_ref", next_ref, ba);
     Set(basis, "dictionary_ref", saved.snapshot.exact_reference, ba);
+    basis["contract_ref"].SetNull();
+    basis["component_revision"].SetNull();
     return finish("applied", saved.snapshot.exact_reference, next_ref, nullptr);
 }
 int MetadataDescriptionService::SaveOperator(const char* text, std::string* response) {

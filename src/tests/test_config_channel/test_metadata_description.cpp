@@ -243,6 +243,18 @@ void TestTimeEditor() {
     save(current["data"]["basis"], R"({"fields":{"legacy":{"definition":"text only"}}})");
     current = describe();
     assert(Canonical(field(current, "legacy")["time_semantics"]) == legacy);
+    // Existing immutable dictionaries can use the former explicit Unix epoch spelling.
+    save(
+        current["data"]["basis"],
+        R"({"fields":{"producer":{"time_semantics":{"state":"declared","origin":"imported","value":{"kind":"instant","unit":{"state":"declared","origin":"producer","value":{"code":"ms","label":"ms"}},"epoch":{"state":"declared","origin":"producer","value":"Unix epoch"}}}}}})",
+        false);
+    current = describe();
+    assert(!current["data"]["context"]["editor_fields"]["producer"]["conflict"].GetBool());
+    const auto previous_unix = Canonical(field(current, "producer")["time_semantics"]);
+    save(current["data"]["basis"], R"({"fields":{"producer":{"definition":"text-only Unix update"}}})");
+    current = describe();
+    assert(Canonical(field(current, "producer")["time_semantics"]) == previous_unix);
+    assert(!current["data"]["context"]["editor_fields"]["producer"]["conflict"].GetBool());
     // Changing one time cannot rewrite an unrelated summary member or its origin.
     auto summary = Copy(current["data"]["description"]["document"]["entity"]["time_fields"], current.GetAllocator());
     Set(summary, "origin", "imported", current.GetAllocator());

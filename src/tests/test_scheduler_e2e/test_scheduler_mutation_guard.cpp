@@ -2875,6 +2875,35 @@ void TestMultiBlockTransformSchedulerPipeline() {
     ASSERT_EQ(failing_provider.released[1].flush_calls, 0);
     ASSERT_EQ(failing_provider.released[1].cancel_calls, 1);
 }
+void TestBatchContractReferences() {
+    SchedulerBatchRuntime runtime;
+    ASSERT_EQ(runtime.Start(1,
+                            [](const std::string& sql, std::string* response) {
+                                *response = "{\"contract_checks\":[{\"use_ref\":\"operator_use." + sql +
+                                            "@1\"}],\"rows\":1,\"error\":\"expected failure\"}";
+                                return sql == "fail" ? error::INTERNAL_ERROR : error::OK;
+                            }),
+              0);
+    for (const std::string terminal : {"second", "fail"}) {
+        std::string error_message;
+        ASSERT_EQ(runtime.Submit(terminal, {"first", terminal}, 0, &error_message), 0);
+        BatchRuntimeSnapshot snapshot;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        do {
+            ASSERT_EQ(runtime.Query(terminal, &snapshot), 0);
+            ASSERT_TRUE(std::chrono::steady_clock::now() < deadline);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (!IsTerminalBatchRuntimeStatus(snapshot.status));
+        ASSERT_EQ(snapshot.status, terminal == "fail" ? BatchRuntimeStatus::kFailed : BatchRuntimeStatus::kCompleted);
+        ASSERT_EQ(snapshot.contract_checks_json.size(), 2u);
+        ASSERT_EQ(snapshot.contract_checks_json[0], R"({"use_ref":"operator_use.first@1"})");
+        ASSERT_EQ(snapshot.contract_checks_json[1], "{\"use_ref\":\"operator_use." + terminal + "@1\"}");
+        BatchRuntimeSnapshot repeated;
+        ASSERT_EQ(runtime.Query(terminal, &repeated), 0);
+        ASSERT_TRUE(repeated.contract_checks_json == snapshot.contract_checks_json);
+    }
+    runtime.Stop();
+}
 }  // namespace scheduler
 }  // namespace flowsql
 
@@ -2891,6 +2920,7 @@ int main() {
     flowsql::scheduler::TestBlockSourceFilterPlanning();
     flowsql::scheduler::TestBlockTransformSchedulerPipeline();
     flowsql::scheduler::TestMultiBlockTransformSchedulerPipeline();
+    flowsql::scheduler::TestBatchContractReferences();
 
     flowsql::scheduler::SchedulerPlugin plugin;
     const std::string source_key = "ring.in";

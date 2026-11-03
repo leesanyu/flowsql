@@ -15,6 +15,11 @@ struct ChannelDatasetRequestV1 {
 struct ChannelDatasetSnapshotV1 {
     std::shared_ptr<const std::string> document_json;
 };
+// Optional producer_metadata.dictionary_source identifies a verified producer:
+// {operator: "category.name", resource: "/resources/...", schema_canonical: "..."}.
+// The resource contains {schema_canonical, dictionary}; the metadata service
+// resolves it from the registered author contract, verifies it and native fields,
+// and exposes a read-only default_dictionary. This creates no binding or run.
 // Providers own metadata discovery; no data reads, credentials or implicit lazy loading.
 interface IChannelDatasetDescriptorV1 {
     virtual ~IChannelDatasetDescriptorV1() = default;

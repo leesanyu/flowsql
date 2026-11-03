@@ -32,6 +32,10 @@ inline bool Known(const Value& v) { return v.IsObject() && Get(v, "state") == "d
 inline std::string Code(const Value& v) {
     return Known(v) && v.HasMember("value") && v["value"].IsObject() ? Get(v["value"], "code") : "";
 }
+inline bool UnixEpoch(const Value& semantic) {
+    return Known(semantic) &&
+           (Get(semantic, "value") == "1970-01-01T00:00:00Z" || Get(semantic, "value") == "Unix epoch");
+}
 inline Json Facts(const Value& physical, const Value& source, const std::string& name) {
     static const std::regex pattern_0(
         R"((u?int(8|16|32|64)?|integer|bigint|smallint|tinyint|mediumint|float(16|32|64)?|half_float|double( precision)?|real|decimal(128|256)?(\(.*\))?|numeric(\(.*\))?)( unsigned)?)");
@@ -112,10 +116,12 @@ inline bool Conflict(const Value& field, const Value& facts) {
         const auto& old = field[k]["value"];
         const auto& fresh = facts[k]["value"];
         if (Get(old, "kind") != Get(fresh, "kind")) return true;
-        for (const char* part : {"unit", "epoch", "timezone"})
+        for (const char* part : {"unit", "epoch", "timezone"}) {
             if (old.HasMember(part) && fresh.HasMember(part) && Known(old[part]) && Known(fresh[part]) &&
-                old[part]["value"] != fresh[part]["value"])
+                old[part]["value"] != fresh[part]["value"] &&
+                !(std::string(part) == "epoch" && UnixEpoch(old[part]) && UnixEpoch(fresh[part])))
                 return true;
+        }
     }
     return false;
 }

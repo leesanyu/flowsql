@@ -15,10 +15,9 @@
     <template v-if="observation?.structure.state === 'known'">
       <fieldset :disabled="busy || !!legacy || observation.structure.state !== 'known'">
         <div class="object-notes">
-          <label>对象说明<textarea aria-label="对象说明" :value="value('description')" @input="edit('description', $event.target.value)" /></label>
-          <label>一行表示什么（可选）<textarea aria-label="一行表示什么" :value="value('row_meaning')" @input="edit('row_meaning', $event.target.value)" /></label>
+          <div><label for="object-description">对象说明</label><div class="description-editor"><textarea id="object-description" aria-label="对象说明" :value="value('description')" @input="edit('description', $event.target.value)" /><p v-for="note in entityNotes('limitations')" :key="note" class="supplement">{{ note }}</p></div></div>
+          <div><label for="row-meaning">一行表示什么（可选）</label><div class="description-editor"><textarea id="row-meaning" aria-label="一行表示什么" :value="value('row_meaning')" @input="edit('row_meaning', $event.target.value)" /><p v-for="note in entityNotes('row_semantics')" :key="note" class="supplement">{{ note }}</p></div></div>
         </div>
-        <p v-for="note in entityNotes" :key="note" class="supplement">{{ note }}</p>
         <div v-show="!fieldsCollapsed" class="field-toolbar"><input v-model="filter" type="search" aria-label="搜索字段名" placeholder="搜索字段名…" /><span>{{ visibleFields.length }} / {{ observation.structure.fields?.length || 0 }} 字段</span></div>
         <div class="fields-scroll">
           <table class="fields"><thead><tr><th>字段 / 类型</th><th>单位</th><th>时间</th><th><div class="field-header-actions"><span>关联</span><button type="button" :title="fieldsCollapsed ? '展开字段表' : '收起字段表'" :aria-label="fieldsCollapsed ? '展开字段表' : '收起字段表'" :aria-expanded="!fieldsCollapsed" @click="fieldsCollapsed = !fieldsCollapsed"><el-icon aria-hidden="true"><ArrowDown v-if="fieldsCollapsed" /><ArrowUp v-else /></el-icon></button></div></th></tr></thead>
@@ -28,10 +27,12 @@
                 <td class="field-unit">
                   <select v-if="['unix_timestamp', 'duration'].includes(timeConfig(f.name).mode)" :aria-label="f.name + ' 时间单位'" :value="timeConfig(f.name).unit || ''" @change="editTime(f.name, 'unit', $event.target.value)"><option value="">请选择单位</option><option v-for="unit in ['s','ms','us','ns']" :key="unit" :value="unit">{{ unit }}</option></select>
                   <span v-else-if="timeConfig(f.name).mode === 'datetime'">{{ fieldValue(f.name, 'unit') || '精度未指定' }}</span>
+                  <span v-else-if="timeConfig(f.name).unsupported">{{ fieldValue(f.name, 'unit') || '单位未声明' }}</span>
                   <input v-else :aria-label="f.name + ' 单位'" :value="fieldValue(f.name, 'unit') || ''" @input="editField(f.name, 'unit', $event.target.value)" />
                 </td>
                 <td class="field-time">
-                  <select class="time-select" :aria-label="f.name + ' 时间类型'" :value="timeSelection(f.name)" @change="changeTimeMode(f.name, $event.target.value)"><option v-for="option in timeOptions(f.name)" :key="option.value" :value="option.value" :disabled="option.disabled">{{ option.label }}</option></select>
+                  <p v-if="timeConfig(f.name).unsupported" class="supplement" role="status">当前时间定义暂不支持编辑</p>
+                  <select v-else class="time-select" :aria-label="f.name + ' 时间类型'" :value="timeConfig(f.name).mode || ''" @change="changeTimeMode(f.name, $event.target.value)"><option v-for="option in timeOptions(f.name)" :key="option.value" :value="option.value">{{ option.label }}</option></select>
                 </td>
                 <td class="field-relation"><button :aria-label="f.name + ' 关联'" @click="relationField = relationField === f.name ? '' : f.name">关联<template v-if="fieldRelations(f.name).length">（{{ fieldRelations(f.name).length }}）</template></button></td>
               </tr>
@@ -39,14 +40,14 @@
                 <td><div class="type" :title="json(f.type)">{{ typeSummary(f.type) }} · {{ f.nullable === null ? '可空性未知' : f.nullable ? '可空' : '非空' }}</div></td>
                 <td></td>
                 <td class="field-time">
-                  <p v-if="timeConfig(f.name).mode === 'unix_timestamp'" class="supplement">基准：1970-01-01T00:00:00Z</p>
+                  <p v-if="timeConfig(f.name).mode === 'unix_timestamp'" class="supplement">基准：Unix epoch<template v-if="timeConfig(f.name).timezone"> · 时区：{{ timeConfig(f.name).timezone }}</template></p>
                   <label v-if="timeConfig(f.name).mode === 'datetime'">时区（可选）<input :aria-label="f.name + ' 时区'" :value="timeConfig(f.name).timezone || ''" placeholder="未指定时区" @input="editTime(f.name, 'timezone', $event.target.value)" /></label>
                   <p v-if="timeFacts(f.name).conflict" role="status">来源时间事实与已有声明不同；原声明保留，请核对后修改。</p>
-                  <p v-if="timeConfig(f.name).unsupported" class="supplement">已有时间表示暂不支持简化编辑，已保留：{{ readable(originalField(f.name).time_semantics.value) }}。选择新解释才会替换。</p>
+                  <details v-if="timeConfig(f.name).unsupported" class="time-definition"><summary>查看时间定义</summary><p class="supplement">{{ timeSummary(effectiveTime(f.name)) }}</p></details>
                 </td>
                 <td class="field-relation"><p v-for="(relation, i) in fieldRelations(f.name)" :key="i" class="supplement">{{ relationTitle(relation) }}</p></td>
               </tr>
-              <tr class="field-description-row"><td colspan="4"><textarea :aria-label="f.name + ' 字段说明'" placeholder="字段说明" :value="fieldValue(f.name, 'definition')" @input="editField(f.name, 'definition', $event.target.value)" /><p v-for="note in fieldNotes(f.name)" :key="note" class="supplement">{{ note }}</p></td></tr>
+              <tr class="field-description-row"><td colspan="4"><div class="description-editor"><textarea :aria-label="f.name + ' 字段说明'" placeholder="字段说明" :value="fieldValue(f.name, 'definition')" @input="editField(f.name, 'definition', $event.target.value)" /><p v-if="timeDescription(effectiveTime(f.name), fieldValue(f.name, 'definition'))" class="supplement">时间含义：{{ timeDescription(effectiveTime(f.name), fieldValue(f.name, 'definition')) }}</p><p v-for="note in fieldNotes(f.name, ['value_domain', 'aggregation'])" :key="note" class="supplement">{{ note }}</p></div><p v-for="note in fieldNotes(f.name, ['null_meaning', 'validity'])" :key="note" class="supplement">{{ note }}</p></td></tr>
             </template></tbody>
           </table>
           <p v-if="!fieldsCollapsed && !visibleFields.length && filter">没有匹配的字段；清空搜索可恢复全部字段。</p>
@@ -69,6 +70,7 @@ import { ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 import ChannelRelationEditor from './ChannelRelationEditor.vue'
 import { semanticsCall as call, clone, json, parseJson, labels } from '../utils/dataSemantics.js'
+import { timeEditorConfig, timeDescription, timeSummary } from '../utils/channelDescriptionTime.js'
 const props = defineProps({ locator: { type: Object, required: true } })
 const observation = ref(null), basis = ref(null), changes = ref({}), legacy = ref(null), busy = ref(false), error = ref(''), notice = ref(''), filter = ref(''), confirmations = ref([]), relationField = ref(''), relationTargets = ref({})
 const fieldsCollapsed = ref(false)
@@ -91,8 +93,8 @@ const fieldValue = (name, k) => {
 const value = k => own(changes.value, k) ? changes.value[k] ?? '' : declared(k === 'description' ? observation.value?.description.document?.description : observation.value?.description.document?.entity?.[k])
 const readable = v => typeof v === 'string' ? v : Array.isArray(v) ? v.map(readable).join('；') : v && typeof v === 'object' ? typeof v.description === 'string' ? v.description : v.label && v.code ? `${v.label}（${v.code}）` : Object.entries(v).map(([k, x]) => `${k}: ${readable(x)}`).join('；') : String(v ?? '')
 const notes = (object, keys) => keys.filter(k => object?.[k]?.state === 'declared').map(k => `${labels[k]}：${readable(object[k].value)}`)
-const entityNotes = computed(() => notes(observation.value?.description.document?.entity, ['limitations', 'row_semantics']))
-const fieldNotes = name => notes(originalField(name), ['null_meaning', 'validity', 'value_domain', 'aggregation'])
+const entityNotes = key => notes(observation.value?.description.document?.entity, [key])
+const fieldNotes = (name, keys) => notes(originalField(name), keys)
 const typeSummary = type => type ? type.name + (Object.keys(type.parameters || {}).length ? ' ' + readable(type.parameters) : '') : '类型未知'
 const relations = computed(() => {
   if (own(changes.value, 'relations')) return changes.value.relations
@@ -116,28 +118,21 @@ async function readRelationTargets() {
 }
 const timeLabels = { unix_timestamp: 'unix时间戳', datetime: '日期时间', duration: '时长' }
 const timeFacts = name => observation.value?.context.editor_fields?.[name] || {}
+const effectiveTime = name => {
+  const saved = originalField(name)?.time_semantics
+  return declared(saved) || (saved?.state !== 'not_applicable' ? declared(timeFacts(name).time_semantics) : null)
+}
 const timeConfig = name => {
   const edits = changes.value.fields?.[name]
-  if (own(edits, 'time')) return edits.time || {}
-  const saved = originalField(name)?.time_semantics
-  const v = declared(saved) || (saved?.state !== 'not_applicable' ? declared(timeFacts(name).time_semantics) : null)
-  if (!v) return {}
-  const unit = declared(v.unit)?.code, timezone = declared(v.timezone) || ''
-  if (v.kind === 'duration' && ['s','ms','us','ns'].includes(unit)) return { mode: 'duration', unit }
-  if (v.kind === 'instant' && timeFacts(name).modes?.includes('datetime')) return { mode: 'datetime', ...(unit ? { unit } : {}), ...(timezone ? { timezone } : {}) }
-  if (v.kind === 'instant' && declared(v.epoch) === '1970-01-01T00:00:00Z' && ['s','ms','us','ns'].includes(unit)) return { mode: 'unix_timestamp', unit }
-  return { unsupported: true }
+  return own(edits, 'time') ? edits.time || {} : timeEditorConfig(effectiveTime(name), timeFacts(name).modes)
 }
-const timeSelection = name => timeConfig(name).unsupported ? '__preserved__' : timeConfig(name).mode || ''
 const timeOptions = name => {
   const current = timeConfig(name), options = [{ value: '', label: '非时间' }]
   for (const mode of ['unix_timestamp', 'datetime', 'duration'])
     if (timeFacts(name).modes?.includes(mode) || current.mode === mode) options.push({ value: mode, label: timeLabels[mode] })
-  if (current.unsupported) options.push({ value: '__preserved__', label: '已有时间表示（保留）', disabled: true })
   return options
 }
 function changeTimeMode(name, mode) {
-  if (mode === '__preserved__') return
   const previous = timeConfig(name)
   const unit = previous.unit || fieldValue(name, 'unit')
   const next = !mode ? null : mode === 'datetime' ? { mode, ...(previous.timezone ? { timezone: previous.timezone } : {}) } : { mode, unit: ['s','ms','us','ns'].includes(unit) ? unit : '' }
@@ -238,6 +233,10 @@ label { display: block; margin: 6px 0; } .object-notes { display: grid; grid-tem
 input:not([type=checkbox]), textarea, select { box-sizing: border-box; max-width: 100%; width: 100%; color: var(--text-primary); background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 4px; padding: 6px; }
 select option { color: var(--text-primary); background: var(--bg-card); }
 input::placeholder { color: var(--text-secondary); opacity: 1; } textarea { min-height: 52px; resize: vertical; } fieldset { border: 0; padding: 0; min-width: 0; }
+.description-editor { min-width: 0; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-card); }
+.description-editor:focus-within { outline: 1px solid var(--el-color-primary); }
+.description-editor textarea { display: block; border: 0; background: transparent; outline: none; }
+.description-editor .supplement { margin: 0; padding: 0 6px 6px; }
 .field-toolbar { display: flex; align-items: center; gap: 12px; margin: 10px 0; color: var(--text-secondary); font-size: 12px; } .field-toolbar input { width: 240px; }
 .fields-scroll { max-width: 100%; overflow: auto; } .fields { width: 100%; table-layout: fixed; border-collapse: collapse; }
 th, td { text-align: left; vertical-align: top; padding: 8px; border-bottom: 1px solid var(--border-color); overflow-wrap: anywhere; } th:first-child { width: 29%; } th:nth-child(2) { width: 18%; } th:nth-child(3) { width: 29%; } th:last-child { width: 24%; }
